@@ -1,0 +1,71 @@
+name: harpoon-m9-test
+services:
+  app:
+    build: .
+    ports:
+      - "18080:3000"
+    volumes:
+      - ./src:/app/src:rw
+      - ./src-ro:/app/ro:ro
+    environment:
+      APP_ENV: "${APP_ENV:-from_compose}"
+      SECRET_FROM_ENV: "${SECRET_FROM_ENV}"
+      REDIS_HOST: redis
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+      EXTRA_ENV: "${EXTRA_ENV:-default_extra}"
+    env_file:
+      - env_file.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    networks:
+      - m9net
+    mem_limit: 64m
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "18081:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    networks:
+      - m9net
+
+  redis:
+    image: redis:alpine
+    networks:
+      - m9net
+
+  worker:
+    image: alpine:3.22
+    command: sh -c "while true; do echo worker; sleep 5; done"
+    networks:
+      - m9net
+    deploy:
+      replicas: 1
+
+volumes:
+  pgdata:
+
+networks:
+  m9net:
+    driver: bridge

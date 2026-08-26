@@ -1,0 +1,15 @@
+[2026-08-26T06:45:59Z] HARPOON_SHARE_HOST /private/tmp tag=harpoon-host-tmp
+[2026-08-26T06:45:59Z] HARPOON_VIRTIOFS_CONFIGURED harpoon-host-tmp -> /private/tmp readOnly=false
+[2026-08-26T06:45:59Z] HARPOON_VIRTIOFS_DEVICE_COUNT 3
+[2026-08-26T06:45:59Z] HARPOON_BALLOON_CONFIGURED 512MiB cpu=2 balloon=virtio-traditional memorySize=536870912 balloonInitial=536870912
+[2026-08-26T06:45:59Z] validate OK HARPOON_HOST_NETDEV_COUNT 1
+[2026-08-26T06:45:59Z] HARPOON_STATE STARTING -> BOOTING
+[2026-08-26T06:45:59Z] starting VM kernel=Image-virt initramfs=harpoon-m4-initramfs.cpio.gz
+[2026-08-26T06:45:59Z] HARPOON_SIGNAL_HANDLERS_INSTALLED DispatchSource SIGINT/SIGTERM POSIX SIG_IGN
+[2026-08-26T06:45:59Z] HARPOON_STATE BOOTING -> FAILED reason=VM start failure VZErrorDomain 1 Internal Virtualization error. The virtual machine failed to start.
+start FAIL VZErrorDomain 1 ["NSLocalizedFailureReason": The virtual machine failed to start., "NSLocalizedFailure": Internal Virtualization error.]
+[2026-08-26T06:45:59Z] HOST_VZ_START_FAILURE
+[2026-08-26T06:45:59Z] HARPOON_CLEANUP_EPHEMERAL_BEGIN dockerSock=/tmp/harpoon-docker.sock balloonControl=/tmp/harpoon-control
+[2026-08-26T06:45:59Z] HARPOON_EPHEMERAL_CLEANED /tmp/harpoon-docker.sock /tmp/harpoon-control (owned only)
+
+Starting Harpoon...

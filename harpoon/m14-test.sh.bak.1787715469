@@ -1,0 +1,179 @@
+#!/bin/sh
+set -eu
+# M14 Idle Resource Optimization — before/after harness
+# Captures: idle host Harpoon/VZ/combined RSS, CPU, threads, FDs, guest mem, 128M load, host RSS under load, recovery, docker run latency, compose, persistence, regressions
+BIN_CANDIDATES="/tmp/harpoon-m11-stage/bin/harpoon dist/harpoon-0.1.0-dev-darwin-arm64/bin/harpoon harpoon/build/harpoon /usr/local/bin/harpoon"
+BIN=""
+for c in $BIN_CANDIDATES; do if [ -x "$c" ]; then BIN="$c"; break; fi; done
+[ -n "$BIN" ] || { echo "[m14] FAIL no binary"; exit 1; }
+RESULT_DIR="harpoon/results/m14"
+mkdir -p "$RESULT_DIR"
+RAW="$RESULT_DIR"
+say() { echo "[m14] $*"; }
+pass() { echo "[m14] PASS $*"; }
+blocked() { echo "[m14] BLOCKED $*"; }
+warn() { echo "[m14] WARN $*"; }
+
+# args: --before or --after label
+LABEL="${1:-before}"
+if [ "$LABEL" = "--before" ]; then LABEL="before"; elif [ "$LABEL" = "--after" ]; then LABEL="after"; fi
+
+get_disk_path() {
+  disk=$(harpoon/build/harpoon status --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('disk',''))" 2>/dev/null || echo "")
+  if [ -n "$disk" ] && [ -f "$disk" ]; then echo "$disk"; return; fi
+  if [ -f /tmp/harpoon-runtime/data/harpoon-root.img ]; then echo "/tmp/harpoon-runtime/data/harpoon-root.img"; return; fi
+  if [ -f "$HOME/Library/Application Support/Harpoon/data/harpoon-root.img" ]; then echo "$HOME/Library/Application Support/Harpoon/data/harpoon-root.img"; return; fi
+  if [ -f spike2/cache/harpoon-root.img ]; then echo "spike2/cache/harpoon-root.img"; return; fi
+  echo "/tmp/harpoon-runtime/data/harpoon-root.img"
+}
+find_vm_pid() {
+  disk="$1"
+  pid=$(lsof -n 2>/dev/null | grep -F "$disk" | grep -i "Virtualization" | awk '{print $2}' | head -n1 || echo "")
+  if [ -n "$pid" ]; then echo "$pid"; return; fi
+  pid=$(pgrep -f "Virtualization" 2>/dev/null | head -n1 || echo "")
+  if [ -n "$pid" ] && lsof -p "$pid" 2>/dev/null | grep -q -F "$disk"; then echo "$pid"; return; fi
+  echo ""
+}
+host_measure() {
+  tier="$1"; label="$2"
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  pid=$(cat /tmp/harpoon.pid 2>/dev/null | tr -d ' \n' || echo "")
+  if [ -z "$pid" ]; then pid=$(pgrep -f "harpoon.*run" 2>/dev/null | head -n1 || echo ""); fi
+  harpoon_rss=""; harpoon_cpu=""; harpoon_threads=""; harpoon_fds=""
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    harpoon_rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+    harpoon_cpu=$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ' | grep -E '^[0-9.]+$' || echo "")
+    harpoon_threads=$(ps -M "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+    harpoon_fds=$(lsof -p "$pid" 2>/dev/null | wc -l | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+  fi
+  disk=$(get_disk_path)
+  vm_pid=$(find_vm_pid "$disk")
+  vm_rss=""; vm_cpu=""; vm_threads=""; vm_fds=""
+  if [ -n "$vm_pid" ] && kill -0 "$vm_pid" 2>/dev/null; then
+    vm_rss=$(ps -o rss= -p "$vm_pid" 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+    vm_cpu=$(ps -o %cpu= -p "$vm_pid" 2>/dev/null | tr -d ' ' | grep -E '^[0-9.]+$' || echo "")
+    vm_threads=$(ps -M "$vm_pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+    vm_fds=$(lsof -p "$vm_pid" 2>/dev/null | wc -l | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+  fi
+  combined=""
+  if echo "$harpoon_rss" | grep -qE '^[0-9]+$' && echo "$vm_rss" | grep -qE '^[0-9]+$'; then combined=$((harpoon_rss + vm_rss)); elif echo "$harpoon_rss" | grep -qE '^[0-9]+$'; then combined="$harpoon_rss"; fi
+  pages_free=$(vm_stat 2>&1 | grep "Pages free" | awk '{print $3}' | tr -d '.' | grep -E '^[0-9]+$' || echo "")
+  echo "$ts,$tier,$label,$pid,$harpoon_rss,$harpoon_cpu,$harpoon_threads,$harpoon_fds,$vm_pid,$vm_rss,$vm_cpu,$vm_threads,$vm_fds,$combined,$pages_free" >> "$RAW/host-${LABEL}.csv"
+  echo "$ts $tier $label harpoon:$harpoon_rss vm:$vm_rss combined:$combined cpu:$harpoon_cpu/$vm_cpu"
+}
+guest_measure() {
+  tier="$1"; label="$2"
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -S /tmp/harpoon-docker.sock ]; then
+    out=$(docker --context harpoon run --rm alpine:3.22 sh -c 'cat /proc/meminfo | grep -E "MemTotal|MemAvailable"; echo "---"; cat /proc/loadavg; echo "---"; ps aux | wc -l' 2>&1 || echo "guest_failed")
+    memtotal=$(echo "$out" | grep MemTotal | awk '{print $2}' | grep -E '^[0-9]+$' || echo "")
+    memavail=$(echo "$out" | grep MemAvailable | awk '{print $2}' | grep -E '^[0-9]+$' || echo "")
+    load_line=$(echo "$out" | grep -E "^[0-9]+\.[0-9]+ [0-9]" | head -n1 || echo "")
+    load1=$(echo "$load_line" | awk '{print $1}' || echo "")
+    load5=$(echo "$load_line" | awk '{print $2}' || echo "")
+    load15=$(echo "$load_line" | awk '{print $3}' || echo "")
+    pcount=$(echo "$out" | awk '/---/{c++; next} c==2{print}' 2>&1 | head -n1 | tr -d ' ' | grep -E '^[0-9]+$' || echo "")
+    echo "$ts,$tier,$label,$memtotal,$memavail,$load1,$load5,$load15,$pcount" >> "$RAW/guest-${LABEL}.csv"
+  else
+    echo "$ts,$tier,$label,BLOCKED" >> "$RAW/guest-${LABEL}.csv"
+  fi
+}
+
+main() {
+  say "M14 $LABEL with $BIN"
+  echo "timestamp,tier,label,harpoon_pid,harpoon_rss_kib,harpoon_cpu_pct,harpoon_threads,harpoon_fds,vm_pid,vm_rss_kib,vm_cpu_pct,vm_threads,vm_fds,combined_rss_kib,pages_free" > "$RAW/host-${LABEL}.csv"
+  echo "timestamp,tier,label,mem_total_kib,mem_available_kib,load1,load5,load15,process_count" > "$RAW/guest-${LABEL}.csv"
+  echo "tier,phase,duration_s" > "$RAW/build-${LABEL}.csv"
+  echo "tier,viability" > "$RAW/tier-${LABEL}.csv"
+  for tier in 512 768 1024; do
+    say "=== Tier $tier ($LABEL) ==="
+    "$BIN" config set memory "$tier" 2>&1 | tail -n2 || true
+    "$BIN" stop 2>&1 | tail -n3 || true
+    sleep 2
+    set +e
+    out=$("$BIN" start 2>&1)
+    echo "$out" | tail -n15 > "$RAW/start-${tier}-${LABEL}.log"
+    if echo "$out" | grep -q "VZErrorDomain 1"; then
+      echo "$tier,BLOCKED_HOST_TRANSIENT" >> "$RAW/tier-${LABEL}.csv"
+      blocked "tier $tier BLOCKED_HOST_TRANSIENT"
+      continue
+    fi
+    set -e
+    sleep 2
+    if ! "$BIN" status 2>&1 | grep -qi running; then
+      echo "$tier,BLOCKED_NOT_RUNNING" >> "$RAW/tier-${LABEL}.csv"
+      blocked "tier $tier not running"
+      continue
+    fi
+    for w in 1 2 3 4 5 6; do if docker --context harpoon version 2>&1 | grep -q "Server"; then break; fi; sleep 5; done
+    if ! docker --context harpoon version 2>&1 | grep -q "Server"; then
+      echo "$tier,BLOCKED_DOCKER_NOT_READY" >> "$RAW/tier-${LABEL}.csv"
+      blocked "tier $tier docker not ready"
+      "$BIN" stop 2>&1 | tail -n3 || true
+      continue
+    fi
+    echo "$tier,LIVE" >> "$RAW/tier-${LABEL}.csv"
+    # idle 30s
+    say "idle $tier"
+    sleep 10
+    for s in 1 2 3 4 5 6; do host_measure "$tier" "idle-${tier}-${s}"; guest_measure "$tier" "idle-${tier}-${s}"; sleep 5; done
+    # 128M load
+    say "load $tier"
+    host_measure "$tier" "mem-idle-${tier}"; guest_measure "$tier" "mem-idle-${tier}"
+    docker --context harpoon rm -f m14-stress 2>&1 | tail -n2 || true
+    set +e
+    docker --context harpoon run -d --name m14-stress python:3-alpine sh -c 'python3 -c "
+import time
+x = bytearray(128 * 1024 * 1024)
+for i in range(0, len(x), 4096):
+    x[i] = 1
+print(\"allocated\", len(x))
+time.sleep(90)
+"' 2>&1 | tail -n2
+    set -e
+    sleep 3
+    running=$(docker --context harpoon inspect -f '{{.State.Running}}' m14-stress 2>&1 | head -n1 || echo "false")
+    if [ "$running" != "true" ]; then
+      warn "workload not running $tier $running"
+      docker --context harpoon logs m14-stress 2>&1 | tail -n10 || true
+      echo "$tier,MEMORY_WORKLOAD_FAILED" >> "$RAW/tier-${LABEL}.csv"
+    else
+      host_measure "$tier" "mem-load-${tier}"; guest_measure "$tier" "mem-load-${tier}"
+      sleep 10; host_measure "$tier" "mem-hold10-${tier}"; guest_measure "$tier" "mem-hold10-${tier}"
+      sleep 20; host_measure "$tier" "mem-hold30-${tier}"; guest_measure "$tier" "mem-hold30-${tier}"
+      docker --context harpoon rm -f m14-stress 2>&1 | tail -n2 || true
+      sleep 2; host_measure "$tier" "mem-release-${tier}"; guest_measure "$tier" "mem-release-${tier}"
+      sleep 10; host_measure "$tier" "mem-after10-${tier}"; guest_measure "$tier" "mem-after10-${tier}"
+      sleep 20; host_measure "$tier" "mem-after30-${tier}"; guest_measure "$tier" "mem-after30-${tier}"
+    fi
+    # docker run latency sanity
+    t0=$(date +%s.%N 2>/dev/null || date +%s)
+    docker --context harpoon run --rm alpine:3.22 true 2>&1 | tail -n1 || true
+    t1=$(date +%s.%N 2>/dev/null || date +%s)
+    d=$(python3 -c "print(float('$t1')-float('$t0'))" 2>/dev/null || echo "?")
+    echo "$tier,run,$d" >> "$RAW/build-${LABEL}.csv"
+    say "run $tier $d s"
+    # compose sanity
+    if [ -f harpoon/fixtures/m9-compose/compose.yml ]; then
+      set +e
+      t0=$(date +%s)
+      docker --context harpoon compose -f harpoon/fixtures/m9-compose/compose.yml up -d 2>&1 | tail -n5
+      t1=$(date +%s); d=$((t1-t0))
+      host_measure "$tier" "compose-up-${tier}"; guest_measure "$tier" "compose-up-${tier}"
+      docker --context harpoon compose -f harpoon/fixtures/m9-compose/compose.yml ps 2>&1 | tail -n5 || true
+      docker --context harpoon compose -f harpoon/fixtures/m9-compose/compose.yml down -v 2>&1 | tail -n5 || true
+      set -e
+    fi
+    # persistence
+    docker --context harpoon volume create m14-vol 2>&1 | tail -n1 || true
+    docker --context harpoon run --rm -v m14-vol:/data alpine:3.22 sh -c 'echo marker > /data/marker && cat /data/marker' 2>&1 | tail -n1 || true
+    "$BIN" stop 2>&1 | tail -n3 || true; sleep 2
+    set +e; out=$("$BIN" start 2>&1); set -e; sleep 3
+    if docker --context harpoon run --rm -v m14-vol:/data alpine:3.22 cat /data/marker 2>&1 | grep -q marker; then pass "persistence $tier"; else warn "persistence $tier"; fi
+    "$BIN" stop 2>&1 | tail -n3 || true; sleep 2
+  done
+  cat "$RAW/tier-${LABEL}.csv" 2>&1 | tee -a "$RAW/summary-${LABEL}.txt" || true
+  say "M14 $LABEL done"
+}
+
+main "$@"

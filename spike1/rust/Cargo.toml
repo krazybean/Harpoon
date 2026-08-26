@@ -1,0 +1,10 @@
+[package]
+name = "harpoon-spike1-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal Rust check for Virtualization.framework via objc2 — proves Rust can call isSupported without Swift"
+
+[dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+block2 = "0.6.2"

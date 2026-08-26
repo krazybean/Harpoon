@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD="$SCRIPT_DIR/build"
+mkdir -p "$BUILD"
+OUT="$BUILD/harpoon"
+echo "[harpoon] building production runtime..." >&2
+swiftc "$SCRIPT_DIR/Sources/RuntimeConfig.swift" "$SCRIPT_DIR/Sources/HostPathTranslator.swift" "$SCRIPT_DIR/Sources/Lifecycle.swift" "$SCRIPT_DIR/Sources/VMManager.swift" "$SCRIPT_DIR/Sources/Bridges.swift" "$SCRIPT_DIR/Sources/PortForwardManager.swift" "$SCRIPT_DIR/Sources/HarpoonCLI.swift" "$SCRIPT_DIR/Sources/main.swift" \
+  -framework Virtualization -o "$OUT" -module-cache-path /tmp/harpoon-mcache 2>&1
+echo "[harpoon] signing with entitlement..." >&2
+codesign --entitlements "$SCRIPT_DIR/entitlements.plist" --force -s - "$OUT" 2>&1
+codesign -d --entitlements - "$OUT" 2>&1 | grep -q "com.apple.security.virtualization" && echo "[harpoon] entitlement OK" >&2 || { echo "[harpoon] entitlement missing!" >&2; exit 1; }
+ls -lh "$OUT" >&2
+echo "[harpoon] build complete: $OUT" >&2

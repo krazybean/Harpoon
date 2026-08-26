@@ -1,0 +1,8 @@
+Starting Harpoon...
+Harpoon running
+PID: 53709
+Docker socket: /tmp/harpoon-docker.sock
+export DOCKER_HOST=unix:///tmp/harpoon-docker.sock
+Log: /Users/<user>/Library/Application Support/Harpoon/harpoon.log
+Docker context: harpoon
+  docker --context harpoon ps

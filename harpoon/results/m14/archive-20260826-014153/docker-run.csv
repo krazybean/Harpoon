@@ -1,0 +1,7 @@
+tier,variant,phase,duration
+512,before,docker_run,0.4086148738861084
+512,after,docker_run,0.41212987899780273
+768,before,docker_run,0.4215409755706787
+768,after,docker_run,0.4005098342895508
+1024,before,docker_run,0.4216349124908447
+1024,after,docker_run,0.4137918949127197
