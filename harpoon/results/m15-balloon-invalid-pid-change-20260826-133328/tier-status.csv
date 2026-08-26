@@ -1,0 +1,4 @@
+tier,status,detail
+512,PASS,completed balloon
+768,RUNTIME_LOST_START
+1024,RUNTIME_LOST_START

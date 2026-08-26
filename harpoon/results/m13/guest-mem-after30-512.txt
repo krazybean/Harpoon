@@ -1,0 +1,11 @@
+MemTotal:         479152 kB
+MemFree:          173944 kB
+MemAvailable:     364004 kB
+---
+0.10 0.05 0.01 2/97 8
+---
+4
+---
+              total        used        free      shared  buff/cache   available
+Mem:            468         103         170           0         196         355
+Swap:             0           0           0

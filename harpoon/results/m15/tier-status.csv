@@ -1,0 +1,5 @@
+tier,status,detail
+512,RUNTIME_LOST_HOLD,hold-30s not running
+768,RUNTIME_LOST_IDLE,RUNTIME_LOST
+host_measure
+1024,PASS,completed

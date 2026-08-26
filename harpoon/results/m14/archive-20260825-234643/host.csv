@@ -1,0 +1,1 @@
+timestamp,tier,variant,phase,harpoon_pid,harpoon_rss_kib,harpoon_cpu_pct,harpoon_threads,harpoon_fds,vm_pid,vm_rss_kib,vm_cpu_pct,vm_threads,vm_fds,combined_rss_kib

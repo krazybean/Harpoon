@@ -1,0 +1,3 @@
+tier,variant,status,detail
+512,before,HOST_VZ_START_FAILURE,VM failed to start
+512,after,HOST_VZ_START_FAILURE,VM failed to start

@@ -1,0 +1,13 @@
+label=before
+binary=harpoon/results/m14/bin/harpoon-before
+binary_abs=/Users/juancastro/Documents/Github/Harpoon/harpoon/results/m14/bin/harpoon-before
+size=821664
+sha256=f9f0d42736ad7f7a1ac0496a161a359f485b84bcc4365c04f24e9226d2900934
+arch=harpoon/results/m14/bin/harpoon-before: Mach-O 64-bit executable arm64
+codesign=Executable=/Users/juancastro/Documents/Github/Harpoon/harpoon/results/m14/bin/harpoon-before;Identifier=harpoon-55554944269cbf04be383c89ad14575f71ec324c;Format=Mach-O thin (arm64);CodeDirectory v=20400 size=1929 flags=0x2(adhoc) hashes=49+7 location=embedded;Signature=adhoc;
+codesign_verify=harpoon/results/m14/bin/harpoon-before: valid on disk
+polling_interval_seconds=2
+source_line=46:        t.schedule(deadline: .now()+2, repeating: 2)
+source_repeating_grep=46:        t.schedule(deadline: .now()+2, repeating: 2);101:                    var buf = [UInt8](repeating: 0, count: 8192);278:                        var buf = [UInt8](repeating: 0, count: 8192);296:                        var buf = [UInt8](repeating: 0, count: 8192);
+git_commit=22415c11f30658ff1e61c87b8cae347ecd7b6489
+git_diff_PortForwardManager=
