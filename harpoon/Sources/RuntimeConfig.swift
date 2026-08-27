@@ -60,7 +60,44 @@ struct RuntimeConfig {
     var dockerReadyTimeout: TimeInterval = 120
 
     static func installedLibDir() -> URL? {
-        // Try common prefixes relative to executable
+        // Harpoon.app bundle: Resources/harpoon/lib/harpoon (when harpoon is at Resources/harpoon/bin/harpoon)
+        // Tauri flat resources: Resources/harpoon or Resources/
+        if let exec = Bundle.main.executableURL {
+            let binDir = exec.deletingLastPathComponent()
+            // Bundle: <Harpoon.app>/Contents/MacOS/harpoon-desktop -> ../Resources/harpoon/lib/harpoon
+            // For harpoon binary itself at Resources/harpoon/bin/harpoon, binDir is .../Resources/harpoon/bin
+            let bundleCandidates: [URL] = [
+                binDir.deletingLastPathComponent().appendingPathComponent("lib/harpoon"), // Resources/harpoon/lib/harpoon
+                binDir.appendingPathComponent("../lib/harpoon").standardized,
+                binDir.appendingPathComponent("../../Resources/harpoon/lib/harpoon").standardized, // from MacOS/harpoon-desktop
+                URL(fileURLWithPath: binDir.path).deletingLastPathComponent().appendingPathComponent("../Resources/harpoon/lib/harpoon").standardized,
+                binDir.appendingPathComponent("../Resources/harpoon").standardized,
+                // Current Tauri bundle-resources layout (Resources/bundle-resources/harpoon)
+                binDir.appendingPathComponent("../Resources/bundle-resources/harpoon/lib/harpoon").standardized,
+                binDir.appendingPathComponent("../../Resources/bundle-resources/harpoon/lib/harpoon").standardized,
+                URL(fileURLWithPath: binDir.path).deletingLastPathComponent().appendingPathComponent("../Resources/bundle-resources/harpoon/lib/harpoon").standardized,
+                binDir.appendingPathComponent("../Resources/bundle-resources/harpoon").standardized,
+            ]
+            for c in bundleCandidates {
+                if FileManager.default.fileExists(atPath: c.path) { return c }
+                // also check if parent contains Image-virt directly (flat)
+                let flat = c.deletingLastPathComponent()
+                if FileManager.default.fileExists(atPath: flat.appendingPathComponent("Image-virt").path) { return flat }
+            }
+            // Check Bundle resourceURL directly
+            if let res = Bundle.main.resourceURL {
+                let resHarpoonLib = res.appendingPathComponent("harpoon/lib/harpoon")
+                if FileManager.default.fileExists(atPath: resHarpoonLib.path) { return resHarpoonLib }
+                let resBundleLib = res.appendingPathComponent("bundle-resources/harpoon/lib/harpoon")
+                if FileManager.default.fileExists(atPath: resBundleLib.path) { return resBundleLib }
+                let resHarpoon = res.appendingPathComponent("harpoon")
+                if FileManager.default.fileExists(atPath: resHarpoon.appendingPathComponent("Image-virt").path) { return resHarpoon }
+                let resBundle = res.appendingPathComponent("bundle-resources/harpoon")
+                if FileManager.default.fileExists(atPath: resBundle.appendingPathComponent("Image-virt").path) { return resBundle }
+                if FileManager.default.fileExists(atPath: res.appendingPathComponent("Image-virt").path) { return res }
+            }
+        }
+        // Try common prefixes relative to executable (installed via package.sh)
         let candidates: [URL] = [
             URL(fileURLWithPath: "/usr/local/lib/harpoon"),
             URL(fileURLWithPath: "/opt/homebrew/lib/harpoon"),

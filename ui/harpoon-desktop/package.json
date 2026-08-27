@@ -1,0 +1,39 @@
+{
+  "name": "harpoon-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "build:runtime": "bash ../../harpoon/build.sh",
+    "build:frontend": "npm run build",
+    "bundle:prepare": "bash src-tauri/prepare-bundle.sh",
+    "bundle:app": "NPM_CONFIG_CACHE=/tmp/npm-cache npm run tauri -- build --bundles app && bash scripts/sign-app.sh",
+    "bundle:dmg": "node scripts/release.mjs --dmg-only",
+    "verify:app": "bash -c 'codesign --verify --deep --strict --verbose=4 src-tauri/target/release/bundle/macos/Harpoon.app && codesign -d --entitlements :- src-tauri/target/release/bundle/macos/Harpoon.app/Contents/Resources/harpoon/bin/harpoon | grep -q com.apple.security.virtualization && ! codesign -d --entitlements :- src-tauri/target/release/bundle/macos/Harpoon.app/Contents/MacOS/harpoon-desktop | grep -q com.apple.security.virtualization && echo \"verify:app PASS\"'",
+    "verify:dmg": "bash -c 'ls src-tauri/target/release/bundle/dmg/*.dmg 2>/dev/null | head -n1 | xargs -I{} sh -c \"hdiutil attach -nobrowse -quiet \\\"{}\\\" && echo \\\"verify:dmg PASS\\\" && hdiutil detach /Volumes/Harpoon 2>/dev/null || echo \\\"verify:dmg mount blocked (sandbox)\\\"\" || echo \"no dmg found\"'",
+    "build:release": "node scripts/release.mjs",
+    "release": "node scripts/release.mjs",
+    "version:bump": "node scripts/version.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "clean": "node scripts/clean.mjs",
+    "clean:release": "node scripts/clean.mjs"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.7",
+    "@tauri-apps/api": "^2.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}

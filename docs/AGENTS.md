@@ -51,6 +51,36 @@ If Ponytail materially challenges the proposed approach, investigate the challen
 
 If the Ponytail skill is unavailable in the current environment, explicitly report that fact rather than silently skipping it.
 
+# 2A. UI/UX Pro Max for Interface Work
+
+For tasks that design, review, modify, or evaluate the Harpoon user interface, use the globally available **UI/UX Pro Max** skill:
+
+`~/.agents/skills/ui-ux-pro-max/SKILL.md`
+
+Apply the skill according to its prescribed workflow.
+
+For an existing Harpoon interface:
+
+- begin with the skill's existing-UI review guidance and Quick Reference,
+- use focused searches for concerns actually observed in the interface,
+- use the React stack guidance for implementation-specific recommendations,
+- prefer UX outcomes before implementation-specific searches,
+- do not generate or persist a new design system unless explicitly requested.
+
+UI/UX Pro Max provides design and interaction guidance. It does not override:
+
+- this `AGENTS.md`,
+- the canonical roadmap,
+- Harpoon architecture or ownership boundaries,
+- runtime behavior or acceptance criteria,
+- executable evidence,
+- Ponytail findings,
+- or explicit user direction.
+
+When UI/UX Pro Max recommendations conflict with established Harpoon requirements, preserve the Harpoon requirement and report the conflict rather than silently redesigning around it.
+
+Do not expand a UI/UX task into unrelated runtime or architecture work.
+
 ---
 
 # 3. The Roadmap Is Canonical

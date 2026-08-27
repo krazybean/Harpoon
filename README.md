@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-Hello World
-=======
 # Harpoon
 
 > Cause damn the whales
@@ -87,6 +84,19 @@ Staged: `dist/harpoon-0.1.0-dev-darwin-arm64` (bin 802K, kernel 33M, initramfs 1
 
 Status: Phase 2 M7-M11 PASS, M12 CONDITIONAL PASS (host VZErrorDomain 1 transient blocks live VM in this env; install/CLI/persistence proven).
 
+## Building Harpoon
+
+Harpoon can be built as a self-contained macOS application. Node.js, Rust, Cargo, and Tauri are build-time dependencies only; packaged releases do not require them.
+
+```sh
+cd ui/harpoon-desktop
+npm ci                    # install
+npm run tauri dev         # development
+npm run build:release     # production Harpoon.app + DMG (3072 MiB)
+```
+
+See [Building Harpoon](docs/building.md) for release, versioning (`npm run release -- patch`), and verification details.
+
 ## Native macOS Virtualization
 
 Harpoon is built directly on Apple's native `Virtualization.framework`.
@@ -95,9 +105,43 @@ Rather than bundling a separate third-party hypervisor, Harpoon uses Apple's nat
 
 ## Lightweight by Design
 
-In feasibility testing on the same Mac, Harpoon's VM used approximately 386 MB of physical memory at idle versus approximately 954 MB for Docker Desktop. Under the same nginx + Redis + PostgreSQL workload, Harpoon used approximately 919 MB versus approximately 1.76 GB.
+Harpoon keeps its macOS control plane deliberately small while container workloads execute inside a lightweight Linux VM.
+
+**Flagship observed result — host control plane at idle: ~80 MiB resident**
+
+Harpoon's host control plane used ~80 MiB RSS at idle during a 30-second observed test — roughly 12 MiB for the runtime daemon and 69–71 MiB for the desktop client.
+
+| Component | Observed idle footprint |
+|---|---|
+| Runtime daemon (`harpoon`) | ~12 MiB RSS |
+| Desktop UI (`Harpoon.app`) | ~69–71 MiB RSS |
+| **Combined control plane** | **~80–83 MiB RSS** |
+| Idle CPU (each host process) | typically <1% |
+| Benchmark workload | Docker Engine running, no containers |
+
+> **Benchmark note:** Figures are observed measurements, not guarantees. 30-second / 15-sample idle observation; development-only Vite/Node/esbuild processes are excluded from product runtime figures. Virtualization.framework XPC process RSS (~86–100 MiB observed) is reported separately and is not total VM physical-memory consumption. Container resource consumption varies by workload.
+
+<details>
+<summary>Benchmark environment & additional measurements</summary>
+
+* **Host:** Apple Silicon macOS, 18 GiB physical memory
+* **Guest:** Linux arm64, Alpine Linux 3.22, Docker Engine 28.3.3, 2 vCPUs, 1024 MiB configured (969.7 MiB Docker-visible)
+* **Docker socket:** `unix:///tmp/harpoon-docker.sock`
+* **Methodology:** 30-second idle observation, 15 samples at 2-second intervals; workload was zero containers running with Docker Engine running
+* **Observed ranges (RSS):** runtime daemon ~11.7–11.8 MiB, desktop UI ~68.5–71.3 MiB, combined control plane ~80–83 MiB
+* **Apple Virtualization.framework XPC service:** ~86–100 MiB RSS observed separately — not total VM memory and not summed with the control plane to infer whole-system cost
+* **Guest/container memory:** not inferable from XPC RSS alone; depends on workload
+* **Idle CPU:** typically <1% for each host process (observed, not guaranteed)
+
+Harpoon-owned host control plane (~80 MiB) is distinct from (1) Apple XPC service memory (~86–100 MiB, platform-owned, reported separately) and (2) guest/container memory inside the VM. Whole-system PhysMem deltas were not measured here.
+
+**Earlier feasibility measurements (not interchangeable with above):**
+
+In earlier feasibility testing on the same Mac, Harpoon's VM used approximately 386 MB of physical memory at idle versus approximately 954 MB for Docker Desktop. Under the same nginx + Redis + PostgreSQL workload, Harpoon used approximately 919 MB versus approximately 1.76 GB. These are EARLIER feasibility measurements using different methodology and are not interchangeable with the 30-second idle control-plane observation above.
 
 These figures are measurements from the development test system and are not universal performance guarantees — see [Architecture](docs/architecture.md) for methodology, configurations, and workload equivalence.
+
+</details>
 
 ## Platform Scope (v0.1)
 
@@ -131,5 +175,3 @@ Pre-release. v0.1 targets the MVP acceptance workflows described in
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
->>>>>>> 28101b8 (saving initial changes)

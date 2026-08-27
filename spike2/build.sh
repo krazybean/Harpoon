@@ -502,11 +502,24 @@ if command -v nslookup >/dev/null 2>&1; then
   else
     echo "HARPOON_DNS_DHCP_FAILED" > /dev/hvc0
     cat /tmp/nslookup.log 2>&1 | tee /dev/hvc0 >/dev/null || true
-    # Replace GUEST /etc/resolv.conf only — do NOT modify macOS host
-    cat > /etc/resolv.conf <<'RESOLV'
+    # Use host DNS passed via kernel cmdline if available (harpoon.dns=IP,IP)
+    HOST_DNS=$(grep -o 'harpoon.dns=[^ ]*' /proc/cmdline 2>/dev/null | cut -d= -f2)
+    if [ -n "$HOST_DNS" ]; then
+        echo "HARPOON_DNS_HOST $HOST_DNS" > /dev/hvc0
+        # HOST_DNS is comma-separated, convert to resolv.conf format
+        printf "" > /etc/resolv.conf
+        echo "$HOST_DNS" | tr ',' '\n' | while read -r ns; do
+            echo "nameserver $ns" >> /etc/resolv.conf
+        done
+        cat /etc/resolv.conf | tee /dev/hvc0 >/dev/null
+    else
+        # No host DNS provided — fallback to public for v0.1, but log warning
+        echo "HARPOON_DNS_HOST_MISSING" > /dev/hvc0
+        cat > /etc/resolv.conf <<'RESOLV'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLV
+    fi
     echo "HARPOON_DNS_OVERRIDE_APPLIED" > /dev/hvc0
     cat /etc/resolv.conf 2>&1 | tee /dev/hvc0 >/dev/null || true
     # Retry with overridden DNS
