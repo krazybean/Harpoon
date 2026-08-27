@@ -28,3 +28,10 @@ spike2/build
 dist/
 harpoon/build/
 harpoon/cache/
+bundle-resources
+ui/harpoon-desktop/src-tauri/bundle-resources
+harpoon/results/
+.DS_Store
+node_modules/
+ui/harpoon-desktop/src-tauri/gen/
+ui/inspiration/

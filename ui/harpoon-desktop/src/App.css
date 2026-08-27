@@ -1,0 +1,14 @@
+@import "./theme.css";
+@import "./styles/primitives.css";
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--app-bg); color: var(--text-primary); font-family: var(--font-sans); }
+code { background: var(--panel-header); color: var(--text-code); padding: 1px 4px; border-radius: 4px; font-family: var(--font-mono); font-size: var(--text-code-size); }
+button:disabled { cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* Scrollbar for dark */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--app-bg); }
+::-webkit-scrollbar-thumb { background: var(--panel-header); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }

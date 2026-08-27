@@ -1,6 +1,59 @@
 import Virtualization
 import Foundation
 
+/// Host DNS discovery via scutil — Architecture A (direct host resolver propagation).
+/// Parses `scutil --dns` output for `nameserver[N] : X.X.X.X` lines.
+/// Filters loopback (127.0.0.1, ::1), link-local (169.254.x.x), and mDNS-only resolvers.
+/// For v0.1, returns the first reachable resolver's upstream servers (e.g., resolver #1).
+/// Scoped/split DNS (per-domain resolvers) is deferred — only global resolvers are propagated.
+func hostDNSServers() -> [String] {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/sbin/scutil")
+    proc.arguments = ["--dns"]
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = Pipe()
+    do { try proc.run() } catch { return [] }
+    proc.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    guard let output = String(data: data, encoding: .utf8), !output.isEmpty else { return [] }
+    var servers: [String] = []
+    // Split into resolver blocks; skip mDNS-only resolvers
+    // scutil --dns format: "resolver #1" ... "nameserver[0] : 8.8.8.8" ... "resolver #2" ...
+    var currentBlockIsMDNS = false
+    for line in output.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("resolver #") {
+            // new block — detect mDNS via domain : local or options : mdns seen in block
+            currentBlockIsMDNS = false
+            continue
+        }
+        // Mark block as mDNS if we see mdns options or domain local
+        let lower = trimmed.lowercased()
+        if lower.contains("mdns") {
+            currentBlockIsMDNS = true
+            continue
+        }
+        if currentBlockIsMDNS { continue }
+        // Parse nameserver lines: "nameserver[0] : 8.8.8.8"
+        guard trimmed.hasPrefix("nameserver[") else { continue }
+        guard let colonRange = trimmed.range(of: ":") else { continue }
+        let ip = trimmed[colonRange.upperBound...].trimmingCharacters(in: .whitespaces)
+        if ip.isEmpty { continue }
+        if ip == "127.0.0.1" || ip == "::1" { continue }
+        if ip.hasPrefix("169.254.") { continue }
+        // also skip IPv6 link-local / loopback variants with zone
+        if ip.hasPrefix("::1") { continue }
+        if ip.lowercased().hasPrefix("fe80:") { continue }
+        // Skip mDNS multicast addresses if any leaked through
+        if ip == "224.0.0.251" { continue }
+        if !servers.contains(ip) {
+            servers.append(ip)
+        }
+    }
+    return servers
+}
+
 // ponytail: minimal VM owner — no abstractions, explicit FD/DispatchSource ownership for bounded cleanup
 final class VMManager {
     let config: RuntimeConfig
@@ -39,7 +92,14 @@ final class VMManager {
         let platform = VZGenericPlatformConfiguration()
         cfg.platform = platform
         let bl = VZLinuxBootLoader(kernelURL: config.kernelURL)
-        bl.commandLine = "console=hvc0"
+        let dnsServers = hostDNSServers()
+        if !dnsServers.isEmpty {
+            bl.commandLine = "console=hvc0 harpoon.dns=" + dnsServers.joined(separator: ",")
+            print("[harpoon] host DNS \(dnsServers.joined(separator: ",")) -> guest")
+        } else {
+            bl.commandLine = "console=hvc0"
+            print("[harpoon] warning: no host DNS found, guest will use fallback")
+        }
         bl.initialRamdiskURL = config.initramfsURL
         cfg.bootLoader = bl
         cfg.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]

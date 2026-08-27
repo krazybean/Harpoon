@@ -1,0 +1,108 @@
+/* Harpoon canonical dark naval operations console — calibrated from docs/ui/01-overview.png as primary authority.
+   Supporting refs 02-07 normalized to 01-overview palette; intentional state variations preserved.
+   Do not median arbitrary screenshots — this is ONE coherent console. */
+:root {
+  /* Application */
+  --app-bg: #031427;
+  --nav-bg: #020617;
+  --panel: #0F172A;
+  --panel-header: #1E293B;
+  --panel-elevated: #1E293B;
+  --border: #1E293B;
+  --border-strong: #334155;
+  --border-subtle: rgba(148,163,184,0.12);
+
+  /* Text */
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-tertiary: #64748B;
+  --text-code: #94A3B8;
+
+  /* Fonts — system only, no remote */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Typography roles */
+  --text-title-size: 14px;
+  --text-title-weight: 700;
+  --text-title-lh: 1.2;
+  --text-title-tracking: -0.01em;
+
+  --text-panel-title-size: 11px;
+  --text-panel-title-weight: 600;
+  --text-panel-title-lh: 1.3;
+  --text-panel-title-tracking: 0.06em;
+
+  --text-th-size: 10px;
+  --text-th-weight: 600;
+  --text-th-tracking: 0.08em;
+
+  --text-body-size: 12px;
+  --text-body-weight: 400;
+  --text-body-lh: 1.5;
+
+  --text-meta-size: 10px;
+  --text-meta-weight: 400;
+  --text-meta-lh: 1;
+
+  --text-code-size: 11px;
+  --text-button-size: 12px;
+  --text-button-weight: 500;
+
+  --text-badge-size: 10px;
+  --text-badge-weight: 700;
+
+  /* Accents */
+  --accent-cyan: #00D1FF;
+  --accent-cyan-dim: #0891B2;
+
+  /* Navigation selected */
+  --nav-selected-bg: #E5A703;
+  --nav-selected-text: #0F172A;
+
+  /* States */
+  --success: #10B981;
+  --success-bg: #052E16;
+  --success-fg: #86EFAC;
+  --warning: #E5A703;
+  --warning-bg: #451A03;
+  --warning-fg: #FDE68A;
+  --error: #EF4444;
+  --error-bg: #450A0A;
+  --error-fg: #FECACA;
+  --info-bg: #082F49;
+  --info-fg: #7DD3FC;
+
+  /* Disabled */
+  --disabled-bg: #1E293B;
+  --disabled-text: #475569;
+
+  /* Focus */
+  --focus-ring: #00D1FF;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Radius */
+  --radius-card: 12px;
+  --radius-button: 8px;
+  --radius-pill: 999px;
+
+  /* Control heights */
+  --control-height: 28px;
+  --control-height-sm: 22px;
+  --badge-height: 20px;
+  --badge-height-sm: 18px;
+  --table-header-height: 28px;
+  --table-row-height: 40px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
