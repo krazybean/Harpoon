@@ -1,0 +1,53 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: "0 6 * * 1"
+
+# Note: shell code is not CodeQL-analyzed (CodeQL does not support shell).
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            os: ubuntu-latest
+            build-mode: none
+          - language: rust
+            os: ubuntu-latest
+            build-mode: none
+          - language: swift
+            os: macos-latest
+            build-mode: manual
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build Swift (manual for CodeQL)
+        if: matrix.build-mode == 'manual'
+        run: |
+          swiftc harpoon/Sources/RuntimeConfig.swift harpoon/Sources/HostPathTranslator.swift harpoon/Sources/Lifecycle.swift harpoon/Sources/VMManager.swift harpoon/Sources/Bridges.swift harpoon/Sources/PortForwardManager.swift harpoon/Sources/HarpoonCLI.swift harpoon/Sources/main.swift -framework Virtualization -o /tmp/harpoon-codeql -module-cache-path /tmp/harpoon-mcache
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          category: "/language:${{ matrix.language }}"
