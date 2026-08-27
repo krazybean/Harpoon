@@ -4,7 +4,7 @@ Thanks for considering a contribution!
 
 ## Reporting Bugs
 
-- Search existing [GitHub Issues](https://github.com/The-Ponytail/Harpoon/issues) to avoid duplicates.
+- Search existing [GitHub Issues](https://github.com/krazybean/Harpoon/issues) to avoid duplicates.
 - Open a new issue with:
   - A clear title and description of expected vs. actual behavior.
   - Steps to reproduce (minimal example if possible).

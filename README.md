@@ -1,176 +1,167 @@
 # Harpoon
 
-> Cause damn the whales
+Lightweight Docker-compatible container environment for macOS using Apple's Virtualization.framework and a minimal Linux VM.
 
-Harpoon is a lightweight, Docker-compatible container runtime environment for macOS,
-designed around one primary goal:
+Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. It provides the macOS-side virtualization substrate needed to run a standard Linux container stack while preserving compatibility with the Docker CLI, Compose, and surrounding tooling.
 
-> Run ordinary Docker development workloads on macOS without allowing the underlying
-> Linux virtual machine to permanently consume an excessive portion of host memory.
+## Why Harpoon?
 
-Harpoon is not a new container engine. It provides the macOS virtualization substrate
-required to run an existing Linux container stack while preserving compatibility with
-the Docker ecosystem.
+- **Native macOS integration** — built directly on `Virtualization.framework` (no bundled third-party hypervisor).
+- **Docker-compatible workflow and API** where actually supported — `docker`, `compose`, and related tools speak to Harpoon's API through a standard Unix socket / Docker context.
+- **Deliberately small architecture** — minimal Linux appliance guest, host control plane focused on VM lifecycle, socket bridging, networking, bind-mount transport, and diagnostics.
+- **Transparent and inspectable** — source available, documented build from Swift and Tauri, no hidden updater or launch agent.
 
-## Product Thesis
+Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit remain authoritative inside the guest for containers, images, volumes, networks, and builds. Harpoon owns the macOS↔Linux boundary.
 
-Linux containers cannot run directly on the macOS kernel. Existing macOS container
-products therefore run a Linux virtual machine underneath Docker or another
-OCI-compatible runtime.
+## Screenshots / Desktop UI
 
-Harpoon accepts that architectural requirement but aggressively minimizes its cost.
-Its core design philosophy is:
+The Tauri/React desktop app is a client of the Harpoon runtime. Seven curated views are included under `docs/ui`:
 
-> The virtual machine should consume resources only while workloads require them,
-> and should return those resources to macOS as aggressively and safely as possible
-> afterward.
+![Overview](docs/ui/01-overview.png)
+![Containers](docs/ui/02-containers.png)
+![Images](docs/ui/03-images.png)
 
-The first-class optimization target is therefore not simply low *configured* VM
-memory, but low **resident host memory during idle and post-workload states**.
+Additional views: volumes, networks, resources, diagnostics. See [UI documentation](docs/ui/README.md) for visual-language notes (reference images are not specifications for runtime behavior).
 
-## Expected Workflow
+## Current Capabilities
 
-Developers keep using their existing Docker tooling:
+All items below have been demonstrated on the documented test system (see results). Fresh-start DNS validation has now passed — see below.
 
-```bash
-harpoon start
-harpoon docker setup
+- **CLI & lifecycle:** `harpoon start` / `stop` / `restart` / `status` / `logs` / `run` / `version` / `help`; background lifecycle via `Process`, single instance via `flock` on `/tmp/harpoon.lock`, PID safety via `proc_pidpath`, stale recovery, terminal independence.
+- **Docker integration:** socket at `unix:///tmp/harpoon-docker.sock` (`0600`), Docker context `harpoon` (`harpoon docker setup|status|use`), `docker --context harpoon version/ps/run/build/buildx` works without TCP.
+- **Compose & dev workflow:** `compose build/up/down`, bind mounts (`ro` enforcement, named volume `pgdata` persistence), bridge `m9net` + DNS, published ports, `env`/`.env`/`healthcheck`/`scale`/`mem_limit`.
+- **Networking:** VZNAT + virtio-net, host loopback forwarder for published ports (`docker run -p 8080:80` → `curl 127.0.0.1:8080`), `/tmp/harpoon-share` VirtioFS bind mounts, `net.ipv4.ip_forward=1`.
+- **Installation / distribution:** relocatable `dist/harpoon-0.1.0-dev-darwin-arm64` (bin 802K, kernel 33M, initramfs 14M, root 2G sparse), `harpoon/install.sh` to `/usr/local`, `uninstall.sh`, APFS clone-aware `cp -c` provisioning, ad-hoc signing with `com.apple.security.virtualization`.
+- **Desktop app:** Tauri 2 + React + Vite (185 kB `dist`), 7 views, `status --json` live polling, per-action busy states, bootstrap `launching→ready/failed` with `Retry`, resource/config views backed by CLI.
+- **Ecosystem compatibility:** matrix A–H via `harpoon/ec-test.sh` (when host healthy) — compose, contexts, buildx verified; specific matrix rows preserved as `BLOCKED` only by host transient, not product.
+- **Validation:** dense acceptance harnesses (M7–M18, EC, UI, D1/D1.1) with logs, `tier-status.csv`, and preserved historical evidence.
 
-docker --context harpoon compose up -d --build
-docker --context harpoon compose ps
-docker --context harpoon compose logs
-docker --context harpoon compose down
+Fresh-start DNS validation (clean stop → fresh `harpoon start` → Docker Engine 28.3.3 `linux/arm64` ready → guest `resolv.conf` with working external resolvers → `registry-1.docker.io` resolved → uncached `busybox:1.37` pull succeeded) **now passes**, superseding earlier documentation that described it as pending due to a Virtualization.framework host condition.
+
+## Architecture
+
+Conceptual data flow:
+
+```
+Docker CLI / client
+        |
+Harpoon host socket/API  (unix:///tmp/harpoon-docker.sock → vsock:2375)
+        |
+macOS Harpoon runtime (harpoon/Sources — Swift, Virtualization.framework)
+        |
+Virtualization.framework (VZVirtualMachine, VZLinuxBootLoader, VZNAT, VirtioFS, vsock)
+        |
+Linux VM (Alpine 3.22, Docker Engine 28.3.3, containerd)
+        |
+Docker Engine / container runtime
 ```
 
-Harpoon does not invent replacement commands for Docker operations already supported
-by the Docker API. Harpoon commands manage Harpoon itself:
+Harpoon's control plane is deliberately small. Container execution, image management, and orchestration remain inside the Linux VM under Docker Engine.
 
-```bash
-harpoon start                # background (defaults: cpus 2, memory 1024)
-harpoon stop
-harpoon status               # human, --json for machines
-harpoon logs [--follow] [--lines N] [--path]
-harpoon config show|set|reset  # persistent defaults (~/Library/Application Support/Harpoon/config.json)
-harpoon docker setup|status|use  # Docker context (unix:///tmp/harpoon-docker.sock)
-harpoon doctor               # diagnostics
-harpoon version              # Harpoon 0.1.0-dev
-```
+For component boundaries and transport details, see [Architecture](docs/architecture.md) and [Lifecycle](docs/lifecycle.md).
 
-## Key Properties
+## Quick Start
 
-- **Docker-compatible**: exposes a Docker API Unix socket at `~/.harpoon/docker.sock`;
-  works with the Docker CLI, Compose, LazyDocker, IDE integrations, and Testcontainers.
-- **Memory-first**: dynamic VM memory management with aggressive, observable
-  reclamation of unused guest memory back to macOS.
-- **Persistent**: stopping Harpoon never destroys images, volumes, containers, or
-  Docker metadata.
-- **Appliance guest**: a minimal Linux VM containing only what Docker workloads need —
-  no desktop environment, no unnecessary services.
-- **Boring virtualization**: built on Apple's `Virtualization.framework`, written in Rust.
-
-## Installation
+Shortest verified path (see [Building](docs/building.md) for prerequisites, packaging, signing, and troubleshooting):
 
 ```sh
-tar xzf dist/harpoon-0.1.0-dev-darwin-arm64.tar.gz
-./dist/harpoon-0.1.0-dev-darwin-arm64/install.sh  # to /usr/local (needs sudo)
-# or from repo
-bash harpoon/install.sh
-harpoon version   # 0.1.0-dev
-harpoon doctor    # 11 PASS
-cd /tmp && harpoon doctor  # relocatable, no repo required
+# Prerequisites: macOS on Apple Silicon, Xcode Command Line Tools, Rust stable
+git clone https://github.com/krazybean/Harpoon.git
+cd Harpoon
+
+# Build runtime
+bash harpoon/build.sh
+
+# Start Harpoon (defaults: cpus 2, memory 1024)
+harpoon/build/harpoon start
+harpoon/build/harpoon status
+harpoon/build/harpoon docker setup
+
+# Use Docker through Harpoon
+docker --context harpoon version
+docker --context harpoon run --rm hello-world
+docker --context harpoon run --rm alpine:3.22 true
+
+# Stop when done
+harpoon/build/harpoon stop
 ```
 
-Staged: `dist/harpoon-0.1.0-dev-darwin-arm64` (bin 802K, kernel 33M, initramfs 14M, root 2.0G/962M) + tar.gz 289M. See [Installation](docs/installation.md) and [Phase 2 Acceptance](docs/phase2-acceptance.md).
+After `harpoon/install.sh`, the same commands are available as `harpoon start/stop/status/...` from any directory and without a checkout. Detailed prerequisites and release packaging (Tauri app, DMG) are in [Building Harpoon](docs/building.md).
 
-Status: Phase 2 M7-M11 PASS, M12 CONDITIONAL PASS (host VZErrorDomain 1 transient blocks live VM in this env; install/CLI/persistence proven).
+## Desktop Application
 
-## Building Harpoon
+`ui/harpoon-desktop` is a Tauri 2 + React + TypeScript + Vite app. It is a client of the Harpoon control API (`status --json`, `doctor`, `logs`, `config`) and never owns the VM lifecycle.
 
-Harpoon can be built as a self-contained macOS application. Node.js, Rust, Cargo, and Tauri are build-time dependencies only; packaged releases do not require them.
+Currently implemented views: overview, containers, images, volumes, networks, resources, diagnostics. Features include 750 ms bootstrap polling, 3 s periodic polling throttled when hidden, async `counts_cache` coalescing, binary resolver (`HARPOON_BIN` → bundled → `harpoon/build/harpoon` → `/usr/local/bin/harpoon`), and Docker resource counts via the Harpoon socket.
+
+Build in development:
 
 ```sh
 cd ui/harpoon-desktop
-npm ci                    # install
-npm run tauri dev         # development
-npm run build:release     # production Harpoon.app + DMG (3072 MiB)
+npm ci
+npm run tauri dev
 ```
 
-See [Building Harpoon](docs/building.md) for release, versioning (`npm run release -- patch`), and verification details.
+See [Building](docs/building.md) for release builds (`npm run build:release`).
 
-## Native macOS Virtualization
+## Resource Usage / Validation
 
-Harpoon is built directly on Apple's native `Virtualization.framework`.
+Representative measurements from the documented test system (Mac15,6 M3 Pro, 18 GiB, macOS 26.5.2, Docker 28.3.3) — observations, not guarantees:
 
-Rather than bundling a separate third-party hypervisor, Harpoon uses Apple's native `Virtualization.framework` for Linux virtualization, including Virtio networking, block storage, VirtioFS, vsock, and memory ballooning.
+- **Host control plane at idle (30 s, 15 samples):** runtime daemon ~12 MiB RSS, desktop UI ~69–71 MiB RSS, combined ~80–83 MiB. Apple Virtualization.framework XPC service ~86–100 MiB observed separately. See README's earlier “Benchmark note” for full methodology.
+- **Earlier feasibility comparison (different methodology, not interchangeable):** Harpoon VM ~386 MiB idle vs Docker Desktop ~954 MiB; under nginx+Redis+Postgres workload Harpoon ~919 MiB vs ~1.76 GiB.
 
-## Lightweight by Design
+Guest/container memory depends on workload and is not inferable from XPC RSS alone.
 
-Harpoon keeps its macOS control plane deliberately small while container workloads execute inside a lightweight Linux VM.
+Collected evidence under `docs/results` and `harpoon/results` (M13–M18, R1, EC, UI, D1/D1.1) with `tier-status.csv`, `host.csv`, logs, and preserved healthy vs `HOST_VZ_START_FAILURE` windows.
 
-**Flagship observed result — host control plane at idle: ~80 MiB resident**
+Links: [Performance](docs/performance.md), [Resources](docs/resources.md), [Validation results](docs/results/), [Architecture](docs/architecture.md).
 
-Harpoon's host control plane used ~80 MiB RSS at idle during a 30-second observed test — roughly 12 MiB for the runtime daemon and 69–71 MiB for the desktop client.
+## Security & Trust
 
-| Component | Observed idle footprint |
-|---|---|
-| Runtime daemon (`harpoon`) | ~12 MiB RSS |
-| Desktop UI (`Harpoon.app`) | ~69–71 MiB RSS |
-| **Combined control plane** | **~80–83 MiB RSS** |
-| Idle CPU (each host process) | typically <1% |
-| Benchmark workload | Docker Engine running, no containers |
+Harpoon intentionally exposes inspectable signals rather than claiming security:
 
-> **Benchmark note:** Figures are observed measurements, not guarantees. 30-second / 15-sample idle observation; development-only Vite/Node/esbuild processes are excluded from product runtime figures. Virtualization.framework XPC process RSS (~86–100 MiB observed) is reported separately and is not total VM physical-memory consumption. Container resource consumption varies by workload.
+- Source available for inspection
+- [Security policy](SECURITY.md) with responsible disclosure via GitHub Private Vulnerability Reporting
+- [Contributing guide](CONTRIBUTING.md)
+- Dependency graph enabled, Dependabot alerts (including malware alerts) and security updates enabled
+- Dependabot configuration for `npm`, `cargo`, and `github-actions`
+- Repository configuration for **CodeQL** (javascript-typescript, rust with `build-mode: none`, swift with manual `swiftc` build on `macos-latest`) and **OpenSSF Scorecard** (`v2.4.4`, pinned Actions)
+- Pinned GitHub Actions (`actions/checkout`, `github/codeql-action/*`, `ossf/scorecard-action`, `actions/upload-artifact`) to commit SHAs
 
-<details>
-<summary>Benchmark environment & additional measurements</summary>
+Harpoon includes repository configuration for CodeQL and OpenSSF Scorecard analysis. Results will become publicly inspectable once the repository is public and those workflows have completed successfully.
 
-* **Host:** Apple Silicon macOS, 18 GiB physical memory
-* **Guest:** Linux arm64, Alpine Linux 3.22, Docker Engine 28.3.3, 2 vCPUs, 1024 MiB configured (969.7 MiB Docker-visible)
-* **Docker socket:** `unix:///tmp/harpoon-docker.sock`
-* **Methodology:** 30-second idle observation, 15 samples at 2-second intervals; workload was zero containers running with Docker Engine running
-* **Observed ranges (RSS):** runtime daemon ~11.7–11.8 MiB, desktop UI ~68.5–71.3 MiB, combined control plane ~80–83 MiB
-* **Apple Virtualization.framework XPC service:** ~86–100 MiB RSS observed separately — not total VM memory and not summed with the control plane to infer whole-system cost
-* **Guest/container memory:** not inferable from XPC RSS alone; depends on workload
-* **Idle CPU:** typically <1% for each host process (observed, not guaranteed)
+Automated analysis does not establish that Harpoon is safe, malware-free, or vulnerability-free. See [SECURITY.md](SECURITY.md) for scope, boundaries, and reporting.
 
-Harpoon-owned host control plane (~80 MiB) is distinct from (1) Apple XPC service memory (~86–100 MiB, platform-owned, reported separately) and (2) guest/container memory inside the VM. Whole-system PhysMem deltas were not measured here.
+CodeQL cannot currently publish code-scanning results while the repository is private under the current account/plan.
 
-**Earlier feasibility measurements (not interchangeable with above):**
+## Known Limitations / v0.1 Scope
 
-In earlier feasibility testing on the same Mac, Harpoon's VM used approximately 386 MB of physical memory at idle versus approximately 954 MB for Docker Desktop. Under the same nginx + Redis + PostgreSQL workload, Harpoon used approximately 919 MB versus approximately 1.76 GB. These are EARLIER feasibility measurements using different methodology and are not interchangeable with the 30-second idle control-plane observation above.
-
-These figures are measurements from the development test system and are not universal performance guarantees — see [Architecture](docs/architecture.md) for methodology, configurations, and workload equivalence.
-
-</details>
-
-## Platform Scope (v0.1)
-
-- macOS on Apple Silicon
-- ARM64 Linux guests
-- Docker Engine + Docker Compose compatibility
-- Local developer workloads
+- **Platform:** macOS on Apple Silicon only; ARM64 Linux guests; no Intel or cross-platform claim.
+- **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
+- **Distribution signing:** local ad-hoc signing with `com.apple.security.virtualization` (`codesign --verify --deep --strict` passes). Developer ID signing and Apple notarization are not complete for public Gatekeeper distribution.
+- **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
+- **Disk:** 2 GiB fixed sparse `harpoon-root.img` (APFS clone-aware, no growable resize in v0.1). Bounded at ~962 MiB–1.0 GiB allocated; `growable` was rejected intentionally.
+- **Network/FS:** explicit `127.0.0.1` HostIp binding deferred ( `0.0.0.0` → `127.0.0.1` is the safe default); `inotify` host→guest not propagated (documented).
+- **Memory reclamation:** virtiomem balloon device and guest driver present, but host-visible reclamation was not consistently demonstrated across the measured tiers; v0.1 does not market balloon as a guaranteed host RSS reduction.
+- **Sandbox on this dev host:** `~/Library/Application Support/Harpoon/data` creation is blocked by the host sandbox (`Operation not permitted`); production uses that path, with fallback to `/tmp/harpoon-runtime/data` for tests. Also, no universal performance guarantee beyond the observed environment.
 
 ## Documentation
 
-| Document                                        | Purpose                                          |
-| ----------------------------------------------- | ------------------------------------------------ |
-| [Architecture](docs/architecture.md)            | Components, boundaries, and data flows           |
-| [Lifecycle](docs/lifecycle.md)                | CLI, background lifecycle, and process model   |
-| [Docker Integration](docs/docker-integration.md) | Docker context integration and workflows       |
-| [Compose](docs/compose.md)                      | Compose workflow and fixture                     |
-| [Configuration](docs/configuration.md)        | Persistent config and precedence               |
-| [Troubleshooting](docs/troubleshooting.md)    | Doctor, exit codes, and common fixes           |
-| [Requirements](docs/requirements.md)            | v0.1 scope, acceptance tests, and non-goals      |
-| [Memory Model](docs/memory-model.md)            | Memory taxonomy, policy engine, and reclamation  |
-| [MVP](docs/mvp.md)                                  | MVP scope and Must/Should/Post-MVP         |
-| [Compatibility](docs/compatibility.md)            | Docker/tooling and host compatibility      |
-| [Risks](docs/risks.md)                            | Risk register and mitigations              |
-| [Decisions](docs/decisions/)                    | Architecture decision records (ADRs)             |
+| Document | Purpose |
+|---|---|
+| [Building](docs/building.md) | Canonical build, packaging, signing, verification |
+| [Security Policy](SECURITY.md) | Supported versions, disclosure process |
+| [Contributing](CONTRIBUTING.md) | Bugs, PRs, build reference |
+| [Roadmap](docs/roadmap.md) | Milestones and current position |
+| [Architecture](docs/architecture.md) | Components, boundaries, data flows |
+| [Results](docs/results/) | Validation evidence (M13–M18, R1, D1) |
+| [Resources](docs/resources.md) | Resource usage and diet limits |
+| [UI](docs/ui/README.md) | Screenshots and visual-language notes |
 
 ## Status
 
-Pre-release. v0.1 targets the MVP acceptance workflows described in
-[Requirements](docs/requirements.md).
+Harpoon is currently a pre-v0.1 release candidate. The repository is being prepared for its first public release. `v0.1` has not been tagged. Security automation will be reviewed after the repository becomes public and before `v0.1` is tagged.
 
 ## License
 

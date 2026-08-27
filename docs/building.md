@@ -425,7 +425,7 @@ What is true now:
 
 What is **not** claimed:
 
-- **Developer ID signing** and **Apple notarization** are **not** complete for public distribution. Local ad-hoc / `Apple Development` signing (e.g., `Apple Development: JUAN G CASTRO (XXXXXXXXXX)` if available) is sufficient for `D1` local acceptance, but normal public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
+- **Developer ID signing** and **Apple notarization** are **not** complete for public distribution. Local ad-hoc / `Apple Development` signing (any valid Apple Development identity if available) is sufficient for local acceptance, but public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
 
 Building Harpoon from source does not require Developer ID or notarization; those are distribution-time steps.
 
