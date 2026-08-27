@@ -13,6 +13,15 @@ Harpoon runs ordinary Docker development workloads on macOS without requiring Do
 
 Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit remain authoritative inside the guest for containers, images, volumes, networks, and builds. Harpoon owns the macOS↔Linux boundary.
 
+## Download Harpoon v0.1.0
+
+macOS Apple Silicon:
+
+- **Desktop + CLI:** [GitHub Releases](https://github.com/krazybean/Harpoon/releases) → `Harpoon-0.1.0-arm64.dmg`
+- **CLI/runtime:** [GitHub Releases](https://github.com/krazybean/Harpoon/releases) → `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` (checksums)
+
+Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). If a release asset URL is not yet published, use the Releases page linked above.
+
 ## Screenshots / Desktop UI
 
 The Tauri/React desktop app is a client of the Harpoon runtime. Seven curated views are included under `docs/ui`:
@@ -31,7 +40,7 @@ All items below have been demonstrated on the documented test system (see result
 - **Docker integration:** socket at `unix:///tmp/harpoon-docker.sock` (`0600`), Docker context `harpoon` (`harpoon docker setup|status|use`), `docker --context harpoon version/ps/run/build/buildx` works without TCP.
 - **Compose & dev workflow:** `compose build/up/down`, bind mounts (`ro` enforcement, named volume `pgdata` persistence), bridge `m9net` + DNS, published ports, `env`/`.env`/`healthcheck`/`scale`/`mem_limit`.
 - **Networking:** VZNAT + virtio-net, host loopback forwarder for published ports (`docker run -p 8080:80` → `curl 127.0.0.1:8080`), `/tmp/harpoon-share` VirtioFS bind mounts, `net.ipv4.ip_forward=1`.
-- **Installation / distribution:** relocatable `dist/harpoon-0.1.0-dev-darwin-arm64` (bin 802K, kernel 33M, initramfs 14M, root 2G sparse), `harpoon/install.sh` to `/usr/local`, `uninstall.sh`, APFS clone-aware `cp -c` provisioning, ad-hoc signing with `com.apple.security.virtualization`.
+- **Installation / distribution:** relocatable `dist/harpoon-0.1.0-darwin-arm64` (bin 802K, kernel 33M, initramfs 14M, root 2G sparse), `harpoon/install.sh` to `/usr/local`, `uninstall.sh`, APFS clone-aware `cp -c` provisioning, ad-hoc signing with `com.apple.security.virtualization`.
 - **Desktop app:** Tauri 2 + React + Vite (185 kB `dist`), 7 views, `status --json` live polling, per-action busy states, bootstrap `launching→ready/failed` with `Retry`, resource/config views backed by CLI.
 - **Ecosystem compatibility:** matrix A–H via `harpoon/ec-test.sh` (when host healthy) — compose, contexts, buildx verified; specific matrix rows preserved as `BLOCKED` only by host transient, not product.
 - **Validation:** dense acceptance harnesses (M7–M18, EC, UI, D1/D1.1) with logs, `tier-status.csv`, and preserved historical evidence.
@@ -129,11 +138,11 @@ Harpoon intentionally exposes inspectable signals rather than claiming security:
 - Repository configuration for **CodeQL** (javascript-typescript, rust with `build-mode: none`, swift with manual `swiftc` build on `macos-latest`) and **OpenSSF Scorecard** (`v2.4.4`, pinned Actions)
 - Pinned GitHub Actions (`actions/checkout`, `github/codeql-action/*`, `ossf/scorecard-action`, `actions/upload-artifact`) to commit SHAs
 
-Harpoon includes repository configuration for CodeQL and OpenSSF Scorecard analysis. Results will become publicly inspectable once the repository is public and those workflows have completed successfully.
+Harpoon includes repository configuration for CodeQL (javascript-typescript, rust, swift) and OpenSSF Scorecard. The repository is now public.
+
+Results become publicly inspectable only after those workflows have completed successfully on the public repository. No successful CodeQL or Scorecard run is claimed here. Dependabot is active, dependency remediation has been performed, and one known transitive glib advisory remains monitored.
 
 Automated analysis does not establish that Harpoon is safe, malware-free, or vulnerability-free. See [SECURITY.md](SECURITY.md) for scope, boundaries, and reporting.
-
-CodeQL cannot currently publish code-scanning results while the repository is private under the current account/plan.
 
 ## Known Limitations / v0.1 Scope
 
@@ -161,7 +170,9 @@ CodeQL cannot currently publish code-scanning results while the repository is pr
 
 ## Status
 
-Harpoon is currently a pre-v0.1 release candidate. The repository is being prepared for its first public release. `v0.1` has not been tagged. Security automation will be reviewed after the repository becomes public and before `v0.1` is tagged.
+Harpoon v0.1.0 is the first public release.
+
+Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 
 ## License
 

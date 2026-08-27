@@ -976,7 +976,7 @@ func handleDockerEnv() -> Int32 {
 }
 
 func handleVersion() -> Int32 {
-    cliPrint("Harpoon 0.1.0-dev")
+    cliPrint("Harpoon 0.1.0")
     return 0
 }
 

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -d "$SCRIPT_DIR/bin" ] && [ -d "$SCRIPT_DIR/lib" ]; then
   SRC="$SCRIPT_DIR"
 else
-  SRC="$(cd "$SCRIPT_DIR/../dist/harpoon-0.1.0-dev-darwin-arm64" && pwd 2>/dev/null || echo "$SCRIPT_DIR/../dist/harpoon-0.1.0-dev-darwin-arm64")"
+  SRC="$(cd "$SCRIPT_DIR/../dist/harpoon-0.1.0-darwin-arm64" && pwd 2>/dev/null || cd "$SCRIPT_DIR/../dist/harpoon-0.1.0-dev-darwin-arm64" && pwd 2>/dev/null || echo "$SCRIPT_DIR/../dist/harpoon-0.1.0-darwin-arm64")"
 fi
 if [ ! -d "$SRC/bin" ]; then echo "[install] staged bin not found at $SRC/bin" >&2; exit 1; fi
 PREFIX="/usr/local"
