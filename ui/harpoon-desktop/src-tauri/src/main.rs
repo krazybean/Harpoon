@@ -351,6 +351,58 @@ fn docker_json_lines(stdout: &str) -> Vec<serde_json::Value> {
     out
 }
 
+fn parse_compose_label(labels: &str, key: &str) -> Option<String> {
+    for part in labels.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == key {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn enrich_compose_fields(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        // Clone Labels to avoid borrow conflict with subsequent inserts
+        let labels_cloned = obj.get("Labels").cloned();
+        if let Some(labels_val) = labels_cloned {
+            if let Some(labels_str) = labels_val.as_str() {
+                if let Some(project) = parse_compose_label(labels_str, "com.docker.compose.project") {
+                    obj.insert("ComposeProject".to_string(), serde_json::Value::String(project));
+                }
+                if let Some(service) = parse_compose_label(labels_str, "com.docker.compose.service") {
+                    obj.insert("ComposeService".to_string(), serde_json::Value::String(service));
+                }
+                if let Some(number) = parse_compose_label(labels_str, "com.docker.compose.container-number") {
+                    obj.insert("ComposeNumber".to_string(), serde_json::Value::String(number));
+                }
+            } else if let Some(map) = labels_val.as_object() {
+                // Fallback for API map form (e.g., /containers/json)
+                if let Some(v) = map.get("com.docker.compose.project").and_then(|x| x.as_str()) {
+                    let v = v.trim();
+                    if !v.is_empty() { obj.insert("ComposeProject".to_string(), serde_json::Value::String(v.to_string())); }
+                }
+                if let Some(v) = map.get("com.docker.compose.service").and_then(|x| x.as_str()) {
+                    let v = v.trim();
+                    if !v.is_empty() { obj.insert("ComposeService".to_string(), serde_json::Value::String(v.to_string())); }
+                }
+                if let Some(v) = map.get("com.docker.compose.container-number").and_then(|x| x.as_str()) {
+                    let v = v.trim();
+                    if !v.is_empty() { obj.insert("ComposeNumber".to_string(), serde_json::Value::String(v.to_string())); }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
     let mut args = vec!["--context", "harpoon", "ps"];
@@ -360,7 +412,11 @@ fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> 
     if code != 0 && !stdout.contains("{") {
         return Err(stderr.trim().to_string());
     }
-    Ok(docker_json_lines(&stdout))
+    let mut containers = docker_json_lines(&stdout);
+    for c in &mut containers {
+        enrich_compose_fields(c);
+    }
+    Ok(containers)
 }
 
 #[tauri::command]
@@ -527,6 +583,86 @@ fn get_counts() -> Result<serde_json::Value, String> {
         *guard = Some((val.clone(), Instant::now()));
     }
     Ok(val)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_project_service_number() {
+        let labels = "com.docker.compose.project=collectiv,com.docker.compose.service=api,com.docker.compose.container-number=1,com.docker.compose.config-hash=abc";
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), Some("collectiv".to_string()));
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.service"), Some("api".to_string()));
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.container-number"), Some("1".to_string()));
+    }
+
+    #[test]
+    fn test_standalone_empty_labels() {
+        let labels = "";
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), None);
+        let mut v = serde_json::json!({"ID":"abc","Labels":""});
+        enrich_compose_fields(&mut v);
+        assert!(v.get("ComposeProject").is_none());
+    }
+
+    #[test]
+    fn test_missing_labels_field() {
+        let mut v = serde_json::json!({"ID":"abc","Image":"nginx"});
+        enrich_compose_fields(&mut v);
+        assert!(v.get("ComposeProject").is_none());
+    }
+
+    #[test]
+    fn test_unrelated_labels_only() {
+        let labels = "foo=bar,other=value";
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), None);
+        let mut v = serde_json::json!({"Labels": labels});
+        enrich_compose_fields(&mut v);
+        assert!(v.get("ComposeProject").is_none());
+    }
+
+    #[test]
+    fn test_malformed_compose_label() {
+        // missing value, missing '=', empty project
+        let labels = "com.docker.compose.project=,com.docker.compose.service=api";
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), None);
+        let labels2 = "com.docker.compose.project";
+        assert_eq!(parse_compose_label(labels2, "com.docker.compose.project"), None);
+        let labels3 = "com.docker.compose.project =  , com.docker.compose.service=api";
+        assert_eq!(parse_compose_label(labels3, "com.docker.compose.project"), None);
+    }
+
+    #[test]
+    fn test_multiple_labels_and_dash_underscore() {
+        let labels = "com.docker.compose.project=my-project_1,com.docker.compose.service=api-service_2,com.docker.compose.container-number=2";
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), Some("my-project_1".to_string()));
+        assert_eq!(parse_compose_label(labels, "com.docker.compose.service"), Some("api-service_2".to_string()));
+        let mut v = serde_json::json!({"Labels": labels});
+        enrich_compose_fields(&mut v);
+        assert_eq!(v.get("ComposeProject").and_then(|x| x.as_str()), Some("my-project_1"));
+        assert_eq!(v.get("ComposeService").and_then(|x| x.as_str()), Some("api-service_2"));
+        assert_eq!(v.get("ComposeNumber").and_then(|x| x.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn test_enrich_preserves_labels_and_adds_fields() {
+        let labels = "com.docker.compose.project=proj,com.docker.compose.service=web";
+        let mut v = serde_json::json!({"ID":"abc","Labels": labels, "Image":"nginx"});
+        enrich_compose_fields(&mut v);
+        assert_eq!(v.get("Labels").and_then(|x| x.as_str()), Some(labels));
+        assert_eq!(v.get("ComposeProject").and_then(|x| x.as_str()), Some("proj"));
+        assert_eq!(v.get("ComposeService").and_then(|x| x.as_str()), Some("web"));
+        assert!(v.get("ComposeNumber").is_none());
+    }
+
+    #[test]
+    fn test_labels_as_object_fallback() {
+        let mut v = serde_json::json!({"Labels": {"com.docker.compose.project":"proj","com.docker.compose.service":"api"}});
+        enrich_compose_fields(&mut v);
+        assert_eq!(v.get("ComposeProject").and_then(|x| x.as_str()), Some("proj"));
+        assert_eq!(v.get("ComposeService").and_then(|x| x.as_str()), Some("api"));
+    }
 }
 
 fn main() {
