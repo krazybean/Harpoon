@@ -74,3 +74,20 @@ used by Tauri; no patched versions are currently available.
 `cargo audit` currently reports no known vulnerabilities. These
 transitive advisories will be monitored and updated as compatible
 upstream Tauri dependencies become available.
+
+## Reporting a Vulnerability
+
+Please do not report security vulnerabilities through public GitHub issues.
+
+Report suspected vulnerabilities privately using Harpoon's GitHub
+Security Advisories:
+
+https://github.com/krazybean/Harpoon/security/advisories/new
+
+Please include enough information to reproduce and assess the issue,
+including the affected Harpoon version, environment, observed behavior,
+expected behavior, and reproduction steps when available.
+
+Security reports will be acknowledged as soon as practical. Please allow
+reasonable time for investigation and remediation before public
+disclosure.
