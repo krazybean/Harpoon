@@ -1,6 +1,12 @@
 # Harpoon
 
 Lightweight Docker-compatible container environment for macOS using Apple's Virtualization.framework and a minimal Linux VM.
+[![Release](https://img.shields.io/github/v/release/krazybean/Harpoon)](https://github.com/krazybean/Harpoon/releases/latest)
+[![CodeQL](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml/badge.svg)](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/krazybean/Harpoon/badge)](https://securityscorecards.dev/viewer/?uri=github.com/krazybean/Harpoon)
+[![License](https://img.shields.io/github/license/krazybean/Harpoon)](https://github.com/krazybean/Harpoon/blob/main/LICENSE)
+[![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://github.com/krazybean/Harpoon)
+
 
 Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. It provides the macOS-side virtualization substrate needed to run a standard Linux container stack while preserving compatibility with the Docker CLI, Compose, and surrounding tooling.
 
