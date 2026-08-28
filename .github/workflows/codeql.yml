@@ -9,6 +9,8 @@ on:
     - cron: "0 6 * * 1"
 
 # Note: shell code is not CodeQL-analyzed (CodeQL does not support shell).
+permissions:
+  contents: read
 
 jobs:
   analyze:
