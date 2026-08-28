@@ -54,3 +54,23 @@ Security-relevant boundaries include:
 - **Out of scope / by design:** Harpoon is **not a sandbox for executing untrusted code without user awareness**. Running a container inherently executes the code the user requested. Users should only run workloads they trust, as containerized workloads can access resources granted by their configuration.
 
 Reports concerning VM escape, unauthorized host access via the exposed API, privilege escalation beyond intended design, or bypass of documented isolation boundaries are of particular interest.
+
+### Rust dependency advisories
+
+Harpoon monitors Rust dependencies using RustSec and GitHub security
+scanning.
+
+The current dependency graph may report informational RustSec advisories
+originating from transitive Tauri dependencies. These currently consist
+of unmaintained-crate warnings and a `glib` unsoundness advisory.
+
+The GTK3-related advisories are associated with Tauri's Linux WebKit/GTK
+dependency graph and are not compiled into Harpoon's macOS ARM64
+production target.
+
+The remaining `unic` advisories identify unmaintained transitive crates
+used by Tauri; no patched versions are currently available.
+
+`cargo audit` currently reports no known vulnerabilities. These
+transitive advisories will be monitored and updated as compatible
+upstream Tauri dependencies become available.
