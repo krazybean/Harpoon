@@ -43,9 +43,16 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>&1 | head -n 20)" ]; then
   git -C "$REPO_ROOT" status --porcelain 2>&1 | head -n 20 >&2
   exit 1
 fi
-# Clean build (reuse tools/release/macos/build.sh)
+# Clean build (reuse tools/release/macos/build.sh) — preserve exit, no tail truncation
 echo "[release] clean build..." >&2
-bash "$SCRIPT_DIR/build.sh" 2>&1 | tail -n 30
+BUILD_LOG=$(mktemp)
+if ! bash "$SCRIPT_DIR/build.sh" 2>&1 | tee "$BUILD_LOG"; then
+  echo "[release] FAIL: build.sh failed" >&2
+  cat "$BUILD_LOG" >&2
+  rm -f "$BUILD_LOG"
+  exit 1
+fi
+rm -f "$BUILD_LOG"
 APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app"
 if [ ! -d "$APP" ]; then echo "[release] FAIL: Harpoon.app not found at $APP" >&2; exit 1; fi
 # Copy to dist/v$VERSION
@@ -55,16 +62,42 @@ mkdir -p "$DIST_DIR"
 if [ -d "$DIST_DIR/Harpoon.app" ]; then rm -rf "$DIST_DIR/Harpoon.app"; fi
 cp -R "$APP" "$DIST_DIR/Harpoon.app"
 echo "[release] copied Harpoon.app to $DIST_DIR/Harpoon.app" >&2
-# Sign inside-out
+# Sign inside-out — preserve true exit status, no tail truncation
 echo "[release] signing..." >&2
-bash "$SCRIPT_DIR/sign-app.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tail -n 20
-# Also sign the original bundle location for consistency (so future verify uses signed)
-bash "$SCRIPT_DIR/sign-app.sh" "$APP" 2>&1 | tail -n 20 || true
-# Verify signatures (Developer ID)
+SIGN_LOG=$(mktemp)
+if ! bash "$SCRIPT_DIR/sign-app.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tee "$SIGN_LOG"; then
+  echo "[release] FAIL: sign-app.sh failed" >&2
+  cat "$SIGN_LOG" >&2
+  rm -f "$SIGN_LOG"
+  exit 1
+fi
+rm -f "$SIGN_LOG"
+# Also sign the original bundle location for consistency (so future verify uses signed) — strict
+if ! bash "$SCRIPT_DIR/sign-app.sh" "$APP" 2>&1 | tee "$SIGN_LOG"; then
+  echo "[release] WARN: signing original bundle failed" >&2
+  cat "$SIGN_LOG" >&2
+  # do not exit, dist is authoritative
+fi
+rm -f "$SIGN_LOG"
+# Verify signatures (Developer ID) — preserve exit
 echo "[release] verify signatures (Developer ID)..." >&2
-bash "$SCRIPT_DIR/verify-signatures.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tail -n 20
-# Structural verify
-bash "$REPO_ROOT/tools/verify-bundle.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tail -n 20
+VERIFY_SIG_LOG=$(mktemp)
+if ! bash "$SCRIPT_DIR/verify-signatures.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tee "$VERIFY_SIG_LOG"; then
+  echo "[release] FAIL: verify-signatures.sh failed" >&2
+  cat "$VERIFY_SIG_LOG" >&2
+  rm -f "$VERIFY_SIG_LOG"
+  exit 1
+fi
+rm -f "$VERIFY_SIG_LOG"
+# Structural verify — preserve exit, no truncation
+VERIFY_LOG=$(mktemp)
+if ! bash "$REPO_ROOT/tools/verify-bundle.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tee "$VERIFY_LOG"; then
+  echo "[release] FAIL: verify-bundle.sh (dist) failed" >&2
+  cat "$VERIFY_LOG" >&2
+  rm -f "$VERIFY_LOG"
+  exit 1
+fi
+rm -f "$VERIFY_LOG"
 # Dependency check (minos 15.1, no DarwinFoundation, etc) — part of verify-bundle, but also explicit
 echo "[release] dependency check..." >&2
 for bin in "$DIST_DIR/Harpoon.app/Contents/MacOS/harpoon-desktop" "$DIST_DIR/Harpoon.app/Contents/Resources/harpoon/bin/harpoon"; do

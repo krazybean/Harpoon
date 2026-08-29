@@ -17,29 +17,36 @@ if ! docker info >/dev/null 2>&1 && ! docker --context harpoon info >/dev/null 2
 fi
 # 2. obtain/build canonical guest assets
 echo "[build] guest assets..." >&2
-bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
+LOG=$(mktemp)
+if ! bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tee "$LOG"; then echo "[build] FAIL: guest-builder build failed (see $LOG)" >&2; cat "$LOG" >&2; exit 1; fi
 # 3. verify pristine root
-bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tail -n 10
+if ! bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: verify-root failed" >&2; exit 1; fi
 # 4. build Swift runtime
 echo "[build] Swift runtime..." >&2
-bash "$REPO_ROOT/harpoon/build.sh" 2>&1 | tail -n 20
+if ! bash "$REPO_ROOT/harpoon/build.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: harpoon/build.sh failed" >&2; exit 1; fi
 # 5. prepare Tauri resources (bundle-resources)
 echo "[build] prepare Tauri resources..." >&2
-bash "$REPO_ROOT/ui/harpoon-desktop/src-tauri/prepare-bundle.sh" 2>&1 | tail -n 10
+if ! bash "$REPO_ROOT/ui/harpoon-desktop/src-tauri/prepare-bundle.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: prepare-bundle.sh failed" >&2; exit 1; fi
 # 6. build frontend
 echo "[build] frontend..." >&2
-npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run build 2>&1 | tail -n 20
+if ! npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run build 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: frontend build failed" >&2; exit 1; fi
 # 7. build release Harpoon.app (Tauri)
 echo "[build] Tauri bundle..." >&2
-# Use tauri build with explicit version (sets tauri.conf.json via version.mjs if needed)
 # Ensure version consistency before build
-node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tail -n 10 || true
+if ! node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: version check failed" >&2; exit 1; fi
 # Build release bundle
-npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run tauri -- build --bundles app 2>&1 | tail -n 30
+if ! npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run tauri -- build --bundles app 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: Tauri build failed" >&2; exit 1; fi
 APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app"
 if [ ! -d "$APP" ]; then echo "[build] FAIL: Harpoon.app not found at $APP" >&2; exit 1; fi
-# 8. structural verify (pre-signing, ad-hoc is ok)
+# 8. structural verify (pre-signing, ad-hoc is ok) — preserve true exit status, no tail truncation
 echo "[build] structural verify..." >&2
-bash "$REPO_ROOT/tools/verify-bundle.sh" "$APP" 2>&1 | tail -n 30
+VERIFY_LOG=$(mktemp)
+if ! bash "$REPO_ROOT/tools/verify-bundle.sh" "$APP" 2>&1 | tee "$VERIFY_LOG"; then
+  echo "[build] FAIL: structural verify failed (verify-bundle.sh exit non-zero)" >&2
+  cat "$VERIFY_LOG" >&2
+  rm -f "$VERIFY_LOG" "$LOG"
+  exit 1
+fi
+rm -f "$VERIFY_LOG" "$LOG"
 echo "[build] DONE Harpoon.app at $APP (v$VERSION, ad-hoc, not yet Developer ID)" >&2
 ls -lh "$APP" >&2
