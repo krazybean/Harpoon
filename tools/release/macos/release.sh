@@ -23,15 +23,26 @@ if ! security find-identity -v -p codesigning 2>&1 | grep -F "$HARPOON_SIGN_IDEN
 echo "[release] guest assets..." >&2
 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
 bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tail -n 10
-# Version flow
-echo "[release] version $VERSION flow..." >&2
-# Ensure package.json version matches requested (if not, bump via version.mjs without commit)
+# Version flow — immutable: requested VERSION must already be committed
+echo "[release] version $VERSION flow (immutable)..." >&2
 PKG_VER=$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version")
+echo "[release] requested $VERSION, package.json $PKG_VER" >&2
 if [ "$PKG_VER" != "$VERSION" ]; then
-  echo "[release] bumping package.json $PKG_VER -> $VERSION (no commit)" >&2
-  node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" "$VERSION" 2>&1 | tail -n 10
+  echo "[release] FAIL: version mismatch — package.json $PKG_VER != requested $VERSION" >&2
+  echo "[release] Run: node ui/harpoon-desktop/scripts/version.mjs $VERSION && git add ... && git commit" >&2
+  node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tail -n 20 >&2
+  exit 1
 fi
-node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tail -n 10
+if ! node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tail -n 20; then
+  echo "[release] FAIL: version consistency check failed" >&2
+  exit 1
+fi
+# Fail if working tree dirty (version must be committed)
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>&1 | head -n 20)" ]; then
+  echo "[release] FAIL: working tree dirty — commit version bump before release" >&2
+  git -C "$REPO_ROOT" status --porcelain 2>&1 | head -n 20 >&2
+  exit 1
+fi
 # Clean build (reuse tools/release/macos/build.sh)
 echo "[release] clean build..." >&2
 bash "$SCRIPT_DIR/build.sh" 2>&1 | tail -n 30
@@ -89,11 +100,20 @@ fi
 # Checksums AFTER notarize/staple
 echo "[release] checksums..." >&2
 ( cd "$DIST_DIR" && shasum -a 256 Harpoon-*.dmg harpoon-*.tar.gz 2>/dev/null | tee SHA256SUMS; cat SHA256SUMS ) 2>&1 | tail -n 20
-# Provenance
+# Provenance — never lie, write actual results only
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=$(git -C "$REPO_ROOT" status --porcelain 2>&1 | head -n 20 || true)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ARCH=$(uname -m)
+# Capture actual notarization result if available
+NOTARY_STATUS="PENDING"
+NOTARY_UUID=""
+if [ -f "$DIST_DIR/notarize.log" ]; then
+  NOTARY_UUID=$(grep -E "id:|SubmissionId" "$DIST_DIR/notarize.log" 2>/dev/null | head -n 1 | grep -oE "[0-9a-fA-F-]{36}" | head -n 1 || true)
+  if grep -q "status: Accepted" "$DIST_DIR/notarize.log" 2>/dev/null; then NOTARY_STATUS="Accepted"; elif grep -q "status:" "$DIST_DIR/notarize.log" 2>/dev/null; then NOTARY_STATUS=$(grep "status:" "$DIST_DIR/notarize.log" | head -n 1 | sed 's/.*status: //'); fi
+fi
+DMG_SHA=$(shasum -a 256 "$DMG" 2>/dev/null | cut -d' ' -f1 || echo "PENDING")
+DMG_BYTES=$(stat -f%z "$DMG" 2>/dev/null || stat -c%s "$DMG" 2>/dev/null || echo "PENDING")
 cat > "$DIST_DIR/RELEASE-PROVENANCE.txt" <<EOF
 Harpoon $VERSION
 git $GIT_SHA
@@ -108,14 +128,14 @@ root $(shasum -a 256 "$REPO_ROOT/assets/guest/harpoon-root.img" 2>/dev/null | cu
 nested $(shasum -a 256 "$DIST_DIR/Harpoon.app/Contents/Resources/harpoon/bin/harpoon" 2>/dev/null | cut -d' ' -f1)
 outer $(shasum -a 256 "$DIST_DIR/Harpoon.app/Contents/MacOS/harpoon-desktop" 2>/dev/null | cut -d' ' -f1)
 sign $HARPOON_SIGN_IDENTITY
-dmg $(shasum -a 256 "$DMG" 2>/dev/null | cut -d' ' -f1) $(stat -f%z "$DMG" 2>/dev/null || stat -c%s "$DMG" 2>/dev/null) bytes
-notary loom-notary Accepted (see notarize log)
+dmg $DMG_SHA $DMG_BYTES bytes
+notary loom-notary $NOTARY_STATUS ${NOTARY_UUID:-PENDING}
 EOF
 cat "$DIST_DIR/RELEASE-PROVENANCE.txt" >&2
 if [ -n "$GIT_DIRTY" ]; then
-  echo "[release] WARN: working tree dirty — not publishable as official release candidate" >&2
-  echo "[release] dirty files:" >&2
+  echo "[release] FAIL: working tree dirty — provenance dirty, not publishable" >&2
   echo "$GIT_DIRTY" >&2
+  exit 1
 fi
 echo "[release] DONE dist/v$VERSION" >&2
 ls -lh "$DIST_DIR" >&2

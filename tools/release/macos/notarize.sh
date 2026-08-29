@@ -20,11 +20,13 @@ fi
 echo "[notarize] submitting $DMG --keychain-profile loom-notary --wait" >&2
 # Capture submission ID and status
 LOG_TMP=$(mktemp)
+DIST_DIR_LOCAL="$(dirname "$DMG")"
 set +e
-xcrun notarytool submit "$DMG" --keychain-profile "loom-notary" --wait 2>&1 | tee "$LOG_TMP"
+xcrun notarytool submit "$DMG" --keychain-profile "loom-notary" --wait 2>&1 | tee "$LOG_TMP" | tee "$DIST_DIR_LOCAL/notarize.log"
 STATUS=${PIPESTATUS[0]}
 set -e
 cat "$LOG_TMP" >&2
+cp "$LOG_TMP" "$DIST_DIR_LOCAL/notarize.log" 2>/dev/null || true
 if [ $STATUS -ne 0 ]; then
   echo "[notarize] FAIL: notarytool submit exit $STATUS" >&2
   # Try to fetch log via submission ID if present

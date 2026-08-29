@@ -1,6 +1,6 @@
 [package]
 name = "harpoon-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Harpoon desktop UI — client of Harpoon runtime"
 authors = ["Harpoon"]
 edition = "2021"

@@ -10,6 +10,26 @@ check() { local msg="$1"; shift; if "$@"; then echo "[verify-signatures] PASS: $
 # Harpoon runtime must be ad-hoc or Developer ID with virtualization entitlement (pre-release ad-hoc is ok, release will be Developer ID)
 check "Harpoon nested runtime valid" bash -c "codesign --verify --verbose \"$APP/Contents/Resources/harpoon/bin/harpoon\" 2>&1 | grep -q \"valid on disk\""
 check "Harpoon virtualization entitlement" bash -c "codesign -d --entitlements :- \"$APP/Contents/Resources/harpoon/bin/harpoon\" 2>&1 | grep -q com.apple.security.virtualization"
+# Timestamp checks — require secure timestamp for Developer ID release
+check "Harpoon nested has secure timestamp" bash -c "codesign -dv --verbose=4 \"$APP/Contents/Resources/harpoon/bin/harpoon\" 2>&1 | grep -q \"Timestamp=\""
+check "Harpoon outer executable has secure timestamp" bash -c "codesign -dv --verbose=4 \"$APP/Contents/MacOS/harpoon-desktop\" 2>&1 | grep -q \"Timestamp=\""
+check "Harpoon.app bundle has secure timestamp" bash -c "codesign -dv --verbose=4 \"$APP\" 2>&1 | grep -q \"Timestamp=\""
+# Ad-hoc check — must NOT be ad-hoc (flags should not contain adhoc)
+if codesign -dv --verbose=4 "$APP/Contents/Resources/harpoon/bin/harpoon" 2>&1 | grep -q "flags=.*adhoc"; then
+  echo "[verify-signatures] FAIL: nested is ad-hoc (missing Developer ID)" >&2; FAIL=1
+else
+  echo "[verify-signatures] PASS: nested not ad-hoc" >&2
+fi
+if codesign -dv --verbose=4 "$APP/Contents/MacOS/harpoon-desktop" 2>&1 | grep -q "flags=.*adhoc"; then
+  echo "[verify-signatures] FAIL: outer executable is ad-hoc" >&2; FAIL=1
+else
+  echo "[verify-signatures] PASS: outer executable not ad-hoc" >&2
+fi
+if codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "flags=.*adhoc"; then
+  echo "[verify-signatures] FAIL: bundle is ad-hoc" >&2; FAIL=1
+else
+  echo "[verify-signatures] PASS: bundle not ad-hoc" >&2
+fi
 # Outer app must be Developer ID Application (not ad-hoc) for release
 if codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
   echo "[verify-signatures] PASS: Outer app Developer ID Application" >&2
@@ -18,7 +38,14 @@ else
   codesign -dv "$APP" 2>&1 | head -n 20 >&2 || true
   FAIL=1
 fi
+# Outer must NOT have virtualization entitlement
+if codesign -d --entitlements :- "$APP/Contents/MacOS/harpoon-desktop" 2>&1 | grep -q "com.apple.security.virtualization"; then
+  echo "[verify-signatures] FAIL: outer should not have virtualization entitlement" >&2; FAIL=1
+else
+  echo "[verify-signatures] PASS: outer no virtualization entitlement" >&2
+fi
 check "Outer app valid on disk" bash -c "codesign --verify --verbose \"$APP\" 2>&1 | grep -q \"valid on disk\""
+check "Bundle deep strict valid" bash -c "codesign --verify --deep --strict --verbose=2 \"$APP\" 2>&1 | grep -q \"valid on disk\""
 # Notarization check (optional, after stapling)
 if xcrun stapler validate "$APP" 2>&1 | grep -q "validate action worked"; then
   echo "[verify-signatures] PASS: notarization stapled" >&2
