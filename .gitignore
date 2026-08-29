@@ -25,6 +25,12 @@ spike1/build
 
 spike2/cache
 spike2/build
+assets/guest/*
+!assets/guest/.gitkeep
+!assets/guest/.bootstrap/
+assets/guest/.cache/
+assets/guest/.bootstrap/*
+!assets/guest/.bootstrap/README.md
 dist/
 harpoon/build/
 harpoon/cache/

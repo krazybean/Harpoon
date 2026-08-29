@@ -172,6 +172,9 @@ export default function App() {
       setBootstrapPhase("discovering");
       const s0 = await refreshStatus();
       await Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]);
+      // Stage 3B: ensure Harpoon docker context exists (idempotent, no default switch, Finder-safe resolver)
+      // This fixes clean-install where context was manually required; safe to run repeatedly
+      try { await invoke<string>("ensure_harpoon_context"); } catch (e) { console.warn("ensure_harpoon_context failed", e); }
       // doctor/logs are independent shelves; refresh without blocking chrome
       refreshDoctor();
       refreshLogs();

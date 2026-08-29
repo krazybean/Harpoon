@@ -12,8 +12,8 @@ struct RuntimeConfig {
     var memoryMIB: Int = 1024 // allowed 512/768/1024, default 1024 safe
     var memorySizeBytes: UInt64 { UInt64(memoryMIB) * 1024 * 1024 }
 
-    var kernelURL: URL = RuntimeConfig.resolveResource(named: "Image-virt", fallback: "spike1/cache/Image-virt")
-    var initramfsURL: URL = RuntimeConfig.resolveResource(named: "harpoon-initramfs.cpio.gz", fallback: "harpoon/cache/harpoon-m4-initramfs.cpio.gz")
+    var kernelURL: URL = RuntimeConfig.resolveResource(named: "Image-virt", fallback: "assets/guest/Image-virt")
+    var initramfsURL: URL = RuntimeConfig.resolveResource(named: "harpoon-initramfs.cpio.gz", fallback: "assets/guest/harpoon-initramfs.cpio.gz")
     var diskURL: URL = RuntimeConfig.resolveRootDisk()
 
     var shareHostPath: String = "/tmp/harpoon-share"
@@ -50,9 +50,11 @@ struct RuntimeConfig {
 
     var dockerSocketPath: String = "/tmp/harpoon-docker.sock"
     var balloonControlPath: String = "/tmp/harpoon-control"
+    var mgmtSocketPath: String = "/tmp/harpoon-mgmt.sock"
     var serialLogPath: String = "/tmp/harpoon-serial.log"
 
     var vsockPort: UInt32 = 2375
+    var mgmtVsockPort: UInt32 = 2377 // Stage 3A management channel — vsock-only, no TCP, no SSH
     var hostForwardPort: UInt16 = 8080
     var guestForwardPort: UInt16 = 8080
 
@@ -141,11 +143,16 @@ struct RuntimeConfig {
     }
 
     static func resolveRootDisk() -> URL {
-        // User-writable disk takes precedence if exists
-        let userPaths = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path,
-            "/tmp/harpoon-runtime/data/harpoon-root.img"
-        ]
+        // User-writable disk takes precedence if exists — NEVER silently delete/replace
+        // because size differs from immutable template; template is read-only, user disk is mutable.
+        // ponytail: no template-size-equality invariant for already-provisioned disk (resize deferred)
+        // Production: only ~/Library/...; /tmp fallback only when explicitly enabled for tests (HARPOON_ALLOW_TMP_FALLBACK=1)
+        let isTest = ProcessInfo.processInfo.environment["HARPOON_ALLOW_TMP_FALLBACK"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_MODE"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] != nil
+        var userPaths = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path]
+        if isTest {
+            userPaths.append("/tmp/harpoon-runtime/data/harpoon-root.img")
+            if let custom = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] { userPaths.append((custom as NSString).appendingPathComponent("data/harpoon-root.img")) }
+        }
         for p in userPaths {
             if FileManager.default.fileExists(atPath: p) { return URL(fileURLWithPath: p) }
         }
@@ -153,17 +160,20 @@ struct RuntimeConfig {
         if let lib = installedLibDir() {
             let tmpl = lib.appendingPathComponent("harpoon-root.img")
             if FileManager.default.fileExists(atPath: tmpl.path) {
-                // provision on first run: copy to user location
+                // provision on first run: copy to user location — production MUST be ~/Library, fail if not writable
                 let userDest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img")
-                // try primary, fallback to /tmp if not writable
                 let dest: URL
                 do {
                     try FileManager.default.createDirectory(at: userDest.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
                     dest = userDest
                 } catch {
-                    let fallback = URL(fileURLWithPath: "/tmp/harpoon-runtime/data/harpoon-root.img")
-                    try? FileManager.default.createDirectory(at: fallback.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
-                    dest = fallback
+                    if isTest {
+                        let fallback = URL(fileURLWithPath: "/tmp/harpoon-runtime/data/harpoon-root.img")
+                        try? FileManager.default.createDirectory(at: fallback.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+                        dest = fallback
+                    } else {
+                        dest = userDest
+                    }
                 }
                 if !FileManager.default.fileExists(atPath: dest.path) {
                     // clone-aware copy: APFS clone via cp -c preserves sparseness; FileManager.copyItem truncates holes on some OS versions (36M vs 962M)
@@ -195,12 +205,24 @@ struct RuntimeConfig {
                         try? FileManager.default.removeItem(atPath: destPath)
                         try? FileManager.default.copyItem(at: tmpl, to: dest)
                     }
+                    // Stage 3C: first-provision sparse grow to default 8G (or config) — template is small (2G) for distribution
+                    let desired = desiredProvisionBytes()
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: destPath), let cur = attrs[.size] as? UInt64, cur < desired {
+                        // sparse truncate — does not allocate physical blocks
+                        if let fh = FileHandle(forWritingAtPath: destPath) {
+                            try? fh.truncate(atOffset: desired)
+                            try? fh.close()
+                        } else {
+                            // fallback via truncate
+                            let t = Process(); t.executableURL = URL(fileURLWithPath: "/usr/bin/truncate"); t.arguments = ["-s", "\(desired)", destPath]; try? t.run(); t.waitUntilExit()
+                        }
+                    }
                 }
                 return dest
             }
         }
-        // development fallback
-        return URL(fileURLWithPath: "spike2/cache/harpoon-root.img")
+        // development fallback — canonical assets/guest (no spike fallback)
+        return URL(fileURLWithPath: "assets/guest/harpoon-root.img")
     }
 
     static func fromEnvironment() -> RuntimeConfig {
@@ -257,7 +279,89 @@ struct RuntimeConfig {
 
     var diskLogicalBytes: UInt64 {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: diskURL.path),
-              let size = attrs[.size] as? UInt64 else { return 2 * 1024 * 1024 * 1024 } // default 2GiB
+              let size = attrs[.size] as? UInt64 else { return 8 * 1024 * 1024 * 1024 } // default 8GiB (sparse)
         return size
+    }
+
+    // Stage 3C: disk size parsing and defaults (sparse)
+    static let defaultProvisionBytes: UInt64 = 8 * 1024 * 1024 * 1024 // 8 GiB logical minimum, sparse
+    static let minProvisionBytes: UInt64 = 2 * 1024 * 1024 * 1024 // must fit template contents (~500M) but enforce 8G for new
+    static func parseDiskSize(_ s: String) -> UInt64? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if t.isEmpty { return nil }
+        var numPart = ""
+        var unitPart = ""
+        for ch in t {
+            if ch.isNumber || ch == "." { if !unitPart.isEmpty { return nil }; numPart.append(ch) } else if ch.isLetter { unitPart.append(ch) } else if ch.isWhitespace { continue } else { return nil }
+        }
+        // ponytail: integer only for disk sizes (no 1.5G ambiguity); reject decimal
+        if numPart.contains(".") { return nil }
+        guard let num = UInt64(numPart), num > 0 else { return nil }
+        let unit = unitPart.trimmingCharacters(in: .whitespaces)
+        let mult: UInt64
+        switch unit {
+        case "", "b": mult = 1
+        case "m", "mb", "mib": mult = 1024 * 1024
+        case "g", "gb", "gib": mult = 1024 * 1024 * 1024
+        case "k", "kb", "kib": mult = 1024
+        case "t", "tb", "tib": mult = 1024 * 1024 * 1024 * 1024
+        default: return nil
+        }
+        let (res, overflow) = num.multipliedReportingOverflow(by: mult)
+        if overflow { return nil }
+        if res == 0 { return nil }
+        // reject > 2TiB artificial max? allow up to 1024G, but check overflow already
+        if res > 5 * 1024 * 1024 * 1024 * 1024 { return nil }
+        return res
+    }
+
+    static func formatBytes(_ b: UInt64) -> String {
+        if b % (1024*1024*1024) == 0 { return "\(b/(1024*1024*1024)) GiB" }
+        if b % (1024*1024) == 0 { return "\(b/(1024*1024)) MiB" }
+        return "\(b) bytes"
+    }
+
+    static func existingUserDiskPath() -> String? {
+        let isTest = ProcessInfo.processInfo.environment["HARPOON_ALLOW_TMP_FALLBACK"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_MODE"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] != nil
+        var userPaths = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path]
+        if isTest {
+            userPaths.append("/tmp/harpoon-runtime/data/harpoon-root.img")
+            if let custom = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] { userPaths.append((custom as NSString).appendingPathComponent("data/harpoon-root.img")) }
+        }
+        for p in userPaths { if FileManager.default.fileExists(atPath: p) { return p } }
+        return nil
+    }
+
+    static func desiredProvisionBytes() -> UInt64 {
+        // config file overrides default, env overrides config
+        let cfgCandidates = [
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/config.json").path,
+            "/tmp/harpoon-runtime/config.json"
+        ]
+        for cand in cfgCandidates {
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),
+               let obj = try? JSONDecoder().decode(HarpoonUserConfig.self, from: data),
+               let ds = obj.diskSize, let parsed = parseDiskSize(ds) {
+                if parsed >= defaultProvisionBytes { return parsed }
+                if parsed >= minProvisionBytes { return parsed }
+                // if parsed < min, fall back to default (avoid tiny)
+            }
+        }
+        if let raw = ProcessInfo.processInfo.environment["HARPOON_DISK_SIZE"], let p = parseDiskSize(raw) { return p }
+        return defaultProvisionBytes
+    }
+
+    // host helpers for disk ops
+    static func backingFileInfo(at path: String) -> (logical: UInt64, physical: UInt64) {
+        var logical: UInt64 = 0
+        var physical: UInt64 = 0
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path), let sz = attrs[.size] as? UInt64 { logical = sz }
+        // physical via stat blocks
+        var st = stat()
+        if stat(path, &st) == 0 {
+            // st_blocks is 512-byte blocks allocated
+            physical = UInt64(st.st_blocks) * 512
+        }
+        return (logical, physical)
     }
 }

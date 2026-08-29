@@ -65,6 +65,7 @@ final class VMManager {
     // serial poll
     var serialPoll: DispatchSourceTimer?
     var bootReady = false
+    var mgmtReady = false
     var bootFailedReason: String?
 
     // bridges owned here, cleaned on stop
@@ -160,6 +161,10 @@ final class VMManager {
             bootReady = true
             log("HARPOON_DOCKER_READY observed")
         }
+        if s.contains("HARPOON_MGMT_READY") && !mgmtReady {
+            mgmtReady = true
+            log("HARPOON_MGMT_READY observed")
+        }
         if s.contains("HARPOON_DOCKER_FAILED") && bootFailedReason == nil {
             bootFailedReason = String(s.components(separatedBy: "HARPOON_DOCKER_FAILED").last?.prefix(400) ?? "")
             log("HARPOON_DOCKER_FAILED observed \(bootFailedReason ?? "")")
@@ -189,7 +194,7 @@ final class VMManager {
     }
 
     func cleanupEphemeral() {
-        log("HARPOON_CLEANUP_EPHEMERAL_BEGIN dockerSock=\(config.dockerSocketPath) balloonControl=\(config.balloonControlPath)")
+        log("HARPOON_CLEANUP_EPHEMERAL_BEGIN dockerSock=\(config.dockerSocketPath) balloonControl=\(config.balloonControlPath) mgmtSock=\(config.mgmtSocketPath)")
         stopBridges()
         // ownership: BridgeSet.stopAll removes pathnames only if owned; do not blindly unlink global paths here
         log("HARPOON_EPHEMERAL_CLEANED \(config.dockerSocketPath) \(config.balloonControlPath) (owned only)")

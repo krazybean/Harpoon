@@ -4,9 +4,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SRC_TAURI="$SCRIPT_DIR"
 BUILD="$REPO_ROOT/harpoon/build/harpoon"
-KERNEL="$REPO_ROOT/spike1/cache/Image-virt"
-INITRAMFS="$REPO_ROOT/harpoon/cache/harpoon-m4-initramfs.cpio.gz"
-ROOTIMG="$REPO_ROOT/spike2/cache/harpoon-root.img"
+KERNEL="$REPO_ROOT/assets/guest/Image-virt"
+INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+ROOTIMG="$REPO_ROOT/assets/guest/harpoon-root.img"
 
 # ponytail: ensure runtime built before bundling
 if [ ! -f "$BUILD" ]; then

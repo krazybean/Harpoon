@@ -42,8 +42,14 @@ if cliArgs.count >= 2 {
         exit(handleConfig(args: Array(cliArgs.dropFirst(2))))
     case "doctor":
         exit(handleDoctor())
+    case "disk":
+        exit(handleDisk(args: Array(cliArgs.dropFirst(2))))
     case "docker":
         exit(handleDocker(args: Array(cliArgs.dropFirst(2))))
+    case "exec":
+        exit(handleExec(args: Array(cliArgs.dropFirst(2))))
+    case "shell":
+        exit(handleShell(args: Array(cliArgs.dropFirst(2))))
     case "version", "--version", "-v":
         exit(handleVersion())
     case "help", "--help", "-h":

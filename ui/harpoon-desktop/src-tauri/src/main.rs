@@ -154,6 +154,47 @@ fn resolve_harpoon_binary() -> Result<PathBuf, String> {
     Err("harpoon binary not found (checked HARPOON_BIN, bundled Resources harpoon/bin/harpoon, <repo>/harpoon/build/harpoon via CARGO_MANIFEST_DIR, /usr/local/bin/harpoon, /opt/homebrew/bin/harpoon, PATH)".to_string())
 }
 
+// --- Canonical Docker CLI discovery (Finder-safe) ---
+fn resolve_docker_binary() -> Result<PathBuf, String> {
+    // ponytail: explicit, no `zsh -l -c`, no sourcing startup files.
+    // Finder-launched apps have minimal PATH (e.g. /usr/bin:/bin:/usr/sbin:/sbin).
+    // We safely consider: 1) current PATH, 2) /opt/homebrew/bin/docker, 3) /usr/local/bin/docker, 4) other standard locations.
+    // Return absolute path for diagnostics; callers must use this, not bare `docker`.
+    let candidates = [
+        PathBuf::from("/opt/homebrew/bin/docker"),
+        PathBuf::from("/usr/local/bin/docker"),
+        PathBuf::from("/usr/bin/docker"),
+        PathBuf::from("/run/current-system/sw/bin/docker"),
+    ];
+    // 1) Try PATH first (process inherited)
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            if dir.is_empty() { continue; }
+            let p = PathBuf::from(dir).join("docker");
+            if is_executable(&p) { return Ok(p); }
+        }
+    }
+    // 2-4) Check standard locations regardless of PATH (Finder fallback)
+    for p in &candidates {
+        if is_executable(p) { return Ok(p.clone()); }
+    }
+    // Also try `which` with extended PATH that includes homebrew locations (still no shell sourcing)
+    let extended = format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}", std::env::var("PATH").unwrap_or_default());
+    for dir in extended.split(':') {
+        if dir.is_empty() { continue; }
+        let p = PathBuf::from(dir).join("docker");
+        if is_executable(&p) { return Ok(p); }
+    }
+    Err("Docker CLI not installed/found (checked PATH, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)".to_string())
+}
+
+fn docker_command(args: &[&str]) -> Result<Command, String> {
+    let bin = resolve_docker_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args);
+    Ok(cmd)
+}
+
 fn run_harpoon(args: &[&str]) -> Result<(String, String, i32), String> {
     let bin = resolve_harpoon_binary()?;
     let mut cmd = Command::new(&bin);
@@ -318,7 +359,8 @@ fn set_cpus(cpus: u32) -> Result<String, String> {
 
 #[tauri::command]
 fn get_docker_info() -> Result<String, String> {
-    let output = Command::new("docker").args(["--context", "harpoon", "info", "--format", "{{.ServerVersion}}"]).output().map_err(|e| format!("docker not found: {}", e))?;
+    let mut cmd = docker_command(&["--context", "harpoon", "info", "--format", "{{.ServerVersion}}"]).map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
+    let output = cmd.output().map_err(|e| format!("Docker CLI: FAIL — Docker CLI not installed/found ({})", e))?;
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if s.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -329,8 +371,7 @@ fn get_docker_info() -> Result<String, String> {
 
 // --- Docker resource helpers (explicit harpoon context, --format json, no Desktop fallback) ---
 fn run_docker(args: &[&str]) -> Result<(String, String, i32), String> {
-    let mut cmd = Command::new("docker");
-    cmd.args(args);
+    let mut cmd = docker_command(args).map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
     // Always require harpoon context explicitly; caller must include --context harpoon
     let output = cmd.output().map_err(|e| format!("failed to execute docker {}: {}", args.join(" "), e))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -585,6 +626,131 @@ fn get_counts() -> Result<serde_json::Value, String> {
     Ok(val)
 }
 
+// --- Stage 3B: Docker host integration ---
+#[tauri::command]
+fn get_docker_cli_path() -> Result<String, String> {
+    let p = resolve_docker_binary()?;
+    Ok(p.display().to_string())
+}
+
+#[tauri::command]
+fn get_docker_compose_info() -> Result<serde_json::Value, String> {
+    let bin = resolve_docker_binary().map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
+    let out = Command::new(&bin).args(["compose", "version"]).output().map_err(|e| format!("Docker Compose plugin ... FAIL — spawn failed: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let combined = format!("{}{}", stdout, stderr);
+    if out.status.success() && (combined.contains("v2") || combined.to_lowercase().contains("compose")) {
+        return Ok(serde_json::json!({"installed": true, "version": combined.trim(), "raw": combined.trim()}));
+    }
+    // Try alternative `docker-compose` binary
+    Ok(serde_json::json!({"installed": false, "version": "", "raw": combined.trim(), "hint": "Install Docker Compose v2 plugin (docker compose version). Docker CLI alone is not sufficient for compose workflows."}))
+}
+
+fn docker_config_path() -> PathBuf {
+    if let Ok(cfg) = std::env::var("DOCKER_CONFIG") {
+        if !cfg.trim().is_empty() { return PathBuf::from(cfg).join("config.json"); }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".docker/config.json");
+    }
+    PathBuf::from("/tmp/.docker/config.json")
+}
+
+fn find_helper_in_path(name: &str) -> bool {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let p = PathBuf::from(dir).join(name);
+            if is_executable(&p) { return true; }
+        }
+    }
+    for p in [PathBuf::from("/opt/homebrew/bin").join(name), PathBuf::from("/usr/local/bin").join(name), PathBuf::from("/usr/bin").join(name)] {
+        if is_executable(&p) { return true; }
+    }
+    false
+}
+
+#[tauri::command]
+fn get_creds_helper_status() -> Result<serde_json::Value, String> {
+    let cfg_path = docker_config_path();
+    if !cfg_path.exists() {
+        return Ok(serde_json::json!({"path": cfg_path.display().to_string(), "credsStore": null, "status": "PASS", "warning": null}));
+    }
+    let data = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&data).unwrap_or(serde_json::json!({}));
+    let creds = v.get("credsStore").and_then(|x| x.as_str()).unwrap_or("");
+    if creds == "desktop" {
+        let helper = "docker-credential-desktop";
+        let found = find_helper_in_path(helper);
+        if !found {
+            return Ok(serde_json::json!({"path": cfg_path.display().to_string(), "credsStore": creds, "status": "WARN", "warning": "config references docker-credential-desktop but the helper is not installed. Docker Desktop credsStore will fail — remove or change credsStore in ~/.docker/config.json, or install the helper. Harpoon does not require Docker Desktop."}));
+        }
+    }
+    Ok(serde_json::json!({"path": cfg_path.display().to_string(), "credsStore": if creds.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(creds.to_string()) }, "status": "PASS", "warning": null}))
+}
+
+#[tauri::command]
+fn ensure_harpoon_context() -> Result<String, String> {
+    // Reuse Swift logic via harpoon CLI for single source of truth, but also fallback to direct docker logic if harpoon binary not available.
+    // Prefer harpoon binary if resolvable
+    if let Ok(bin) = resolve_harpoon_binary() {
+        let out = Command::new(&bin).args(["docker", "setup"]).output().map_err(|e| e.to_string())?;
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if out.status.success() { return Ok(combined.trim().to_string()); }
+        // fall through to direct docker logic for more granular control
+        if !combined.contains("not installed") { /* try direct */ }
+    }
+    let bin = resolve_docker_binary().map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
+    let expected = "unix:///tmp/harpoon-docker.sock";
+    // inspect
+    let inspect_out = Command::new(&bin).args(["context", "inspect", "harpoon"]).output().map_err(|e| e.to_string())?;
+    let inspect_stdout = String::from_utf8_lossy(&inspect_out.stdout).to_string();
+    if inspect_out.status.success() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inspect_stdout) {
+            if let Some(arr) = v.as_array().and_then(|a| a.first()) {
+                if let Some(host) = arr.get("Endpoints").and_then(|e| e.get("docker")).and_then(|d| d.get("Host")).and_then(|h| h.as_str()) {
+                    if host == expected {
+                        return Ok(format!("Harpoon context already exists and is valid\nEndpoint: {}", host));
+                    } else {
+                        // repair: update
+                        let upd = Command::new(&bin).args(["context", "update", "harpoon", "--docker", &format!("host={}", expected)]).output().map_err(|e| e.to_string())?;
+                        if upd.status.success() {
+                            return Ok(format!("Repaired Harpoon context {} -> {}", host, expected));
+                        }
+                        // fallback rm + create
+                        let _ = Command::new(&bin).args(["context", "rm", "-f", "harpoon"]).output();
+                    }
+                }
+            }
+        }
+    }
+    // create
+    let create = Command::new(&bin).args(["context", "create", "harpoon", "--docker", &format!("host={}", expected), "--description", "Harpoon"]).output().map_err(|e| e.to_string())?;
+    let combined = format!("{}{}", String::from_utf8_lossy(&create.stdout), String::from_utf8_lossy(&create.stderr));
+    if create.status.success() { return Ok(combined.trim().to_string()); }
+    // race check
+    let inspect2 = Command::new(&bin).args(["context", "inspect", "harpoon"]).output().map_err(|e| e.to_string())?;
+    if inspect2.status.success() { return Ok("Harpoon context now exists (race)".to_string()); }
+    Err(combined.trim().to_string())
+}
+
+// Stage 3C: disk (via harpoon CLI, single source of truth)
+#[tauri::command]
+fn get_disk_status() -> Result<String, String> {
+    let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
+    let out = Command::new(&bin).args(["disk", "status"]).output().map_err(|e| e.to_string())?;
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
+}
+
+#[tauri::command]
+fn resize_disk(size: String) -> Result<String, String> {
+    let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
+    let out = Command::new(&bin).args(["disk", "resize", &size]).output().map_err(|e| e.to_string())?;
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,7 +836,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
-            get_harpoon_binary_path,
+            get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
             list_containers, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image,
             list_volumes, inspect_volume, remove_volume,

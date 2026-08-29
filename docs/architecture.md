@@ -107,6 +107,17 @@ proxies raw Docker API traffic into the guest over virtio sockets (vsock). Requi
 - Must not depend on exposing `/var/run/docker.sock` through a shared filesystem.
 - Must tolerate concurrent connections from multiple client processes.
 
+### Management channel (Stage 3A, vsock 2377, no SSH, no TCP)
+
+Dedicated host↔guest control channel over virtio-vsock, separate from Docker port 2375.
+
+- Guest listener: `socat VSOCK-LISTEN:2377,fork EXEC:/usr/local/bin/harpoon-mgmt` (vsock-only, no TCP bind, no SSH daemon)
+- Host bridge: `BridgeSet` listens on unix `0600` at `/tmp/harpoon-mgmt.sock` → vsock `2377` per-connection proxy (no wildcard TCP, no LAN exposure)
+- Protocol: JSON-line request `{"op":"exec","argv":[...]}` or `{"op":"shell"}` over single vsock connection; exec preserves argv boundaries (no `/bin/sh -c`), returns `{"exit":N,"stdout":"...","stderr":"..."}`; shell spawns `/bin/sh` with PTY via `pty.openpty()` and proxies raw bytes bidirectionally
+- CLI: `harpoon exec -- <argv...>` (host returns guest exit status, prints stdout/stderr, failure messages: Harpoon VM is not running, Guest management service is not ready, Connection to guest management service failed, Guest command exited with status N); `harpoon shell` opens interactive PTY (stdin/stdout/stderr, raw mode, clean EOF)
+- Readiness: guest emits `HARPOON_MGMT_READY` to serial (`/dev/hvc0`) after mgmt listener is listening; host `VMManager` observes it separately from `HARPOON_DOCKER_READY` (Docker readiness does NOT depend on mgmt); `harpoon doctor` and `harpoon status` report `Management: ready` and check `0600` socket + `HARPOON_MGMT_READY`
+- Security/trust: vsock-only reachability (no TCP networking), no SSH, no host wildcard ports; logged-in macOS user owning the VM is trusted for root-level guest management (no auth theater); host unix sockets preserve `0600` permissions
+
 ### Guest agent
 
 A small process inside the Linux guest, started early in boot. Responsibilities:
@@ -143,16 +154,34 @@ Harpoon M7 adds background lifecycle without turning the VM into a daemon framew
 See [Lifecycle](lifecycle.md) for process model, file layout, and failure semantics.
 
 
-## Docker Native Integration (M8)
+## Docker Native Integration (M8 + Stage 3B)
 
-Harpoon integrates via standard Docker contexts, no Desktop dependency.
+Harpoon integrates via standard Docker contexts, no Desktop dependency. Stage 3B adds Finder-safe discovery and host-integration hardening.
 
-- Context `harpoon` → `unix:///tmp/harpoon-docker.sock` via `docker context create`
-- `harpoon docker setup/status/remove/use` manage it; never overwrites foreign contexts
-- `harpoon start` hints `docker --context harpoon ps`, does not auto-switch active context
+- **Canonical discovery**: `PATH` → `/opt/homebrew/bin/docker` → `/usr/local/bin/docker` → `/usr/bin/docker` (no `zsh -l -c`, no shell sourcing). `harpoon doctor` reports `Docker CLI ................. PASS /opt/homebrew/bin/docker` or `FAIL — Docker CLI not installed/found`. All Tauri `docker` invocations use the same resolved absolute path.
+- **Harpoon context**: `harpoon` → `unix:///tmp/harpoon-docker.sock` via `harpoon docker setup` (idempotent create/repair via `context update` → `rm -f` → `create`, exact endpoint `unix:///tmp/harpoon-docker.sock`, never switches default `docker context` — Harpoon uses `docker --context harpoon ...`). Desktop app ensures context on first relevant use via `ensure_harpoon_context` (safe to run repeatedly, only `harpoon` mutated).
+- **Compose v2**: Detected separately via `docker compose version` (same resolved binary); `harpoon doctor` reports `Docker Compose plugin ...... PASS v5.1.0` vs `FAIL` with hint. Non-compose `docker` operations continue when Compose missing.
+- **Credential helper**: Non-destructive inspect of `~/.docker/config.json` (`DOCKER_CONFIG` respected); if `"credsStore":"desktop"` and `docker-credential-desktop` not in `PATH`/standard locations, `harpoon doctor` warns `Docker credential helper ... WARN — config references docker-credential-desktop but helper not installed` (Harpoon never deletes `credsStore`).
 - Context survives stop/start; buildx works via standard context
 
 See [Docker Integration](docker-integration.md) and [Lifecycle](lifecycle.md).
+
+## Persistent Storage (Stage 3C)
+
+Harpoon separates **immutable template** `assets/guest/harpoon-root.img` (pristine, `containers=0 images=0 volumes=0`, sparse `2 GiB` logical, `~962M` physical, small for distribution) from **mutable user disk** `~/Library/Application Support/Harpoon/data/harpoon-root.img` (fallback `/tmp/harpoon-runtime/data/harpoon-root.img`, persistent, grow-only, sparse, never silently replaced).
+
+- **Provenance**: template → `harpoon-root.img` built via `tools/guest-builder` (ext4 directly on `/dev/vda` raw block, no partition, `Docker data-root=/var/lib/docker` wholly on that device).
+- **First provision**: copied **once** via `cp -c` (APFS clone) + `ditto` fallback only when mutable disk does **not exist**. Once provisioned, never size/hash-compared, never overwritten on start/update, never shrunk. Corrupt → diagnostic FAIL, explicit destructive reset only (not implemented implicit).
+- **Capacity model**: distribution template stays small; **default first-provision 8 GiB logical minimum** (sparse, `8*1024^3=8589934592`, physical stays ~1G until used) because `azure-sql-edge` exhausted 2 GiB (`no space left on device`). Documented sparse: logical != physical. Supported `G/GiB/M/MiB` (e.g. `12G 16G 24G 32G`), integer only, rejects zero/negative/malformed/overflow/` <8G`/shrink with clear messages.
+- **First-provision interface**: `harpoon start --disk-size 16G` (when no disk; if disk exists, tells `use harpoon disk resize 16G`), plus persistent `harpoon config set/get disk-size 16G` (`~/Library/.../config.json` `diskSize`); desktop consumes same config; `HARPOON_DISK_SIZE` env also considered. No `zsh -l` needed.
+- **Disk commands**: `harpoon disk status` (backing path, logical/physical sparse, FS capacity/used/free via `df -B1` over vsock `2377` when running else `unavailable`, inode, template immutable, configured), `harpoon disk resize 16G` (grow-only, `requested <= current` rejected, never shrink).
+- **Safe resize architecture**: **OFFLINE grow** preferred (ext4 journaled). `harpoon disk resize` requires `VM stopped`, validates regular file, grows sparse backing via `truncate`/`ftruncate` (old FS remains valid), verifies `logical == requested` and `inode` unchanged. **No macOS `e2fsprogs` required** — production app owns pathway via guest `e2fsprogs` (`apk add e2fsprogs`) and auto `resize2fs /dev/vda` (safe **online** `resize2fs` on mounted ext4, journaled atomic) on next boot if `blockdev --getsize64 > df -B1`. If ext4 inside partition would use `parted`+`resize2fs`, but Harpoon is raw so direct `resize2fs`.
+- **Failure atomicity**: backing grown without FS grown is valid old FS; retry detects `backing > filesystem` and re-runs `resize2fs` (doctor warns `backing > filesystem — pending resize`). Never copies template over user disk as recovery.
+- **Doctor/status**: `Persistent disk ............ PASS`, `Logical capacity`, `Host allocation sparse`, `Filesystem capacity/free`, warnings for `backing>FS` (interrupted), host low free `<2G`, `FS low <512M`, ` <8G` with `harpoon disk status` details. When stopped, backing facts authoritative, no fake FS.
+- **Desktop integration**: Tauri `get_disk_status`/`resize_disk` (via `harpoon disk` CLI single source), `harpoon doctor` storage included. Provision choices `8 16 32 Custom` via `harpoon config set disk-size`/`harpoon start --disk-size`/`harpoon disk resize` without major UI redesign.
+- **Sanitation**: template stays `0/0/0` (`tools/guest-builder/verify-root.sh`); tests use copies, never enlarge template.
+
+See [Installation](installation.md) (disk prerequisites) and `harpoon disk --help`.
 
 
 ## Developer Ergonomics (M10)
@@ -177,7 +206,7 @@ Proven primitives already used:
 - `VZLinuxBootLoader` (direct kernel+initramfs boot, `Image-virt` `6.12.94-0-virt`)
 - `VZVirtioBlockDeviceConfiguration` + `VZDiskImageStorageDeviceAttachment` (`ext4` persistent root)
 - `VZNATNetworkDeviceAttachment` + `VZVirtioNetworkDeviceConfiguration` (VZNAT, `virtio_net`)
-- `VZVirtioSocketDeviceConfiguration` + `VZVirtioSocketDevice` (vsock `AF_VSOCK` `2375`)
+- `VZVirtioSocketDeviceConfiguration` + `VZVirtioSocketDevice` (vsock `AF_VSOCK` `2375` Docker, `2377` management)
 - `VZVirtioFileSystemDeviceConfiguration` / `VZSingleDirectoryShare` / `VZSharedDirectory` / VirtioFS (`harpoon-share` → `/mnt/harpoon-share`)
 - `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` / `VZVirtioTraditionalMemoryBalloonDevice` (`targetVirtualMachineMemorySize`)
 

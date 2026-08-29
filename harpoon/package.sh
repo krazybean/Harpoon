@@ -12,9 +12,9 @@ echo "[package] building harpoon..." >&2
 bash "$SCRIPT_DIR/build.sh" 2>&1 | tail -n 5
 echo "[package] verifying artifacts..." >&2
 [ -f "$BUILD/harpoon" ] || { echo "[package] binary missing" >&2; exit 1; }
-[ -f "$ROOT/spike1/cache/Image-virt" ] || { echo "[package] kernel missing spike1/cache/Image-virt" >&2; exit 1; }
-[ -f "$ROOT/harpoon/cache/harpoon-m4-initramfs.cpio.gz" ] || { echo "[package] initramfs missing" >&2; exit 1; }
-[ -f "$ROOT/spike2/cache/harpoon-root.img" ] || { echo "[package] root disk missing" >&2; exit 1; }
+[ -f "$ROOT/assets/guest/Image-virt" ] || { echo "[package] kernel missing assets/guest/Image-virt (run: bash tools/guest-builder/build.sh)" >&2; exit 1; }
+[ -f "$ROOT/assets/guest/harpoon-initramfs.cpio.gz" ] || { echo "[package] initramfs missing assets/guest/harpoon-initramfs.cpio.gz (run: bash tools/guest-builder/build.sh)" >&2; exit 1; }
+[ -f "$ROOT/assets/guest/harpoon-root.img" ] || { echo "[package] root disk missing assets/guest/harpoon-root.img (run: bash tools/guest-builder/build.sh)" >&2; exit 1; }
 file "$BUILD/harpoon" | grep -q "arm64" || { echo "[package] not arm64" >&2; exit 1; }
 codesign -d --entitlements :- "$BUILD/harpoon" 2>&1 | grep -q "com.apple.security.virtualization" || { echo "[package] entitlement missing" >&2; exit 1; }
 codesign --verify --verbose "$BUILD/harpoon" 2>&1 | grep -q "valid on disk" || { echo "[package] codesign invalid" >&2; exit 1; }
@@ -23,10 +23,10 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib/harpoon" "$STAGE/share/doc/harpoon"
 cp "$BUILD/harpoon" "$STAGE/bin/harpoon"
 chmod +x "$STAGE/bin/harpoon"
-cp "$ROOT/spike1/cache/Image-virt" "$STAGE/lib/harpoon/Image-virt"
-cp "$ROOT/harpoon/cache/harpoon-m4-initramfs.cpio.gz" "$STAGE/lib/harpoon/harpoon-initramfs.cpio.gz"
+cp "$ROOT/assets/guest/Image-virt" "$STAGE/lib/harpoon/Image-virt"
+cp "$ROOT/assets/guest/harpoon-initramfs.cpio.gz" "$STAGE/lib/harpoon/harpoon-initramfs.cpio.gz"
 # root template: clone-aware (APFS cp -c preserves sparse; fallback to ditto/cp)
-if cp -c "$ROOT/spike2/cache/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img" 2>/dev/null; then :; elif ditto "$ROOT/spike2/cache/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img" 2>/dev/null; then :; else cp "$ROOT/spike2/cache/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img"; fi
+if cp -c "$ROOT/assets/guest/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img" 2>/dev/null; then :; elif ditto "$ROOT/assets/guest/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img" 2>/dev/null; then :; else cp "$ROOT/assets/guest/harpoon-root.img" "$STAGE/lib/harpoon/harpoon-root.img"; fi
 # docs
 cp "$ROOT/README.md" "$STAGE/share/doc/harpoon/" 2>/dev/null || true
 cp "$ROOT/docs/installation.md" "$STAGE/share/doc/harpoon/" 2>/dev/null || true

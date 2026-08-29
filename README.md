@@ -75,6 +75,12 @@ Harpoon's control plane is deliberately small. Container execution, image manage
 
 For component boundaries and transport details, see [Architecture](docs/architecture.md) and [Lifecycle](docs/lifecycle.md).
 
+## Requirements
+
+- macOS on Apple Silicon, Xcode Command Line Tools, Rust stable (for building)
+- **Docker CLI required**, Docker Desktop **NOT required**. Docker Compose v2 plugin (`docker compose version`) required only for `compose` workflows. Harpoon discovers Docker via `PATH` → `/opt/homebrew/bin/docker` → `/usr/local/bin/docker` (Finder-safe) and creates/repairs context `harpoon` → `unix:///tmp/harpoon-docker.sock` without changing your default context (`harpoon docker setup`; desktop ensures on first use). If `~/.docker/config.json` contains `"credsStore":"desktop"` without `docker-credential-desktop`, `harpoon doctor` warns (Harpoon never deletes `credsStore`).
+- **Persistent storage**: immutable `assets/guest/harpoon-root.img` template (`2 GiB` sparse, `0/0/0`) → mutable `~/Library/.../harpoon-root.img` (grow-only sparse, never silently replaced). First provision **8 GiB** logical (`azure-sql-edge` exhausted 2G) via `harpoon start --disk-size 16G` or `harpoon config set disk-size`; grow via `harpoon disk resize 16G` (VM stopped, `truncate` + guest `resize2fs`, atomic, `backing>FS` retry).
+
 ## Quick Start
 
 Shortest verified path (see [Building](docs/building.md) for prerequisites, packaging, signing, and troubleshooting):

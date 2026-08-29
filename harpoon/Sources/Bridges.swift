@@ -31,6 +31,10 @@ final class BridgeSet {
     var ownsBalloonControlSocket = false
     var balloonClients: [Int32: DispatchSourceRead] = [:]
     var balloonBuffers: [Int32: Data] = [:]
+    // management channel (Stage 3A) — vsock 2377, unix 0600, no TCP
+    var mgmtListenerFd: Int32 = -1
+    var mgmtListenerSource: DispatchSourceRead?
+    var ownsMgmtSocket = false
 
     init(config: RuntimeConfig, vsockDevice: VZVirtioSocketDevice?, balloonDevice: VZVirtioTraditionalMemoryBalloonDevice?, log: @escaping (String)->Void) {
         self.config = config
@@ -42,6 +46,7 @@ final class BridgeSet {
     func startAll() {
         startUnixBridge()
         startBalloonControl()
+        startMgmtBridge()
         startPortForwarding()
     }
 
@@ -82,6 +87,19 @@ final class BridgeSet {
             ownsBalloonControlSocket = false
         } else {
             log("HARPOON_BRIDGES_STOP_ALL skip remove \(config.balloonControlPath) (not owned) end")
+        }
+        if mgmtListenerSource != nil {
+            mgmtListenerSource?.cancel(); mgmtListenerSource = nil
+            mgmtListenerFd = -1
+        } else if mgmtListenerFd >= 0 {
+            close(mgmtListenerFd); mgmtListenerFd = -1
+        }
+        if ownsMgmtSocket {
+            try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
+            log("HARPOON_BRIDGES_STOP_ALL removed \(config.mgmtSocketPath) (owned) end")
+            ownsMgmtSocket = false
+        } else {
+            log("HARPOON_BRIDGES_STOP_ALL skip remove \(config.mgmtSocketPath) (not owned) end")
         }
     }
 
@@ -529,6 +547,112 @@ final class BridgeSet {
             }
         }
         source.setCancelHandler { close(cfd); try? FileManager.default.removeItem(atPath: self.config.balloonControlPath) }
+        source.resume()
+    }
+
+    // MARK: - Management channel (Stage 3A) vsock 2377, unix 0600, no TCP, no SSH
+    func startMgmtBridge() {
+        guard vsockDevice != nil else { log("HARPOON_MGMT_BRIDGE_SKIP no vsock"); return }
+        if FileManager.default.fileExists(atPath: config.mgmtSocketPath) {
+            if isSocketLive(config.mgmtSocketPath) {
+                log("HARPOON_ALREADY_RUNNING mgmt \(config.mgmtSocketPath) in use")
+                return
+            }
+            log("HARPOON_STALE_CLEANUP removing stale \(config.mgmtSocketPath)")
+            try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
+        }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { log("HARPOON_MGMT_FAILED socket \(String(cString:strerror(errno)))"); return }
+        mgmtListenerFd = fd
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        memset(&addr.sun_path, 0, MemoryLayout.size(ofValue: addr.sun_path))
+        _ = config.mgmtSocketPath.withCString { src in withUnsafeMutablePointer(to: &addr.sun_path) { dst in strncpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src, MemoryLayout.size(ofValue: dst.pointee)-1) } }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let br = withUnsafePointer(to: addr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in Darwin.bind(fd, sp, len) } }
+        guard br == 0 else {
+            if errno == EADDRINUSE { log("HARPOON_ALREADY_RUNNING mgmt bind \(config.mgmtSocketPath) \(String(cString:strerror(errno)))") } else { log("HARPOON_MGMT_FAILED bind \(String(cString:strerror(errno)))") }
+            close(fd); mgmtListenerFd = -1; return
+        }
+        chmod(config.mgmtSocketPath, 0o600)
+        guard listen(fd, 16) == 0 else { log("HARPOON_MGMT_FAILED listen \(String(cString:strerror(errno)))"); close(fd); mgmtListenerFd = -1; return }
+        ownsMgmtSocket = true
+        log("HARPOON_MGMT_LISTENING \(config.mgmtSocketPath) 0600 -> vsock:\(config.mgmtVsockPort)")
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        var nextId = 0
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+        mgmtListenerSource = source
+        source.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            while true {
+                var ca = sockaddr_un()
+                var cl: socklen_t = socklen_t(MemoryLayout<sockaddr_un>.size)
+                let cfd = withUnsafeMutablePointer(to: &ca) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in accept(fd, sp, &cl) } }
+                if cfd < 0 {
+                    if errno == EAGAIN || errno == EWOULDBLOCK { break }
+                    self.log("HARPOON_MGMT_ACCEPT_FAILED \(String(cString:strerror(errno)))")
+                    break
+                }
+                let bid = nextId; nextId += 1
+                self.log("HARPOON_MGMT_ACCEPT \(bid) fd=\(cfd)")
+                guard let dev = self.vsockDevice else { self.log("HARPOON_MGMT_CLOSE \(bid) vsock not ready"); close(cfd); continue }
+                dev.connect(toPort: self.config.mgmtVsockPort) { result in
+                    switch result {
+                    case .failure(let e):
+                        self.log("HARPOON_MGMT_VSOCK_CONNECT_FAILURE \(bid) port \(self.config.mgmtVsockPort) error \(e)")
+                        self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect failed")
+                        close(cfd)
+                    case .success(let conn):
+                        let vfd = conn.fileDescriptor
+                        self.log("HARPOON_MGMT_VSOCK_CONNECTED \(bid) vsockFd=\(vfd) clientFd=\(cfd)")
+                        // simple bidirectional pipe, vsock<->unix
+                        let cflags = fcntl(cfd, F_GETFL, 0); if cflags >= 0 { _ = fcntl(cfd, F_SETFL, cflags | O_NONBLOCK) }
+                        let vflags = fcntl(vfd, F_GETFL, 0); if vflags >= 0 { _ = fcntl(vfd, F_SETFL, vflags | O_NONBLOCK) }
+                        let cr = DispatchSource.makeReadSource(fileDescriptor: cfd, queue: .global())
+                        let vr = DispatchSource.makeReadSource(fileDescriptor: vfd, queue: .global())
+                        var closedCr = false, closedVr = false, closed = false
+                        func closeBoth(_ reason: String) {
+                            if closed { return }; closed = true
+                            cr.cancel(); vr.cancel(); close(cfd); conn.close()
+                            self.log("HARPOON_MGMT_CLOSE \(bid) \(reason) clientFd=\(cfd) vsockFd=\(vfd)")
+                        }
+                        cr.setEventHandler {
+                            var buf = [UInt8](repeating: 0, count: 8192)
+                            let n = buf.withUnsafeMutableBytes { ptr in read(cfd, ptr.baseAddress!, ptr.count) }
+                            if n == 0 { closedCr = true; cr.cancel(); shutdown(vfd, SHUT_WR); self.log("HARPOON_MGMT_CLIENT_EOF \(bid)"); if closedVr { closeBoth("both EOF") }; return }
+                            if n < 0 { if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }; self.log("HARPOON_MGMT_CLOSE \(bid) client read \(String(cString:strerror(errno)))"); closeBoth("client read"); return }
+                            var off = 0
+                            while off < n {
+                                let w = buf.withUnsafeBytes { ptr in write(vfd, ptr.baseAddress!.advanced(by: off), n-off) }
+                                if w > 0 { off += Int(w); continue }
+                                if w < 0 && errno == EINTR { continue }
+                                if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
+                                if w < 0 && errno == EPIPE { closeBoth("vsock EPIPE"); return }
+                                self.log("HARPOON_MGMT_CLOSE \(bid) vsock write \(String(cString:strerror(errno)))"); closeBoth("vsock write"); return
+                            }
+                        }
+                        vr.setEventHandler {
+                            var buf = [UInt8](repeating: 0, count: 8192)
+                            let n = buf.withUnsafeMutableBytes { ptr in read(vfd, ptr.baseAddress!, ptr.count) }
+                            if n == 0 { closedVr = true; vr.cancel(); shutdown(cfd, SHUT_WR); self.log("HARPOON_MGMT_VSOCK_EOF \(bid)"); if closedCr { closeBoth("both EOF") }; return }
+                            if n < 0 { if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }; self.log("HARPOON_MGMT_CLOSE \(bid) vsock read \(String(cString:strerror(errno)))"); closeBoth("vsock read"); return }
+                            var off = 0
+                            while off < n {
+                                let w = buf.withUnsafeBytes { ptr in write(cfd, ptr.baseAddress!.advanced(by: off), n-off) }
+                                if w > 0 { off += Int(w); continue }
+                                if w < 0 && errno == EINTR { continue }
+                                if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
+                                if w < 0 && errno == EPIPE { closeBoth("client EPIPE"); return }
+                                self.log("HARPOON_MGMT_CLOSE \(bid) client write \(String(cString:strerror(errno)))"); closeBoth("client write"); return
+                            }
+                        }
+                        cr.resume(); vr.resume()
+                    }
+                }
+            }
+        }
+        source.setCancelHandler { close(fd) }
         source.resume()
     }
 

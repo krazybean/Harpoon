@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+import sys, os, json, subprocess, pty, select, signal, struct, fcntl, termios
+
+def handle_exec(argv):
+    # argv preserved exactly, no shell
+    try:
+        # Use Popen to capture stdout/stderr separately
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        out, err = proc.communicate()
+        rc = proc.returncode
+    except FileNotFoundError as e:
+        out = b""
+        err = (str(e) + "\n").encode()
+        rc = 127
+    except Exception as e:
+        out = b""
+        err = (str(e) + "\n").encode()
+        rc = 1
+    # decode with replacement, keep as strings (JSON will escape)
+    try:
+        sout = out.decode('utf-8', errors='replace')
+    except:
+        sout = ""
+    try:
+        serr = err.decode('utf-8', errors='replace')
+    except:
+        serr = ""
+    resp = {"exit": rc, "stdout": sout, "stderr": serr}
+    sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def handle_shell():
+    # Spawn pty shell and proxy fd 0/1 (vsock via socat) <-> pty master
+    master, slave = pty.openpty()
+    # ensure slave has sane term settings? leave default
+    # spawn /bin/sh -i with setsid
+    env = os.environ.copy()
+    env["TERM"] = "xterm"
+    env["PS1"] = "harpoon:/# "
+    # Use /bin/sh if exists else /bin/ash
+    shell = "/bin/sh"
+    if not os.path.exists(shell):
+        shell = "/bin/ash"
+    try:
+        p = subprocess.Popen([shell, "-i"], preexec_fn=os.setsid, stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=env)
+    except Exception as e:
+        sys.stderr.write(str(e))
+        os.close(master)
+        os.close(slave)
+        return
+    os.close(slave)
+    # Make master and stdin non-blocking?
+    # Need to proxy between fd 0 (vsock stdin) and master
+    # stdin (fd 0) is the vsock socket via socat; stdout (fd1) same
+    # We'll use os.read on fd 0 and os.write to master, and vice versa.
+    # Set stdin/master to non-blocking via fcntl? Use select with blocking reads with timeout and handling.
+    try:
+        # make fds non-blocking to avoid blocking select issues? We'll use blocking with select.
+        # Keep original flags but ensure non-blocking not needed because select says ready.
+        pass
+    except:
+        pass
+    # Proxy loop
+    alive = True
+    try:
+        while alive:
+            r, _, _ = select.select([master, 0], [], [])
+            if master in r:
+                try:
+                    data = os.read(master, 8192)
+                except OSError:
+                    break
+                if not data:
+                    break
+                # write to stdout (fd 1) which goes to vsock
+                # need to handle partial writes
+                off = 0
+                while off < len(data):
+                    try:
+                        n = os.write(1, data[off:])
+                    except OSError as e:
+                        if e.errno == 4: # EINTR
+                            continue
+                        break
+                    if n <= 0:
+                        break
+                    off += n
+            if 0 in r:
+                try:
+                    data = os.read(0, 8192)
+                except OSError:
+                    break
+                if not data:
+                    # EOF from host -> close shell
+                    break
+                # write to pty master
+                off = 0
+                while off < len(data):
+                    try:
+                        n = os.write(master, data[off:])
+                    except OSError as e:
+                        if e.errno == 4:
+                            continue
+                        break
+                    if n <= 0:
+                        break
+                    off += n
+            # check if shell exited
+            if p.poll() is not None:
+                # drain remaining master data briefly then exit
+                try:
+                    # flush any remaining output
+                    while True:
+                        r2, _, _ = select.select([master], [], [], 0)
+                        if not r2:
+                            break
+                        data = os.read(master, 8192)
+                        if not data:
+                            break
+                        os.write(1, data)
+                except:
+                    pass
+                break
+    except Exception as e:
+        pass
+    finally:
+        try:
+            os.close(master)
+        except:
+            pass
+        try:
+            p.terminate()
+        except:
+            pass
+        try:
+            p.wait(timeout=1)
+        except:
+            try:
+                p.kill()
+            except:
+                pass
+
+def main():
+    # Read single JSON line from stdin (unbuffered)
+    # Use os.read loop until newline to avoid buffered IO issues for shell raw mode
+    data = b""
+    while True:
+        chunk = os.read(0, 4096)
+        if not chunk:
+            return
+        data += chunk
+        if b"\n" in data:
+            break
+        if len(data) > 64*1024:
+            # header too large
+            return
+    line, rest = data.split(b"\n", 1)
+    # rest may contain shell input already? For shell we need to handle it.
+    # Push rest back via pipe? For shell we can stash and write to pty after spawning.
+    # For now, handle exec case ignoring rest (should be empty), shell case will need rest.
+    try:
+        req = json.loads(line.decode('utf-8'))
+    except:
+        resp = {"exit": 1, "stdout": "", "stderr": "invalid request: not JSON"}
+        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.flush()
+        return
+    op = req.get("op")
+    if op == "exec":
+        argv = req.get("argv")
+        if not isinstance(argv, list) or len(argv)==0:
+            resp = {"exit": 2, "stdout": "", "stderr": "invalid argv"}
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+            return
+        # ensure all strings
+        argv = [str(x) for x in argv]
+        # If there is rest (pipelined), ignore for exec
+        handle_exec(argv)
+    elif op == "shell":
+        # For shell, if rest not empty, we need to feed it to shell after spawn.
+        # We'll handle by creating a pipe that injects rest into master after spawn.
+        # To avoid complexity, we can temporarily store rest and after opening pty, write it.
+        # But our handle_shell reads from fd 0 after header; rest already consumed from fd 0.
+        # So we need to make rest available. Simplest: if rest exists, write it to a tmp buffer that handle_shell will first consume.
+        # Instead we implement shell proxy that first writes rest into master.
+        # We'll monkey-patch handle_shell to accept initial data.
+        # Inline shell handling here with rest
+        master, slave = pty.openpty()
+        env = os.environ.copy()
+        env["TERM"] = "xterm"
+        shell = "/bin/sh"
+        if not os.path.exists(shell):
+            shell = "/bin/ash"
+        try:
+            p = subprocess.Popen([shell, "-i"], preexec_fn=os.setsid, stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=env)
+        except Exception as e:
+            resp = {"exit":1,"stdout":"","stderr":str(e)}
+            sys.stdout.write(json.dumps(resp)+"\n")
+            sys.stdout.flush()
+            os.close(master); os.close(slave)
+            return
+        os.close(slave)
+        # if rest has data (client pipelined), feed to pty
+        if rest:
+            try:
+                os.write(master, rest)
+            except:
+                pass
+        alive = True
+        try:
+            while alive:
+                r, _, _ = select.select([master, 0], [], [])
+                if master in r:
+                    try:
+                        data = os.read(master, 8192)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    off=0
+                    while off<len(data):
+                        try:
+                            n=os.write(1, data[off:])
+                        except OSError as e:
+                            if e.errno==4:
+                                continue
+                            break
+                        if n<=0: break
+                        off+=n
+                if 0 in r:
+                    try:
+                        data=os.read(0,8192)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    off=0
+                    while off<len(data):
+                        try:
+                            n=os.write(master, data[off:])
+                        except OSError as e:
+                            if e.errno==4:
+                                continue
+                            break
+                        if n<=0: break
+                        off+=n
+                if p.poll() is not None:
+                    try:
+                        while True:
+                            r2,_,_=select.select([master],[],[],0)
+                            if not r2: break
+                            data=os.read(master,8192)
+                            if not data: break
+                            os.write(1,data)
+                    except:
+                        pass
+                    break
+        finally:
+            try: os.close(master)
+            except: pass
+            try: p.terminate()
+            except: pass
+            try: p.wait(timeout=1)
+            except:
+                try: p.kill()
+                except: pass
+    else:
+        resp = {"exit":1,"stdout":"","stderr":"unknown op: %s" % op}
+        sys.stdout.write(json.dumps(resp)+"\n")
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    # Ensure stdin/stdout are binary-unbuffered? Use os.read/write after header.
+    # But after exec we used sys.stdout.write which is buffered text; flush ensures delivery.
+    main()

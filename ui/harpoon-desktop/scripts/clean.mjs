@@ -66,4 +66,4 @@ try {
 } catch {}
 
 console.log(`[clean] done. reclaimed ~${(before/1024/1024).toFixed(1)} MiB (before ${before} bytes)`);
-console.log('DO NOT removed: spike1/cache/Image-virt, harpoon/cache/harpoon-m4-initramfs.cpio.gz, spike2/cache/harpoon-root.img, ~/Library/Application Support/Harpoon, /tmp/harpoon-runtime, harpoon/results, docs/results');
+console.log('DO NOT removed: assets/guest/Image-virt, assets/guest/harpoon-initramfs.cpio.gz, assets/guest/harpoon-root.img, ~/Library/Application Support/Harpoon, /tmp/harpoon-runtime, harpoon/results, docs/results (spike1/spike2 historical)');

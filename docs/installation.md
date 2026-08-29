@@ -54,6 +54,33 @@ bash harpoon/uninstall.sh --purge  # also removes ~/Library/Application Support/
 bash harpoon/install.sh
 ```
 
+## Docker prerequisites (Stage 3B)
+
+Docker CLI is **required**. Docker Desktop is **NOT required**. Docker Compose v2 is **separately detected** and required only for `compose` workflows.
+
+- **Docker CLI**: Harpoon discovers it via canonical resolver: current `PATH` → `/opt/homebrew/bin/docker` → `/usr/local/bin/docker` → `/usr/bin/docker`. Finder-launched UI (minimal `PATH`) still resolves via `/opt/homebrew`/`/usr/local` without sourcing shell startup files. `harpoon doctor` reports `Docker CLI ................. PASS /opt/homebrew/bin/docker` or `FAIL — Docker CLI not installed/found`. No generic `os error 2` reaches UI.
+- **Harpoon context**: `harpoon` → `unix:///tmp/harpoon-docker.sock`. Created/repaired idempotently by `harpoon docker setup` (does **not** switch your active/default context; Harpoon operations use `docker --context harpoon ...`). The desktop app ensures the context on first relevant use. Verify with `docker context inspect harpoon` (Host must be exactly `unix:///tmp/harpoon-docker.sock`). Repeated `harpoon docker setup` is safe; it repairs a wrong endpoint via `context update` → `rm -f` → `create`.
+- **Docker Compose v2**: Detected separately via `docker compose version` (using the same resolved executable). `harpoon doctor` shows `Docker Compose plugin ...... PASS v5.1.0` or `FAIL` with hint. Ordinary `docker run` etc continue to work when Compose is missing; Compose itself will show an actionable message.
+- **Stale Docker Desktop credential helper**: Harpoon inspects `~/.docker/config.json` (respecting `DOCKER_CONFIG`) non-destructively. If `"credsStore":"desktop"` and `docker-credential-desktop` is not found in `PATH`/standard locations, `harpoon doctor` warns `Docker credential helper ... WARN — config references docker-credential-desktop but helper not installed` (Harpoon never silently deletes `credsStore`; remove it manually or install the helper if you need it).
+
+```sh
+harpoon docker setup   # idempotent, repairs wrong endpoint, leaves default context unchanged
+harpoon doctor         # decomposed: CLI, Compose, context, socket, Engine, credsStore
+docker --context harpoon version
+docker --context harpoon run --rm hello-world
+docker --context harpoon compose version
+```
+
+## Persistent storage (Stage 3C)
+
+Immutable template `assets/guest/harpoon-root.img` (`2 GiB` logical, `~962M` APFS sparse, `0/0/0`) is **never** silently replaced. First `harpoon start` (or `harpoon start --disk-size 16G`) copies to mutable `~/Library/Application Support/Harpoon/data/harpoon-root.img` (`/tmp/...` fallback) sparse-grown to **8 GiB logical minimum** (`truncate` + guest `resize2fs` on next boot; `azure-sql-edge` exhausted 2G). Supports `G/GiB/M/MiB` (e.g. `12G 16G 32G`), grow-only via `harpoon disk resize 16G` (VM stopped, `requested <= current` rejected, no shrink, `backing > FS` = pending retry). `harpoon disk status` reports backing logical/physical (sparse), FS used/free, inode, template; `harpoon doctor` warns on `backing>FS`, host low `<2G`, `FS <512M`. `harpoon config set/get disk-size 16G` persists; `HARPOON_DISK_SIZE` env also considered. No `e2fsprogs` install required on macOS; guest owns `resize2fs`. Interrupted file-grow without FS remains valid old FS; retry expands.
+
+```sh
+harpoon disk status
+harpoon disk resize 16G # VM stopped
+harpoon start --disk-size 32G # first provision only
+```
+
 ## Verification
 
 ```sh

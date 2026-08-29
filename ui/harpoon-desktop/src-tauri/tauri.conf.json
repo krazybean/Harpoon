@@ -43,7 +43,8 @@
     "macOS": {
       "entitlements": null,
       "frameworks": [],
-      "signingIdentity": null
+      "signingIdentity": null,
+      "minimumSystemVersion": "15.1"
     }
   },
   "plugins": {}

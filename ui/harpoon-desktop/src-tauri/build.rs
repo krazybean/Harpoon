@@ -9,9 +9,9 @@ fn main() {
   let bin_dir = bundle_res.join("bin");
   let lib_dir = bundle_res.join("lib/harpoon");
   let harpoon_bin = repo_root.join("harpoon/build/harpoon");
-  let kernel = repo_root.join("spike1/cache/Image-virt");
-  let initramfs = repo_root.join("harpoon/cache/harpoon-m4-initramfs.cpio.gz");
-  let rootimg = repo_root.join("spike2/cache/harpoon-root.img");
+  let kernel = repo_root.join("assets/guest/Image-virt");
+  let initramfs = repo_root.join("assets/guest/harpoon-initramfs.cpio.gz");
+  let rootimg = repo_root.join("assets/guest/harpoon-root.img");
 
   // ensure harpoon built
   if !harpoon_bin.exists() {
