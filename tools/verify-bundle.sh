@@ -52,14 +52,22 @@ otool -l "$APP/Contents/MacOS/harpoon-desktop" | grep -A5 LC_BUILD_VERSION | gre
 
 # 5. otool -L checks
 echo "[verify-bundle] checking dylibs for Harpoon..." >&2
-OTOOL_HARPOON=$(otool -L "$APP/Contents/Resources/harpoon/bin/harpoon")
+OTOOL_HARPOON=$(otool -L "$APP/Contents/Resources/harpoon/bin/harpoon" | tail -n +2)
 echo "$OTOOL_HARPOON" | head -n 30 >&2
-# Must NOT have DarwinFoundation1 (would indicate 26.0 build)
+# Must NOT have DarwinFoundation1/2/3 (would indicate 26.0 build)
 check_fail "Harpoon should not link DarwinFoundation1 (15.1 target)" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation1"
-# Check for non-system dylibs (hardcoded dev paths)
-if echo "$OTOOL_HARPOON" | grep -E "/Users/|/opt/homebrew|/Library/Developer|@rpath.*harpoon" | grep -v "@executable_path" | grep -v "@loader_path" | grep -v "/usr/lib/swift" | grep -v "/System/Library" | grep -v "/usr/lib/lib"; then
-  echo "[verify-bundle] FAIL: Harpoon has non-system dylib" >&2
+check_fail "Harpoon should not link DarwinFoundation2" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation2"
+check_fail "Harpoon should not link DarwinFoundation3" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation3"
+# Check for non-system dylibs — parse dependencies only (header skipped via tail -n +2)
+# Allow: /System/Library/*, /usr/lib/* (covers /usr/lib/swift/*), @rpath/*, @executable_path/*, @loader_path/*
+# Reject: arbitrary absolute, /Users/*, /opt/homebrew/*, Xcode/toolchain (/Library/Developer/*), DarwinFoundation*
+if echo "$OTOOL_HARPOON" | grep -E "/Users/|/opt/homebrew|/Library/Developer" | grep -v "^[[:space:]]*@"; then
+  echo "[verify-bundle] FAIL: Harpoon has non-system dylib (forbidden absolute/Xcode/homebrew/Users)" >&2
   echo "$OTOOL_HARPOON" | grep -E "/Users/|/opt/homebrew|/Library/Developer" >&2 || true
+  FAIL=1
+elif echo "$OTOOL_HARPOON" | grep -v "^[[:space:]]*/System/Library/" | grep -v "^[[:space:]]*/usr/lib/" | grep -v "^[[:space:]]*@rpath/" | grep -v "^[[:space:]]*@executable_path/" | grep -v "^[[:space:]]*@loader_path/" | grep -v "^[[:space:]]*$" | grep -q .; then
+  echo "[verify-bundle] FAIL: Harpoon has non-system dylib (unexpected absolute path)" >&2
+  echo "$OTOOL_HARPOON" | grep -v "^[[:space:]]*/System/Library/" | grep -v "^[[:space:]]*/usr/lib/" | grep -v "^[[:space:]]*@rpath/" | grep -v "^[[:space:]]*@executable_path/" | grep -v "^[[:space:]]*@loader_path/" | grep -v "^[[:space:]]*$" >&2 || true
   FAIL=1
 else
   echo "[verify-bundle] PASS: Harpoon dylibs are system or @rpath" >&2
