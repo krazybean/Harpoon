@@ -7,8 +7,8 @@ VERSION="${HARPOON_VERSION:-$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/pa
 if [ -n "${1:-}" ]; then VERSION="$1"; fi
 APP="${2:-$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app}"
 if [ ! -d "$APP" ]; then echo "[build-dmg] FAIL: Harpoon.app not found at $APP" >&2; exit 1; fi
-# Verify app is already signed (at least ad-hoc, ideally Developer ID)
-if ! codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | grep -q "valid on disk"; then
+# Verify app is already signed (at least ad-hoc, ideally Developer ID) — trust exit status, not grep (pipefail+grep -q SIGPIPE)
+if ! codesign --verify --deep --strict --verbose=2 "$APP" >/dev/null 2>&1; then
   echo "[build-dmg] FAIL: Harpoon.app not signed/valid at $APP" >&2; codesign --verify --deep --strict --verbose=4 "$APP" 2>&1 | tail -n 20 >&2; exit 1
 fi
 DIST_DIR="$REPO_ROOT/dist/v$VERSION"
@@ -42,8 +42,9 @@ fi
 rm -rf "$TMP_SRC"
 if [ $DMG_CREATED -eq 0 ] || [ ! -f "$DMG_PATH" ]; then
   echo "[build-dmg] FAIL: DMG not created at $DMG_PATH" >&2
-  # Sandbox may block hdiutil Device not configured — not a product bug, but release pipeline should still note
-  if hdiutil create -size 3072m -fs HFS+ -volname Harpoon -srcfolder "$APP" -ov -format UDZO "$DMG_PATH" 2>&1 | grep -q "Device not configured"; then
+  # Sandbox may block hdiutil Device not configured — capture to avoid pipefail SIGPIPE
+  HDIUTIL_OUT=$(hdiutil create -size 3072m -fs HFS+ -volname Harpoon -srcfolder "$APP" -ov -format UDZO "$DMG_PATH" 2>&1 || true)
+  if echo "$HDIUTIL_OUT" | grep -q "Device not configured"; then
     echo "[build-dmg] BLOCKED: hdiutil Device not configured (sandbox)" >&2
     exit 0
   fi
@@ -52,17 +53,19 @@ fi
 echo "[build-dmg] DMG created $DMG_PATH ($(du -h "$DMG_PATH" | awk '{print $1}'))" >&2
 # Mount and verify byte/signature equivalent
 MNT=$(mktemp -d)
-if hdiutil attach -nobrowse -quiet -mountpoint "$MNT" "$DMG_PATH" 2>&1 | tail -n 5; then
+if hdiutil attach -nobrowse -quiet -mountpoint "$MNT" "$DMG_PATH" >/dev/null 2>&1; then
   echo "[build-dmg] mounted at $MNT" >&2
-  # Verify app inside DMG is same as source (codesign valid)
-  if ! codesign --verify --deep --strict --verbose=2 "$MNT/Harpoon.app" 2>&1 | grep -q "valid on disk"; then
-    echo "[build-dmg] FAIL: mounted Harpoon.app not valid" >&2; hdiutil detach "$MNT" 2>&1 | tail; exit 1
+  # Verify app inside DMG is same as source (codesign valid) — trust exit status
+  if ! codesign --verify --deep --strict --verbose=2 "$MNT/Harpoon.app" >/dev/null 2>&1; then
+    echo "[build-dmg] FAIL: mounted Harpoon.app not valid" >&2; hdiutil detach "$MNT" >/dev/null 2>&1 || true; exit 1
   fi
-  # Verify-bundle on mounted copy
-  bash "$REPO_ROOT/tools/verify-bundle.sh" "$MNT/Harpoon.app" 2>&1 | tail -n 10
-  # Compare signature (if same Team, should match)
-  SRC_SIG=$(codesign -dv "$APP" 2>&1 | grep Authority | head -n1 || true)
-  MNT_SIG=$(codesign -dv "$MNT/Harpoon.app" 2>&1 | grep Authority | head -n1 || true)
+  # Verify-bundle on mounted copy (preserve exit, avoid tail truncation)
+  if ! bash "$REPO_ROOT/tools/verify-bundle.sh" "$MNT/Harpoon.app" 2>&1 | tee /tmp/verify-mounted.log; then
+    echo "[build-dmg] FAIL: verify-bundle on mounted app failed" >&2; hdiutil detach "$MNT" >/dev/null 2>&1 || true; exit 1
+  fi
+  # Compare signature (if same Team, should match) — avoid grep|head SIGPIPE, use grep -m1
+  SRC_SIG=$(codesign -dv --verbose=4 "$APP" 2>&1 | grep -m1 "Authority=" || true)
+  MNT_SIG=$(codesign -dv --verbose=4 "$MNT/Harpoon.app" 2>&1 | grep -m1 "Authority=" || true)
   echo "[build-dmg] src Authority: $SRC_SIG" >&2
   echo "[build-dmg] mnt Authority: $MNT_SIG" >&2
   hdiutil detach "$MNT" 2>&1 | tail -n 5 || true
