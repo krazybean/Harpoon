@@ -959,7 +959,7 @@ func handleConfig(args: [String]) -> Int32 {
             cur.memory = v
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
             guard let bytes = RuntimeConfig.parseDiskSize(valStr) else { cliError("invalid disk-size: \(valStr) — use e.g. 8G, 16G, 1024M (G/GiB/M/MiB)"); return 1 }
-            if bytes < RuntimeConfig.defaultProvisionBytes { cliError("disk-size must be at least 32G, got \(valStr) (\(bytes) bytes)"); return 1 }
+            if bytes < RuntimeConfig.minProvisionBytes { cliError("disk-size must be at least 2G, got \(valStr) (\(bytes) bytes)"); return 1 }
             cur.diskSize = valStr
         } else {
             cliError("unknown config key: \(key) (expected cpus, memory, disk-size)")
@@ -1122,8 +1122,8 @@ func handleDiskResize(args: [String]) -> Int32 {
         cliError("invalid size: \(newSizeStr) — use e.g. 8G, 16G, 32G, 1024M (G/GiB/M/MiB)")
         return 2
     }
-    if requested < RuntimeConfig.defaultProvisionBytes {
-        cliError("requested \(newSizeStr) (\(requested) bytes) < minimum 32G (\(RuntimeConfig.defaultProvisionBytes) bytes)")
+    if requested < RuntimeConfig.minProvisionBytes {
+        cliError("requested \(newSizeStr) (\(requested) bytes) < minimum 2G (\(RuntimeConfig.minProvisionBytes) bytes)")
         return 2
     }
     let snap = statusSnapshot()
@@ -1340,8 +1340,8 @@ func handleDoctor() -> Int32 {
         check(true, "Persistent disk ............ PASS \(backing)")
         cliPrint("INFO  Logical capacity ........... \(RuntimeConfig.formatBytes(logical)) (\(logical) bytes)")
         cliPrint("INFO  Host allocation ............ \(RuntimeConfig.formatBytes(physical)) (\(physical) bytes) sparse")
-        if logical < RuntimeConfig.defaultProvisionBytes {
-            check(false, "Persistent disk logical < 32G (\(RuntimeConfig.formatBytes(logical))) — should be >=32G", warn:true)
+        if logical < RuntimeConfig.minProvisionBytes {
+            check(false, "Persistent disk logical < 2G (\(RuntimeConfig.formatBytes(logical))) — should be >=2G (template size, existing disks <32G remain valid)", warn:true)
         }
         // Config vs actual mismatch (Stage 3C B)
         if let cfgDiskStr = loadUserConfig().0?.diskSize, let cfgBytes = RuntimeConfig.parseDiskSize(cfgDiskStr) {
@@ -1722,8 +1722,8 @@ func handleStart(args: [String]) -> Int32 {
             cliError("invalid --disk-size: \(ds) — use e.g. 8G, 16G, 32G, 1024M (G/GiB/M/MiB)")
             return 2
         }
-        if bytes < RuntimeConfig.defaultProvisionBytes {
-            cliError("disk-size must be at least 32G, got \(ds) (\(bytes) bytes)")
+        if bytes < RuntimeConfig.minProvisionBytes {
+            cliError("disk-size must be at least 2G, got \(ds) (\(bytes) bytes)")
             return 2
         }
         if let existing = RuntimeConfig.existingUserDiskPath() {
