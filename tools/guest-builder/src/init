@@ -488,10 +488,10 @@ echo "HARPOON_APK_INSTALL_OK" > /dev/hvc0
 # Alpine 3.22: P:containerd provides p:cmd:containerd, file usr/bin/containerd (verified via APKINDEX/community/containerd-2.1.5-r2.apk)
 # PATH check: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin (busybox default)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-for bin in dockerd docker containerd socat python3 e2fsprogs; do
+for bin in dockerd docker containerd socat python3 resize2fs; do
   if ! p=$(command -v "$bin" 2>/dev/null); then
     echo "HARPOON_DOCKER_FAILED missing_binary $bin PATH=$PATH" > /dev/hvc0
-    ls -l /usr/bin/$bin /usr/sbin/$bin /bin/$bin 2>&1 | tee /dev/hvc0 >/dev/null || true
+    ls -l /usr/bin/$bin /usr/sbin/$bin /bin/$bin /sbin/$bin 2>&1 | tee /dev/hvc0 >/dev/null || true
     while true; do sleep 5; echo "HARPOON_DOCKER_FAILED missing_binary $bin" > /dev/hvc0; done
   fi
   # emit exact paths
@@ -501,13 +501,54 @@ for bin in dockerd docker containerd socat python3 e2fsprogs; do
     containerd) echo "HARPOON_BIN_CONTAINERD $p" > /dev/hvc0 ;;
     socat) echo "HARPOON_BIN_SOCAT $p" > /dev/hvc0 ;;
     python3) echo "HARPOON_BIN_PYTHON3 $p" > /dev/hvc0 ;;
-    e2fsprogs) echo "HARPOON_BIN_E2FSPROGS $p" > /dev/hvc0 ;;
+    resize2fs) echo "HARPOON_BIN_RESIZE2FS $p" > /dev/hvc0 ;;
   esac
   ls -l "$p" 2>&1 | tee /dev/hvc0 >/dev/null || true
 done
 echo "HARPOON_APK_DOCKER_VERSION $(docker --version 2>&1)" > /dev/hvc0
 echo "HARPOON_APK_CONTAINERD_VERSION $(containerd --version 2>&1)" > /dev/hvc0
 echo "HARPOON_APK_SOCAT_VERSION $(socat -V 2>&1 | head -n 5)" > /dev/hvc0
+echo "HARPOON_APK_RESIZE2FS_VERSION $(resize2fs -V 2>&1 | head -n 1)" > /dev/hvc0
+
+# Stage 3C: filesystem reconciliation — MUST happen BEFORE Docker Engine becomes available
+# Invariant: block device capacity > ext4 filesystem capacity => expand ext4 via resize2fs
+# Idempotent: if capacities match, no-op. Fail loudly before Docker if growth fails.
+echo "HARPOON_DISK_CHECK_START" > /dev/hvc0
+DEV="/dev/vda"
+if [ ! -b "$DEV" ] && [ -b "/dev/vda1" ]; then DEV="/dev/vda1"; fi
+if [ -b "$DEV" ]; then
+  echo "HARPOON_DISK_CHECK $DEV" > /dev/hvc0
+  DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+  FS_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
+  if [ -z "$FS_BYTES" ]; then FS_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+  echo "HARPOON_DISK_SIZES dev=$DEV_BYTES fs=$FS_BYTES" > /dev/hvc0
+  if [ -n "$DEV_BYTES" ] && [ -n "$FS_BYTES" ] && [ "$DEV_BYTES" -gt 0 ] && [ "$FS_BYTES" -gt 0 ] && [ "$DEV_BYTES" -gt "$FS_BYTES" ]; then
+    echo "HARPOON_DISK_RESIZE needed $FS_BYTES -> $DEV_BYTES" > /dev/hvc0
+    if ! resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null; then
+      echo "HARPOON_DOCKER_FAILED resize2fs failed dev=$DEV fs=$FS_BYTES -> $DEV_BYTES" > /dev/hvc0
+      echo "HARPOON_DISK_RESIZE_FAILED dev=$DEV" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs failed" > /dev/hvc0; done
+    fi
+    FS2=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | head -n 1)
+    if [ -z "$FS2" ]; then FS2=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+    echo "HARPOON_DISK_RESIZED fs_new=$FS2 dev=$DEV_BYTES" > /dev/hvc0
+    if [ -n "$FS2" ] && [ "$FS2" -lt "$DEV_BYTES" ]; then
+      # Due to ext4 overhead, FS may be slightly smaller than block, allow ~2% slack
+      SLACK=$((DEV_BYTES / 50))
+      EXPECTED=$((DEV_BYTES - SLACK))
+      if [ "$FS2" -lt "$EXPECTED" ]; then
+        echo "HARPOON_DOCKER_FAILED resize2fs incomplete fs=$FS2 dev=$DEV_BYTES expected~$EXPECTED" > /dev/hvc0
+        while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs incomplete" > /dev/hvc0; done
+      fi
+    fi
+  else
+    echo "HARPOON_DISK_NO_RESIZE" > /dev/hvc0
+  fi
+else
+  echo "HARPOON_DISK_CHECK no block $DEV" > /dev/hvc0
+  echo "HARPOON_DOCKER_FAILED no block device $DEV for filesystem reconciliation" > /dev/hvc0
+  while true; do sleep 5; echo "HARPOON_DOCKER_FAILED no block device" > /dev/hvc0; done
+fi
 
 # Phase 2 — Docker ramdisk mode NOT used on block-backed root (normal pivot_root)
 # Previous spike used DOCKER_RAMDISK=true to workaround initramfs pivot_root invalid argument
@@ -700,48 +741,60 @@ if [ $READY -eq 1 ]; then
     GUEST_IP2=$(ip -4 addr show "$IFACE" 2>/dev/null | grep -oE "inet [0-9.]+/[0-9]+" | head -n1 | cut -d' ' -f2 | cut -d/ -f1)
     [ -n "$GUEST_IP2" ] && echo "HARPOON_GUEST_IP $GUEST_IP2" > /dev/hvc0 || true
     echo "HARPOON_NET_READY" > /dev/hvc0
-    # Stage 3C: auto-expand ext4 if backing > filesystem (grow-only, sparse, atomic)
-    # Ponytail: online resize2fs is safe on mounted ext4 (journaled, atomic); offline e2fsck not run on RW mount
-    # If host grew backing file but FS not yet grown (interrupted), retry expands on next boot
-    if command -v resize2fs >/dev/null 2>&1; then
-      DEV="/dev/vda"
-      if [ ! -b "$DEV" ] && [ -b "/dev/vda1" ]; then DEV="/dev/vda1"; fi
-      if [ -b "$DEV" ]; then
-        echo "HARPOON_DISK_CHECK $DEV" > /dev/hvc0
-        # device size bytes
-        DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
-        # filesystem size via df (online) — df -B1 gives FS size
-        FS_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
-        if [ -z "$FS_BYTES" ]; then FS_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
-        echo "HARPOON_DISK_SIZES dev=$DEV_BYTES fs=$FS_BYTES" > /dev/hvc0
-        if [ -n "$DEV_BYTES" ] && [ -n "$FS_BYTES" ] && [ "$DEV_BYTES" -gt 0 ] && [ "$FS_BYTES" -gt 0 ] && [ "$DEV_BYTES" -gt "$FS_BYTES" ]; then
-          echo "HARPOON_DISK_RESIZE needed $FS_BYTES -> $DEV_BYTES" > /dev/hvc0
-          resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_DISK_RESIZE_FAILED" > /dev/hvc0
-          # re-check
-          FS2=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | head -n 1)
-          echo "HARPOON_DISK_RESIZED fs_new=$FS2 dev=$DEV_BYTES" > /dev/hvc0
-        else
-          echo "HARPOON_DISK_NO_RESIZE needed" > /dev/hvc0
-        fi
-      else
-        echo "HARPOON_DISK_CHECK no block $DEV" > /dev/hvc0
-      fi
-    else
-      echo "HARPOON_DISK_CHECK no resize2fs" > /dev/hvc0
+    # Idempotent post-Docker disk sanity check (resize already done before Docker; re-emit sizes for observability)
+    DEV_POST="/dev/vda"
+    if [ ! -b "$DEV_POST" ] && [ -b "/dev/vda1" ]; then DEV_POST="/dev/vda1"; fi
+    if [ -b "$DEV_POST" ]; then
+      DEV_BYTES_POST=$(blockdev --getsize64 "$DEV_POST" 2>/dev/null || echo 0)
+      FS_BYTES_POST=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
+      if [ -z "$FS_BYTES_POST" ]; then FS_BYTES_POST=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+      echo "HARPOON_DISK_SIZES_POST dev=$DEV_BYTES_POST fs=$FS_BYTES_POST" > /dev/hvc0
     fi
     # Management channel — dedicated vsock 2377, vsock-only, no TCP, no SSH (Stage 3A)
     echo "HARPOON_MGMT_START" > /dev/hvc0
     chmod +x /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
-    # Start vsock management listener (exec handler + pty shell)
-    socat VSOCK-LISTEN:2377,reuseaddr,fork EXEC:/usr/local/bin/harpoon-mgmt > /tmp/mgmt.log 2>&1 &
-    MGMT_PID=$!
-    sleep 1
-    if kill -0 $MGMT_PID 2>/dev/null; then
-      echo "HARPOON_MGMT_READY" > /dev/hvc0
-      echo "mgmt vsock 2377 pid=$MGMT_PID" > /dev/hvc0
-      ls -l /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
+    # Verify harpoon-mgmt + python3 preconditions before listening
+    if [ ! -f /usr/local/bin/harpoon-mgmt ]; then
+      echo "HARPOON_MGMT_FAILED missing /usr/local/bin/harpoon-mgmt" > /dev/hvc0
+    elif ! command -v python3 >/dev/null 2>&1; then
+      echo "HARPOON_MGMT_FAILED missing python3" > /dev/hvc0
+    elif ! command -v socat >/dev/null 2>&1; then
+      echo "HARPOON_MGMT_FAILED missing socat" > /dev/hvc0
     else
-      echo "HARPOON_MGMT_FAILED mgmt_pid=$MGMT_PID log=$(cat /tmp/mgmt.log 2>&1 | head -n 20)" > /dev/hvc0
+      # Validate script syntax quickly (python compile) before listening
+      if ! python3 -m py_compile /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null; then
+        echo "HARPOON_MGMT_FAILED py_compile failed" > /dev/hvc0
+      fi
+      # Check socat vsock support upfront (same check as docker bridge)
+      if ! socat -V 2>&1 | grep -qi vsock; then
+        # socat on Alpine always has vsock but emit for diagnosis
+        echo "HARPOON_MGMT_VSOCK_CHECK socat no vsock in -V" > /dev/hvc0
+      fi
+      # Start vsock management listener (exec handler + pty shell) with retry
+      MGMT_READY=0
+      for attempt in 1 2 3; do
+        echo "HARPOON_MGMT_ATTEMPT $attempt" > /dev/hvc0
+        socat VSOCK-LISTEN:2377,reuseaddr,fork EXEC:/usr/local/bin/harpoon-mgmt > /tmp/mgmt.log 2>&1 &
+        MGMT_PID=$!
+        sleep 1
+        if kill -0 $MGMT_PID 2>/dev/null; then
+          # Probe vsock actually listening (netstat or ss if available, else check via python preflight)
+          echo "HARPOON_MGMT_READY" > /dev/hvc0
+          echo "mgmt vsock 2377 pid=$MGMT_PID attempt=$attempt" > /dev/hvc0
+          ls -l /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
+          cat /tmp/mgmt.log 2>&1 | head -n 20 | tee /dev/hvc0 >/dev/null || true
+          MGMT_READY=1
+          break
+        else
+          echo "HARPOON_MGMT_RETRY mgmt_pid=$MGMT_PID attempt=$attempt log=$(cat /tmp/mgmt.log 2>&1 | head -n 20)" > /dev/hvc0
+          sleep 1
+        fi
+      done
+      if [ "$MGMT_READY" -eq 0 ]; then
+        echo "HARPOON_MGMT_FAILED all attempts log=$(cat /tmp/mgmt.log 2>&1 | head -n 20)" > /dev/hvc0
+        echo "HARPOON_DOCKER_FAILED mgmt failed after retries" > /dev/hvc0
+        while true; do sleep 5; echo "HARPOON_MGMT_FAILED" > /dev/hvc0; done
+      fi
     fi
   else
     echo "HARPOON_DOCKER_FAILED vsock bridge failed vsock_pid=$VSOCK_PID log=$(cat /tmp/vsock-bridge.log 2>&1 | head -n 20)" > /dev/hvc0

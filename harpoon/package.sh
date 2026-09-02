@@ -11,6 +11,10 @@ STAGE="$DIST/harpoon-$VERSION-darwin-$ARCH"
 echo "[package] building harpoon..." >&2
 bash "$SCRIPT_DIR/build.sh" 2>&1 | tail -n 5
 echo "[package] verifying artifacts..." >&2
+# Guest verification gate — catches missing resize2fs/mgmt before packaging
+if [ -f "$ROOT/tools/guest-builder/verify-guest.sh" ]; then
+  bash "$ROOT/tools/guest-builder/verify-guest.sh" 2>&1 || { echo "[package] FAIL: guest verification gate — cannot package" >&2; exit 1; }
+fi
 [ -f "$BUILD/harpoon" ] || { echo "[package] binary missing" >&2; exit 1; }
 [ -f "$ROOT/assets/guest/Image-virt" ] || { echo "[package] kernel missing assets/guest/Image-virt (run: bash tools/guest-builder/build.sh)" >&2; exit 1; }
 [ -f "$ROOT/assets/guest/harpoon-initramfs.cpio.gz" ] || { echo "[package] initramfs missing assets/guest/harpoon-initramfs.cpio.gz (run: bash tools/guest-builder/build.sh)" >&2; exit 1; }

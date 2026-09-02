@@ -911,13 +911,13 @@ func handleConfig(args: [String]) -> Int32 {
         if let c = cfg {
             if let v = c.cpus { cliPrint("cpus: \(v)") } else { cliPrint("cpus: (default 2)") }
             if let v = c.memory { cliPrint("memory: \(v)") } else { cliPrint("memory: (default 1024)") }
-            if let v = c.diskSize { cliPrint("disk-size: \(v)") } else { cliPrint("disk-size: (default 8G)") }
+            if let v = c.diskSize { cliPrint("disk-size: \(v)") } else { cliPrint("disk-size: (default 32G)") }
             if c.cpus==nil && c.memory==nil && c.diskSize==nil { cliPrint("(no user config, using defaults)") }
         } else {
             cliPrint("(no user config, using defaults)")
             cliPrint("cpus: (default 2)")
             cliPrint("memory: (default 1024)")
-            cliPrint("disk-size: (default 8G)")
+            cliPrint("disk-size: (default 32G)")
         }
         return 0
     } else if args[0]=="get" && args.count>=2 {
@@ -931,7 +931,7 @@ func handleConfig(args: [String]) -> Int32 {
             if let v = cfg?.memory { cliPrint("\(v)") } else { cliPrint("1024") }
             return 0
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
-            if let v = cfg?.diskSize { cliPrint(v) } else { cliPrint("8G") }
+            if let v = cfg?.diskSize { cliPrint(v) } else { cliPrint("32G") }
             return 0
         } else {
             cliError("unknown config key: \(key)"); return 1
@@ -959,7 +959,7 @@ func handleConfig(args: [String]) -> Int32 {
             cur.memory = v
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
             guard let bytes = RuntimeConfig.parseDiskSize(valStr) else { cliError("invalid disk-size: \(valStr) — use e.g. 8G, 16G, 1024M (G/GiB/M/MiB)"); return 1 }
-            if bytes < RuntimeConfig.defaultProvisionBytes { cliError("disk-size must be at least 8G, got \(valStr) (\(bytes) bytes)"); return 1 }
+            if bytes < RuntimeConfig.defaultProvisionBytes { cliError("disk-size must be at least 32G, got \(valStr) (\(bytes) bytes)"); return 1 }
             cur.diskSize = valStr
         } else {
             cliError("unknown config key: \(key) (expected cpus, memory, disk-size)")
@@ -1076,12 +1076,12 @@ func handleDiskStatus() -> Int32 {
         cliPrint("Host allocation:   0 bytes (sparse, not yet allocated)")
         cliPrint("Filesystem:        not yet provisioned — will be \(RuntimeConfig.formatBytes(desired)) on first start")
         let cfg = loadUserConfig().0
-        if let ds = cfg?.diskSize { cliPrint("Configured:        \(ds)") } else { cliPrint("Configured:        (default 8G)") }
+        if let ds = cfg?.diskSize { cliPrint("Configured:        \(ds)") } else { cliPrint("Configured:        (default 32G)") }
         return 0
     }
     let (logical, physical) = RuntimeConfig.backingFileInfo(at: backing)
     let cfg = loadUserConfig().0
-    let configured = cfg?.diskSize ?? "(default 8G)"
+    let configured = cfg?.diskSize ?? "(default 32G)"
     cliPrint("Backing file:      \(backing)")
     cliPrint("Logical capacity:  \(RuntimeConfig.formatBytes(logical)) (\(logical) bytes)")
     cliPrint("Host allocation:   \(RuntimeConfig.formatBytes(physical)) (\(physical) bytes) — sparse")
@@ -1123,7 +1123,7 @@ func handleDiskResize(args: [String]) -> Int32 {
         return 2
     }
     if requested < RuntimeConfig.defaultProvisionBytes {
-        cliError("requested \(newSizeStr) (\(requested) bytes) < minimum 8G (\(RuntimeConfig.defaultProvisionBytes) bytes)")
+        cliError("requested \(newSizeStr) (\(requested) bytes) < minimum 32G (\(RuntimeConfig.defaultProvisionBytes) bytes)")
         return 2
     }
     let snap = statusSnapshot()
@@ -1133,7 +1133,7 @@ func handleDiskResize(args: [String]) -> Int32 {
         return 1
     }
     guard let backing = RuntimeConfig.existingUserDiskPath() else {
-        cliError("no provisioned disk found — run harpoon start first (first provision default 8G)")
+        cliError("no provisioned disk found — run harpoon start first (first provision default 32G)")
         return 1
     }
     let (curLogical, curPhysical) = RuntimeConfig.backingFileInfo(at: backing)
@@ -1341,7 +1341,7 @@ func handleDoctor() -> Int32 {
         cliPrint("INFO  Logical capacity ........... \(RuntimeConfig.formatBytes(logical)) (\(logical) bytes)")
         cliPrint("INFO  Host allocation ............ \(RuntimeConfig.formatBytes(physical)) (\(physical) bytes) sparse")
         if logical < RuntimeConfig.defaultProvisionBytes {
-            check(false, "Persistent disk logical < 8G (\(RuntimeConfig.formatBytes(logical))) — should be >=8G", warn:true)
+            check(false, "Persistent disk logical < 32G (\(RuntimeConfig.formatBytes(logical))) — should be >=32G", warn:true)
         }
         // Config vs actual mismatch (Stage 3C B)
         if let cfgDiskStr = loadUserConfig().0?.diskSize, let cfgBytes = RuntimeConfig.parseDiskSize(cfgDiskStr) {
@@ -1431,17 +1431,28 @@ func mgmtExec(argv: [String]) -> Int32 {
     if snap.state == "starting" || snap.state == "degraded" {
         // still check mgmt socket live, but warn
     }
-    // check mgmt socket exists
+    // check mgmt socket exists — brief wait for race (guest mgmt starts ~1-3s after DOCKER_READY)
     if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-        // check if VM running but mgmt not yet ready
-        if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) {
-            if !log.contains("HARPOON_MGMT_READY") {
-                cliError("Guest management service is not ready")
-                return 1
+        var waited = false
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.5)
+            if FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) { waited = true; break }
+            if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8), log.contains("HARPOON_MGMT_READY") {
+                // log says ready but socket not yet bridged — wait a bit more
+                continue
             }
         }
-        cliError("Guest management service is not ready")
-        return 1
+        if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
+            if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) {
+                if !log.contains("HARPOON_MGMT_READY") {
+                    cliError("Guest management service is not ready")
+                    if waited { cliError("hint: waited 5s, check harpoon logs for HARPOON_MGMT_START/READY") }
+                    return 1
+                }
+            }
+            cliError("Guest management service is not ready")
+            return 1
+        }
     }
     guard let fd = connectMgmtSocket() else {
         // distinguish: socket exists but connect failed = mgmt not ready vs connection failed
@@ -1560,8 +1571,15 @@ func handleShell(args: [String]) -> Int32 {
         return 1
     }
     if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-        cliError("Guest management service is not ready")
-        return 1
+        // brief wait matching mgmtExec
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.5)
+            if FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) { break }
+        }
+        if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
+            cliError("Guest management service is not ready")
+            return 1
+        }
     }
     guard let fd = connectMgmtSocket() else {
         cliError("Connection to guest management service failed")
@@ -1705,7 +1723,7 @@ func handleStart(args: [String]) -> Int32 {
             return 2
         }
         if bytes < RuntimeConfig.defaultProvisionBytes {
-            cliError("disk-size must be at least 8G, got \(ds) (\(bytes) bytes)")
+            cliError("disk-size must be at least 32G, got \(ds) (\(bytes) bytes)")
             return 2
         }
         if let existing = RuntimeConfig.existingUserDiskPath() {

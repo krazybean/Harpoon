@@ -55,6 +55,12 @@ if ! bash "$SCRIPT_DIR/verify-root.sh" "$OUT_DIR/harpoon-root.img" 2>&1; then
   exit 1
 fi
 
+# Run guest verification gate (mandatory tooling: resize2fs, mgmt, modules, ordering)
+if ! bash "$SCRIPT_DIR/verify-guest.sh" 2>&1; then
+  echo "[guest-builder] FAIL: guest verification gate failed — build must fail" >&2
+  exit 1
+fi
+
 # Hashes
 if command -v shasum >/dev/null 2>&1; then
   echo "[guest-builder] hashes:" >&2

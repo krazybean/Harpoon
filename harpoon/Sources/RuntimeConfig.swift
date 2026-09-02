@@ -279,12 +279,12 @@ struct RuntimeConfig {
 
     var diskLogicalBytes: UInt64 {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: diskURL.path),
-              let size = attrs[.size] as? UInt64 else { return 8 * 1024 * 1024 * 1024 } // default 8GiB (sparse)
+              let size = attrs[.size] as? UInt64 else { return 32 * 1024 * 1024 * 1024 } // default 32GiB (sparse)
         return size
     }
 
     // Stage 3C: disk size parsing and defaults (sparse)
-    static let defaultProvisionBytes: UInt64 = 8 * 1024 * 1024 * 1024 // 8 GiB logical minimum, sparse
+    static let defaultProvisionBytes: UInt64 = 32 * 1024 * 1024 * 1024 // 32 GiB logical sparse default (was 8G)
     static let minProvisionBytes: UInt64 = 2 * 1024 * 1024 * 1024 // must fit template contents (~500M) but enforce 8G for new
     static func parseDiskSize(_ s: String) -> UInt64? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

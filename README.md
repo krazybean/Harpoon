@@ -79,7 +79,7 @@ For component boundaries and transport details, see [Architecture](docs/architec
 
 - macOS on Apple Silicon, Xcode Command Line Tools, Rust stable (for building)
 - **Docker CLI required**, Docker Desktop **NOT required**. Docker Compose v2 plugin (`docker compose version`) required only for `compose` workflows. Harpoon discovers Docker via `PATH` → `/opt/homebrew/bin/docker` → `/usr/local/bin/docker` (Finder-safe) and creates/repairs context `harpoon` → `unix:///tmp/harpoon-docker.sock` without changing your default context (`harpoon docker setup`; desktop ensures on first use). If `~/.docker/config.json` contains `"credsStore":"desktop"` without `docker-credential-desktop`, `harpoon doctor` warns (Harpoon never deletes `credsStore`).
-- **Persistent storage**: immutable `assets/guest/harpoon-root.img` template (`2 GiB` sparse, `0/0/0`) → mutable `~/Library/.../harpoon-root.img` (grow-only sparse, never silently replaced). First provision **8 GiB** logical (`azure-sql-edge` exhausted 2G) via `harpoon start --disk-size 16G` or `harpoon config set disk-size`; grow via `harpoon disk resize 16G` (VM stopped, `truncate` + guest `resize2fs`, atomic, `backing>FS` retry).
+- **Persistent storage**: immutable `assets/guest/harpoon-root.img` template (`2 GiB` sparse, `0/0/0`) → mutable `~/Library/.../harpoon-root.img` (grow-only sparse, never silently replaced). First provision **32 GiB** logical sparse (`azure-sql-edge` exhausted 2G) via `harpoon start --disk-size 16G` or `harpoon config set disk-size`; grow via `harpoon disk resize 16G` (VM stopped, `truncate` + guest `resize2fs`, atomic, `backing>FS` retry).
 
 ## Quick Start
 
@@ -162,7 +162,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
 - **Distribution signing:** local ad-hoc signing with `com.apple.security.virtualization` (`codesign --verify --deep --strict` passes). Developer ID signing and Apple notarization are not complete for public Gatekeeper distribution.
 - **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
-- **Disk:** 2 GiB fixed sparse `harpoon-root.img` (APFS clone-aware, no growable resize in v0.1). Bounded at ~962 MiB–1.0 GiB allocated; `growable` was rejected intentionally.
+- **Disk:** 2 GiB template + 32 GiB sparse default `harpoon-root.img` (APFS clone-aware, growable via harpoon disk resize). Bounded at ~962 MiB–1.0 GiB allocated; `growable` was rejected intentionally.
 - **Network/FS:** explicit `127.0.0.1` HostIp binding deferred ( `0.0.0.0` → `127.0.0.1` is the safe default); `inotify` host→guest not propagated (documented).
 - **Memory reclamation:** virtiomem balloon device and guest driver present, but host-visible reclamation was not consistently demonstrated across the measured tiers; v0.1 does not market balloon as a guaranteed host RSS reduction.
 - **Sandbox on this dev host:** `~/Library/Application Support/Harpoon/data` creation is blocked by the host sandbox (`Operation not permitted`); production uses that path, with fallback to `/tmp/harpoon-runtime/data` for tests. Also, no universal performance guarantee beyond the observed environment.
