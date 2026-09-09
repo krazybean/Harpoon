@@ -364,22 +364,15 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
         }
     }
     let effectiveReady = dockerReady || (sockExists && logHasRunning)
+    // `run` is a supported foreground entrypoint and deliberately has no launcher
+    // metadata. Its exclusive lock is therefore the secondary liveness signal.
+    let activeRuntime = (alive && isHarpoon) || lockHeld
     let state: String
-    if pid == nil && !lockHeld && !sockExists {
-        state = "stopped"
-    } else if let _ = pid, alive, isHarpoon, sockExists, effectiveReady {
-        state = "running"
-    } else if let _ = pid, alive, isHarpoon, sockExists, !effectiveReady {
-        state = "starting"
-    } else if let _ = pid, alive, isHarpoon, !sockExists {
-        state = "starting"
-    } else if let _ = pid, alive, !isHarpoon {
+    if activeRuntime {
+        state = sockExists && effectiveReady ? "running" : "starting"
+    } else if pid != nil {
         state = "stale"
-    } else if pid != nil && !alive {
-        state = "stale"
-    } else if lockHeld && !alive {
-        state = "degraded"
-    } else if alive && !sockExists {
+    } else if sockExists {
         state = "degraded"
     } else {
         state = "stopped"
