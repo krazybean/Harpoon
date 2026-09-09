@@ -5,6 +5,7 @@
 ## Current Position
 
 - **Current phase:** v0.1.1 Stage 2 standalone — **IN PROGRESS — Harpoon.app self-contained (15.1 min, Swift 15.1 target, Frameworks RPATH, no spike, no repo, no XC hardcode; verify-bundle.sh)**; Stage 1 canonical guest path PASS, Release Tooling PASS, D1.1 PASS, core MVP+EC+UI COMPLETE
+- **v0.1.1 preserved-root module reconciliation:** **PASS** — canonical initramfs carries a hash/mode manifest for its complete bundled module closure and boot reconciles it atomically into preserved roots before `switch_root`. The disposable old-root migration regression proved in-place identity, immutable payload and NAT module/metadata restoration, Docker-canary preservation, management handoff, and idempotent second boot.
 - **Last completed milestone:** UI — Tauri UI (PASS — Tauri 2 + React-TS + Vite, 185kB dist, cargo check dev, status --json live, START_PASS 20:50:42Z running + EXPANSION + RESPONSIVENESS + BOOTSTRAP — resolver HARPOON_BIN/CARGO_MANIFEST_DIR/bundled/PATH + Docker resources + async cache/instant nav + bootstrap launching→ready/failed auto-start once + phase spinner + 750ms polling + per-action busy, no Sources redesign, no Redux, no launch agent)
 - **Next milestone:** UI Design / UX Polish — NEXT (Release Tooling PASS, do not begin Developer ID/notarization, updater, Homebrew, or UI redesign in this task)
 - **M17 status:** PASS — 8 functional acceptance demonstrated in preserved healthy 181158 (CLOCK_SYNC_PASS/STALE_CLEANUP_PASS/RESTART_RECOVERY_PASS/VZNAT_REBIND_PASS/DOCKERD_RECOVERY_PASS/FAILED_BOOT_RECOVERY_PASS/SOAK_PASS/DOCTOR_PASS 16 PASS, 0 warnings, 0 failures), PASS,completed suppressed solely by substring bug (`grep -q "FAIL"` matched `FAILED_BOOT_RECOVERY_PASS`) → fixed exact-field `awk -F, 'NR>1 && ($2=="FAIL" || $2~/_FAIL$/)'` yields PASS (9 rows); subsequent HOST_VZ_START_FAILURE retained as historical host-platform evidence (R1 5 paired cycles 10/10 implicates host/VZ state) — no Sources change, no preserved CSV fabrication
@@ -550,4 +551,3 @@ Keep out of active roadmap unless under clearly marked `Post-v0.1 / Non-Goal`:
 ## Changelog
 
 - 2026-08-26: Created `docs/roadmap.md` as canonical (no prior `docs/roadmap*` existed; `docs/mvp.md` narrow Must/Should remains, `docs/requirements.md` authoritative scope). Verified against live `harpoon/results/m13` (15 PASS startup, 0.446s container, 5/4/4s compose, 1s build) and `harpoon/results/m14` (distinct hashes `f9f0d4`/`0acca8`, source 2→10, paired harness 609 lines, host blocked).
-

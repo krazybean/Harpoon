@@ -105,7 +105,7 @@ REPOS2
       # Refresh immutable release payload; never touch Docker or user data paths.
       echo "HARPOON_RUNTIME_REFRESH_START" > /dev/hvc0
       RUNTIME_OK=1
-      for payload in init usr/local/bin/harpoon-mgmt usr/local/bin/harpoon-mgmt-wrapper usr/local/share/harpoon-runtime/python.manifest usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
+      for payload in init usr/local/bin/harpoon-mgmt usr/local/bin/harpoon-mgmt-wrapper usr/local/share/harpoon-runtime/python.manifest usr/local/share/harpoon-runtime/modules.manifest usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
         if [ -e "/$payload" ]; then
           mkdir -p "/newroot/$(dirname "$payload")" 2>&1 | tee /dev/hvc0 >/dev/null || true
           cp -a "/$payload" "/newroot/$payload" 2>&1 | tee /dev/hvc0 >/dev/null || { echo "HARPOON_RUNTIME_REFRESH_FAILED $payload" > /dev/hvc0; RUNTIME_OK=0; }
@@ -149,37 +149,41 @@ REPOS2
       echo "HARPOON_INIT_REFRESHED" > /dev/hvc0
       echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
       echo "HARPOON_RUNTIME_REFRESH_DONE" > /dev/hvc0
-      # Harpoon: always refresh final ext4 module tree to current initramfs (fixes stale harpoon-root.img incomplete module fileset)
-      # Do not wipe disk; copy the smallest coherent subtrees needed for Docker networking from same 6.12.94-0-virt modloop
-      # Exact paths verified from modloop (Phase 1): llc, stp, bridge, br_netfilter, veth, libcrc32c, etc. plus deps nf_defrag, etc.
       echo "HARPOON_MODULE_REFRESH_START" > /dev/hvc0
-      mkdir -p /newroot/lib/modules
-      # Remove stale incomplete tree and copy current coherent tree (initramfs has correct files + modules.dep)
-      rm -rf /newroot/lib/modules/6.12.94-0-virt
-      cp -a /lib/modules/6.12.94-0-virt /newroot/lib/modules/ 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_MODULE_REFRESH_FAILED" > /dev/hvc0
-      ls -lh /newroot/lib/modules/6.12.94-0-virt/kernel/net/llc/llc.ko /newroot/lib/modules/6.12.94-0-virt/kernel/lib/libcrc32c.ko /newroot/lib/modules/6.12.94-0-virt/kernel/drivers/net/veth.ko /newroot/lib/modules/6.12.94-0-virt/kernel/net/netfilter/x_tables.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+      MODULE_MANIFEST=/usr/local/share/harpoon-runtime/modules.manifest
+      if [ ! -s "$MODULE_MANIFEST" ]; then
+        echo "HARPOON_MODULE_REFRESH_FAILED missing module manifest" > /dev/hvc0
+        RUNTIME_OK=0
+      else
+        while read -r kind value mode path; do
+          case "$kind" in
+            F) [ -f "/$path" ] && [ "$(sha256sum "/$path" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -c '%a' "/$path")" = "$mode" ] || { echo "HARPOON_MODULE_REFRESH_FAILED source $path" > /dev/hvc0; RUNTIME_OK=0; } ;;
+            L) [ -L "/$mode" ] && [ "$(readlink "/$mode")" = "$value" ] || { echo "HARPOON_MODULE_REFRESH_FAILED source $mode" > /dev/hvc0; RUNTIME_OK=0; } ;;
+            *) echo "HARPOON_MODULE_REFRESH_FAILED invalid module manifest" > /dev/hvc0; RUNTIME_OK=0 ;;
+          esac
+        done < "$MODULE_MANIFEST"
+      fi
+      if [ "$RUNTIME_OK" -eq 1 ]; then
+        while read -r kind value mode path; do
+          [ "$kind" = L ] && { path="$mode"; mode=""; }
+          dest="/newroot/$path"
+          mkdir -p "$(dirname "$dest")" || { RUNTIME_OK=0; break; }
+          case "$kind" in
+            F)
+              [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -c '%a' "$dest")" = "$mode" ] && continue
+              tmp="$(dirname "$dest")/.$(basename "$dest").harpoon.$$"
+              cp -p "/$path" "$tmp" && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$value" ] && mv -f "$tmp" "$dest" && echo "HARPOON_MODULE_REFRESH_REPAIRED $path" > /dev/hvc0 || { rm -f "$tmp"; echo "HARPOON_MODULE_REFRESH_FAILED repair $path" > /dev/hvc0; RUNTIME_OK=0; }
+              ;;
+            L)
+              [ -L "$dest" ] && [ "$(readlink "$dest")" = "$value" ] && continue
+              tmp="$(dirname "$dest")/.$(basename "$dest").harpoon.$$"
+              ln -s "$value" "$tmp" && mv -f "$tmp" "$dest" && echo "HARPOON_MODULE_REFRESH_REPAIRED $path" > /dev/hvc0 || { rm -f "$tmp"; echo "HARPOON_MODULE_REFRESH_FAILED repair $path" > /dev/hvc0; RUNTIME_OK=0; }
+              ;;
+          esac
+        done < "$MODULE_MANIFEST"
+      fi
+      [ "$RUNTIME_OK" -eq 1 ] || { echo "HARPOON_DOCKER_FAILED module_refresh" > /dev/hvc0; while true; do sleep 5; echo "HARPOON_DOCKER_FAILED module_refresh" > /dev/hvc0; done; }
       echo "HARPOON_MODULE_REFRESH_DONE" > /dev/hvc0
-      # Verify FINAL ext4 root contains required files before switch_root (do not guess, fail if absent)
-      for modpath in kernel/net/llc/llc.ko kernel/net/802/stp.ko kernel/net/bridge/bridge.ko kernel/net/bridge/br_netfilter.ko kernel/drivers/net/veth.ko kernel/lib/libcrc32c.ko kernel/net/netfilter/nf_conntrack.ko kernel/net/netfilter/nf_nat.ko kernel/net/netfilter/x_tables.ko kernel/net/ipv4/netfilter/ip_tables.ko kernel/net/ipv4/netfilter/iptable_nat.ko kernel/net/ipv4/netfilter/iptable_filter.ko kernel/net/netfilter/xt_MASQUERADE.ko kernel/net/netfilter/xt_addrtype.ko kernel/net/netfilter/xt_conntrack.ko kernel/net/netfilter/xt_comment.ko kernel/net/netfilter/xt_tcpudp.ko kernel/net/ipv4/netfilter/nf_defrag_ipv4.ko kernel/net/ipv6/netfilter/nf_defrag_ipv6.ko kernel/lib/crc16.ko kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko kernel/fs/ext4/ext4.ko kernel/net/vmw_vsock/vsock.ko kernel/fs/fuse/fuse.ko kernel/fs/fuse/virtiofs.ko kernel/drivers/virtio/virtio_balloon.ko; do
-        if [ -f "/newroot/lib/modules/6.12.94-0-virt/$modpath" ]; then
-          echo "HARPOON_MODULE_FILE $modpath OK" > /dev/hvc0
-        else
-          echo "HARPOON_MODULE_FILE $modpath MISSING" > /dev/hvc0
-        fi
-      done
-      # Mandatory gates (spec Phase 3): llc, veth, libcrc32c, x_tables
-      for req in llc veth libcrc32c x_tables; do
-        case "$req" in
-          llc) f="kernel/net/llc/llc.ko" ;;
-          veth) f="kernel/drivers/net/veth.ko" ;;
-          libcrc32c) f="kernel/lib/libcrc32c.ko" ;;
-          x_tables) f="kernel/net/netfilter/x_tables.ko" ;;
-        esac
-        if [ ! -f "/newroot/lib/modules/6.12.94-0-virt/$f" ]; then
-          echo "HARPOON_DOCKER_FAILED module_file_missing $f" > /dev/hvc0
-          while true; do sleep 5; echo "HARPOON_DOCKER_FAILED module_file_missing $f" > /dev/hvc0; done
-        fi
-      done
       # Prepare newroot mounts for switch_root
       mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/tmp /newroot/run
       mount --move /proc /newroot/proc 2>&1 | tee /dev/hvc0 >/dev/null || mount -t proc none /newroot/proc 2>&1 | tee /dev/hvc0 >/dev/null || true

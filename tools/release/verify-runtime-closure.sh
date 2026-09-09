@@ -151,6 +151,24 @@ if [ -f "$INITRAMFS" ]; then
   else
     fail "initramfs Python runtime manifest missing"
   fi
+  MODULE_MANIFEST="$INIT_DIR/usr/local/share/harpoon-runtime/modules.manifest"
+  if [ -s "$MODULE_MANIFEST" ]; then
+    MODULE_MANIFEST_OK=1
+    while read -r kind value mode path; do
+      case "$kind" in
+        F) [ -f "$INIT_DIR/$path" ] && [ "$(shasum -a 256 "$INIT_DIR/$path" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -f '%Lp' "$INIT_DIR/$path" 2>/dev/null || stat -c '%a' "$INIT_DIR/$path")" = "$mode" ] || MODULE_MANIFEST_OK=0 ;;
+        L) [ -L "$INIT_DIR/$mode" ] && [ "$(readlink "$INIT_DIR/$mode")" = "$value" ] || MODULE_MANIFEST_OK=0 ;;
+        *) MODULE_MANIFEST_OK=0 ;;
+      esac
+    done < "$MODULE_MANIFEST"
+    find "$MODULE_DIR" \( -type f -o -type l \) -print | sed "s#^$INIT_DIR/##" | LC_ALL=C sort > "$INIT_DIR/module-files"
+    awk '$1=="F" {print $4} $1=="L" {print $3}' "$MODULE_MANIFEST" | LC_ALL=C sort > "$INIT_DIR/manifest-files"
+    cmp -s "$INIT_DIR/module-files" "$INIT_DIR/manifest-files" || MODULE_MANIFEST_OK=0
+    [ "$MODULE_MANIFEST_OK" -eq 1 ] && pass "initramfs module manifest covers closure" || fail "initramfs module manifest mismatch"
+  else
+    fail "initramfs module manifest missing"
+  fi
+  if grep -q 'modules.manifest' "$INIT_SRC" && grep -q 'HARPOON_DOCKER_FAILED module_refresh' "$INIT_SRC"; then pass "init reconciles module closure fail-loud"; else fail "init module reconciliation missing"; fi
   if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then pass "mgmt listener uses wrapper"; else fail "mgmt listener bypasses wrapper"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
   for mod in af_packet nfnetlink nf_tables nft_compat nft_chain_nat xt_nat xt_REDIRECT xt_MASQUERADE; do

@@ -68,6 +68,23 @@ if [ -f "$INITRAMFS" ]; then
     echo "[verify-guest] FAIL: Python runtime manifest missing in initramfs" >&2; FAIL=1
   fi
   MODULE_DIR=$(find "$GUEST_TMPDIR/lib/modules" -mindepth 1 -maxdepth 1 -type d | head -n1)
+  MODULE_MANIFEST="$GUEST_TMPDIR/usr/local/share/harpoon-runtime/modules.manifest"
+  if [ -s "$MODULE_MANIFEST" ]; then
+    MODULE_MANIFEST_OK=1
+    while read -r kind value mode path; do
+      case "$kind" in
+        F) [ -f "$GUEST_TMPDIR/$path" ] && [ "$(shasum -a 256 "$GUEST_TMPDIR/$path" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -f '%Lp' "$GUEST_TMPDIR/$path" 2>/dev/null || stat -c '%a' "$GUEST_TMPDIR/$path")" = "$mode" ] || MODULE_MANIFEST_OK=0 ;;
+        L) [ -L "$GUEST_TMPDIR/$mode" ] && [ "$(readlink "$GUEST_TMPDIR/$mode")" = "$value" ] || MODULE_MANIFEST_OK=0 ;;
+        *) MODULE_MANIFEST_OK=0 ;;
+      esac
+    done < "$MODULE_MANIFEST"
+    find "$MODULE_DIR" \( -type f -o -type l \) -print | sed "s#^$GUEST_TMPDIR/##" | LC_ALL=C sort > "$GUEST_TMPDIR/module-files"
+    awk '$1=="F" {print $4} $1=="L" {print $3}' "$MODULE_MANIFEST" | LC_ALL=C sort > "$GUEST_TMPDIR/manifest-files"
+    cmp -s "$GUEST_TMPDIR/module-files" "$GUEST_TMPDIR/manifest-files" || MODULE_MANIFEST_OK=0
+    [ "$MODULE_MANIFEST_OK" -eq 1 ] && echo "[verify-guest] PASS: module manifest covers initramfs closure" >&2 || { echo "[verify-guest] FAIL: module manifest mismatch" >&2; FAIL=1; }
+  else
+    echo "[verify-guest] FAIL: module manifest missing in initramfs" >&2; FAIL=1
+  fi
   CHECKED="$GUEST_TMPDIR/.checked-modules"
   verify_path() {
     local path="$1" dep

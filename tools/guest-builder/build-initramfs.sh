@@ -241,7 +241,18 @@ if [ -n "${ENGINE:-}" ] && docker_cmd info >/dev/null 2>&1; then
       fi
     done < "$REQUIRED_FEATURES"
     rm -f "$COPIED_MODULES"
-    # Ensure modules.dep is correct for copied subset (keep original)
+    # Record the exact bundled module closure, including modprobe metadata.
+    mkdir -p "$STAGING/usr/local/share/harpoon-runtime"
+    MODULE_MANIFEST="$STAGING/usr/local/share/harpoon-runtime/modules.manifest"
+    {
+      find "$STAGING/lib/modules/$KVER" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+        printf "F %s %s %s\\n" "$(sha256sum "$path" | cut -d" " -f1)" "$(stat -c %a "$path")" "${path#$STAGING/}"
+      done
+      find "$STAGING/lib/modules/$KVER" -type l -print | LC_ALL=C sort | while IFS= read -r path; do
+        printf "L %s %s\\n" "$(readlink "$path")" "${path#$STAGING/}"
+      done
+    } > "$MODULE_MANIFEST"
+    [ "$(grep -c "^F " "$MODULE_MANIFEST")" -gt 0 ] || { echo "[rebuild] FAIL empty module manifest" >&2; exit 1; }
     # Copy harpoon init and management handoff
     cp -a "/repo/tools/guest-builder/src/init" "$STAGING/init"
     chmod +x "$STAGING/init"
