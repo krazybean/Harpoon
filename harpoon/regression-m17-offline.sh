@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ponytail: offline 16G/2G filesystem reconciliation + python/mgmt closure — structural + executable proof, not live VZ
-# Proves resize2fs + Docker + python3/harpoon-mgmt are runnable offline and expands 2G FS to ~16G without network
+# Proves resize2fs + dumpe2fs + Docker + python3/harpoon-mgmt are runnable offline and expands 2G FS to 16G without network
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
@@ -56,14 +56,35 @@ RESIZE2FS=""
 for cand in /opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/resize2fs /opt/homebrew/bin/resize2fs /usr/local/bin/resize2fs /sbin/resize2fs; do
   if [ -x "$cand" ]; then RESIZE2FS="$cand"; break; fi
 done
-if [ -z "$RESIZE2FS" ]; then
-  say "WARN: no host resize2fs, skipping executable expansion test"
-  pass "M17-EXPAND-SKIP" "no host resize2fs"
+DUMPE2FS=""
+for cand in /opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/dumpe2fs /opt/homebrew/bin/dumpe2fs /usr/local/bin/dumpe2fs /sbin/dumpe2fs; do
+  if [ -x "$cand" ]; then DUMPE2FS="$cand"; break; fi
+done
+if [ -z "$RESIZE2FS" ] || [ -z "$DUMPE2FS" ]; then
+  say "WARN: no host resize2fs/dumpe2fs, skipping executable geometry test"
+  pass "M17-GEOMETRY-SKIP" "no host resize2fs/dumpe2fs"
 else
-  say "harness: 2G -> 16G expand via $RESIZE2FS"
+  say "harness: exact 16G geometry via $RESIZE2FS + $DUMPE2FS"
   WORK=$(mktemp -d)
   cp "$ROOT_IMG" "$WORK/test.img"
-  truncate -s 16G "$WORK/test.img"
+  truncate -s 17179869184 "$WORK/test.img"
+  DEV_BYTES=17179869184
+  DF_VISIBLE_BYTES=16831696896
+  OLD_EXPECTED=$((DEV_BYTES - DEV_BYTES / 50))
+  if [ "$DF_VISIBLE_BYTES" -lt "$OLD_EXPECTED" ]; then
+    pass "M17-OLD-DF-FALSE-NEGATIVE" "df=$DF_VISIBLE_BYTES < old_expected=$OLD_EXPECTED"
+  else
+    fail "M17-OLD-DF-FALSE-NEGATIVE" "old df check did not reject observed geometry"
+  fi
+  BLOCKS=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | awk '/^Block count:/{print $3}')
+  BLOCKSIZE=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | awk '/^Block size:/{print $3}')
+  SIZE=$((BLOCKS * BLOCKSIZE))
+  ALIGNED=$(((DEV_BYTES / BLOCKSIZE) * BLOCKSIZE))
+  if [ "$SIZE" -lt "$ALIGNED" ]; then
+    pass "M17-GEOMETRY-NEGATIVE" "2G ext4 geometry=$SIZE remains below 16G=$ALIGNED"
+  else
+    fail "M17-GEOMETRY-NEGATIVE" "unresized ext4 geometry=$SIZE unexpectedly fills device"
+  fi
   if "$RESIZE2FS" -f "$WORK/test.img" 2>&1 | head -n 20 | tee "$RESULT_DIR/resize.log" | grep -q "nothing to do\|resizing"; then
     pass "M17-RESIZE" "resize2fs executed"
   else
@@ -72,16 +93,15 @@ else
       pass "M17-RESIZE" "resize2fs attempted"
     fi
   fi
-  if command -v dumpe2fs >/dev/null 2>&1 || [ -x /opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/dumpe2fs ]; then
-    DUMPE2FS="/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/dumpe2fs"
-    BLOCKS=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | grep "Block count:" | awk '{print $3}' || echo 0)
-    BLOCKSIZE=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | grep "Block size:" | awk '{print $3}' || echo 4096)
-    SIZE=$((BLOCKS * BLOCKSIZE))
-    say "result blocks=$BLOCKS size=$SIZE"
-    if [ "$SIZE" -gt 16000000000 ]; then pass "M17-VERIFY" "expanded to ~16G $SIZE"; else fail "M17-VERIFY" "not expanded $SIZE"; fi
+  BLOCKS=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | awk '/^Block count:/{print $3}')
+  BLOCKSIZE=$($DUMPE2FS -h "$WORK/test.img" 2>/dev/null | awk '/^Block size:/{print $3}')
+  SIZE=$((BLOCKS * BLOCKSIZE))
+  ALIGNED=$(((DEV_BYTES / BLOCKSIZE) * BLOCKSIZE))
+  say "result blocks=$BLOCKS block_size=$BLOCKSIZE geometry=$SIZE expected=$ALIGNED"
+  if [ "$SIZE" -ge "$ALIGNED" ]; then
+    pass "M17-GEOMETRY-POSITIVE" "resized ext4 geometry=$SIZE fills aligned 16G=$ALIGNED"
   else
-    say "no dumpe2fs, checking via debugfs"
-    /opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/debugfs -R "stats" "$WORK/test.img" 2>&1 | grep -q "16G\|4194304" && pass "M17-VERIFY" "expanded" || pass "M17-VERIFY-SKIP" "no verifier"
+    fail "M17-GEOMETRY-POSITIVE" "resized ext4 geometry=$SIZE does not fill aligned 16G=$ALIGNED"
   fi
   rm -rf "$WORK"
 fi

@@ -199,43 +199,59 @@ if echo "$ROOTFS_T2" | grep -qE "tmpfs|rootfs"; then
 fi
 echo "HARPOON_DOCKER_INIT_START" > /dev/hvc0
 # --- Stage 3C offline filesystem reconciliation (MUST happen BEFORE any network/apk, offline self-contained) ---
+harpoon_reconcile_ext4() {
+  DEV="$1"
+  DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+  DF_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
+  if [ -z "$DF_BYTES" ]; then DF_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+  EXT4_BLOCKS=$(dd if="$DEV" bs=1 skip=1028 count=4 2>/dev/null | od -An -t u4 | tr -d ' ')
+  EXT4_LOG_BLOCK_SIZE=$(dd if="$DEV" bs=1 skip=1048 count=4 2>/dev/null | od -An -t u4 | tr -d ' ')
+  EXT4_MAGIC=$(dd if="$DEV" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x2 | tr -d ' ')
+  if [ -z "$DEV_BYTES" ] || [ -z "$EXT4_BLOCKS" ] || [ -z "$EXT4_LOG_BLOCK_SIZE" ] || [ "$EXT4_MAGIC" != "ef53" ] || [ "$DEV_BYTES" -le 0 ] || [ "$EXT4_BLOCKS" -le 0 ] || [ "$EXT4_LOG_BLOCK_SIZE" -gt 6 ]; then
+    echo "HARPOON_DOCKER_FAILED ext4_geometry_unreadable dev=$DEV dev_bytes=$DEV_BYTES blocks=$EXT4_BLOCKS log_block_size=$EXT4_LOG_BLOCK_SIZE magic=$EXT4_MAGIC" > /dev/hvc0
+    while true; do sleep 5; echo "HARPOON_DOCKER_FAILED ext4_geometry_unreadable" > /dev/hvc0; done
+  fi
+  EXT4_BLOCK_SIZE=$((1024 << EXT4_LOG_BLOCK_SIZE))
+  EXT4_BYTES=$((EXT4_BLOCKS * EXT4_BLOCK_SIZE))
+  DEV_ALIGNED_BYTES=$(((DEV_BYTES / EXT4_BLOCK_SIZE) * EXT4_BLOCK_SIZE))
+  echo "HARPOON_DISK_GEOMETRY dev=$DEV_BYTES df=$DF_BYTES blocks=$EXT4_BLOCKS block_size=$EXT4_BLOCK_SIZE fs_geometry=$EXT4_BYTES expected=$DEV_ALIGNED_BYTES" > /dev/hvc0
+  if [ "$EXT4_BYTES" -lt "$DEV_ALIGNED_BYTES" ]; then
+    echo "HARPOON_DISK_RESIZE needed $EXT4_BYTES -> $DEV_ALIGNED_BYTES" > /dev/hvc0
+    if ! command -v resize2fs >/dev/null 2>&1; then
+      echo "HARPOON_DOCKER_FAILED missing_binary resize2fs PATH=$PATH" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED missing_binary resize2fs" > /dev/hvc0; done
+    fi
+    if ! resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null; then
+      echo "HARPOON_DOCKER_FAILED resize2fs failed dev=$DEV geometry=$EXT4_BYTES -> $DEV_ALIGNED_BYTES" > /dev/hvc0
+      echo "HARPOON_DISK_RESIZE_FAILED dev=$DEV" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs failed" > /dev/hvc0; done
+    fi
+    EXT4_BLOCKS=$(dd if="$DEV" bs=1 skip=1028 count=4 2>/dev/null | od -An -t u4 | tr -d ' ')
+    EXT4_LOG_BLOCK_SIZE=$(dd if="$DEV" bs=1 skip=1048 count=4 2>/dev/null | od -An -t u4 | tr -d ' ')
+    EXT4_MAGIC=$(dd if="$DEV" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x2 | tr -d ' ')
+    if [ -z "$EXT4_BLOCKS" ] || [ -z "$EXT4_LOG_BLOCK_SIZE" ] || [ "$EXT4_MAGIC" != "ef53" ] || [ "$EXT4_BLOCKS" -le 0 ] || [ "$EXT4_LOG_BLOCK_SIZE" -gt 6 ]; then
+      echo "HARPOON_DOCKER_FAILED ext4_geometry_unreadable_after_resize dev=$DEV" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED ext4_geometry_unreadable_after_resize" > /dev/hvc0; done
+    fi
+    EXT4_BLOCK_SIZE=$((1024 << EXT4_LOG_BLOCK_SIZE))
+    EXT4_BYTES=$((EXT4_BLOCKS * EXT4_BLOCK_SIZE))
+    DEV_ALIGNED_BYTES=$(((DEV_BYTES / EXT4_BLOCK_SIZE) * EXT4_BLOCK_SIZE))
+    echo "HARPOON_DISK_RESIZED blocks=$EXT4_BLOCKS block_size=$EXT4_BLOCK_SIZE fs_geometry=$EXT4_BYTES expected=$DEV_ALIGNED_BYTES" > /dev/hvc0
+    if [ "$EXT4_BYTES" -lt "$DEV_ALIGNED_BYTES" ]; then
+      echo "HARPOON_DOCKER_FAILED resize2fs incomplete fs_geometry=$EXT4_BYTES dev=$DEV_BYTES expected=$DEV_ALIGNED_BYTES" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs incomplete" > /dev/hvc0; done
+    fi
+  else
+    echo "HARPOON_DISK_NO_RESIZE" > /dev/hvc0
+  fi
+}
+
 echo "HARPOON_DISK_CHECK_START" > /dev/hvc0
 DEV="/dev/vda"
 if [ ! -b "$DEV" ] && [ -b "/dev/vda1" ]; then DEV="/dev/vda1"; fi
 if [ -b "$DEV" ]; then
   echo "HARPOON_DISK_CHECK $DEV" > /dev/hvc0
-  DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
-  FS_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
-  if [ -z "$FS_BYTES" ]; then FS_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
-  echo "HARPOON_DISK_SIZES dev=$DEV_BYTES fs=$FS_BYTES" > /dev/hvc0
-  if [ -n "$DEV_BYTES" ] && [ -n "$FS_BYTES" ] && [ "$DEV_BYTES" -gt 0 ] && [ "$FS_BYTES" -gt 0 ] && [ "$DEV_BYTES" -gt "$FS_BYTES" ]; then
-    echo "HARPOON_DISK_RESIZE needed $FS_BYTES -> $DEV_BYTES" > /dev/hvc0
-    if ! command -v resize2fs >/dev/null 2>&1; then
-      echo "HARPOON_DOCKER_FAILED missing_binary resize2fs PATH=$PATH" > /dev/hvc0
-      ls -l /usr/sbin/resize2fs /sbin/resize2fs /usr/bin/resize2fs /bin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
-      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED missing_binary resize2fs" > /dev/hvc0; done
-    fi
-    echo "HARPOON_BIN_RESIZE2FS $(command -v resize2fs)" > /dev/hvc0
-    echo "HARPOON_APK_RESIZE2FS_VERSION $(resize2fs -V 2>&1 | head -n 1)" > /dev/hvc0
-    if ! resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null; then
-      echo "HARPOON_DOCKER_FAILED resize2fs failed dev=$DEV fs=$FS_BYTES -> $DEV_BYTES" > /dev/hvc0
-      echo "HARPOON_DISK_RESIZE_FAILED dev=$DEV" > /dev/hvc0
-      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs failed" > /dev/hvc0; done
-    fi
-    FS2=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | head -n 1)
-    if [ -z "$FS2" ]; then FS2=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
-    echo "HARPOON_DISK_RESIZED fs_new=$FS2 dev=$DEV_BYTES" > /dev/hvc0
-    if [ -n "$FS2" ] && [ "$FS2" -lt "$DEV_BYTES" ]; then
-      SLACK=$((DEV_BYTES / 50))
-      EXPECTED=$((DEV_BYTES - SLACK))
-      if [ "$FS2" -lt "$EXPECTED" ]; then
-        echo "HARPOON_DOCKER_FAILED resize2fs incomplete fs=$FS2 dev=$DEV_BYTES expected~$EXPECTED" > /dev/hvc0
-        while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs incomplete" > /dev/hvc0; done
-      fi
-    fi
-  else
-    echo "HARPOON_DISK_NO_RESIZE" > /dev/hvc0
-  fi
+  harpoon_reconcile_ext4 "$DEV"
 else
   echo "HARPOON_DISK_CHECK no block $DEV" > /dev/hvc0
   echo "HARPOON_DOCKER_FAILED no block device $DEV for filesystem reconciliation" > /dev/hvc0
@@ -614,32 +630,7 @@ DEV="/dev/vda"
 if [ ! -b "$DEV" ] && [ -b "/dev/vda1" ]; then DEV="/dev/vda1"; fi
 if [ -b "$DEV" ]; then
   echo "HARPOON_DISK_CHECK $DEV" > /dev/hvc0
-  DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
-  FS_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
-  if [ -z "$FS_BYTES" ]; then FS_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
-  echo "HARPOON_DISK_SIZES dev=$DEV_BYTES fs=$FS_BYTES" > /dev/hvc0
-  if [ -n "$DEV_BYTES" ] && [ -n "$FS_BYTES" ] && [ "$DEV_BYTES" -gt 0 ] && [ "$FS_BYTES" -gt 0 ] && [ "$DEV_BYTES" -gt "$FS_BYTES" ]; then
-    echo "HARPOON_DISK_RESIZE needed $FS_BYTES -> $DEV_BYTES" > /dev/hvc0
-    if ! resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null; then
-      echo "HARPOON_DOCKER_FAILED resize2fs failed dev=$DEV fs=$FS_BYTES -> $DEV_BYTES" > /dev/hvc0
-      echo "HARPOON_DISK_RESIZE_FAILED dev=$DEV" > /dev/hvc0
-      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs failed" > /dev/hvc0; done
-    fi
-    FS2=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | head -n 1)
-    if [ -z "$FS2" ]; then FS2=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
-    echo "HARPOON_DISK_RESIZED fs_new=$FS2 dev=$DEV_BYTES" > /dev/hvc0
-    if [ -n "$FS2" ] && [ "$FS2" -lt "$DEV_BYTES" ]; then
-      # Due to ext4 overhead, FS may be slightly smaller than block, allow ~2% slack
-      SLACK=$((DEV_BYTES / 50))
-      EXPECTED=$((DEV_BYTES - SLACK))
-      if [ "$FS2" -lt "$EXPECTED" ]; then
-        echo "HARPOON_DOCKER_FAILED resize2fs incomplete fs=$FS2 dev=$DEV_BYTES expected~$EXPECTED" > /dev/hvc0
-        while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs incomplete" > /dev/hvc0; done
-      fi
-    fi
-  else
-    echo "HARPOON_DISK_NO_RESIZE" > /dev/hvc0
-  fi
+  harpoon_reconcile_ext4 "$DEV"
 else
   echo "HARPOON_DISK_CHECK no block $DEV" > /dev/hvc0
   echo "HARPOON_DOCKER_FAILED no block device $DEV for filesystem reconciliation" > /dev/hvc0
