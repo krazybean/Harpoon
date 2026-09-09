@@ -122,72 +122,59 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     MODLOOP_TMP=$(mktemp -d)
     unsquashfs -f -d "$MODLOOP_TMP/modloop" "$CACHE/modloop-virt" > /dev/null
     # Find kernel version dir
-    KVER=$(ls "$MODLOOP_TMP/modloop/lib/modules" | head -n1)
+    MODULES_DIR="$MODLOOP_TMP/modloop/modules"
+    KVER=$(ls "$MODULES_DIR" | head -n1)
     echo "[rebuild] kernel $KVER" >&2
     # Create modules dir in staging
     mkdir -p "$STAGING/lib/modules/$KVER"
     # Copy modules.dep and related metadata first
-    cp -a "$MODLOOP_TMP/modloop/lib/modules/$KVER"/modules.* "$STAGING/lib/modules/$KVER/" 2>/dev/null || true
-    # Determine required modules via dependency walk (virtio, vsock, etc)
-    # Use modprobe --show-depends inside staging via chroot or via parsing modules.dep
-    # Simpler: copy known required set plus dependencies via modules.dep
-    REQ_MODS="
-      kernel/drivers/virtio/virtio.ko
-      kernel/drivers/virtio/virtio_ring.ko
-      kernel/drivers/virtio/virtio_pci.ko
-      kernel/drivers/virtio/virtio_mmio.ko
-      kernel/drivers/block/virtio_blk.ko
-      kernel/drivers/net/virtio_net.ko
-      kernel/drivers/char/virtio_console.ko
-      kernel/fs/fuse/virtiofs.ko
-      kernel/net/vmw_vsock/vsock.ko
-      kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko
-      kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko
-      kernel/net/vmw_vsock/vsock_diag.ko
-      kernel/net/vmw_vsock/vsock_loopback.ko
-      kernel/drivers/gpu/drm/virtio/virtio-gpu.ko
-      kernel/drivers/char/hw_random/virtio-rng.ko
-      kernel/drivers/virtio/virtio_balloon.ko
-      kernel/drivers/virtio/virtio_mem.ko
-      kernel/lib/libcrc32c.ko
-      kernel/net/llc/llc.ko
-      kernel/net/netfilter/x_tables.ko
-      kernel/drivers/net/veth.ko
-    "
-    # Helper to copy module and its dependencies via modules.dep
-    copy_mod_with_deps() {
-      local mod="$1"
-      local dep_file="$STAGING/lib/modules/$KVER/modules.dep"
-      # Find line for mod
-      if [ -f "$dep_file" ]; then
-        local line=$(grep -F "$mod:" "$dep_file" 2>/dev/null | head -n1 || true)
-        if [ -n "$line" ]; then
-          # line is like "kernel/.../virtio.ko: kernel/.../virtio_ring.ko ..."
-          local deps=$(echo "$line" | cut -d: -f2)
-          for d in $deps; do
-            d=$(echo "$d" | xargs)
-            if [ -n "$d" ]; then
-              local src="$MODLOOP_TMP/modloop/lib/modules/$KVER/$d"
-              local dst="$STAGING/lib/modules/$KVER/$d"
-              if [ -f "$src" ] && [ ! -f "$dst" ]; then
-                mkdir -p "$(dirname "$dst")"
-                cp -a "$src" "$dst"
-                # recursively copy deps of dep (simple: grep again)
-                # For ponytail, one level is enough for virtio stack
-              fi
-            fi
-          done
-        fi
+    cp -a "$MODULES_DIR/$KVER"/modules.* "$STAGING/lib/modules/$KVER/" 2>/dev/null || true
+    REQUIRED_MODULES="/repo/tools/guest-builder/required-modules.txt"
+    REQUIRED_FEATURES="/repo/tools/guest-builder/required-kernel-features.txt"
+    FEATURE_MODULES="/repo/tools/guest-builder/kernel-feature-modules.txt"
+    COPIED_MODULES="$STAGING/.harpoon-modules"
+    resolve_module() {
+      local name="$1" path alias
+      path=$(find "$MODULES_DIR/$KVER" -type f -name "$name.ko" | sed "s#^$MODULES_DIR/$KVER/##" | LC_ALL=C sort | head -n1)
+      if [ -z "$path" ]; then
+        alias=$(awk -v name="$name" "\$1==\"alias\" && \$2==name {print \$3; exit}" "$MODULES_DIR/$KVER/modules.alias")
+        [ -n "$alias" ] && path=$(find "$MODULES_DIR/$KVER" -type f -name "$alias.ko" | sed "s#^$MODULES_DIR/$KVER/##" | LC_ALL=C sort | head -n1)
       fi
-      # Copy the module itself
-      local src="$MODLOOP_TMP/modloop/lib/modules/$KVER/$mod"
-      local dst="$STAGING/lib/modules/$KVER/$mod"
-      if [ -f "$src" ]; then
-        mkdir -p "$(dirname "$dst")"
-        cp -a "$src" "$dst"
-      fi
+      [ -n "$path" ] || { echo "[rebuild] FAIL unresolved required module: $name" >&2; return 1; }
+      echo "$path"
     }
-    for m in $REQ_MODS; do copy_mod_with_deps "$m"; done
+    copy_module() {
+      local path="$1" dep
+      grep -qxF "$path" "$COPIED_MODULES" 2>/dev/null && return
+      echo "$path" >> "$COPIED_MODULES"
+      for dep in $(awk -v path="$path" "\$1==path \":\" {for(i=2;i<=NF;i++) print \$i}" "$MODULES_DIR/$KVER/modules.dep"); do
+        [ -f "$MODULES_DIR/$KVER/$dep" ] || { echo "[rebuild] FAIL missing dependency $dep for $path" >&2; exit 1; }
+        copy_module "$dep"
+      done
+      mkdir -p "$(dirname "$STAGING/lib/modules/$KVER/$path")"
+      cp -a "$MODULES_DIR/$KVER/$path" "$STAGING/lib/modules/$KVER/$path"
+    }
+    feature_module() {
+      awk -v feature="$1" '$1==feature {print $2; exit}' "$FEATURE_MODULES"
+    }
+    while IFS= read -r mod; do
+      case "$mod" in ''|'#'*) continue ;; esac
+      path=$(resolve_module "$mod") || exit 1
+      copy_module "$path"
+    done < "$REQUIRED_MODULES"
+    while IFS= read -r feature; do
+      case "$feature" in ''|'#'*) continue ;; esac
+      mod=$(feature_module "$feature")
+      [ -n "$mod" ] || { echo "[rebuild] FAIL required kernel feature $feature has no module mapping" >&2; exit 1; }
+      if grep -q "/$mod\\.ko$" "$MODULES_DIR/$KVER/modules.builtin"; then
+        echo "[rebuild] kernel feature $feature=y" >&2
+      else
+        path=$(resolve_module "$mod") || { echo "[rebuild] FAIL required kernel feature $feature is unset" >&2; exit 1; }
+        echo "[rebuild] kernel feature $feature=m ($mod)" >&2
+        copy_module "$path"
+      fi
+    done < "$REQUIRED_FEATURES"
+    rm -f "$COPIED_MODULES"
     # Ensure modules.dep is correct for copied subset (keep original)
     # Copy harpoon init and mgmt
     cp -a "/repo/tools/guest-builder/src/init" "$STAGING/init"

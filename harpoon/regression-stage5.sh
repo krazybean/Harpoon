@@ -314,6 +314,11 @@ if [ "$LIVE" -eq 1 ]; then
     else
       fail "R5-10-EXEC" "harpoon exec failed"
     fi
+    if "$BIN" exec -- python3 -c 'import os,pty; master,slave=pty.openpty(); os.close(master); os.close(slave)' 2>&1; then
+      pass "R5-LIVE-PTY" "guest devpts supports pty.openpty"
+    else
+      fail "R5-LIVE-PTY" "guest pty.openpty failed"
+    fi
     # Test disk status
     if "$BIN" disk status 2>&1 | grep -q "Logical capacity"; then
       pass "R5-LIVE-STATUS" "disk status works"
@@ -331,6 +336,7 @@ else
   skip "R5-LIVE-DOCKER" "needs --live"
   skip "R5-LIVE-32G" "needs --live"
   skip "R5-10-EXEC" "needs --live"
+  skip "R5-LIVE-PTY" "needs --live"
   skip "R5-LIVE-STATUS" "needs --live"
 fi
 

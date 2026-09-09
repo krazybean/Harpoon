@@ -165,13 +165,17 @@ REPOS2
         exec chroot /newroot /init
       fi
     else
-      echo "HARPOON_BLOCK_MOUNT_FAILED" > /dev/hvc0
+      echo "HARPOON_ROOT_MOUNT_FAILED dev=/dev/vda target=/newroot" > /dev/hvc0
+      echo "HARPOON_DOCKER_FAILED root_mount_failed" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED root_mount_failed" > /dev/hvc0; done
     fi
   else
     echo "HARPOON_BLOCK_NO_DEVICE" > /dev/hvc0
   fi
 fi
 # If we reach here, we are on block-backed root (ext4) — confirm
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null || true
 # Phase 1 — Confirm root filesystem (now should be ext4 after pivot)
 echo "HARPOON_ROOTFS" > /dev/hvc0
 mount 2>&1 | grep ' on / ' | tee /dev/hvc0 >/dev/null || mount | tee /dev/hvc0 >/dev/null || true
@@ -868,6 +872,7 @@ if [ $READY -eq 1 ]; then
         sleep 1
         if kill -0 $MGMT_PID 2>/dev/null; then
           # Probe vsock actually listening (netstat or ss if available, else check via python preflight)
+          echo "HARPOON_MGMT_LISTENER_READY" > /dev/hvc0
           echo "HARPOON_MGMT_READY" > /dev/hvc0
           echo "mgmt vsock 2377 pid=$MGMT_PID attempt=$attempt" > /dev/hvc0
           ls -l /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true

@@ -1,0 +1,35 @@
+# Root filesystem
+virtio_blk
+crc16
+mbcache
+jbd2
+ext4
+crc32c
+
+# Docker networking and storage
+bridge
+br_netfilter
+veth
+overlay
+nf_conntrack
+nf_nat
+x_tables
+ip_tables
+iptable_nat
+iptable_filter
+xt_MASQUERADE
+xt_addrtype
+xt_conntrack
+xt_comment
+xt_tcpudp
+
+# VirtioFS, balloon, network, and vsock
+fuse
+virtiofs
+virtio_balloon
+failover
+net_failover
+virtio_net
+vsock
+vmw_vsock_virtio_transport_common
+vmw_vsock_virtio_transport

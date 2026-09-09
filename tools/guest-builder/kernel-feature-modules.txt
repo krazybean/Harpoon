@@ -1,0 +1,5 @@
+# CONFIG feature to implementing module for modular kernels.
+CONFIG_PACKET af_packet
+CONFIG_NF_TABLES nf_tables
+CONFIG_NFT_CHAIN_NAT nft_chain_nat
+CONFIG_NFT_COMPAT nft_compat

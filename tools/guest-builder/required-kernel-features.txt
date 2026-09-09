@@ -1,0 +1,5 @@
+# Guest user-space kernel capabilities required at boot.
+CONFIG_PACKET
+CONFIG_NF_TABLES
+CONFIG_NFT_CHAIN_NAT
+CONFIG_NFT_COMPAT

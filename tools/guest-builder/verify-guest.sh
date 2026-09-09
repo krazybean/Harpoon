@@ -12,6 +12,9 @@ INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
+REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
+REQUIRED_FEATURES="$REPO_ROOT/tools/guest-builder/required-kernel-features.txt"
+FEATURE_MODULES="$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt"
 
 FAIL=0
 check() {
@@ -42,6 +45,49 @@ if [ -f "$INITRAMFS" ]; then
   LISTING=$(gzip -dc "$INITRAMFS" 2>/dev/null | cpio -it 2>/dev/null || echo "")
   grep -q "usr/local/bin/harpoon-mgmt" <<< "$LISTING" && echo "[verify-guest] PASS: harpoon-mgmt in initramfs" >&2 || { echo "[verify-guest] FAIL: harpoon-mgmt missing in initramfs" >&2; FAIL=1; }
   grep -q "lib/modules.*ext4.ko" <<< "$LISTING" && echo "[verify-guest] PASS: ext4.ko in initramfs" >&2 || { echo "[verify-guest] FAIL: ext4.ko missing" >&2; FAIL=1; }
+  GUEST_TMPDIR=$(mktemp -d)
+  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$GUEST_TMPDIR" && cpio -idm 2>/dev/null || true)
+  MODULE_DIR=$(find "$GUEST_TMPDIR/lib/modules" -mindepth 1 -maxdepth 1 -type d | head -n1)
+  CHECKED="$GUEST_TMPDIR/.checked-modules"
+  verify_path() {
+    local path="$1" dep
+    grep -qxF "$path" "$CHECKED" 2>/dev/null && return
+    echo "$path" >> "$CHECKED"
+    [ -f "$MODULE_DIR/$path" ] || { echo "[verify-guest] FAIL: module missing $path" >&2; FAIL=1; return; }
+    for dep in $(awk -v path="$path" '$1==path ":" {for(i=2;i<=NF;i++) print $i}' "$MODULE_DIR/modules.dep"); do verify_path "$dep"; done
+  }
+  resolve_module() {
+    local name="$1" path alias
+    path=$(find "$MODULE_DIR" -type f -name "$name.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+    if [ -z "$path" ]; then
+      alias=$(awk -v name="$name" '$1=="alias" && $2==name {print $3; exit}' "$MODULE_DIR/modules.alias")
+      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f -name "$alias.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+    fi
+    [ -n "$path" ] || return 1
+    echo "$path"
+  }
+  verify_module() {
+    local path
+    path=$(resolve_module "$1") || { echo "[verify-guest] FAIL: unresolved module $1" >&2; FAIL=1; return; }
+    verify_path "$path"
+  }
+  while IFS= read -r mod; do case "$mod" in ''|'#'*) continue ;; esac; verify_module "$mod"; done < "$REQUIRED_MODULES"
+  echo "[verify-guest] PASS: required module closure" >&2
+  while IFS= read -r feature; do
+    case "$feature" in ''|'#'*) continue ;; esac
+    mod=$(awk -v feature="$feature" '$1==feature {print $2; exit}' "$FEATURE_MODULES")
+    if [ -z "$mod" ]; then
+      echo "[verify-guest] FAIL: required kernel feature $feature has no module mapping" >&2; FAIL=1
+    elif grep -q "/$mod\\.ko$" "$MODULE_DIR/modules.builtin"; then
+      echo "[verify-guest] PASS: required kernel feature $feature=y" >&2
+    elif path=$(resolve_module "$mod"); then
+      verify_path "$path"
+      echo "[verify-guest] PASS: required kernel feature $feature=m ($mod)" >&2
+    else
+      echo "[verify-guest] FAIL: required kernel feature $feature is unset" >&2; FAIL=1
+    fi
+  done < "$REQUIRED_FEATURES"
+  rm -rf "$GUEST_TMPDIR"
   grep -q "lib/modules.*virtio_blk.ko" <<< "$LISTING" && echo "[verify-guest] PASS: virtio_blk.ko present" >&2 || { echo "[verify-guest] FAIL: virtio_blk.ko missing" >&2; FAIL=1; }
   grep -q "lib/modules.*vsock.ko" <<< "$LISTING" && echo "[verify-guest] PASS: vsock.ko present" >&2 || { echo "[verify-guest] FAIL: vsock.ko missing" >&2; FAIL=1; }
   grep -q "lib/modules.*vmw_vsock" <<< "$LISTING" && echo "[verify-guest] PASS: vmw_vsock modules present" >&2 || { echo "[verify-guest] FAIL: vmw_vsock modules missing" >&2; FAIL=1; }
@@ -74,15 +120,16 @@ if [ -f "$INIT_SRC" ]; then
   if grep -q "HARPOON_DISK_RESIZE_FAILED" "$INIT_SRC"; then echo "[verify-guest] PASS: resize failure handling" >&2; else echo "[verify-guest] FAIL: no resize failure handling" >&2; FAIL=1; fi
   # init must contain harpoon-mgmt startup with retry
   if grep -q "harpoon-mgmt" "$INIT_SRC" && grep -q "HARPOON_MGMT_READY" "$INIT_SRC"; then echo "[verify-guest] PASS: mgmt startup in init" >&2; else echo "[verify-guest] FAIL: mgmt startup missing" >&2; FAIL=1; fi
+  if grep -q 'mount -t devpts devpts /dev/pts' "$INIT_SRC"; then echo "[verify-guest] PASS: devpts mounted for management shell" >&2; else echo "[verify-guest] FAIL: devpts mount missing" >&2; FAIL=1; fi
   # Verify repacked initramfs matches source
-  TMPDIR=$(mktemp -d)
-  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$TMPDIR" && cpio -idm 2>/dev/null || true)
-  if [ -f "$TMPDIR/init" ] && diff -q "$INIT_SRC" "$TMPDIR/init" >/dev/null 2>&1; then
+  GUEST_TMPDIR=$(mktemp -d)
+  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$GUEST_TMPDIR" && cpio -idm 2>/dev/null || true)
+  if [ -f "$GUEST_TMPDIR/init" ] && diff -q "$INIT_SRC" "$GUEST_TMPDIR/init" >/dev/null 2>&1; then
     echo "[verify-guest] PASS: initramfs init matches src/init" >&2
   else
     echo "[verify-guest] FAIL: initramfs init differs from src/init — rebuild required" >&2; FAIL=1
   fi
-  rm -rf "$TMPDIR"
+  rm -rf "$GUEST_TMPDIR"
 fi
 
 # 5. harpoon-mgmt must be valid python

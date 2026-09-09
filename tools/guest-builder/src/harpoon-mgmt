@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 import sys, os, json, subprocess, pty, select, signal, struct, fcntl, termios
 
+def marker(message):
+    try:
+        fd = os.open(os.environ.get("HARPOON_MGMT_MARKER_PATH", "/dev/hvc0"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, ("HARPOON_MGMT_" + message + "\n").encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+def send_response(rc, stdout="", stderr=""):
+    sys.stdout.write(json.dumps({"exit": rc, "stdout": stdout, "stderr": stderr}, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    marker("RESPONSE_SENT status=%d" % rc)
+
 def handle_exec(argv):
     # argv preserved exactly, no shell
     try:
@@ -25,9 +40,8 @@ def handle_exec(argv):
         serr = err.decode('utf-8', errors='replace')
     except:
         serr = ""
-    resp = {"exit": rc, "stdout": sout, "stderr": serr}
-    sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    send_response(rc, sout, serr)
+    return rc
 
 def handle_shell():
     # Spawn pty shell and proxy fd 0/1 (vsock via socat) <-> pty master
@@ -141,13 +155,15 @@ def handle_shell():
                 pass
 
 def main():
+    marker("CHILD_START")
     # Read single JSON line from stdin (unbuffered)
     # Use os.read loop until newline to avoid buffered IO issues for shell raw mode
     data = b""
     while True:
         chunk = os.read(0, 4096)
         if not chunk:
-            return
+            marker("REQUEST_EOF bytes=%d newline=no" % len(data))
+            return 0
         data += chunk
         if b"\n" in data:
             break
@@ -155,29 +171,31 @@ def main():
             # header too large
             return
     line, rest = data.split(b"\n", 1)
+    marker("REQUEST_RECEIVED bytes=%d newline=yes" % len(line))
     # rest may contain shell input already? For shell we need to handle it.
     # Push rest back via pipe? For shell we can stash and write to pty after spawning.
     # For now, handle exec case ignoring rest (should be empty), shell case will need rest.
     try:
         req = json.loads(line.decode('utf-8'))
-    except:
-        resp = {"exit": 1, "stdout": "", "stderr": "invalid request: not JSON"}
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
-        return
+    except Exception as error:
+        marker("REQUEST_PARSE_ERROR type=%s" % type(error).__name__)
+        send_response(1, "", "invalid request: not JSON")
+        return 1
     op = req.get("op")
     if op == "exec":
         argv = req.get("argv")
         if not isinstance(argv, list) or len(argv)==0:
-            resp = {"exit": 2, "stdout": "", "stderr": "invalid argv"}
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-            return
+            marker("REQUEST_PARSED op=exec")
+            send_response(2, "", "invalid argv")
+            return 2
         # ensure all strings
         argv = [str(x) for x in argv]
         # If there is rest (pipelined), ignore for exec
-        handle_exec(argv)
+        marker("REQUEST_PARSED op=exec")
+        marker("EXEC_START argc=%d" % len(argv))
+        return handle_exec(argv)
     elif op == "shell":
+        marker("REQUEST_PARSED op=shell")
         # For shell, if rest not empty, we need to feed it to shell after spawn.
         # We'll handle by creating a pipe that injects rest into master after spawn.
         # To avoid complexity, we can temporarily store rest and after opening pty, write it.
@@ -265,12 +283,20 @@ def main():
             except:
                 try: p.kill()
                 except: pass
+        return 0
     else:
-        resp = {"exit":1,"stdout":"","stderr":"unknown op: %s" % op}
-        sys.stdout.write(json.dumps(resp)+"\n")
-        sys.stdout.flush()
+        marker("REQUEST_PARSED op=invalid")
+        send_response(1, "", "unknown op")
+        return 1
+
+def run():
+    try:
+        return main()
+    except Exception as error:
+        marker("CHILD_ERROR type=%s" % type(error).__name__)
+        return 1
 
 if __name__ == "__main__":
-    # Ensure stdin/stdout are binary-unbuffered? Use os.read/write after header.
-    # But after exec we used sys.stdout.write which is buffered text; flush ensures delivery.
-    main()
+    status = run()
+    marker("CHILD_EXIT status=%d" % status)
+    sys.exit(status)

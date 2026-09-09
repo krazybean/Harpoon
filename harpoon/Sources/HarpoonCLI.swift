@@ -1427,14 +1427,14 @@ func connectMgmtSocket() -> Int32? {
     return fd
 }
 
-func managementReady() -> Bool {
+func managementListenerReady() -> Bool {
     guard FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath),
           let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) else { return false }
-    return log.contains("HARPOON_MGMT_READY")
+    return log.contains("HARPOON_MGMT_LISTENER_READY") || log.contains("HARPOON_MGMT_READY")
 }
 
 func isMgmtServiceReachable() -> Bool {
-    guard managementReady(), let fd = connectMgmtSocket() else { return false }
+    guard managementListenerReady(), let fd = connectMgmtSocket() else { return false }
     defer { close(fd) }
     let request = Data("{\"op\":\"exec\",\"argv\":[\"true\"]}\n".utf8)
     let wrote = request.withUnsafeBytes { write(fd, $0.baseAddress!, request.count) }
@@ -1449,6 +1449,10 @@ func isMgmtServiceReachable() -> Bool {
           let data = line.data(using: .utf8),
           let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
     return (response["exit"] as? Int) == 0
+}
+
+func managementReady() -> Bool {
+    isMgmtServiceReachable()
 }
 
 func waitForManagementReady() -> Bool {

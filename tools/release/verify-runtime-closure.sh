@@ -7,6 +7,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
+REQUIRED_FEATURES="$REPO_ROOT/tools/guest-builder/required-kernel-features.txt"
+FEATURE_MODULES="$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -87,6 +90,46 @@ if [ -f "$INITRAMFS" ]; then
   INIT_DIR="$WORK_DIR/initramfs-init"
   mkdir -p "$INIT_DIR"
   gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$INIT_DIR" && cpio -idm 2>/dev/null || true)
+  MODULE_DIR=$(find "$INIT_DIR/lib/modules" -mindepth 1 -maxdepth 1 -type d | head -n1)
+  CHECKED="$INIT_DIR/.checked-modules"
+  verify_module_path() {
+    local path="$1" dep
+    grep -qxF "$path" "$CHECKED" 2>/dev/null && return
+    echo "$path" >> "$CHECKED"
+    [ -f "$MODULE_DIR/$path" ] || { fail "initramfs module dependency missing $path"; return; }
+    for dep in $(awk -v path="$path" '$1==path ":" {for(i=2;i<=NF;i++) print $i}' "$MODULE_DIR/modules.dep"); do verify_module_path "$dep"; done
+  }
+  resolve_module() {
+    local name="$1" path alias
+    path=$(find "$MODULE_DIR" -type f -name "$name.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+    if [ -z "$path" ]; then
+      alias=$(awk -v name="$name" '$1=="alias" && $2==name {print $3; exit}' "$MODULE_DIR/modules.alias")
+      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f -name "$alias.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+    fi
+    [ -n "$path" ] || return 1
+    echo "$path"
+  }
+  verify_required_module() {
+    local path
+    path=$(resolve_module "$1") || { fail "initramfs required module unresolved $1"; return; }
+    verify_module_path "$path"
+  }
+  while IFS= read -r mod; do case "$mod" in ''|'#'*) continue ;; esac; verify_required_module "$mod"; done < "$REQUIRED_MODULES"
+  [ "$FAIL" -eq 0 ] && pass "initramfs required module closure"
+  while IFS= read -r feature; do
+    case "$feature" in ''|'#'*) continue ;; esac
+    mod=$(awk -v feature="$feature" '$1==feature {print $2; exit}' "$FEATURE_MODULES")
+    if [ -z "$mod" ]; then
+      fail "required kernel feature $feature has no module mapping"
+    elif grep -q "/$mod\\.ko$" "$MODULE_DIR/modules.builtin"; then
+      pass "required kernel feature $feature=y"
+    elif path=$(resolve_module "$mod"); then
+      verify_module_path "$path"
+      pass "required kernel feature $feature=m ($mod)"
+    else
+      fail "required kernel feature $feature is unset"
+    fi
+  done < "$REQUIRED_FEATURES"
   if [ -f "$INIT_DIR/init" ] && diff -q "$INIT_SRC" "$INIT_DIR/init" >/dev/null 2>&1; then pass "initramfs init matches src"; else fail "initramfs init mismatch"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
 else
