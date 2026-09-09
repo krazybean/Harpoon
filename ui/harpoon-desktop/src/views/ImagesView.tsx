@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MagnifyingGlass, Trash } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
+import { deletePrompt, resourceId, runSequential } from "../lib/resourceBatch";
+import { useResourceSelection } from "../hooks/useResourceSelection";
 
 export const ImagesView = memo(function ImagesView({
   images, refreshing, error, updatedAt, hasCache, actionInProgress, doAction, refresh
@@ -17,8 +19,19 @@ export const ImagesView = memo(function ImagesView({
 }) {
   const [detail,setDetail]=useState<string>("");
   const [confirmImage,setConfirmImage]=useState<any>(null);
+  const [confirmBulkDelete,setConfirmBulkDelete]=useState<{ ids: string[]; title: string; names: string[] } | null>(null);
+  const [batchResult,setBatchResult]=useState<{ message: string; failed: number } | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
-  useEffect(()=>{ if(confirmImage) cancelRef.current?.focus(); }, [confirmImage]);
+  const selection = useResourceSelection(images);
+  useEffect(()=>{ if(confirmImage || confirmBulkDelete) cancelRef.current?.focus(); }, [confirmImage, confirmBulkDelete]);
+  const selectedImages = images.filter((im)=>selection.selected.has(resourceId(im)));
+  const runBatch = (ids = [...selection.selected]) => {
+    doAction("batch-images", async ()=>{
+      const result = await runSequential(ids, (id)=>invoke("remove_image", { id }));
+      selection.remove(result.succeeded);
+      setBatchResult({ message: result.failed.length ? `${result.succeeded.length} of ${ids.length} images deleted. ${result.failed.length} failed.` : `${result.succeeded.length} images deleted.`, failed: result.failed.length });
+    });
+  };
 
   if (error && !hasCache) return <div className="panel" style={{ padding: 12, background: "var(--error-bg)", borderColor: "#7F1D1D", color: "var(--error-fg)" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>;
   if (!hasCache && refreshing) {
@@ -40,12 +53,20 @@ export const ImagesView = memo(function ImagesView({
         <span className="text-panel-title">Images ({images.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
         <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
       </div>
+      <div className="selection-bar">
+        <span className="text-meta">{selection.selected.size} selected</span>
+        <button onClick={selection.selectAll} disabled={!images.length || Boolean(actionInProgress)} className="btn btn--secondary">Select all</button>
+        <button onClick={selection.clear} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--ghost">Clear selection</button>
+        <button onClick={()=>{ const prompt=deletePrompt("images", selectedImages.map((im)=>`${im.Repository}:${im.Tag}`)); setConfirmBulkDelete({ ids: selectedImages.map(resourceId), ...prompt }); }} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--destructive"><Trash size={14} />Delete</button>
+        {batchResult && <span className="text-meta" style={{ color: batchResult.failed ? "var(--error-fg)" : "var(--success-fg)" }}>{batchResult.message}</span>}
+      </div>
       {error && hasCache && <div style={{ padding: "8px 12px", background: "var(--error-bg)", color: "var(--error-fg)", fontSize: 12, borderBottom: "1px solid #7F1D1D" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>}
       <div style={{ overflowX: "auto" }}>
         <table>
-          <thead className="table-head"><tr><th scope="col" className="col-repo">Repository:Tag</th><th scope="col" className="col-img-id">ID</th><th scope="col" className="col-size">Size</th><th scope="col" className="col-created">Created</th><th scope="col" className="col-img-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
+          <thead className="table-head"><tr><th scope="col" className="col-select"><input type="checkbox" checked={images.length>0 && selection.selected.size===images.length} onChange={(e)=>e.target.checked ? selection.selectAll() : selection.clear()} aria-label="Select all images" /></th><th scope="col" className="col-repo">Repository:Tag</th><th scope="col" className="col-img-id">ID</th><th scope="col" className="col-size">Size</th><th scope="col" className="col-created">Created</th><th scope="col" className="col-img-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
           <tbody>{images.map((im:any)=>(
             <tr key={im.ID} className="table-row">
+              <td className="col-select"><input type="checkbox" checked={selection.selected.has(resourceId(im))} onChange={()=>selection.toggle(resourceId(im))} aria-label={`Select image ${im.Repository}:${im.Tag}`} /></td>
               <td className="col-repo" title={`${im.Repository}:${im.Tag}`} aria-label={`${im.Repository}:${im.Tag}`}><span className="cell-inner">{im.Repository}:{im.Tag}</span></td>
               <td className="mono col-img-id" title={im.ID||""} aria-label={im.ID||""}><span className="cell-inner">{(im.ID||"").slice(0,12)}</span></td>
               <td className="col-size" title={im.Size||""}><span className="cell-inner">{im.Size||"—"}</span></td>
@@ -66,6 +87,18 @@ export const ImagesView = memo(function ImagesView({
             <div className="dialog-actions">
               <button ref={cancelRef} onClick={()=>setConfirmImage(null)} className="btn btn--secondary">Cancel</button>
               <button onClick={()=>{ const im=confirmImage; setConfirmImage(null); doAction(`rmi-${im.ID}`, ()=>invoke("remove_image", { id: im.ID })); }} className="btn btn--destructive">Remove image</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmBulkDelete && (
+        <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmBulkDelete(null)}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-bulk-image-title" onClick={e=>e.stopPropagation()} onKeyDown={e=>{ if(e.key==="Escape") setConfirmBulkDelete(null); }}>
+            <div id="confirm-bulk-image-title" className="dialog-title">{confirmBulkDelete.title}</div>
+            <div className="dialog-body">This will permanently remove the selected images. This action cannot be undone.{confirmBulkDelete.names.length>0 && <><br />{confirmBulkDelete.names.map((name)=><span key={name} style={{ display: "block" }}>{name}</span>)}</>}</div>
+            <div className="dialog-actions">
+              <button ref={cancelRef} onClick={()=>setConfirmBulkDelete(null)} className="btn btn--secondary">Cancel</button>
+              <button onClick={()=>{ const batch=confirmBulkDelete; setConfirmBulkDelete(null); runBatch(batch.ids); }} className="btn btn--destructive">Delete images</button>
             </div>
           </div>
         </div>

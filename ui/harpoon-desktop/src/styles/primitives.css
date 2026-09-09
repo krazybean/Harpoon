@@ -77,6 +77,9 @@ button { font-family: var(--font-sans); -webkit-appearance: none; appearance: no
 }
 .table-row td.mono { font-family: var(--font-mono); font-size: var(--text-code-size); color: var(--text-code); }
 .table-actions { display: inline-flex; gap: 4px; justify-content: flex-end; white-space: nowrap; flex-wrap: nowrap; }
+.col-select { width: 40px; padding-right: 0 !important; text-align: center !important; }
+.selection-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.selection-bar .btn { height: var(--control-height-sm); padding: 0 8px; font-size: 11px; }
 
 /* Shell */
 .shell { display: flex; height: 100vh; background: var(--app-bg); color: var(--text-primary); font-family: var(--font-sans); }

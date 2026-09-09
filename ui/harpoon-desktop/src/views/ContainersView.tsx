@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState, Fragment } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, Stop, ArrowClockwise, TerminalWindow, MagnifyingGlass, Trash, CaretDown, CaretRight, StackSimple } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
+import { deletePrompt, resourceId, runSequential } from "../lib/resourceBatch";
+import { useResourceSelection } from "../hooks/useResourceSelection";
 
 export const ContainersView = memo(function ContainersView({
   containers,
@@ -26,11 +28,22 @@ export const ContainersView = memo(function ContainersView({
 }) {
   const [detail, setDetail] = useState<string>("");
   const [confirmContainer, setConfirmContainer] = useState<any>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ ids: string[]; title: string; names: string[] } | null>(null);
+  const [batchResult, setBatchResult] = useState<{ message: string; failed: number } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(()=> new Set<string>());
   const cancelRef = useRef<HTMLButtonElement>(null);
-  useEffect(()=>{ if(confirmContainer) cancelRef.current?.focus(); }, [confirmContainer]);
+  const selection = useResourceSelection(containers);
+  useEffect(()=>{ if(confirmContainer || confirmBulkDelete) cancelRef.current?.focus(); }, [confirmContainer, confirmBulkDelete]);
   const isRunning = status?.state==="running";
   const hasRows = containers.length>0;
+  const selectedContainers = containers.filter((c)=>selection.selected.has(resourceId(c)));
+  const runBatch = (command: string, verb: string, ids = [...selection.selected]) => {
+    doAction("batch-containers", async ()=>{
+      const result = await runSequential(ids, (id)=>invoke(command, { id }));
+      selection.remove(result.succeeded);
+      setBatchResult({ message: result.failed.length ? `${result.succeeded.length} of ${ids.length} containers ${verb}. ${result.failed.length} failed.` : `${result.succeeded.length} containers ${verb}.`, failed: result.failed.length });
+    });
+  };
 
   if (!isRunning) {
     return (
@@ -109,6 +122,7 @@ export const ContainersView = memo(function ContainersView({
 
   const renderRow = (c:any) => (
     <tr key={c.ID||c.Id} className="table-row">
+      <td className="col-select"><input type="checkbox" checked={selection.selected.has(resourceId(c))} onChange={()=>selection.toggle(resourceId(c))} aria-label={`Select container ${c.Names||c.Name}`} /></td>
       <td className="col-name" title={c.Names||c.Name} aria-label={c.Names||c.Name}><span className="cell-inner">{c.Names||c.Name}</span></td>
       <td className="mono col-id" title={c.ID||c.Id} aria-label={c.ID||c.Id}><span className="cell-inner">{(c.ID||c.Id||"").slice(0,12)}</span></td>
       <td className="col-image" title={c.Image} aria-label={c.Image}><span className="cell-inner">{c.Image}</span></td>
@@ -131,15 +145,25 @@ export const ContainersView = memo(function ContainersView({
         <span className="text-panel-title">Containers ({containers.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
         <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
       </div>
+      <div className="selection-bar">
+        <span className="text-meta">{selection.selected.size} selected</span>
+        <button onClick={selection.selectAll} disabled={!containers.length || Boolean(actionInProgress)} className="btn btn--secondary">Select all</button>
+        <button onClick={selection.clear} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--ghost">Clear selection</button>
+        <button onClick={()=>runBatch("start_container", "started")} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--secondary"><Play size={14} />Start</button>
+        <button onClick={()=>runBatch("stop_container", "stopped")} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--secondary"><Stop size={14} />Stop</button>
+        <button onClick={()=>runBatch("restart_container", "restarted")} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--secondary"><ArrowClockwise size={14} />Restart</button>
+        <button onClick={()=>{ const prompt=deletePrompt("containers", selectedContainers.map((c)=>c.Names||c.Name)); setConfirmBulkDelete({ ids: selectedContainers.map(resourceId), ...prompt }); }} disabled={!selection.selected.size || Boolean(actionInProgress)} className="btn btn--destructive"><Trash size={14} />Delete</button>
+        {batchResult && <span className="text-meta" style={{ color: batchResult.failed ? "var(--error-fg)" : "var(--success-fg)" }}>{batchResult.message}</span>}
+      </div>
       {error && hasCache && <div style={{ padding: "8px 12px", background: "var(--error-bg)", color: "var(--error-fg)", fontSize: 12, borderBottom: "1px solid #7F1D1D" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>}
       <div style={{ overflowX: "auto" }}>
         <table>
-          <thead className="table-head"><tr><th scope="col" className="col-name">Name</th><th scope="col" className="col-id">ID</th><th scope="col" className="col-image">Image</th><th scope="col" className="col-state">State</th><th scope="col" className="col-ports">Ports</th><th scope="col" className="col-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
+          <thead className="table-head"><tr><th scope="col" className="col-select"><input type="checkbox" checked={containers.length>0 && selection.selected.size===containers.length} onChange={(e)=>e.target.checked ? selection.selectAll() : selection.clear()} aria-label="Select all containers" /></th><th scope="col" className="col-name">Name</th><th scope="col" className="col-id">ID</th><th scope="col" className="col-image">Image</th><th scope="col" className="col-state">State</th><th scope="col" className="col-ports">Ports</th><th scope="col" className="col-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
           <tbody>
             {groups.map(g => (
               <Fragment key={g.project}>
                 <tr className="group-header">
-                  <td colSpan={6} style={{ background: "var(--panel-header)", padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
+                  <td colSpan={7} style={{ background: "var(--panel-header)", padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
                     <button onClick={()=>toggle(g.project)} aria-expanded={!collapsed.has(g.project)} aria-label={`${collapsed.has(g.project) ? "Expand" : "Collapse"} project ${g.project}`} className="btn btn--ghost btn--sm" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600, width: "100%", justifyContent: "flex-start" }}>
                       {collapsed.has(g.project) ? <CaretRight size={14} weight="bold" /> : <CaretDown size={14} weight="bold" />}
                       <StackSimple size={14} weight="regular" aria-hidden="true" />
@@ -163,6 +187,18 @@ export const ContainersView = memo(function ContainersView({
             <div className="dialog-actions">
               <button ref={cancelRef} onClick={()=>{ setConfirmContainer(null); }} className="btn btn--secondary">Cancel</button>
               <button onClick={()=>{ const c=confirmContainer; setConfirmContainer(null); doAction(`rm-${c.ID||c.Id}`, ()=>invoke("remove_container", { id: c.ID||c.Id })); }} className="btn btn--destructive">Remove container</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmBulkDelete && (
+        <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmBulkDelete(null)}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-bulk-title" onClick={e=>e.stopPropagation()} onKeyDown={e=>{ if(e.key==="Escape") setConfirmBulkDelete(null); }}>
+            <div id="confirm-bulk-title" className="dialog-title">{confirmBulkDelete.title}</div>
+            <div className="dialog-body">This will permanently remove the selected containers. This action cannot be undone.{confirmBulkDelete.names.length>0 && <><br />{confirmBulkDelete.names.map((name)=><span key={name} style={{ display: "block" }}>{name}</span>)}</>}</div>
+            <div className="dialog-actions">
+              <button ref={cancelRef} onClick={()=>setConfirmBulkDelete(null)} className="btn btn--secondary">Cancel</button>
+              <button onClick={()=>{ const batch=confirmBulkDelete; setConfirmBulkDelete(null); runBatch("remove_container", "deleted", batch.ids); }} className="btn btn--destructive">Delete containers</button>
             </div>
           </div>
         </div>
