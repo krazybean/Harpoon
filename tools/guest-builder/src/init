@@ -102,10 +102,20 @@ https://dl-cdn.alpinelinux.org/alpine/v3.22/community
 REPOS2
         ls -l /newroot/bin/sh 2>&1 | tee /dev/hvc0 >/dev/null || true
       fi
-      # Harpoon: always refresh final ext4 init to current (fixes stale block image without wipe)
-      cp /init /newroot/init 2>&1 | tee /dev/hvc0 >/dev/null || true
-      chmod +x /newroot/init 2>&1 | tee /dev/hvc0 >/dev/null || true
+      # Refresh immutable release payload; never touch Docker or user data paths.
+      echo "HARPOON_RUNTIME_REFRESH_START" > /dev/hvc0
+      RUNTIME_OK=1
+      for payload in init usr/local/bin/harpoon-mgmt usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
+        if [ -e "/$payload" ]; then
+          mkdir -p "/newroot/$(dirname "$payload")" 2>&1 | tee /dev/hvc0 >/dev/null || true
+          cp -a "/$payload" "/newroot/$payload" 2>&1 | tee /dev/hvc0 >/dev/null || { echo "HARPOON_RUNTIME_REFRESH_FAILED $payload" > /dev/hvc0; RUNTIME_OK=0; }
+        else echo "HARPOON_RUNTIME_REFRESH_FAILED missing $payload" > /dev/hvc0; RUNTIME_OK=0; fi
+      done
+      chmod +x /newroot/init /newroot/usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
+      [ $RUNTIME_OK -eq 1 ] || { echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; while true; do sleep 5; echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; done; }
       echo "HARPOON_INIT_REFRESHED" > /dev/hvc0
+      echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
+      echo "HARPOON_RUNTIME_REFRESH_DONE" > /dev/hvc0
       # Harpoon: always refresh final ext4 module tree to current initramfs (fixes stale harpoon-root.img incomplete module fileset)
       # Do not wipe disk; copy the smallest coherent subtrees needed for Docker networking from same 6.12.94-0-virt modloop
       # Exact paths verified from modloop (Phase 1): llc, stp, bridge, br_netfilter, veth, libcrc32c, etc. plus deps nf_defrag, etc.
@@ -116,29 +126,6 @@ REPOS2
       cp -a /lib/modules/6.12.94-0-virt /newroot/lib/modules/ 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_MODULE_REFRESH_FAILED" > /dev/hvc0
       ls -lh /newroot/lib/modules/6.12.94-0-virt/kernel/net/llc/llc.ko /newroot/lib/modules/6.12.94-0-virt/kernel/lib/libcrc32c.ko /newroot/lib/modules/6.12.94-0-virt/kernel/drivers/net/veth.ko /newroot/lib/modules/6.12.94-0-virt/kernel/net/netfilter/x_tables.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
       echo "HARPOON_MODULE_REFRESH_DONE" > /dev/hvc0
-      # Harpoon: ensure offline resize2fs is present in final root (for post-pivot filesystem reconciliation)
-      echo "HARPOON_RESIZE2FS_REFRESH_START" > /dev/hvc0
-      mkdir -p /newroot/usr/sbin /newroot/sbin /newroot/usr/lib /newroot/etc
-      for _bin in /usr/sbin/resize2fs /sbin/resize2fs; do
-        if [ -f "$_bin" ]; then
-          cp -a "$_bin" /newroot/usr/sbin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
-          cp -a "$_bin" /newroot/sbin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
-          break
-        fi
-      done
-      for _lib in /usr/lib/libext2fs.so.2 /usr/lib/libe2p.so.2 /usr/lib/libcom_err.so.2 /usr/lib/libblkid.so.1 /usr/lib/libuuid.so.1; do
-        if [ -f "$_lib" ]; then cp -a "$_lib" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
-        # also handle symlinked versioned files
-        _real=$(readlink -f "$_lib" 2>/dev/null || echo "")
-        if [ -n "$_real" ] && [ -f "$_real" ]; then cp -a "$_real" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
-      done
-      # versioned libs
-      for _vlib in /usr/lib/libext2fs.so.2.4 /usr/lib/libe2p.so.2.3 /usr/lib/libcom_err.so.2.1 /usr/lib/libblkid.so.1.1.0 /usr/lib/libuuid.so.1.3.0; do
-        if [ -f "$_vlib" ]; then cp -a "$_vlib" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
-      done
-      if [ -f /etc/mke2fs.conf ]; then cp -a /etc/mke2fs.conf /newroot/etc/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
-      ls -lh /newroot/usr/sbin/resize2fs /newroot/sbin/resize2fs /newroot/usr/lib/libext2fs.so.2 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_RESIZE2FS_REFRESH_FAILED" > /dev/hvc0
-      echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
       # Verify FINAL ext4 root contains required files before switch_root (do not guess, fail if absent)
       for modpath in kernel/net/llc/llc.ko kernel/net/802/stp.ko kernel/net/bridge/bridge.ko kernel/net/bridge/br_netfilter.ko kernel/drivers/net/veth.ko kernel/lib/libcrc32c.ko kernel/net/netfilter/nf_conntrack.ko kernel/net/netfilter/nf_nat.ko kernel/net/netfilter/x_tables.ko kernel/net/ipv4/netfilter/ip_tables.ko kernel/net/ipv4/netfilter/iptable_nat.ko kernel/net/ipv4/netfilter/iptable_filter.ko kernel/net/netfilter/xt_MASQUERADE.ko kernel/net/netfilter/xt_addrtype.ko kernel/net/netfilter/xt_conntrack.ko kernel/net/netfilter/xt_comment.ko kernel/net/netfilter/xt_tcpudp.ko kernel/net/ipv4/netfilter/nf_defrag_ipv4.ko kernel/net/ipv6/netfilter/nf_defrag_ipv6.ko kernel/lib/crc16.ko kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko kernel/fs/ext4/ext4.ko kernel/net/vmw_vsock/vsock.ko kernel/fs/fuse/fuse.ko kernel/fs/fuse/virtiofs.ko kernel/drivers/virtio/virtio_balloon.ko; do
         if [ -f "/newroot/lib/modules/6.12.94-0-virt/$modpath" ]; then
@@ -335,6 +322,7 @@ if [ $VIRTIOFS_OK -eq 1 ]; then
   else
     echo "HARPOON_VIRTIOFS_FAILED mount $(dmesg 2>&1 | tail -n 20 | head -n 20)" > /dev/hvc0
   fi
+  HOST_SHARES_OK=1
   for share in harpoon-host-users harpoon-host-tmp; do
     case "$share" in
       harpoon-host-users) mountpoint=/mnt/harpoon-host/Users ;;
@@ -345,8 +333,10 @@ if [ $VIRTIOFS_OK -eq 1 ]; then
       echo "HARPOON_VIRTIOFS_MOUNTED tag=$share path=$mountpoint" > /dev/hvc0
     else
       echo "HARPOON_VIRTIOFS_FAILED tag=$share path=$mountpoint" > /dev/hvc0
+      HOST_SHARES_OK=0
     fi
   done
+  [ $HOST_SHARES_OK -eq 1 ] && echo "HARPOON_VIRTIOFS_HOST_ROOTS_READY" > /dev/hvc0 || echo "HARPOON_VIRTIOFS_HOST_ROOTS_DEGRADED" > /dev/hvc0
 else
   echo "HARPOON_VIRTIOFS_FAILED module" > /dev/hvc0
 fi
