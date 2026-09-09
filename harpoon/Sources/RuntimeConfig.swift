@@ -230,10 +230,13 @@ struct RuntimeConfig {
         var c = RuntimeConfig()
         // user config (file) overrides defaults, env overrides config, CLI overrides all
         // load user config if present
-        let configCandidates = [
+        var configCandidates = [
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/config.json").path,
             "/tmp/harpoon-runtime/config.json"
         ]
+        if let testDir = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"], !testDir.isEmpty {
+            configCandidates.insert((testDir as NSString).appendingPathComponent("config.json"), at: 0)
+        }
         var fileCfg: HarpoonUserConfig? = nil
         for cand in configCandidates {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),
@@ -278,7 +281,7 @@ struct RuntimeConfig {
     }
 
     static func memoryValidationError(_ mib: Int) -> String? {
-        let minMiB = Int(VZVirtualMachineConfiguration.minimumAllowedMemorySize / 1024 / 1024)
+        let minMiB = max(512, Int(VZVirtualMachineConfiguration.minimumAllowedMemorySize / 1024 / 1024))
         let maxMiB = Int(VZVirtualMachineConfiguration.maximumAllowedMemorySize / 1024 / 1024)
         if mib < minMiB || mib > maxMiB { return "memoryMIB must be \(minMiB)...\(maxMiB), got \(mib)" }
         return nil

@@ -19,6 +19,11 @@ enum HarpoonPaths {
         return URL(fileURLWithPath: "/tmp/harpoon-runtime")
     }
     static var appSupportDir: URL {
+        if let custom = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"], !custom.isEmpty {
+            let dir = URL(fileURLWithPath: custom)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+            return dir
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let primary = home.appendingPathComponent("Library/Application Support/Harpoon")
         if isTestFallbackEnabled {
