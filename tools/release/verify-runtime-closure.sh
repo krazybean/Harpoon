@@ -152,6 +152,9 @@ if [ -f "$INITRAMFS" ]; then
   fi
   if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then pass "mgmt listener uses wrapper"; else fail "mgmt listener bypasses wrapper"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
+  for mod in af_packet nfnetlink nf_tables nft_compat nft_chain_nat xt_nat xt_REDIRECT xt_MASQUERADE; do
+    grep -Eq "NET_MODULES=.*(^|[[:space:]])$mod([[:space:]]|\")" "$INIT_SRC" && pass "iptables-nft DNAT activation $mod" || fail "iptables-nft DNAT activation missing $mod"
+  done
 else
   fail "initramfs missing"
 fi

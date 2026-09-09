@@ -283,9 +283,11 @@ else
 fi
 # --- Spike 3 FINAL ext4 runtime networking (must run in final ext4 root before dockerd) ---
 echo "HARPOON_NET_RUNTIME_START" > /dev/hvc0
-# load already-injected bridge/NAT modules (capture errors, do not silently ignore)
+# Load the complete bridge/NAT closure for the packaged iptables-nft stack.
+# Keep the legacy modules because iptables-nft uses their compatibility targets.
 ERR_NET=0
-for mod in bridge br_netfilter veth overlay nf_conntrack nf_nat x_tables ip_tables iptable_nat iptable_filter xt_MASQUERADE xt_addrtype xt_conntrack xt_comment xt_tcpudp; do
+NET_MODULES="bridge br_netfilter veth overlay nf_conntrack nf_nat x_tables ip_tables iptable_nat iptable_filter xt_MASQUERADE xt_nat xt_REDIRECT xt_addrtype xt_conntrack xt_comment xt_tcpudp af_packet nfnetlink nf_tables nft_compat nft_chain_nat"
+for mod in $NET_MODULES; do
   if ! modprobe "$mod" > /tmp/modprobe_$mod.log 2>&1; then
     cat /tmp/modprobe_$mod.log 2>&1 | tee /dev/hvc0 >/dev/null || true
     echo "HARPOON_MODPROBE_FAILED $mod $(cat /tmp/modprobe_$mod.log 2>&1 | head -n 5)" > /dev/hvc0

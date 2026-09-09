@@ -23,6 +23,15 @@ xt_conntrack
 xt_comment
 xt_tcpudp
 
+# iptables-nft DNAT/SNAT compatibility closure for Docker published ports
+af_packet
+nfnetlink
+nf_tables
+nft_compat
+nft_chain_nat
+xt_nat
+xt_REDIRECT
+
 # VirtioFS, balloon, network, and vsock
 fuse
 virtiofs

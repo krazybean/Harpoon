@@ -141,6 +141,11 @@ if [ -f "$INIT_SRC" ]; then
   if grep -q "harpoon-mgmt" "$INIT_SRC" && grep -q "HARPOON_MGMT_READY" "$INIT_SRC"; then echo "[verify-guest] PASS: mgmt startup in init" >&2; else echo "[verify-guest] FAIL: mgmt startup missing" >&2; FAIL=1; fi
   if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then echo "[verify-guest] PASS: mgmt listener uses wrapper" >&2; else echo "[verify-guest] FAIL: mgmt listener bypasses wrapper" >&2; FAIL=1; fi
   if grep -q 'mount -t devpts devpts /dev/pts' "$INIT_SRC"; then echo "[verify-guest] PASS: devpts mounted for management shell" >&2; else echo "[verify-guest] FAIL: devpts mount missing" >&2; FAIL=1; fi
+  NET_LINE=$(grep -n '^NET_MODULES=' "$INIT_SRC" | cut -d: -f1 | head -n1 || echo 9999)
+  for mod in af_packet nfnetlink nf_tables nft_compat nft_chain_nat xt_nat xt_REDIRECT xt_MASQUERADE; do
+    grep -Eq "NET_MODULES=.*(^|[[:space:]])$mod([[:space:]]|\")" "$INIT_SRC" && echo "[verify-guest] PASS: iptables-nft DNAT activation $mod" >&2 || { echo "[verify-guest] FAIL: iptables-nft DNAT activation missing $mod" >&2; FAIL=1; }
+  done
+  if [ "$NET_LINE" -lt "$DOCKER_LINE" ]; then echo "[verify-guest] PASS: iptables-nft DNAT activation before Docker" >&2; else echo "[verify-guest] FAIL: iptables-nft DNAT activation not before Docker" >&2; FAIL=1; fi
   # Verify repacked initramfs matches source
   GUEST_TMPDIR=$(mktemp -d)
   gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$GUEST_TMPDIR" && cpio -idm 2>/dev/null || true)
