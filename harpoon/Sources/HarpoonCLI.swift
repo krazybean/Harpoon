@@ -910,13 +910,13 @@ func handleConfig(args: [String]) -> Int32 {
         cliPrint("Config: \(path)")
         if let c = cfg {
             if let v = c.cpus { cliPrint("cpus: \(v)") } else { cliPrint("cpus: (default 2)") }
-            if let v = c.memory { cliPrint("memory: \(v)") } else { cliPrint("memory: (default 1024)") }
+            if let v = c.memory { cliPrint("memory: \(v)") } else { cliPrint("memory: (default 4096)") }
             if let v = c.diskSize { cliPrint("disk-size: \(v)") } else { cliPrint("disk-size: (default 32G)") }
             if c.cpus==nil && c.memory==nil && c.diskSize==nil { cliPrint("(no user config, using defaults)") }
         } else {
             cliPrint("(no user config, using defaults)")
             cliPrint("cpus: (default 2)")
-            cliPrint("memory: (default 1024)")
+            cliPrint("memory: (default 4096)")
             cliPrint("disk-size: (default 32G)")
         }
         return 0
@@ -928,7 +928,7 @@ func handleConfig(args: [String]) -> Int32 {
             if let v = cfg?.cpus { cliPrint("\(v)") } else { cliPrint("2") }
             return 0
         } else if key=="memory" {
-            if let v = cfg?.memory { cliPrint("\(v)") } else { cliPrint("1024") }
+            if let v = cfg?.memory { cliPrint("\(v)") } else { cliPrint("4096") }
             return 0
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
             if let v = cfg?.diskSize { cliPrint(v) } else { cliPrint("32G") }
@@ -955,7 +955,7 @@ func handleConfig(args: [String]) -> Int32 {
             cur.cpus = v
         } else if key=="memory" {
             guard let v = Int(valStr) else { cliError("invalid memory: \(valStr)"); return 1 }
-            if ![512,768,1024].contains(v) { cliError("memory must be 512|768|1024, got \(v)"); return 1 }
+            if let error = RuntimeConfig.memoryValidationError(v) { cliError(error); return 1 }
             cur.memory = v
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
             guard let bytes = RuntimeConfig.parseDiskSize(valStr) else { cliError("invalid disk-size: \(valStr) — use e.g. 8G, 16G, 1024M (G/GiB/M/MiB)"); return 1 }
@@ -996,7 +996,7 @@ func handleConfig(args: [String]) -> Int32 {
         cliPrint("usage: harpoon config <show|set|get|reset|path> [args]")
         cliPrint("  show              Show current config and path")
         cliPrint("  set cpus 2        Set cpus 1...8")
-        cliPrint("  set memory 1024   Set memory 512|768|1024")
+        cliPrint("  set memory 4096   Set memory in MiB (minimum 512)")
         cliPrint("  set disk-size 16G Set disk size (e.g. 8G, 16G, 32G) — first provision or resize via harpoon disk resize")
         cliPrint("  get disk-size     Get disk-size")
         cliPrint("  reset cpus        Reset to default")
@@ -2071,7 +2071,7 @@ func printUsageFull() {
 
     Start options:
       --cpus N                1...8 (default 2)
-      --memory 512|768|1024   (default 1024)
+      --memory MiB>=512       (default 4096)
       --kernel PATH
       --initramfs PATH
       --disk PATH

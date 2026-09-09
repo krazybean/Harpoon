@@ -7,8 +7,8 @@ func log(_ m: String) {
 }
 
 func printUsage() {
-    fputs("usage: harpoon [--cpus 1|2] [--memory 512|768|1024] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr)
-    fputs("defaults: --cpus 2 --memory 1024  (HARPOON_CPUS/HARPOON_MEMORY_MIB env fallback, CLI wins)\n", stderr)
+    fputs("usage: harpoon [--cpus 1|2] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr)
+    fputs("defaults: --cpus 2 --memory 4096  (HARPOON_CPUS/HARPOON_MEMORY_MIB env fallback, CLI wins)\n", stderr)
     fputs("precedence: CLI > config > environment > defaults\n", stderr)
 }
 
@@ -19,7 +19,7 @@ if cliArgs.count >= 2 {
     // support --help for subcommands: harpoon start --help etc.
     if cliArgs.count>=3 && (cliArgs[2]=="--help" || cliArgs[2]=="-h") {
         switch cmd {
-        case "start": fputs("usage: harpoon start [--cpus 1..8] [--memory 512|768|1024] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr); exit(0)
+        case "start": fputs("usage: harpoon start [--cpus 1..8] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr); exit(0)
         case "logs": fputs("usage: harpoon logs [--follow] [--lines N] [--path]\n", stderr); exit(0)
         case "config": fputs("usage: harpoon config <show|set|reset|path>\n", stderr); exit(0)
         case "docker": fputs("usage: harpoon docker <setup|status|remove|use|env>\n", stderr); exit(0)
@@ -120,11 +120,6 @@ while i < foregroundArgs.count {
     }
 }
 
-let allowed: Set<Int> = [512, 768, 1024]
-if !cliMemoryProvided && !allowed.contains(config.memoryMIB) {
-    log("HARPOON_MEMORY_CONFIG_WARN raw=\(config.memoryMIB) clamped to 1024 (allowed 512/768/1024) env fallback")
-    config.memoryMIB = 1024
-}
 if !cliCpusProvided && (config.cpuCount < 1 || config.cpuCount > 8) {
     if ProcessInfo.processInfo.environment["HARPOON_CPUS"] != nil {
         log("HARPOON_CPU_CONFIG_WARN raw=\(config.cpuCount) clamped to 2 (allowed 1...8) env fallback")

@@ -859,22 +859,14 @@ final class BridgeSet {
             log("HARPOON_BALLOON_TARGET_REQUEST \(req)")
             let configuredBytes = config.memorySizeBytes
             let floorBytes: UInt64 = 512 * 1024 * 1024
-            let allowedTiers: [UInt64] = [512, 768, 1024].map { $0 * 1024 * 1024 }
-            let reqMiB = req / 1024 / 1024
             var rejectReason: String? = nil
             if req > configuredBytes {
                 rejectReason = "exceeds configured memory \(configuredBytes) (\(configuredBytes/1024/1024) MiB)"
             } else if req < floorBytes {
                 rejectReason = "below floor 512 MiB"
-            } else if !allowedTiers.contains(req) {
-                // also allow only tier values that are <= configured
-                if ![512, 768, 1024].contains(Int(reqMiB)) {
-                    rejectReason = "unsupported tier \(reqMiB) MiB (allowed 512/768/1024 <= configured \(config.memoryMIB))"
-                } else if reqMiB > UInt64(config.memoryMIB) {
-                    rejectReason = "exceeds configured \(config.memoryMIB) MiB"
-                }
+            } else if req % (1024 * 1024) != 0 {
+                rejectReason = "must be a whole MiB"
             }
-            // For configured 512, only 512 allowed; for 768, 512/768; for 1024, all — covered by above
             if let reason = rejectReason {
                 log("HARPOON_BALLOON_TARGET_REJECT requested=\(req) reason=\(reason)")
             } else {

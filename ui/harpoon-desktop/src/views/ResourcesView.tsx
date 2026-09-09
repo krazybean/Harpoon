@@ -33,9 +33,7 @@ export const ResourcesView = memo(function ResourcesView({
                 </select>
               </label>
               <label className="text-body" style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>Memory
-                <select className="select-primitive" value={config?.memory ?? 1024} onChange={(e)=>onSetMemory(parseInt(e.target.value))} disabled={actionInProgress==="memory"}>
-                  <option value={512}>512 MiB</option><option value={768}>768 MiB</option><option value={1024}>1024 MiB</option><option value={1536}>1536 MiB</option><option value={2048}>2048 MiB</option>
-                </select>
+                <input className="select-primitive" type="number" min={512} step={1} defaultValue={config?.memory ?? 4096} onBlur={(e)=>onSetMemory(parseInt(e.target.value))} disabled={actionInProgress==="memory"} />
               </label>
             </div>
             <div className="text-meta" style={{ marginTop: 10 }}>Changes via <code className="text-code">harpoon config set</code>. Restart required.</div>

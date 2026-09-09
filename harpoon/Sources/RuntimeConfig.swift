@@ -1,4 +1,5 @@
 import Foundation
+import Virtualization
 
 struct SharedRoot {
     let hostPath: String
@@ -9,7 +10,7 @@ struct SharedRoot {
 // ponytail: minimal production config — no public config system yet (M8), defaults reproduce Spike 5
 struct RuntimeConfig {
     var cpuCount: Int = 2
-    var memoryMIB: Int = 1024 // allowed 512/768/1024, default 1024 safe
+    var memoryMIB: Int = 4096
     var memorySizeBytes: UInt64 { UInt64(memoryMIB) * 1024 * 1024 }
 
     var kernelURL: URL = RuntimeConfig.resolveResource(named: "Image-virt", fallback: "assets/guest/Image-virt")
@@ -269,11 +270,17 @@ struct RuntimeConfig {
         let maxCPU = 8 // conservative Phase1; framework maximumAllowedCPUCount may be larger (e.g. 32) but 8 is safe for M6
         if cpuCount < minCPU || cpuCount > maxCPU { return "cpuCount must be \(minCPU)...\(maxCPU), got \(cpuCount)" }
         #endif
-        let allowed: Set<Int> = [512, 768, 1024]
-        if !allowed.contains(memoryMIB) { return "memoryMIB must be 512/768/1024, got \(memoryMIB)" }
+        if let error = Self.memoryValidationError(memoryMIB) { return error }
         if !FileManager.default.fileExists(atPath: kernelURL.path) { return "kernel not found: \(kernelURL.path)" }
         if !FileManager.default.fileExists(atPath: initramfsURL.path) { return "initramfs not found: \(initramfsURL.path)" }
         // disk is optional for validation — ramdisk fallback exists but production expects block
+        return nil
+    }
+
+    static func memoryValidationError(_ mib: Int) -> String? {
+        let minMiB = Int(VZVirtualMachineConfiguration.minimumAllowedMemorySize / 1024 / 1024)
+        let maxMiB = Int(VZVirtualMachineConfiguration.maximumAllowedMemorySize / 1024 / 1024)
+        if mib < minMiB || mib > maxMiB { return "memoryMIB must be \(minMiB)...\(maxMiB), got \(mib)" }
         return nil
     }
 

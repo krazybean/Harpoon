@@ -319,7 +319,7 @@ fn get_config() -> Result<ConfigResult, String> {
         return Err(raw);
     }
     let mut cpus = 2;
-    let mut memory = 1024;
+    let mut memory = 4096;
     for line in raw.lines() {
         let l = line.trim().to_lowercase();
         if l.starts_with("cpus:") {
@@ -339,8 +339,7 @@ fn get_config() -> Result<ConfigResult, String> {
 
 #[tauri::command]
 fn set_memory(memory: u32) -> Result<String, String> {
-    let allowed = [512, 768, 1024, 1536, 2048];
-    if !allowed.contains(&memory) { return Err(format!("unsupported memory {}, allowed {:?}", memory, allowed)); }
+    if memory < 512 { return Err(format!("memory must be at least 512 MiB, got {}", memory)); }
     let (stdout, stderr, code) = run_harpoon(&["config", "set", "memory", &memory.to_string()])?;
     let combined = format!("{}{}", stdout, stderr);
     if code != 0 { return Err(combined); }
