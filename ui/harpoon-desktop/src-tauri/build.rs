@@ -13,6 +13,10 @@ fn main() {
   let initramfs = repo_root.join("assets/guest/harpoon-initramfs.cpio.gz");
   let rootimg = repo_root.join("assets/guest/harpoon-root.img");
 
+  for asset in [&harpoon_bin, &kernel, &initramfs, &rootimg] {
+    println!("cargo:rerun-if-changed={}", asset.display());
+  }
+
   // ensure harpoon built
   if !harpoon_bin.exists() {
     let _ = Command::new("bash").arg(repo_root.join("harpoon/build.sh")).status();

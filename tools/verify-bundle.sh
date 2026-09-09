@@ -3,6 +3,8 @@ set -euo pipefail
 # ponytail: verify Harpoon.app standalone bundle — fails build/release when any check fails
 # Checks: nested runtime, guest assets, arch, deployment target, dylibs, RPATH, entitlements, no repo refs
 APP="${1:-ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CANONICAL_INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 if [ ! -d "$APP" ]; then
   echo "[verify-bundle] FAIL: Harpoon.app not found at $APP" >&2
   exit 1
@@ -34,6 +36,8 @@ check "Contents/MacOS/harpoon-desktop exists" test -f "$APP/Contents/MacOS/harpo
 check "nested Harpoon runtime exists" test -f "$APP/Contents/Resources/harpoon/bin/harpoon"
 check "kernel exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/Image-virt"
 check "initramfs exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
+check "canonical initramfs exists" test -f "$CANONICAL_INITRAMFS"
+check "initramfs matches canonical" cmp -s "$CANONICAL_INITRAMFS" "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
 check "root template exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img"
 
 # 2. Arch
@@ -150,7 +154,7 @@ fi
 
 # 8. Guest assets sizes
 check "kernel size ~33M" bash -c 'test $(stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null) -gt 30000000' -- "$APP/Contents/Resources/harpoon/lib/harpoon/Image-virt"
-check "initramfs size ~14M" bash -c 'test $(stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null) -gt 10000000' -- "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
+check "initramfs size matches canonical" bash -c 'test "$(stat -f%z "$1" 2>/dev/null || stat -c%s "$1")" = "$(stat -f%z "$2" 2>/dev/null || stat -c%s "$2")"' -- "$CANONICAL_INITRAMFS" "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
 check "root logical 2G" bash -c 'test $(stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null) -eq 2147483648' -- "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img"
 
 # 9. Frameworks check

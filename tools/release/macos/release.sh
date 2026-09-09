@@ -69,6 +69,11 @@ mkdir -p "$DIST_DIR"
 if [ -d "$DIST_DIR/Harpoon.app" ]; then rm -rf "$DIST_DIR/Harpoon.app"; fi
 cp -R "$APP" "$DIST_DIR/Harpoon.app"
 echo "[release] copied Harpoon.app to $DIST_DIR/Harpoon.app" >&2
+# The dist staging app is what gets signed and shipped; reject stale resources before signing.
+if ! bash "$REPO_ROOT/tools/verify-bundle.sh" "$DIST_DIR/Harpoon.app"; then
+  echo "[release] FAIL: dist app does not match canonical bundle resources" >&2
+  exit 1
+fi
 # Sign inside-out — preserve true exit status, no tail truncation
 echo "[release] signing..." >&2
 SIGN_LOG=$(mktemp)
