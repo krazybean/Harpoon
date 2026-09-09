@@ -51,7 +51,16 @@ ok "symlink"
 # file bind (single file)
 echo "file-bind" > "$M4_HOST/single.txt"
 DOCKER_HOST="unix://$HOST_SOCK" docker run --rm -v "$M4_HOST/single.txt:/workspace/single.txt" alpine:3.22 cat /workspace/single.txt | grep -q "file-bind" || fail "file bind"
+DOCKER_HOST="unix://$HOST_SOCK" docker run --rm -v "$M4_HOST/single.txt:/workspace/single.txt" alpine:3.22 test -f /workspace/single.txt || fail "file bind changed type"
 ok "file bind"
+# Missing host sources must not become guest directories during container create.
+set +e
+missing_out=$(DOCKER_HOST="unix://$HOST_SOCK" docker run --rm -v "$M4_HOST/missing.txt:/workspace/missing.txt" alpine:3.22 true 2>&1)
+missing_status=$?
+set -e
+[ $missing_status -ne 0 ] || fail "missing bind source unexpectedly created"
+echo "$missing_out" | grep -qi "does not exist\|missing" || fail "missing bind source error unclear: $missing_out"
+ok "missing bind source rejected"
 # read-only
 DOCKER_HOST="unix://$HOST_SOCK" docker run --rm -v "$M4_HOST:/workspace:ro" alpine:3.22 cat /workspace/host.txt | grep -q "host-value" || fail "ro read"
 # ro write should fail

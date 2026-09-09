@@ -305,8 +305,13 @@ final class BridgeSet {
                                         }
                                         break
                                     }
-                                    // helper: check for absolute host bind sources outside shared roots
-                                    func firstUnsupportedHostPath(in data: Data) -> String? {
+                                    // Reject missing sources before Docker can create a directory for a file bind.
+                                    func firstInvalidHostPath(in data: Data) -> (path: String, reason: String)? {
+                                        func issue(_ src: String) -> (path: String, reason: String)? {
+                                            guard src.hasPrefix("/") else { return nil }
+                                            guard self.translator.translateHostPath(src) != nil else { return (src, "not shared") }
+                                            return FileManager.default.fileExists(atPath: src) ? nil : (src, "missing")
+                                        }
                                         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else { return nil }
                                         // HostConfig.Binds
                                         if let hostConfig = json["HostConfig"] as? [String: Any], let binds = hostConfig["Binds"] as? [String] {
@@ -314,28 +319,27 @@ final class BridgeSet {
                                                 let parts = b.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
                                                 guard parts.count >= 2 else { continue }
                                                 let src = parts[0]
-                                                guard src.hasPrefix("/") else { continue }
-                                                if self.translator.translateHostPath(src) == nil { return src }
+                                                if let found = issue(src) { return found }
                                             }
                                         }
                                         // HostConfig.Mounts (bind only)
                                         if let hostConfig = json["HostConfig"] as? [String: Any], let mounts = hostConfig["Mounts"] as? [[String: Any]] {
                                             for m in mounts {
-                                                guard let src = m["Source"] as? String, src.hasPrefix("/") else { continue }
+                                                guard let src = m["Source"] as? String else { continue }
                                                 let t = m["Type"] as? String
                                                 // only bind mounts are host paths; volume/named mounts are not host paths
                                                 if t == nil || t == "bind" {
-                                                    if self.translator.translateHostPath(src) == nil { return src }
+                                                    if let found = issue(src) { return found }
                                                 }
                                             }
                                         }
                                         // top-level Mounts
                                         if let mounts = json["Mounts"] as? [[String: Any]] {
                                             for m in mounts {
-                                                guard let src = m["Source"] as? String, src.hasPrefix("/") else { continue }
+                                                guard let src = m["Source"] as? String else { continue }
                                                 let t = m["Type"] as? String
                                                 if t == nil || t == "bind" {
-                                                    if self.translator.translateHostPath(src) == nil { return src }
+                                                    if let found = issue(src) { return found }
                                                 }
                                             }
                                         }
@@ -345,8 +349,7 @@ final class BridgeSet {
                                                 let parts = b.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
                                                 guard parts.count >= 2 else { continue }
                                                 let src = parts[0]
-                                                guard src.hasPrefix("/") else { continue }
-                                                if self.translator.translateHostPath(src) == nil { return src }
+                                                if let found = issue(src) { return found }
                                             }
                                         }
                                         return nil
@@ -354,14 +357,14 @@ final class BridgeSet {
                                     let isCreate = method == "POST" && path.contains("containers/create")
                                     var outData: Data = requestData
                                     if isCreate && bodyLen > 0 && !isChunked {
-                                        if let unsupported = firstUnsupportedHostPath(in: bodyData) {
-                                            let msg = "Harpoon: host path \"\(unsupported)\" is not shared. Supported Harpoon shared roots are /Users and /tmp (/private/tmp). Host path must be under /Users or /tmp to be bind-mounted. Unsupported host path: \(unsupported)"
+                                        if let invalid = firstInvalidHostPath(in: bodyData) {
+                                            let msg = invalid.reason == "missing" ? "Harpoon: host bind source \"\(invalid.path)\" does not exist; refusing to let Docker create a directory with the wrong type." : "Harpoon: host path \"\(invalid.path)\" is not shared. Supported Harpoon shared roots are /Users and /tmp (/private/tmp). Host path must be under /Users or /tmp to be bind-mounted. Unsupported host path: \(invalid.path)"
                                             let errObj: [String: Any] = ["message": msg]
                                             let errBody = (try? JSONSerialization.data(withJSONObject: errObj, options: [])) ?? Data("{\"message\":\"unsupported host path\"}".utf8)
                                             let errHeader = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: \(errBody.count)\r\n\r\n"
                                             var errData = Data(errHeader.utf8)
                                             errData.append(errBody)
-                                            self.log("HARPOON_TRANSLATION_REJECT \(bid) \(unsupported) not shared")
+                                            self.log("HARPOON_TRANSLATION_REJECT \(bid) path=\(invalid.path) reason=\(invalid.reason)")
                                             // write error directly to client (Docker CLI)
                                             var off = 0
                                             while off < errData.count {

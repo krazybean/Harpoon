@@ -60,6 +60,11 @@ if python3 -c "import ast; ast.parse(open('tools/guest-builder/src/harpoon-mgmt'
 else
   fail "R5-08b" "harpoon-mgmt syntax error"
 fi
+if printf '{"op":"exec","argv":["uname","-s"]}\n' | python3 tools/guest-builder/src/harpoon-mgmt 2>&1 | grep -q '"exit": 0'; then
+  pass "R5-MGMT-EXEC" "harpoon-mgmt exec protocol succeeds"
+else
+  fail "R5-MGMT-EXEC" "harpoon-mgmt exec protocol failed"
+fi
 
 # Root template sanity (structural)
 say "--- root template sanity ---"
@@ -101,6 +106,16 @@ if grep -q 'for bin in.*resize2fs' tools/guest-builder/src/init && ! grep -q 'fo
   pass "R5-BINARY" "checks resize2fs not e2fsprogs"
 else
   fail "R5-BINARY" "binary check still buggy"
+fi
+if grep -q 'harpoon-host-users' tools/guest-builder/src/init && grep -q 'harpoon-host-tmp' tools/guest-builder/src/init; then
+  pass "R5-VIRTIOFS-ROOTS" "guest mounts host bind roots"
+else
+  fail "R5-VIRTIOFS-ROOTS" "guest missing host bind root mounts"
+fi
+if grep -q 'waitForManagementReady' harpoon/Sources/HarpoonCLI.swift && grep -q 'Guest management connection closed before shell started' harpoon/Sources/HarpoonCLI.swift; then
+  pass "R5-MGMT-FAILURE" "exec waits for guest readiness and shell fails loudly"
+else
+  fail "R5-MGMT-FAILURE" "management readiness or shell failure guard missing"
 fi
 # Offline artifact checks (structural)
 if gzip -dc assets/guest/harpoon-initramfs.cpio.gz 2>/dev/null | cpio -it 2>/dev/null | grep -q "sbin/resize2fs"; then

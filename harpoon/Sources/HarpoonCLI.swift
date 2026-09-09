@@ -403,7 +403,7 @@ func handleStatus(args: [String]=[]) -> Int32 {
             "sockExists": snap.sockExists,
             "lockHeld": snap.lockHeld,
             "mgmtSocketPath": HarpoonPaths.mgmtSocketPath,
-            "mgmtReady": isMgmtSocketLive()
+            "mgmtReady": isMgmtServiceReachable()
         ]
         if let pid = snap.pid { json["pid"] = pid }
         if let m = snap.meta {
@@ -446,7 +446,7 @@ func handleStatus(args: [String]=[]) -> Int32 {
         if let pid = snap.pid { cliPrint("PID: \(pid)") }
         cliPrint("VM: running")
         cliPrint("Docker: ready")
-        let mgmtReady = isMgmtSocketLive() && ((try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8))?.contains("HARPOON_MGMT_READY") ?? false)
+        let mgmtReady = isMgmtServiceReachable()
         cliPrint("Management: \(mgmtReady ? "ready" : "not ready")")
         if let m = snap.meta {
             cliPrint("CPUs: \(m.cpus)")
@@ -1023,7 +1023,7 @@ func guestFilesystemInfoViaMgmt() -> (capacity: UInt64?, used: UInt64?, free: UI
     // Try to query guest df via management channel if VM running and mgmt reachable
     let snap = statusSnapshot()
     if snap.state != "running" { return nil }
-    if !isMgmtSocketLive() { return nil }
+    if !isMgmtServiceReachable() { return nil }
     guard let fd = connectMgmtSocket() else { return nil }
     defer { close(fd) }
     let req: [String: Any] = ["op": "exec", "argv": ["df", "-B1", "/"]]
@@ -1322,7 +1322,7 @@ func handleDoctor() -> Int32 {
             var st = stat()
             let permsOk = stat(HarpoonPaths.mgmtSocketPath, &st)==0 && (st.st_mode & 0o777)==0o600
             check(permsOk, "mgmt socket 0600")
-            check(isMgmtSocketLive(), "mgmt service reachable (vsock 2377)")
+            check(isMgmtServiceReachable(), "mgmt service reachable (vsock 2377)")
         }
         if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) {
             check(log.contains("HARPOON_MGMT_READY"), "HARPOON_MGMT_READY in log")
@@ -1422,6 +1422,43 @@ func connectMgmtSocket() -> Int32? {
     return fd
 }
 
+func managementReady() -> Bool {
+    guard FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath),
+          let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) else { return false }
+    return log.contains("HARPOON_MGMT_READY")
+}
+
+func isMgmtServiceReachable() -> Bool {
+    guard managementReady(), let fd = connectMgmtSocket() else { return false }
+    defer { close(fd) }
+    let request = Data("{\"op\":\"exec\",\"argv\":[\"true\"]}\n".utf8)
+    let wrote = request.withUnsafeBytes { write(fd, $0.baseAddress!, request.count) }
+    guard wrote == request.count else { return false }
+    var timeout = timeval(tv_sec: 2, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    var buffer = [UInt8](repeating: 0, count: 1024)
+    let count = read(fd, &buffer, buffer.count)
+    guard count > 0,
+          let text = String(bytes: buffer[0..<count], encoding: .utf8),
+          let line = text.split(separator: "\n").first,
+          let data = line.data(using: .utf8),
+          let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return (response["exit"] as? Int) == 0
+}
+
+func waitForManagementReady() -> Bool {
+    for _ in 0..<20 {
+        if managementReady() { return true }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+    return false
+}
+
+func managementFailureReason() -> String {
+    guard let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) else { return "no runtime log" }
+    return log.split(separator: "\n").reversed().first { $0.contains("HARPOON_MGMT_") }.map(String.init) ?? "no guest management readiness marker"
+}
+
 func mgmtExec(argv: [String]) -> Int32 {
     let snap = statusSnapshot()
     if snap.state == "stopped" || snap.state == "stale" {
@@ -1431,28 +1468,9 @@ func mgmtExec(argv: [String]) -> Int32 {
     if snap.state == "starting" || snap.state == "degraded" {
         // still check mgmt socket live, but warn
     }
-    // check mgmt socket exists — brief wait for race (guest mgmt starts ~1-3s after DOCKER_READY)
-    if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-        var waited = false
-        for _ in 0..<10 {
-            Thread.sleep(forTimeInterval: 0.5)
-            if FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) { waited = true; break }
-            if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8), log.contains("HARPOON_MGMT_READY") {
-                // log says ready but socket not yet bridged — wait a bit more
-                continue
-            }
-        }
-        if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-            if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) {
-                if !log.contains("HARPOON_MGMT_READY") {
-                    cliError("Guest management service is not ready")
-                    if waited { cliError("hint: waited 5s, check harpoon logs for HARPOON_MGMT_START/READY") }
-                    return 1
-                }
-            }
-            cliError("Guest management service is not ready")
-            return 1
-        }
+    if !waitForManagementReady() {
+        cliError("Guest management service is not ready: \(managementFailureReason())")
+        return 1
     }
     guard let fd = connectMgmtSocket() else {
         // distinguish: socket exists but connect failed = mgmt not ready vs connection failed
@@ -1570,16 +1588,9 @@ func handleShell(args: [String]) -> Int32 {
         cliError("Harpoon VM is not running")
         return 1
     }
-    if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-        // brief wait matching mgmtExec
-        for _ in 0..<10 {
-            Thread.sleep(forTimeInterval: 0.5)
-            if FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) { break }
-        }
-        if !FileManager.default.fileExists(atPath: HarpoonPaths.mgmtSocketPath) {
-            cliError("Guest management service is not ready")
-            return 1
-        }
+    if !waitForManagementReady() {
+        cliError("Guest management service is not ready: \(managementFailureReason())")
+        return 1
     }
     guard let fd = connectMgmtSocket() else {
         cliError("Connection to guest management service failed")
@@ -1621,13 +1632,15 @@ func handleShell(args: [String]) -> Int32 {
     // proxy loop: stdin <-> socket, socket <-> stdout
     signal(SIGPIPE, SIG_IGN)
     var shouldExit = false
+    var receivedGuestData = false
+    var connectionFailed = false
     // set non-blocking for stdin and fd
     let f1 = fcntl(STDIN_FILENO, F_GETFL, 0); if f1 >= 0 { _ = fcntl(STDIN_FILENO, F_SETFL, f1 | O_NONBLOCK) }
     let f2 = fcntl(fd, F_GETFL, 0); if f2 >= 0 { _ = fcntl(fd, F_SETFL, f2 | O_NONBLOCK) }
     while !shouldExit {
         var pfds = [pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0), pollfd(fd: fd, events: Int16(POLLIN), revents: 0)]
         let ret = poll(&pfds, 2, 1000)
-        if ret < 0 { if errno == EINTR { continue }; break }
+        if ret < 0 { if errno == EINTR { continue }; connectionFailed = true; break }
         if ret == 0 { continue }
         if (pfds[0].revents & Int16(POLLIN)) != 0 {
             var buf = [UInt8](repeating: 0, count: 8192)
@@ -1639,7 +1652,7 @@ func handleShell(args: [String]) -> Int32 {
                     if w > 0 { off2 += Int(w); continue }
                     if w < 0 && errno == EINTR { continue }
                     if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                    break
+                    connectionFailed = true; shouldExit = true; break
                 }
             } else if n == 0 {
                 // EOF
@@ -1651,6 +1664,7 @@ func handleShell(args: [String]) -> Int32 {
             var buf = [UInt8](repeating: 0, count: 8192)
             let n = buf.withUnsafeMutableBytes { ptr in read(fd, ptr.baseAddress!, ptr.count) }
             if n > 0 {
+                receivedGuestData = true
                 var off2 = 0
                 while off2 < n {
                     let w = buf.withUnsafeBytes { ptr in write(STDOUT_FILENO, ptr.baseAddress!.advanced(by: off2), n-off2) }
@@ -1660,13 +1674,19 @@ func handleShell(args: [String]) -> Int32 {
                     break
                 }
             } else if n == 0 {
+                if !receivedGuestData { connectionFailed = true }
                 break
             } else {
                 if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
+                    connectionFailed = true
                     break
                 }
             }
         }
+    }
+    if connectionFailed {
+        cliError("Guest management connection closed before shell started")
+        return 1
     }
     return 0
 }

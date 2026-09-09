@@ -242,7 +242,6 @@ readyPoll.setEventHandler {
     _ = manager.checkSerial()
     if manager.bootReady && !readyPollCancelled {
         readyPollCancelled = true
-        readyPoll.cancel()
         lifecycle.transition(to: .dockerReady)
         log("HARPOON_DOCKER_READY observed, starting bridges")
         manager.startBridges()

@@ -70,7 +70,13 @@ final class HostPathTranslator {
             return nil
         }
         let guest = root.guestPath + remainder
-        log("HARPOON_HOST_PATH_TRANSLATE \(host) -> \(guest) via \(root.hostPath)->\(root.guestPath)")
+        let type: String
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: std), let fileType = attrs[.type] as? FileAttributeType {
+            type = fileType == .typeRegular ? "file" : fileType == .typeDirectory ? "dir" : "other"
+        } else {
+            type = "missing"
+        }
+        log("HARPOON_HOST_PATH_TRANSLATE original=\(host) guest=\(guest) type=\(type) via \(root.hostPath)->\(root.guestPath)")
         return guest
     }
 

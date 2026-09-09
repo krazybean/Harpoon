@@ -335,6 +335,18 @@ if [ $VIRTIOFS_OK -eq 1 ]; then
   else
     echo "HARPOON_VIRTIOFS_FAILED mount $(dmesg 2>&1 | tail -n 20 | head -n 20)" > /dev/hvc0
   fi
+  for share in harpoon-host-users harpoon-host-tmp; do
+    case "$share" in
+      harpoon-host-users) mountpoint=/mnt/harpoon-host/Users ;;
+      harpoon-host-tmp) mountpoint=/mnt/harpoon-host/tmp ;;
+    esac
+    mkdir -p "$mountpoint" 2>&1 | tee /dev/hvc0 >/dev/null || true
+    if mount -t virtiofs "$share" "$mountpoint" 2>&1 | tee /dev/hvc0 >/dev/null; then
+      echo "HARPOON_VIRTIOFS_MOUNTED tag=$share path=$mountpoint" > /dev/hvc0
+    else
+      echo "HARPOON_VIRTIOFS_FAILED tag=$share path=$mountpoint" > /dev/hvc0
+    fi
+  done
 else
   echo "HARPOON_VIRTIOFS_FAILED module" > /dev/hvc0
 fi
