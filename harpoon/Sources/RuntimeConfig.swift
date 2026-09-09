@@ -62,10 +62,30 @@ struct RuntimeConfig {
     var bootTimeout: TimeInterval = 120
     var dockerReadyTimeout: TimeInterval = 120
 
+    static func executableURLs() -> [URL] {
+        var urls: [URL] = []
+        let arg0 = CommandLine.arguments.first ?? ""
+        if !arg0.isEmpty {
+            let url = arg0.hasPrefix("/")
+                ? URL(fileURLWithPath: arg0)
+                : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(arg0)
+            urls.append(url.standardized.resolvingSymlinksInPath())
+        }
+        if let bundle = Bundle.main.executableURL {
+            urls.append(bundle.standardized.resolvingSymlinksInPath())
+        }
+        return urls
+    }
+
+    static func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
     static func installedLibDir() -> URL? {
         // Harpoon.app bundle: Resources/harpoon/lib/harpoon (when harpoon is at Resources/harpoon/bin/harpoon)
         // Tauri flat resources: Resources/harpoon or Resources/
-        if let exec = Bundle.main.executableURL {
+        for exec in executableURLs() {
             let binDir = exec.deletingLastPathComponent()
             // Bundle: <Harpoon.app>/Contents/MacOS/harpoon-desktop -> ../Resources/harpoon/lib/harpoon
             // For harpoon binary itself at Resources/harpoon/bin/harpoon, binDir is .../Resources/harpoon/bin
@@ -82,65 +102,54 @@ struct RuntimeConfig {
                 binDir.appendingPathComponent("../Resources/bundle-resources/harpoon").standardized,
             ]
             for c in bundleCandidates {
-                if FileManager.default.fileExists(atPath: c.path) { return c }
-                // also check if parent contains Image-virt directly (flat)
-                let flat = c.deletingLastPathComponent()
-                if FileManager.default.fileExists(atPath: flat.appendingPathComponent("Image-virt").path) { return flat }
-            }
-            // Check Bundle resourceURL directly
-            if let res = Bundle.main.resourceURL {
-                let resHarpoonLib = res.appendingPathComponent("harpoon/lib/harpoon")
-                if FileManager.default.fileExists(atPath: resHarpoonLib.path) { return resHarpoonLib }
-                let resBundleLib = res.appendingPathComponent("bundle-resources/harpoon/lib/harpoon")
-                if FileManager.default.fileExists(atPath: resBundleLib.path) { return resBundleLib }
-                let resHarpoon = res.appendingPathComponent("harpoon")
-                if FileManager.default.fileExists(atPath: resHarpoon.appendingPathComponent("Image-virt").path) { return resHarpoon }
-                let resBundle = res.appendingPathComponent("bundle-resources/harpoon")
-                if FileManager.default.fileExists(atPath: resBundle.appendingPathComponent("Image-virt").path) { return resBundle }
-                if FileManager.default.fileExists(atPath: res.appendingPathComponent("Image-virt").path) { return res }
+                if isDirectory(c) { return c }
             }
         }
-        // Try common prefixes relative to executable (installed via package.sh)
-        let candidates: [URL] = [
-            URL(fileURLWithPath: "/usr/local/lib/harpoon"),
-            URL(fileURLWithPath: "/opt/homebrew/lib/harpoon"),
-            URL(fileURLWithPath: "/opt/homebrew/libexec/harpoon"),
-        ]
-        for c in candidates {
-            if FileManager.default.fileExists(atPath: c.path) { return c }
+        if let res = Bundle.main.resourceURL {
+            for path in ["harpoon/lib/harpoon", "bundle-resources/harpoon/lib/harpoon", "harpoon", "bundle-resources/harpoon"] {
+                let candidate = res.appendingPathComponent(path)
+                if isDirectory(candidate) { return candidate }
+            }
         }
         // Relative to executable: <prefix>/bin/harpoon -> <prefix>/lib/harpoon
-        if let exec = Bundle.main.executableURL {
+        for exec in executableURLs() {
             let binDir = exec.deletingLastPathComponent()
             let lib1 = binDir.deletingLastPathComponent().appendingPathComponent("lib/harpoon")
-            if FileManager.default.fileExists(atPath: lib1.path) { return lib1 }
+            if isDirectory(lib1) { return lib1 }
             let lib2 = binDir.appendingPathComponent("../lib/harpoon").standardized
-            if FileManager.default.fileExists(atPath: lib2.path) { return lib2 }
+            if isDirectory(lib2) { return lib2 }
         }
         return nil
     }
 
+    static func sourceAssetRoot() -> URL? {
+        let fm = FileManager.default
+        for exec in executableURLs() {
+            let root = exec.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let assets = root.appendingPathComponent("assets/guest")
+            if fm.fileExists(atPath: assets.appendingPathComponent("Image-virt").path),
+               fm.fileExists(atPath: assets.appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
+        }
+        let assets = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("assets/guest")
+        if fm.fileExists(atPath: assets.appendingPathComponent("Image-virt").path),
+           fm.fileExists(atPath: assets.appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
+        return nil
+    }
+
     static func resolveResource(named: String, fallback: String) -> URL {
-        // 1. env override already handled in fromEnvironment, but check installed
-        if let lib = installedLibDir() {
-            let cand = lib.appendingPathComponent(named)
-            if FileManager.default.fileExists(atPath: cand.path) { return cand }
-        }
-        // 2. development fallback relative to cwd
-        let cwdCand = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(fallback)
-        if FileManager.default.fileExists(atPath: cwdCand.path) { return cwdCand }
-        // 3. relative to executable's directory (when running from build)
-        if let exec = Bundle.main.executableURL {
-            let execDir = exec.deletingLastPathComponent()
-            // try harpoon/../../fallback
-            let cand2 = execDir.appendingPathComponent("../../").appendingPathComponent(fallback).standardized
-            if FileManager.default.fileExists(atPath: cand2.path) { return cand2 }
-        }
-        // 4. fallback as given (will fail validation later with clear message)
+        // Explicit overrides are applied in fromEnvironment. An installed resource root wins over CWD.
         if let lib = installedLibDir() {
             return lib.appendingPathComponent(named)
         }
+        if let assets = sourceAssetRoot() { return assets.appendingPathComponent(named) }
         return URL(fileURLWithPath: fallback)
+    }
+
+    static func rootTemplateURL() -> URL {
+        if let path = ProcessInfo.processInfo.environment["HARPOON_TEST_ROOT"], !path.isEmpty { return URL(fileURLWithPath: path) }
+        if let lib = installedLibDir() { return lib.appendingPathComponent("harpoon-root.img") }
+        if let assets = sourceAssetRoot() { return assets.appendingPathComponent("harpoon-root.img") }
+        return URL(fileURLWithPath: "assets/guest/harpoon-root.img")
     }
 
     static func resolveRootDisk() -> URL {
@@ -158,9 +167,8 @@ struct RuntimeConfig {
             if FileManager.default.fileExists(atPath: p) { return URL(fileURLWithPath: p) }
         }
         // Otherwise use template from installed lib or fallback
-        if let lib = installedLibDir() {
-            let tmpl = lib.appendingPathComponent("harpoon-root.img")
-            if FileManager.default.fileExists(atPath: tmpl.path) {
+        let tmpl = rootTemplateURL()
+        if FileManager.default.fileExists(atPath: tmpl.path) {
                 // provision on first run: copy to user location — production MUST be ~/Library, fail if not writable
                 let userDest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img")
                 let dest: URL
@@ -220,10 +228,8 @@ struct RuntimeConfig {
                     }
                 }
                 return dest
-            }
         }
-        // development fallback — canonical assets/guest (no spike fallback)
-        return URL(fileURLWithPath: "assets/guest/harpoon-root.img")
+        return tmpl
     }
 
     static func fromEnvironment() -> RuntimeConfig {

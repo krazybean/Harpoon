@@ -1231,11 +1231,12 @@ func handleDoctor() -> Int32 {
     check(FileManager.default.isExecutableFile(atPath: bin), "binary \(bin)")
     let appDir = HarpoonPaths.appSupportDir.path
     check(FileManager.default.isWritableFile(atPath: appDir) || FileManager.default.fileExists(atPath: appDir), "runtime directory writable \(appDir)")
-    let kernel = RuntimeConfig().kernelURL.path
+    let runtime = RuntimeConfig.fromEnvironment()
+    let kernel = runtime.kernelURL.path
     check(FileManager.default.fileExists(atPath: kernel), "kernel \(kernel)")
-    let initramfs = RuntimeConfig().initramfsURL.path
+    let initramfs = runtime.initramfsURL.path
     check(FileManager.default.fileExists(atPath: initramfs), "initramfs \(initramfs)")
-    let disk = RuntimeConfig().diskURL.path
+    let disk = runtime.diskURL.path
     let diskExists = FileManager.default.fileExists(atPath: disk)
     check(diskExists, "disk \(disk)")
     if diskExists, let attrs = try? FileManager.default.attributesOfItem(atPath: disk), let sz = attrs[.size] as? UInt64 {
@@ -1765,26 +1766,18 @@ func handleStart(args: [String]) -> Int32 {
             // same size, no-op
         } else {
             // no disk — provision with requested size before VM start
-            let tmplCandidates = [
-                "/Applications/Harpoon.app/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img",
-                FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Github/Harpoon/assets/guest/harpoon-root.img").path,
-                FileManager.default.currentDirectoryPath + "/assets/guest/harpoon-root.img"
-            ]
-            var tmplPath: String? = nil
-            for cand in tmplCandidates { if FileManager.default.fileExists(atPath: cand) { tmplPath = cand; break } }
-            if let inst = RuntimeConfig.installedLibDir()?.appendingPathComponent("harpoon-root.img").path, FileManager.default.fileExists(atPath: inst) { tmplPath = inst }
-            if tmplPath == nil, let env = ProcessInfo.processInfo.environment["HARPOON_TEST_ROOT"] { tmplPath = env }
-            guard let tmpl = tmplPath else {
+            let template = RuntimeConfig.rootTemplateURL().path
+            guard FileManager.default.fileExists(atPath: template) else {
                 cliError("template not found for provisioning")
                 return 1
             }
             let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path
             try? FileManager.default.createDirectory(atPath: (dest as NSString).deletingLastPathComponent, withIntermediateDirectories: true, attributes: nil)
             if !FileManager.default.fileExists(atPath: dest) {
-                let cp = Process(); cp.executableURL = URL(fileURLWithPath: "/bin/cp"); cp.arguments = ["-c", "-p", tmpl, dest]; try? cp.run(); cp.waitUntilExit()
+                let cp = Process(); cp.executableURL = URL(fileURLWithPath: "/bin/cp"); cp.arguments = ["-c", "-p", template, dest]; try? cp.run(); cp.waitUntilExit()
                 if cp.terminationStatus != 0 || !FileManager.default.fileExists(atPath: dest) {
-                    let ditto = Process(); ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto"); ditto.arguments = [tmpl, dest]; try? ditto.run(); ditto.waitUntilExit()
-                    if ditto.terminationStatus != 0 { try? FileManager.default.copyItem(atPath: tmpl, toPath: dest) }
+                    let ditto = Process(); ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto"); ditto.arguments = [template, dest]; try? ditto.run(); ditto.waitUntilExit()
+                    if ditto.terminationStatus != 0 { try? FileManager.default.copyItem(atPath: template, toPath: dest) }
                 }
                 // truncate to requested
                 if let fh = FileHandle(forWritingAtPath: dest) {
