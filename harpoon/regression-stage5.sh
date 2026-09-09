@@ -55,7 +55,7 @@ if gzip -dc assets/guest/harpoon-initramfs.cpio.gz 2>/dev/null | cpio -it 2>/dev
 else
   fail "R5-08" "harpoon-mgmt missing in initramfs"
 fi
-if python3 -m py_compile tools/guest-builder/src/harpoon-mgmt 2>&1 >/dev/null; then
+if python3 -c "import ast; ast.parse(open('tools/guest-builder/src/harpoon-mgmt').read())" 2>&1 >/dev/null; then
   pass "R5-08b" "harpoon-mgmt py_compile"
 else
   fail "R5-08b" "harpoon-mgmt syntax error"

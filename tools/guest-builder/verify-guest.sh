@@ -78,7 +78,7 @@ fi
 
 # 5. harpoon-mgmt must be valid python
 if [ -f "$HARPOON_MGMT" ]; then
-  if python3 -m py_compile "$HARPOON_MGMT" 2>&1 | head -n 5; then echo "[verify-guest] PASS: harpoon-mgmt py_compile" >&2; else echo "[verify-guest] FAIL: harpoon-mgmt py_compile" >&2; FAIL=1; fi
+  if python3 -c "import ast; ast.parse(open('$HARPOON_MGMT').read())" 2>&1 | head -n 5; then echo "[verify-guest] PASS: harpoon-mgmt py_compile" >&2; else echo "[verify-guest] FAIL: harpoon-mgmt py_compile" >&2; FAIL=1; fi
   if head -n1 "$HARPOON_MGMT" | grep -q "python3"; then echo "[verify-guest] PASS: harpoon-mgmt shebang python3" >&2; else echo "[verify-guest] FAIL: harpoon-mgmt shebang" >&2; FAIL=1; fi
 fi
 
