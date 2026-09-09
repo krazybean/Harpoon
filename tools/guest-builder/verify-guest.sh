@@ -35,6 +35,7 @@ check "root template exists" test -f "$ROOT_IMG"
 check "harpoon-mgmt source exists" test -f "$HARPOON_MGMT"
 check "harpoon-mgmt wrapper source exists" test -f "$HARPOON_MGMT_WRAPPER"
 check "init source exists" test -f "$INIT_SRC"
+if "$SCRIPT_DIR/build-initramfs.sh" --check >/dev/null 2>&1; then echo "[verify-guest] PASS: initramfs input fingerprint current" >&2; else echo "[verify-guest] FAIL: initramfs input fingerprint stale" >&2; FAIL=1; fi
 
 # 2. Root template logical size exactly 2147483648
 if [ -f "$ROOT_IMG" ]; then

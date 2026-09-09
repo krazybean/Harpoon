@@ -41,6 +41,7 @@ say "verifying runtime closure..."
 
 # INITRAMFS — busybox applets (representative core set used by init)
 if [ -f "$INITRAMFS" ]; then
+  if "$REPO_ROOT/tools/guest-builder/build-initramfs.sh" --check >/dev/null 2>&1; then pass "initramfs input fingerprint current"; else fail "initramfs input fingerprint stale"; fi
   LISTING=$(gzip -dc "$INITRAMFS" 2>/dev/null | cpio -it 2>/dev/null || echo "")
   for cmd in sh mount umount mkdir cp mv rm chmod chown ln grep sed awk cut cat sleep sync stat df blockdev modprobe insmod lsmod switch_root; do
     if grep -q "bin/$cmd" <<< "$LISTING" || grep -q "sbin/$cmd" <<< "$LISTING"; then pass "initramfs busybox $cmd"; else fail "initramfs missing busybox $cmd"; fi

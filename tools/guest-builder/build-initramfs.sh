@@ -3,16 +3,19 @@ set -euo pipefail
 # ponytail: build canonical harpoon-initramfs.cpio.gz — deterministic, no bootstrap cycle
 # Precedence:
 #   1. explicit FETCH env (HARPOON_INITRAMFS_URL/SHA256) — versioned artifact cache
-#   2. local canonical if already built (assets/guest/harpoon-initramfs.cpio.gz)
+#   2. local canonical if its input manifest matches
 #   3. deterministic REBUILD via Docker Linux (Alpine 3.22)
 #   4. BOOTSTRAP only if HARPOON_ALLOW_BOOTSTRAP=1 (development-only, not release)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+OUT="${HARPOON_INITRAMFS_OUT:-$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz}"
+FINGERPRINT="$OUT.inputs"
 BOOTSTRAP="$REPO_ROOT/assets/guest/.bootstrap/harpoon-initramfs.cpio.gz"
 CACHE_DIR="$REPO_ROOT/assets/guest/.cache"
 SRC_INIT="$REPO_ROOT/tools/guest-builder/src/init"
 SRC_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
+SRC_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
+ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
 mkdir -p "$REPO_ROOT/assets/guest" "$CACHE_DIR"
 
 # Pinned production inputs — mismatch FAILs
@@ -21,6 +24,44 @@ EXPECTED_INITRAMFS_VIRT_SHA="508de7f561b94aac0b569611574502e4528eb21230318badac9
 EXPECTED_MODLOOP_SHA="65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810"
 EXPECTED_MINIROOTFS_SHA="188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c"
 EXPECTED_KERNEL="6.12.94-0-virt"
+
+input_manifest() {
+  local file rel
+  printf 'harpoon-initramfs-inputs-v1\n'
+  printf 'pin %s %s\n' kernel "$EXPECTED_KERNEL"
+  printf 'pin %s %s\n' vmlinuz "$EXPECTED_VMLINUZ_SHA"
+  printf 'pin %s %s\n' initramfs-virt "$EXPECTED_INITRAMFS_VIRT_SHA"
+  printf 'pin %s %s\n' modloop "$EXPECTED_MODLOOP_SHA"
+  printf 'pin %s %s\n' minirootfs "$EXPECTED_MINIROOTFS_SHA"
+  for file in "$SCRIPT_DIR/build-initramfs.sh" "$SRC_INIT" "$SRC_MGMT" "$SRC_MGMT_WRAPPER" "$REPO_ROOT/tools/guest-builder/required-modules.txt" "$REPO_ROOT/tools/guest-builder/required-kernel-features.txt" "$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt" "$ROOT_IMG"; do
+    [ -f "$file" ] || { echo "[build-initramfs] FAIL: missing input $file" >&2; return 1; }
+    rel="${file#$REPO_ROOT/}"
+    printf 'sha256 %s %s\n' "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$rel"
+  done
+}
+
+CURRENT_INPUTS=$(mktemp)
+trap 'rm -f "$CURRENT_INPUTS"' EXIT
+input_manifest > "$CURRENT_INPUTS"
+
+case "${1:-}" in
+  --fingerprint) cat "$CURRENT_INPUTS"; exit 0 ;;
+  --check)
+    if [ -f "$OUT" ] && [ -f "$FINGERPRINT" ] && cmp -s "$CURRENT_INPUTS" "$FINGERPRINT"; then
+      echo "[build-initramfs] current: $OUT" >&2
+      exit 0
+    fi
+    echo "[build-initramfs] stale: $OUT" >&2
+    exit 1
+    ;;
+  '') ;;
+  *) echo "usage: $0 [--check|--fingerprint]" >&2; exit 2 ;;
+esac
+
+write_fingerprint() {
+  cp "$CURRENT_INPUTS" "$FINGERPRINT.tmp"
+  mv "$FINGERPRINT.tmp" "$FINGERPRINT"
+}
 
 # Verify pinned cache inputs if present (mismatch FAIL, not just print)
 for _f in "$CACHE_DIR/vmlinuz-virt" "$CACHE_DIR/initramfs-virt" "$CACHE_DIR/modloop-virt" "$CACHE_DIR/alpine-minirootfs-3.22.1-aarch64.tar.gz"; do
@@ -62,17 +103,19 @@ if [ -n "$FETCH_URL" ] && [ -n "$FETCH_SHA" ]; then
     exit 1
   fi
   mv "$TMP_FETCH" "$OUT"
+  rm -f "$FINGERPRINT"
   echo "[build-initramfs] fetched and verified $OUT (sha256 $ACTUAL_SHA)" >&2
   ls -lh "$OUT" >&2
   exit 0
 fi
 
-# 2. local canonical if already built
-if [ -f "$OUT" ]; then
+# 2. local canonical only when its declared inputs match
+if [ -f "$OUT" ] && [ -f "$FINGERPRINT" ] && cmp -s "$CURRENT_INPUTS" "$FINGERPRINT"; then
   echo "[build-initramfs] up to date at $OUT" >&2
   ls -lh "$OUT" >&2
   exit 0
 fi
+if [ -f "$OUT" ]; then echo "[build-initramfs] STALE: input manifest missing, malformed, or changed; rebuilding" >&2; fi
 
 # 3. deterministic REBUILD via Docker Linux (Alpine 3.22)
 # Pinned inputs (Alpine 3.22 aarch64, kernel 6.12.94-0-virt):
@@ -88,13 +131,36 @@ fi
 #   modloop-virt: (fetched, sha printed at build)
 #   alpine-minirootfs-3.22.1: (fetched, sha printed)
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+CALLER_DOCKER_CONTEXT="${DOCKER_CONTEXT:-}"
+DOCKER_CONTEXT="${HARPOON_BUILD_DOCKER_CONTEXT:-}"
+docker_cmd() {
+  if [ -n "$DOCKER_CONTEXT" ]; then
+    env -u DOCKER_HOST -u DOCKER_CONTEXT docker --context "$DOCKER_CONTEXT" "$@"
+  else
+    docker "$@"
+  fi
+}
+if [ -n "$DOCKER_CONTEXT" ]; then
+  ENGINE="HARPOON_BUILD_DOCKER_CONTEXT=$DOCKER_CONTEXT"
+elif [ -n "${DOCKER_HOST:-}" ]; then
+  ENGINE="DOCKER_HOST=$DOCKER_HOST"
+elif [ -n "$CALLER_DOCKER_CONTEXT" ]; then
+  DOCKER_CONTEXT="$CALLER_DOCKER_CONTEXT"
+  ENGINE="DOCKER_CONTEXT=$DOCKER_CONTEXT"
+elif docker info >/dev/null 2>&1; then
+  ENGINE="default Docker endpoint"
+elif docker --context harpoon info >/dev/null 2>&1; then
+  DOCKER_CONTEXT=harpoon
+  ENGINE="harpoon Docker context"
+fi
+if [ -n "${ENGINE:-}" ] && docker_cmd info >/dev/null 2>&1; then
+  echo "[build-initramfs] build engine: $ENGINE" >&2
   echo "[build-initramfs] REBUILD MODE: deterministic rebuild via Docker (Alpine 3.22)..." >&2
   # Ensure src init/mgmt exist (committed)
   if [ ! -f "$SRC_INIT" ]; then echo "[build-initramfs] FAIL: missing $SRC_INIT (committed init source)" >&2; exit 1; fi
   if [ ! -f "$SRC_MGMT" ]; then echo "[build-initramfs] FAIL: missing $SRC_MGMT" >&2; exit 1; fi
   # Run rebuild inside Alpine container
-  docker run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 sh -c '
+  docker_cmd run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 sh -c '
     set -euo pipefail
     apk add --no-cache cpio gzip squashfs-tools curl e2fsprogs e2fsprogs-extra > /dev/null
     BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64"
@@ -232,6 +298,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     ls -lh "$OUT" >&2
   '
   if [ -f "$OUT" ]; then
+    write_fingerprint
     echo "[build-initramfs] REBUILD SUCCESS at $OUT" >&2
     ls -lh "$OUT" >&2
     exit 0
@@ -244,6 +311,7 @@ fi
 if [ "${HARPOON_ALLOW_BOOTSTRAP:-}" = "1" ] && [ -f "$BOOTSTRAP" ]; then
   echo "[build-initramfs] BOOTSTRAP MODE (development-only, HARPOON_ALLOW_BOOTSTRAP=1): using $BOOTSTRAP" >&2
   cp -p "$BOOTSTRAP" "$OUT"
+  rm -f "$FINGERPRINT"
   ls -lh "$OUT" >&2
   if command -v shasum >/dev/null; then echo "[build-initramfs] sha256 $(shasum -a 256 "$OUT" | cut -d' ' -f1)" >&2; fi
   echo "[build-initramfs] done (bootstrap, not for release)" >&2
