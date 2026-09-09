@@ -23,6 +23,13 @@ if ! security find-identity -v -p codesigning 2>&1 | grep -F "$HARPOON_SIGN_IDEN
 echo "[release] guest assets..." >&2
 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
 bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tail -n 10
+# Release runtime closure — every dependency for boot/Docker/management must be bundled
+echo "[release] runtime closure..." >&2
+if ! bash "$REPO_ROOT/tools/release/verify-runtime-closure.sh" 2>&1 | tee /tmp/closure.log; then
+  echo "[release] FAIL: verify-runtime-closure.sh failed — release blocked, see /tmp/closure.log" >&2
+  cat /tmp/closure.log >&2
+  exit 1
+fi
 # Version flow — immutable: requested VERSION must already be committed
 echo "[release] version $VERSION flow (immutable)..." >&2
 PKG_VER=$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version")
