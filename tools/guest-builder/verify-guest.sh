@@ -47,20 +47,29 @@ if [ -f "$INITRAMFS" ]; then
   echo "$LISTING" | grep -q "lib/modules.*vmw_vsock" && echo "[verify-guest] PASS: vmw_vsock modules present" >&2 || { echo "[verify-guest] FAIL: vmw_vsock modules missing" >&2; FAIL=1; }
   echo "$LISTING" | grep -q "lib/modules.*virtiofs.ko" && echo "[verify-guest] PASS: virtiofs.ko present" >&2 || { echo "[verify-guest] FAIL: virtiofs.ko missing" >&2; FAIL=1; }
   echo "$LISTING" | grep -q "sbin/apk" && echo "[verify-guest] PASS: apk present" >&2 || { echo "[verify-guest] FAIL: apk missing" >&2; FAIL=1; }
+  # Artifact-level: resize2fs must be present in initramfs (offline, not via apk)
+  echo "$LISTING" | grep -q "sbin/resize2fs" && echo "[verify-guest] PASS: resize2fs in initramfs (offline)" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in initramfs" >&2; FAIL=1; }
+  echo "$LISTING" | grep -q "usr/sbin/resize2fs" && echo "[verify-guest] PASS: resize2fs in usr/sbin" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in usr/sbin" >&2; FAIL=1; }
+  echo "$LISTING" | grep -q "libext2fs" && echo "[verify-guest] PASS: libext2fs in initramfs" >&2 || { echo "[verify-guest] FAIL: libext2fs missing in initramfs" >&2; FAIL=1; }
+  echo "$LISTING" | grep -q "libblkid" && echo "[verify-guest] PASS: libblkid in initramfs" >&2 || { echo "[verify-guest] FAIL: libblkid missing in initramfs" >&2; FAIL=1; }
+  # Verify initramfs init will be able to run resize2fs: check it contains the refresh logic
+  if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then echo "[verify-guest] PASS: init has resize2fs refresh to final root" >&2; else echo "[verify-guest] FAIL: init missing resize2fs refresh" >&2; FAIL=1; fi
 fi
 
 # 4. Init source checks — the class of defect that shipped RC
 if [ -f "$INIT_SRC" ]; then
-  # init must install e2fsprogs package
-  if grep -q "apk add.*e2fsprogs" "$INIT_SRC"; then echo "[verify-guest] PASS: init installs e2fsprogs" >&2; else echo "[verify-guest] FAIL: init does not apk add e2fsprogs" >&2; FAIL=1; fi
+  # init must provide offline resize2fs via initramfs (not rely on apk at boot)
+  if grep -q "apk add.*e2fsprogs" "$INIT_SRC"; then echo "[verify-guest] FAIL: init still apk adds e2fsprogs (should be offline via initramfs)" >&2; FAIL=1; else echo "[verify-guest] PASS: init does not apk add e2fsprogs (offline)" >&2; fi
   # init must verify resize2fs (not e2fsprogs binary)
   if grep -q 'for bin in.*resize2fs' "$INIT_SRC"; then echo "[verify-guest] PASS: init checks resize2fs binary" >&2; else echo "[verify-guest] FAIL: init does not check resize2fs" >&2; FAIL=1; fi
   if grep -q 'for bin in.*e2fsprogs' "$INIT_SRC"; then echo "[verify-guest] FAIL: init still checks e2fsprogs (bug)" >&2; FAIL=1; else echo "[verify-guest] PASS: init does not check e2fsprogs binary" >&2; fi
-  # init must do disk resize BEFORE docker
-  # Find line numbers: DISK_CHECK_START should appear before DOCKERD_START
+  # init must do disk resize BEFORE docker AND before APK (offline)
+  # Find line numbers: DISK_CHECK_START should appear before DOCKERD_START and before APK
   DISK_LINE=$(grep -n "HARPOON_DISK_CHECK_START" "$INIT_SRC" | cut -d: -f1 | head -n1 || echo 9999)
   DOCKER_LINE=$(grep -n "HARPOON_DOCKERD_START\|dockerd --host" "$INIT_SRC" | cut -d: -f1 | head -n1 || echo 0)
+  APK_LINE=$(grep -n "HARPOON_APK_UPDATE_START\|apk update" "$INIT_SRC" | cut -d: -f1 | head -n1 || echo 9999)
   if [ "$DISK_LINE" -lt "$DOCKER_LINE" ] && [ "$DISK_LINE" -ne 9999 ]; then echo "[verify-guest] PASS: disk resize before Docker ($DISK_LINE < $DOCKER_LINE)" >&2; else echo "[verify-guest] FAIL: disk resize not before Docker (disk:$DISK_LINE docker:$DOCKER_LINE)" >&2; FAIL=1; fi
+  if [ "$DISK_LINE" -lt "$APK_LINE" ] && [ "$DISK_LINE" -ne 9999 ]; then echo "[verify-guest] PASS: disk resize before APK ($DISK_LINE < $APK_LINE) offline" >&2; else echo "[verify-guest] FAIL: disk resize not before APK (disk:$DISK_LINE apk:$APK_LINE) — must be offline" >&2; FAIL=1; fi
   # init must include failure handling for resize
   if grep -q "HARPOON_DISK_RESIZE_FAILED" "$INIT_SRC"; then echo "[verify-guest] PASS: resize failure handling" >&2; else echo "[verify-guest] FAIL: no resize failure handling" >&2; FAIL=1; fi
   # init must contain harpoon-mgmt startup with retry

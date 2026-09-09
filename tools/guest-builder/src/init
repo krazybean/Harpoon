@@ -116,6 +116,29 @@ REPOS2
       cp -a /lib/modules/6.12.94-0-virt /newroot/lib/modules/ 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_MODULE_REFRESH_FAILED" > /dev/hvc0
       ls -lh /newroot/lib/modules/6.12.94-0-virt/kernel/net/llc/llc.ko /newroot/lib/modules/6.12.94-0-virt/kernel/lib/libcrc32c.ko /newroot/lib/modules/6.12.94-0-virt/kernel/drivers/net/veth.ko /newroot/lib/modules/6.12.94-0-virt/kernel/net/netfilter/x_tables.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
       echo "HARPOON_MODULE_REFRESH_DONE" > /dev/hvc0
+      # Harpoon: ensure offline resize2fs is present in final root (for post-pivot filesystem reconciliation)
+      echo "HARPOON_RESIZE2FS_REFRESH_START" > /dev/hvc0
+      mkdir -p /newroot/usr/sbin /newroot/sbin /newroot/usr/lib /newroot/etc
+      for _bin in /usr/sbin/resize2fs /sbin/resize2fs; do
+        if [ -f "$_bin" ]; then
+          cp -a "$_bin" /newroot/usr/sbin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
+          cp -a "$_bin" /newroot/sbin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
+          break
+        fi
+      done
+      for _lib in /usr/lib/libext2fs.so.2 /usr/lib/libe2p.so.2 /usr/lib/libcom_err.so.2 /usr/lib/libblkid.so.1 /usr/lib/libuuid.so.1; do
+        if [ -f "$_lib" ]; then cp -a "$_lib" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
+        # also handle symlinked versioned files
+        _real=$(readlink -f "$_lib" 2>/dev/null || echo "")
+        if [ -n "$_real" ] && [ -f "$_real" ]; then cp -a "$_real" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
+      done
+      # versioned libs
+      for _vlib in /usr/lib/libext2fs.so.2.4 /usr/lib/libe2p.so.2.3 /usr/lib/libcom_err.so.2.1 /usr/lib/libblkid.so.1.1.0 /usr/lib/libuuid.so.1.3.0; do
+        if [ -f "$_vlib" ]; then cp -a "$_vlib" /newroot/usr/lib/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
+      done
+      if [ -f /etc/mke2fs.conf ]; then cp -a /etc/mke2fs.conf /newroot/etc/ 2>&1 | tee /dev/hvc0 >/dev/null || true; fi
+      ls -lh /newroot/usr/sbin/resize2fs /newroot/sbin/resize2fs /newroot/usr/lib/libext2fs.so.2 2>&1 | tee /dev/hvc0 >/dev/null || echo "HARPOON_RESIZE2FS_REFRESH_FAILED" > /dev/hvc0
+      echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
       # Verify FINAL ext4 root contains required files before switch_root (do not guess, fail if absent)
       for modpath in kernel/net/llc/llc.ko kernel/net/802/stp.ko kernel/net/bridge/bridge.ko kernel/net/bridge/br_netfilter.ko kernel/drivers/net/veth.ko kernel/lib/libcrc32c.ko kernel/net/netfilter/nf_conntrack.ko kernel/net/netfilter/nf_nat.ko kernel/net/netfilter/x_tables.ko kernel/net/ipv4/netfilter/ip_tables.ko kernel/net/ipv4/netfilter/iptable_nat.ko kernel/net/ipv4/netfilter/iptable_filter.ko kernel/net/netfilter/xt_MASQUERADE.ko kernel/net/netfilter/xt_addrtype.ko kernel/net/netfilter/xt_conntrack.ko kernel/net/netfilter/xt_comment.ko kernel/net/netfilter/xt_tcpudp.ko kernel/net/ipv4/netfilter/nf_defrag_ipv4.ko kernel/net/ipv6/netfilter/nf_defrag_ipv6.ko kernel/lib/crc16.ko kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko kernel/fs/ext4/ext4.ko kernel/net/vmw_vsock/vsock.ko kernel/fs/fuse/fuse.ko kernel/fs/fuse/virtiofs.ko kernel/drivers/virtio/virtio_balloon.ko; do
         if [ -f "/newroot/lib/modules/6.12.94-0-virt/$modpath" ]; then
@@ -175,6 +198,49 @@ if echo "$ROOTFS_T2" | grep -qE "tmpfs|rootfs"; then
   while true; do sleep 5; echo "HARPOON_DOCKER_FAILED rootfs_not_ext4" > /dev/hvc0; done
 fi
 echo "HARPOON_DOCKER_INIT_START" > /dev/hvc0
+# --- Stage 3C offline filesystem reconciliation (MUST happen BEFORE any network/apk, offline self-contained) ---
+echo "HARPOON_DISK_CHECK_START" > /dev/hvc0
+DEV="/dev/vda"
+if [ ! -b "$DEV" ] && [ -b "/dev/vda1" ]; then DEV="/dev/vda1"; fi
+if [ -b "$DEV" ]; then
+  echo "HARPOON_DISK_CHECK $DEV" > /dev/hvc0
+  DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+  FS_BYTES=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | tr -d '\n')
+  if [ -z "$FS_BYTES" ]; then FS_BYTES=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+  echo "HARPOON_DISK_SIZES dev=$DEV_BYTES fs=$FS_BYTES" > /dev/hvc0
+  if [ -n "$DEV_BYTES" ] && [ -n "$FS_BYTES" ] && [ "$DEV_BYTES" -gt 0 ] && [ "$FS_BYTES" -gt 0 ] && [ "$DEV_BYTES" -gt "$FS_BYTES" ]; then
+    echo "HARPOON_DISK_RESIZE needed $FS_BYTES -> $DEV_BYTES" > /dev/hvc0
+    if ! command -v resize2fs >/dev/null 2>&1; then
+      echo "HARPOON_DOCKER_FAILED missing_binary resize2fs PATH=$PATH" > /dev/hvc0
+      ls -l /usr/sbin/resize2fs /sbin/resize2fs /usr/bin/resize2fs /bin/resize2fs 2>&1 | tee /dev/hvc0 >/dev/null || true
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED missing_binary resize2fs" > /dev/hvc0; done
+    fi
+    echo "HARPOON_BIN_RESIZE2FS $(command -v resize2fs)" > /dev/hvc0
+    echo "HARPOON_APK_RESIZE2FS_VERSION $(resize2fs -V 2>&1 | head -n 1)" > /dev/hvc0
+    if ! resize2fs "$DEV" 2>&1 | tee /dev/hvc0 >/dev/null; then
+      echo "HARPOON_DOCKER_FAILED resize2fs failed dev=$DEV fs=$FS_BYTES -> $DEV_BYTES" > /dev/hvc0
+      echo "HARPOON_DISK_RESIZE_FAILED dev=$DEV" > /dev/hvc0
+      while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs failed" > /dev/hvc0; done
+    fi
+    FS2=$(df -B1 / 2>/dev/null | awk 'NR==2{print $2}' 2>/dev/null | head -n 1)
+    if [ -z "$FS2" ]; then FS2=$(df -B1 2>/dev/null | awk '$6=="/"{print $2}' 2>/dev/null | head -n 1); fi
+    echo "HARPOON_DISK_RESIZED fs_new=$FS2 dev=$DEV_BYTES" > /dev/hvc0
+    if [ -n "$FS2" ] && [ "$FS2" -lt "$DEV_BYTES" ]; then
+      SLACK=$((DEV_BYTES / 50))
+      EXPECTED=$((DEV_BYTES - SLACK))
+      if [ "$FS2" -lt "$EXPECTED" ]; then
+        echo "HARPOON_DOCKER_FAILED resize2fs incomplete fs=$FS2 dev=$DEV_BYTES expected~$EXPECTED" > /dev/hvc0
+        while true; do sleep 5; echo "HARPOON_DOCKER_FAILED resize2fs incomplete" > /dev/hvc0; done
+      fi
+    fi
+  else
+    echo "HARPOON_DISK_NO_RESIZE" > /dev/hvc0
+  fi
+else
+  echo "HARPOON_DISK_CHECK no block $DEV" > /dev/hvc0
+  echo "HARPOON_DOCKER_FAILED no block device $DEV for filesystem reconciliation" > /dev/hvc0
+  while true; do sleep 5; echo "HARPOON_DOCKER_FAILED no block device" > /dev/hvc0; done
+fi
 # --- Spike 3 FINAL ext4 runtime networking (must run in final ext4 root before dockerd) ---
 echo "HARPOON_NET_RUNTIME_START" > /dev/hvc0
 # load already-injected bridge/NAT modules (capture errors, do not silently ignore)
@@ -445,6 +511,17 @@ else
   echo "HARPOON_HTTPS_FAILED wget not found" > /dev/hvc0
 fi
 
+# APK — offline-aware: if all required binaries already present (persistent root), skip network
+NEED_APK=0
+for _b in dockerd docker containerd socat python3; do
+  if ! command -v "$_b" >/dev/null 2>&1; then NEED_APK=1; break; fi
+done
+# resize2fs is already provided offline via initramfs copy, do not require apk for it
+if [ "$NEED_APK" -eq 0 ]; then
+  echo "HARPOON_APK_SKIPPED all binaries present offline" > /dev/hvc0
+  echo "HARPOON_APK_UPDATE_OK" > /dev/hvc0
+  echo "HARPOON_APK_INSTALL_OK" > /dev/hvc0
+else
 # APK — fail fast, explicit markers (rc alone insufficient)
 echo "HARPOON_APK_UPDATE_START" > /dev/hvc0
 apk update > /tmp/apk.log 2>&1
@@ -455,9 +532,15 @@ cat /tmp/apk.log 2>&1 | tee /dev/hvc0 >/dev/null
 if [ $RC -ne 0 ] || grep -q "unavailable" /tmp/apk.log 2>&1 || grep -q "temporary error" /tmp/apk.log 2>&1; then
   echo "HARPOON_APK_UPDATE_FAILED rc=$RC unavailable" > /dev/hvc0
   echo "HARPOON_APK_UPDATE_FAILED $(cat /tmp/apk.log 2>&1 | head -n 20)" > /dev/hvc0
-  echo "HARPOON_DOCKER_FAILED apk update failed" > /dev/hvc0
-  while true; do sleep 5; echo "HARPOON_APK_UPDATE_FAILED" > /dev/hvc0; done
-fi
+  # offline fallback: if binaries already present, do not block resize (already done) or Docker if possible
+  if command -v dockerd >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && command -v containerd >/dev/null 2>&1; then
+    echo "HARPOON_APK_UPDATE_SKIPPED offline but dockerd present" > /dev/hvc0
+    echo "HARPOON_APK_UPDATE_OK" > /dev/hvc0
+  else
+    echo "HARPOON_DOCKER_FAILED apk update failed" > /dev/hvc0
+    while true; do sleep 5; echo "HARPOON_APK_UPDATE_FAILED" > /dev/hvc0; done
+  fi
+else
 # Additional verification: apk policy / search
 if ! apk policy docker-engine > /tmp/apk_policy.log 2>&1 || ! grep -q "docker-engine" /tmp/apk_policy.log 2>&1; then
   # fallback apk search
@@ -470,16 +553,26 @@ if ! apk policy docker-engine > /tmp/apk_policy.log 2>&1 || ! grep -q "docker-en
   fi
 fi
 echo "HARPOON_APK_UPDATE_OK" > /dev/hvc0
+fi
 
 echo "HARPOON_APK_INSTALL_START" > /dev/hvc0
 # Prefer explicit packages: docker-engine provides dockerd, docker-cli provides docker, containerd, socat, ca-certificates
-# Use docker meta as fallback but explicit dependencies make diagnosis clearer
-if ! apk add --no-cache docker-engine docker-cli containerd runc socat ca-certificates python3 e2fsprogs > /tmp/apk2.log 2>&1; then
+# e2fsprogs is provided offline via initramfs, do not require apk for resize2fs
+if ! apk add --no-cache docker-engine docker-cli containerd runc socat ca-certificates python3 > /tmp/apk2.log 2>&1; then
   cat /tmp/apk2.log 2>&1 | tee /dev/hvc0 >/dev/null
   echo "HARPOON_APK_INSTALL_FAILED rc=$?" > /dev/hvc0
   echo "HARPOON_APK_INSTALL_FAILED $(cat /tmp/apk2.log 2>&1 | head -n 30)" > /dev/hvc0
-  echo "HARPOON_DOCKER_FAILED apk add failed" > /dev/hvc0
-  while true; do sleep 5; echo "HARPOON_APK_INSTALL_FAILED" > /dev/hvc0; done
+  if command -v dockerd >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && command -v containerd >/dev/null 2>&1; then
+    echo "HARPOON_APK_INSTALL_SKIPPED offline but dockerd present" > /dev/hvc0
+    echo "HARPOON_APK_INSTALL_OK" > /dev/hvc0
+  else
+    echo "HARPOON_DOCKER_FAILED apk add failed" > /dev/hvc0
+    while true; do sleep 5; echo "HARPOON_APK_INSTALL_FAILED" > /dev/hvc0; done
+  fi
+else
+cat /tmp/apk2.log 2>&1 | tee /dev/hvc0 >/dev/null
+echo "HARPOON_APK_INSTALL_OK" > /dev/hvc0
+fi
 fi
 cat /tmp/apk2.log 2>&1 | tee /dev/hvc0 >/dev/null
 echo "HARPOON_APK_INSTALL_OK" > /dev/hvc0

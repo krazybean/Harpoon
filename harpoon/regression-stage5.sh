@@ -86,15 +86,43 @@ fi
 say "--- disk ordering ---"
 DISK_LINE=$(grep -n "HARPOON_DISK_CHECK_START" tools/guest-builder/src/init | cut -d: -f1 | head -n1 || echo 9999)
 DOCKER_LINE=$(grep -n "HARPOON_DOCKERD_START" tools/guest-builder/src/init | cut -d: -f1 | head -n1 || echo 0)
+APK_LINE=$(grep -n "HARPOON_APK_UPDATE_START\|apk update" tools/guest-builder/src/init | cut -d: -f1 | head -n1 || echo 9999)
 if [ "$DISK_LINE" -lt "$DOCKER_LINE" ] && [ "$DISK_LINE" != "9999" ]; then
   pass "R5-ORDER" "disk resize before docker ($DISK_LINE < $DOCKER_LINE)"
 else
   fail "R5-ORDER" "disk not before docker ($DISK_LINE vs $DOCKER_LINE)"
 fi
+if [ "$DISK_LINE" -lt "$APK_LINE" ] && [ "$DISK_LINE" != "9999" ]; then
+  pass "R5-ORDER-APK" "disk resize before APK ($DISK_LINE < $APK_LINE) offline"
+else
+  fail "R5-ORDER-APK" "disk not before APK ($DISK_LINE vs $APK_LINE) — must be offline"
+fi
 if grep -q 'for bin in.*resize2fs' tools/guest-builder/src/init && ! grep -q 'for bin in.*e2fsprogs' tools/guest-builder/src/init; then
   pass "R5-BINARY" "checks resize2fs not e2fsprogs"
 else
   fail "R5-BINARY" "binary check still buggy"
+fi
+# Offline artifact checks (structural)
+if gzip -dc assets/guest/harpoon-initramfs.cpio.gz 2>/dev/null | cpio -it 2>/dev/null | grep -q "sbin/resize2fs"; then
+  pass "R5-ARTIFACT-RESIZE" "resize2fs in initramfs"
+else
+  fail "R5-ARTIFACT-RESIZE" "resize2fs missing in initramfs"
+fi
+if gzip -dc assets/guest/harpoon-initramfs.cpio.gz 2>/dev/null | cpio -it 2>/dev/null | grep -q "libext2fs"; then
+  pass "R5-ARTIFACT-LIBS" "libext2fs in initramfs"
+else
+  fail "R5-ARTIFACT-LIBS" "libext2fs missing in initramfs"
+fi
+if grep -q "HARPOON_RESIZE2FS_REFRESH" tools/guest-builder/src/init; then
+  pass "R5-REFRESH" "init has resize2fs refresh to final root"
+else
+  fail "R5-REFRESH" "init missing resize2fs refresh"
+fi
+# Work-Mac fixture: 16G block / ~2G ext4 / offline — ensure resize2fs would be runnable without network
+if gzip -dc assets/guest/harpoon-initramfs.cpio.gz 2>/dev/null | cpio -it 2>/dev/null | grep -q "usr/lib/libblkid"; then
+  pass "R5-ARTIFACT-BLKID" "libblkid in initramfs (resize2fs deps)"
+else
+  fail "R5-ARTIFACT-BLKID" "libblkid missing"
 fi
 
 # Verify verifier passes (structural)

@@ -195,6 +195,22 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     mkdir -p "$STAGING/usr/local/bin"
     cp -a "/repo/tools/guest-builder/src/harpoon-mgmt" "$STAGING/usr/local/bin/harpoon-mgmt"
     chmod +x "$STAGING/usr/local/bin/harpoon-mgmt"
+    # Offline resize2fs for filesystem reconciliation (no network at boot)
+    echo "[rebuild] adding offline resize2fs..." >&2
+    apk add --no-cache e2fsprogs e2fsprogs-extra e2fsprogs-libs libblkid libuuid libcom_err > /dev/null 2>&1
+    mkdir -p "$STAGING/usr/sbin" "$STAGING/sbin" "$STAGING/usr/lib" "$STAGING/etc"
+    cp -a /usr/sbin/resize2fs "$STAGING/usr/sbin/" 2>/dev/null || cp -a /sbin/resize2fs "$STAGING/sbin/" 2>/dev/null || true
+    cp -a /usr/sbin/resize2fs "$STAGING/sbin/resize2fs" 2>/dev/null || true
+    for _lib in /usr/lib/libext2fs.so.2 /usr/lib/libe2p.so.2 /usr/lib/libcom_err.so.2 /usr/lib/libblkid.so.1 /usr/lib/libuuid.so.1; do
+      if [ -f "$_lib" ]; then cp -a "$_lib" "$STAGING/usr/lib/" 2>/dev/null || true; fi
+      _real=$(readlink -f "$_lib" 2>/dev/null || echo "")
+      if [ -n "$_real" ] && [ -f "$_real" ]; then cp -a "$_real" "$STAGING/usr/lib/" 2>/dev/null || true; fi
+    done
+    for _vlib in /usr/lib/libext2fs.so.2.4 /usr/lib/libe2p.so.2.3 /usr/lib/libcom_err.so.2.1 /usr/lib/libblkid.so.1.1.0 /usr/lib/libuuid.so.1.3.0; do
+      if [ -f "$_vlib" ]; then cp -a "$_vlib" "$STAGING/usr/lib/" 2>/dev/null || true; fi
+    done
+    if [ -f /etc/mke2fs.conf ]; then cp -a /etc/mke2fs.conf "$STAGING/etc/" 2>/dev/null || true; fi
+    ls -lh "$STAGING/usr/sbin/resize2fs" "$STAGING/sbin/resize2fs" 2>&1 | head -n 20 >&2 || echo "[rebuild] resize2fs not found" >&2
     # Ensure busybox/sh exists (from minirootfs)
     # Pack initramfs deterministically: sort, fixed timestamps, gzip -n
     # Use reproducible cpio: find with sorted, gzip -n (no timestamp)
