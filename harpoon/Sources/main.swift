@@ -168,6 +168,14 @@ log("HARPOON_MEMORY_CONFIG_BYTES \(config.memorySizeBytes)")
 log("HARPOON_DISK_IMAGE \(config.diskURL.path)")
 log("HARPOON_DISK_LOGICAL_BYTES \(config.diskLogicalBytes)")
 log("HARPOON_RESOURCE_CONFIG cpus=\(config.cpuCount) memoryMiB=\(config.memoryMIB) disk=\(config.diskURL.path) diskLogicalBytes=\(config.diskLogicalBytes)")
+func resourceOrigin(cliFlag: String, environment: String) -> String {
+    if CommandLine.arguments.contains(cliFlag) { return "cli_override" }
+    if ProcessInfo.processInfo.environment[environment] != nil { return "env_override" }
+    if RuntimeConfig.installedLibDir() != nil { return "bundle" }
+    if RuntimeConfig.sourceAssetRoot() != nil { return "source_tree" }
+    return "fallback"
+}
+log("HARPOON_ASSETS_SELECTED kernelOrigin=\(resourceOrigin(cliFlag: "--kernel", environment: "HARPOON_KERNEL")) initramfsOrigin=\(resourceOrigin(cliFlag: "--initramfs", environment: "HARPOON_INITRAMFS"))")
 
 let manager = VMManager(config: config, lifecycle: lifecycle)
 

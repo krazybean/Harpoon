@@ -149,19 +149,22 @@ REPOS2
       echo "HARPOON_INIT_REFRESHED" > /dev/hvc0
       echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
       echo "HARPOON_RUNTIME_REFRESH_DONE" > /dev/hvc0
-      echo "HARPOON_MODULE_REFRESH_START" > /dev/hvc0
+      echo "HARPOON_MODULE_REFRESH_START dest=/newroot" > /dev/hvc0
       MODULE_MANIFEST=/usr/local/share/harpoon-runtime/modules.manifest
       if [ ! -s "$MODULE_MANIFEST" ]; then
         echo "HARPOON_MODULE_REFRESH_FAILED missing module manifest" > /dev/hvc0
         RUNTIME_OK=0
       else
+        MODULE_ENTRIES=0
         while read -r kind value mode path; do
+          MODULE_ENTRIES=$((MODULE_ENTRIES + 1))
           case "$kind" in
             F) [ -f "/$path" ] && [ "$(sha256sum "/$path" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -c '%a' "/$path")" = "$mode" ] || { echo "HARPOON_MODULE_REFRESH_FAILED source $path" > /dev/hvc0; RUNTIME_OK=0; } ;;
             L) [ -L "/$mode" ] && [ "$(readlink "/$mode")" = "$value" ] || { echo "HARPOON_MODULE_REFRESH_FAILED source $mode" > /dev/hvc0; RUNTIME_OK=0; } ;;
             *) echo "HARPOON_MODULE_REFRESH_FAILED invalid module manifest" > /dev/hvc0; RUNTIME_OK=0 ;;
           esac
         done < "$MODULE_MANIFEST"
+        [ "$RUNTIME_OK" -eq 1 ] && echo "HARPOON_MODULE_REFRESH_SOURCE_VALID entries=$MODULE_ENTRIES" > /dev/hvc0
       fi
       if [ "$RUNTIME_OK" -eq 1 ]; then
         while read -r kind value mode path; do
