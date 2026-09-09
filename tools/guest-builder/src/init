@@ -105,12 +105,45 @@ REPOS2
       # Refresh immutable release payload; never touch Docker or user data paths.
       echo "HARPOON_RUNTIME_REFRESH_START" > /dev/hvc0
       RUNTIME_OK=1
-      for payload in init usr/local/bin/harpoon-mgmt usr/local/bin/harpoon-mgmt-wrapper usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
+      for payload in init usr/local/bin/harpoon-mgmt usr/local/bin/harpoon-mgmt-wrapper usr/local/share/harpoon-runtime/python.manifest usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
         if [ -e "/$payload" ]; then
           mkdir -p "/newroot/$(dirname "$payload")" 2>&1 | tee /dev/hvc0 >/dev/null || true
           cp -a "/$payload" "/newroot/$payload" 2>&1 | tee /dev/hvc0 >/dev/null || { echo "HARPOON_RUNTIME_REFRESH_FAILED $payload" > /dev/hvc0; RUNTIME_OK=0; }
         else echo "HARPOON_RUNTIME_REFRESH_FAILED missing $payload" > /dev/hvc0; RUNTIME_OK=0; fi
       done
+      # Validate the signed initramfs runtime before replacing any persistent file.
+      RUNTIME_MANIFEST=/usr/local/share/harpoon-runtime/python.manifest
+      if [ ! -f "$RUNTIME_MANIFEST" ]; then
+        echo "HARPOON_RUNTIME_REFRESH_FAILED missing python manifest" > /dev/hvc0
+        RUNTIME_OK=0
+      else
+        while read -r kind value mode path; do
+          case "$kind" in
+            F) [ -f "/$path" ] && [ "$(sha256sum "/$path" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -c '%a' "/$path")" = "$mode" ] || { echo "HARPOON_RUNTIME_REFRESH_FAILED source $path" > /dev/hvc0; RUNTIME_OK=0; } ;;
+            L) [ -L "/$mode" ] && [ "$(readlink "/$mode")" = "$value" ] || { echo "HARPOON_RUNTIME_REFRESH_FAILED source $mode" > /dev/hvc0; RUNTIME_OK=0; } ;;
+            *) echo "HARPOON_RUNTIME_REFRESH_FAILED invalid python manifest" > /dev/hvc0; RUNTIME_OK=0 ;;
+          esac
+        done < "$RUNTIME_MANIFEST"
+      fi
+      if [ "$RUNTIME_OK" -eq 1 ]; then
+        while read -r kind value mode path; do
+          [ "$kind" = L ] && { path="$mode"; mode=""; }
+          dest="/newroot/$path"
+          mkdir -p "$(dirname "$dest")" || { RUNTIME_OK=0; break; }
+          case "$kind" in
+            F)
+              [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$value" ] && [ "$(stat -c '%a' "$dest")" = "$mode" ] && continue
+              tmp="$(dirname "$dest")/.$(basename "$dest").harpoon.$$"
+              cp -p "/$path" "$tmp" && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$value" ] && mv -f "$tmp" "$dest" && echo "HARPOON_RUNTIME_REFRESH_REPAIRED $path" > /dev/hvc0 || { rm -f "$tmp"; echo "HARPOON_RUNTIME_REFRESH_FAILED repair $path" > /dev/hvc0; RUNTIME_OK=0; }
+              ;;
+            L)
+              [ -L "$dest" ] && [ "$(readlink "$dest")" = "$value" ] && continue
+              tmp="$(dirname "$dest")/.$(basename "$dest").harpoon.$$"
+              ln -s "$value" "$tmp" && mv -f "$tmp" "$dest" && echo "HARPOON_RUNTIME_REFRESH_REPAIRED $path" > /dev/hvc0 || { rm -f "$tmp"; echo "HARPOON_RUNTIME_REFRESH_FAILED repair $path" > /dev/hvc0; RUNTIME_OK=0; }
+              ;;
+          esac
+        done < "$RUNTIME_MANIFEST"
+      fi
       chmod +x /newroot/init /newroot/usr/local/bin/harpoon-mgmt /newroot/usr/local/bin/harpoon-mgmt-wrapper 2>&1 | tee /dev/hvc0 >/dev/null || true
       [ $RUNTIME_OK -eq 1 ] || { echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; while true; do sleep 5; echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; done; }
       echo "HARPOON_INIT_REFRESHED" > /dev/hvc0
@@ -851,15 +884,13 @@ if [ $READY -eq 1 ]; then
       echo "HARPOON_MGMT_FAILED missing /usr/local/bin/harpoon-mgmt-wrapper" > /dev/hvc0
     elif [ ! -f /usr/local/bin/harpoon-mgmt ]; then
       echo "HARPOON_MGMT_FAILED missing /usr/local/bin/harpoon-mgmt" > /dev/hvc0
-    elif ! command -v python3 >/dev/null 2>&1; then
-      echo "HARPOON_MGMT_FAILED missing python3" > /dev/hvc0
+    elif ! python3 -c 'import fcntl,json,os,pty,select,signal,struct,subprocess,sys,termios' >/dev/null 2>&1; then
+      echo "HARPOON_MGMT_FAILED python_runtime_invalid" > /dev/hvc0
+    elif ! python3 -m py_compile /usr/local/bin/harpoon-mgmt >/dev/null 2>&1; then
+      echo "HARPOON_MGMT_FAILED handler_invalid" > /dev/hvc0
     elif ! command -v socat >/dev/null 2>&1; then
       echo "HARPOON_MGMT_FAILED missing socat" > /dev/hvc0
     else
-      # Validate script syntax quickly (python compile) before listening
-      if ! python3 -m py_compile /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null; then
-        echo "HARPOON_MGMT_FAILED py_compile failed" > /dev/hvc0
-      fi
       # Check socat vsock support upfront (same check as docker bridge)
       if ! socat -V 2>&1 | grep -qi vsock; then
         # socat on Alpine always has vsock but emit for diagnosis

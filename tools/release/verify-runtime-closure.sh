@@ -133,6 +133,23 @@ if [ -f "$INITRAMFS" ]; then
     fi
   done < "$REQUIRED_FEATURES"
   if [ -f "$INIT_DIR/init" ] && diff -q "$INIT_SRC" "$INIT_DIR/init" >/dev/null 2>&1; then pass "initramfs init matches src"; else fail "initramfs init mismatch"; fi
+  RUNTIME_MANIFEST="$INIT_DIR/usr/local/share/harpoon-runtime/python.manifest"
+  if [ -f "$RUNTIME_MANIFEST" ]; then
+    RUNTIME_OK=1
+    while read -r kind value mode path; do
+      case "$kind" in
+        F) [ -f "$INIT_DIR/$path" ] && [ "$(shasum -a 256 "$INIT_DIR/$path" | cut -d' ' -f1)" = "$value" ] || RUNTIME_OK=0 ;;
+        L) [ -L "$INIT_DIR/$mode" ] && [ "$(readlink "$INIT_DIR/$mode")" = "$value" ] || RUNTIME_OK=0 ;;
+        *) RUNTIME_OK=0 ;;
+      esac
+    done < "$RUNTIME_MANIFEST"
+    [ "$RUNTIME_OK" -eq 1 ] && pass "initramfs Python runtime manifest" || fail "initramfs Python runtime manifest"
+    [ "$(readlink "$INIT_DIR/usr/bin/python3" 2>/dev/null)" = "python3.12" ] && pass "initramfs python3 symlink" || fail "initramfs python3 symlink"
+    [ -s "$INIT_DIR/usr/bin/python3.12" ] && file "$INIT_DIR/usr/bin/python3.12" | grep -q aarch64 && pass "initramfs python3 aarch64" || fail "initramfs python3 invalid"
+    [ -f "$INIT_DIR/usr/lib/libpython3.12.so.1.0" ] && [ -f "$INIT_DIR/lib/ld-musl-aarch64.so.1" ] && pass "initramfs Python loader closure" || fail "initramfs Python loader closure"
+  else
+    fail "initramfs Python runtime manifest missing"
+  fi
   if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then pass "mgmt listener uses wrapper"; else fail "mgmt listener bypasses wrapper"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
 else

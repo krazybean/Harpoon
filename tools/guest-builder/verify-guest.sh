@@ -50,6 +50,22 @@ if [ -f "$INITRAMFS" ]; then
   grep -q "lib/modules.*ext4.ko" <<< "$LISTING" && echo "[verify-guest] PASS: ext4.ko in initramfs" >&2 || { echo "[verify-guest] FAIL: ext4.ko missing" >&2; FAIL=1; }
   GUEST_TMPDIR=$(mktemp -d)
   gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$GUEST_TMPDIR" && cpio -idm 2>/dev/null || true)
+  RUNTIME_MANIFEST="$GUEST_TMPDIR/usr/local/share/harpoon-runtime/python.manifest"
+  if [ -f "$RUNTIME_MANIFEST" ]; then
+    RUNTIME_OK=1
+    while read -r kind value mode path; do
+      case "$kind" in
+        F) [ -f "$GUEST_TMPDIR/$path" ] && [ "$(shasum -a 256 "$GUEST_TMPDIR/$path" | cut -d' ' -f1)" = "$value" ] || RUNTIME_OK=0 ;;
+        L) [ -L "$GUEST_TMPDIR/$mode" ] && [ "$(readlink "$GUEST_TMPDIR/$mode")" = "$value" ] || RUNTIME_OK=0 ;;
+        *) RUNTIME_OK=0 ;;
+      esac
+    done < "$RUNTIME_MANIFEST"
+    [ "$RUNTIME_OK" -eq 1 ] && echo "[verify-guest] PASS: Python runtime manifest matches initramfs" >&2 || { echo "[verify-guest] FAIL: Python runtime manifest mismatch" >&2; FAIL=1; }
+    [ "$(readlink "$GUEST_TMPDIR/usr/bin/python3" 2>/dev/null)" = "python3.12" ] && echo "[verify-guest] PASS: Python symlink target" >&2 || { echo "[verify-guest] FAIL: Python symlink target" >&2; FAIL=1; }
+    file "$GUEST_TMPDIR/usr/bin/python3.12" 2>/dev/null | grep -q aarch64 && echo "[verify-guest] PASS: initramfs Python aarch64 ELF" >&2 || { echo "[verify-guest] FAIL: initramfs Python is not aarch64 ELF" >&2; FAIL=1; }
+  else
+    echo "[verify-guest] FAIL: Python runtime manifest missing in initramfs" >&2; FAIL=1
+  fi
   MODULE_DIR=$(find "$GUEST_TMPDIR/lib/modules" -mindepth 1 -maxdepth 1 -type d | head -n1)
   CHECKED="$GUEST_TMPDIR/.checked-modules"
   verify_path() {

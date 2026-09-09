@@ -96,7 +96,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # Run rebuild inside Alpine container
   docker run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 sh -c '
     set -euo pipefail
-    apk add --no-cache cpio gzip squashfs-tools curl > /dev/null
+    apk add --no-cache cpio gzip squashfs-tools curl e2fsprogs e2fsprogs-extra > /dev/null
     BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64"
     CACHE="/cache"
     REPO="/repo"
@@ -184,6 +184,26 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     chmod +x "$STAGING/usr/local/bin/harpoon-mgmt"
     cp -a "/repo/tools/guest-builder/src/harpoon-mgmt-wrapper" "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
     chmod +x "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
+    # Carry the offline Python closure from the canonical persistent root.
+    ROOT_IMG="/repo/assets/guest/harpoon-root.img"
+    [ -f "$ROOT_IMG" ] || { echo "[rebuild] FAIL missing canonical root image" >&2; exit 1; }
+    mkdir -p "$STAGING/usr/bin" "$STAGING/usr/lib" "$STAGING/lib" "$STAGING/usr/local/share/harpoon-runtime"
+    debugfs -R "dump /usr/bin/python3.12 $STAGING/usr/bin/python3.12" "$ROOT_IMG" >/dev/null
+    ln -s python3.12 "$STAGING/usr/bin/python3"
+    debugfs -R "dump /usr/lib/libpython3.12.so.1.0 $STAGING/usr/lib/libpython3.12.so.1.0" "$ROOT_IMG" >/dev/null
+    debugfs -R "dump /lib/ld-musl-aarch64.so.1 $STAGING/lib/ld-musl-aarch64.so.1" "$ROOT_IMG" >/dev/null
+    debugfs -R "rdump /usr/lib/python3.12 $STAGING/usr/lib" "$ROOT_IMG" >/dev/null
+    chmod 0755 "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1"
+    RUNTIME_MANIFEST="$STAGING/usr/local/share/harpoon-runtime/python.manifest"
+    {
+      find "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1" "$STAGING/usr/lib/python3.12" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+        printf "F %s %s %s\\n" "$(sha256sum "$path" | cut -d" " -f1)" "$(stat -c %a "$path")" "${path#$STAGING/}"
+      done
+      find "$STAGING/usr/bin/python3" "$STAGING/usr/lib/python3.12" -type l -print | LC_ALL=C sort | while IFS= read -r path; do
+        printf "L %s %s\\n" "$(readlink "$path")" "${path#$STAGING/}"
+      done
+    } > "$RUNTIME_MANIFEST"
+    [ "$(grep -c "^F " "$RUNTIME_MANIFEST")" -gt 0 ] || { echo "[rebuild] FAIL empty Python manifest" >&2; exit 1; }
     # Offline resize2fs for filesystem reconciliation (no network at boot)
     echo "[rebuild] adding offline resize2fs..." >&2
     apk add --no-cache e2fsprogs e2fsprogs-extra e2fsprogs-libs libblkid libuuid libcom_err > /dev/null 2>&1

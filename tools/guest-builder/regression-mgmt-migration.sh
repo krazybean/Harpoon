@@ -7,6 +7,7 @@ ROOT="$REPO_ROOT/assets/guest/harpoon-root.img"
 INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 DEBUGFS=/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/debugfs
 DUMPE2FS=/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/dumpe2fs
+E2FSCK=/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/e2fsck
 TMP=$(mktemp -d /tmp/harpoon-mgmt-migration.XXXXXX)
 DISK="$TMP/old-root.img"
 CANARY="$TMP/docker-canary"
@@ -27,23 +28,38 @@ check test -f "$ROOT"
 check test -f "$INITRAMFS"
 check test -x "$DEBUGFS"
 check test -x "$DUMPE2FS"
+check test -x "$E2FSCK"
 cp -c "$ROOT" "$DISK" 2>/dev/null || cp "$ROOT" "$DISK"
+set +e
+"$E2FSCK" -fy "$DISK" >/dev/null
+fsck_status=$?
+set -e
+[ "$fsck_status" -le 1 ] || fail "template e2fsck status $fsck_status"
 printf 'harpoon-migration-docker-canary\n' > "$CANARY"
 "$DEBUGFS" -w -R 'rm /usr/local/bin/harpoon-mgmt' "$DISK" >/dev/null 2>&1 || true
 "$DEBUGFS" -w -R "write $CANARY /var/lib/docker/harpoon-mgmt-canary" "$DISK" >/dev/null || fail "cannot write Docker canary"
+# Normalize metadata after deliberate offline debugfs mutations before boot.
+set +e
+"$E2FSCK" -fy "$DISK" >/dev/null
+fsck_status=$?
+set -e
+[ "$fsck_status" -le 1 ] || fail "fixture e2fsck status $fsck_status"
 if stat_path /usr/local/bin/harpoon-mgmt | grep -q 'Inode:'; then fail "old root still has harpoon-mgmt"; fi
+"$DEBUGFS" -R "dump /var/lib/docker/harpoon-mgmt-canary $TMP/canary-before" "$DISK" >/dev/null || fail "fixture Docker canary missing before boot"
+cmp -s "$CANARY" "$TMP/canary-before" || fail "fixture Docker canary differs before boot"
 before_identity=$(stat -f '%d:%i:%z' "$DISK")
 before_uuid=$("$DUMPE2FS" -h "$DISK" 2>/dev/null | awk -F': ' '/Filesystem UUID:/{print $2}')
 
 "$BIN" stop >/dev/null 2>&1 || true
 HARPOON_TEST_TMPDIR="$TMP/runtime" HARPOON_ALLOW_TMP_FALLBACK=1 HARPOON_DISK="$DISK" HARPOON_INITRAMFS="$INITRAMFS" "$BIN" start
 HARPOON_TEST_TMPDIR="$TMP/runtime" HARPOON_ALLOW_TMP_FALLBACK=1 "$BIN" exec -- true || fail "management exec true"
-HARPOON_TEST_TMPDIR="$TMP/runtime" HARPOON_ALLOW_TMP_FALLBACK=1 "$BIN" exec -- uname -a | grep -q Linux || fail "management exec uname"
+uname_output=$(HARPOON_TEST_TMPDIR="$TMP/runtime" HARPOON_ALLOW_TMP_FALLBACK=1 "$BIN" exec -- uname -a) || fail "management exec uname"
+[[ "$uname_output" == *Linux* ]] || fail "management exec uname"
 for _ in $(seq 1 30); do
-  docker --context harpoon version 2>/dev/null | grep -q Server && break
+  docker --context harpoon version >/dev/null 2>&1 && break
   sleep 1
 done
-docker --context harpoon version 2>/dev/null | grep -q Server || fail "Docker is not ready"
+docker --context harpoon version >/dev/null 2>&1 || fail "Docker is not ready"
 for marker in \
   'HARPOON_MGMT_WRAPPER_START' \
   'HARPOON_MGMT_WRAPPER_TARGET exists=yes regular=yes executable=yes' \
