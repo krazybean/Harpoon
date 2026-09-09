@@ -1,15 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 # ponytail: release runtime closure gate — proves every dependency for boot/Docker/management is bundled, not fetched
-# HOST, INITRAMFS, ROOT, BOOT ORDER. Fails release if any closure missing.
+# INITRAMFS, ROOT, BOOT ORDER. Host signing is verified post-sign in verify-signatures.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
-APP="${1:-$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app}"
-if [ ! -f "$INITRAMFS" ]; then APP="$REPO_ROOT/dist/v0.1.1/Harpoon.app"; fi
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
 FAIL=0
 say() { echo "[closure] $*" >&2; }
 pass() { echo "[closure] PASS: $1" >&2; }
@@ -35,18 +35,6 @@ fi
 
 say "verifying runtime closure..."
 
-# HOST
-if [ -d "$APP" ]; then
-  if file "$APP/Contents/MacOS/harpoon-desktop" 2>&1 | grep -q "arm64"; then pass "host harpoon-desktop arm64"; else fail "host arm64"; fi
-  if otool -l "$APP/Contents/Resources/harpoon/bin/harpoon" 2>&1 | grep -A5 LC_BUILD_VERSION | grep -q "minos 15.1"; then pass "host minos 15.1"; else fail "host minos"; fi
-  if otool -L "$APP/Contents/Resources/harpoon/bin/harpoon" 2>&1 | tail -n +2 | grep -E "/Users|/opt/homebrew|/Library/Developer" | grep -q .; then fail "host contains dev path"; else pass "host no dev path"; fi
-  if codesign -d --entitlements :- "$APP/Contents/Resources/harpoon/bin/harpoon" 2>&1 | grep -q "com.apple.security.virtualization"; then pass "host virtualization entitlement"; else fail "host entitlement"; fi
-  if [ -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img" ]; then SZ=$(stat -f%z "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img" 2>/dev/null || stat -c%s "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img"); if [ "$SZ" = "2147483648" ]; then pass "host root 2G"; else fail "host root size $SZ"; fi; else fail "host root missing"; fi
-else
-  say "host app not found at $APP — checking dist fallback"
-  if [ -d "$REPO_ROOT/dist/v0.1.1/Harpoon.app" ]; then pass "host dist exists"; else fail "host app missing"; fi
-fi
-
 # INITRAMFS — busybox applets (representative core set used by init)
 if [ -f "$INITRAMFS" ]; then
   LISTING=$(gzip -dc "$INITRAMFS" 2>/dev/null | cpio -it 2>/dev/null || echo "")
@@ -61,46 +49,46 @@ if [ -f "$INITRAMFS" ]; then
     if grep -q "$lib" <<< "$LISTING"; then pass "initramfs $lib"; else fail "initramfs missing $lib"; fi
   done
   # ELF closure for resize2fs — verify actual PT_INTERP path exists
-  TMPDIR=$(mktemp -d)
-  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$TMPDIR" && cpio -idm 2>/dev/null || true)
-  if [ -f "$TMPDIR/usr/sbin/resize2fs" ]; then
+  RESIZE_DIR="$WORK_DIR/resize2fs"
+  mkdir -p "$RESIZE_DIR"
+  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$RESIZE_DIR" && cpio -idm 2>/dev/null || true)
+  if [ -f "$RESIZE_DIR/usr/sbin/resize2fs" ]; then
     if [ "$READELF" != "false" ]; then
-      if $READELF --dynamic "$TMPDIR/usr/sbin/resize2fs" 2>&1 | grep -q "libext2fs.so.2"; then pass "resize2fs DT_NEEDED libext2fs"; else fail "resize2fs missing libext2fs"; fi
+      if $READELF --dynamic "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -q "libext2fs.so.2"; then pass "resize2fs DT_NEEDED libext2fs"; else fail "resize2fs missing libext2fs"; fi
       # Verify actual interpreter path emitted by readelf exists in artifact
-      INTERP=$($READELF -l "$TMPDIR/usr/sbin/resize2fs" 2>&1 | grep -o "/[^ ]*ld-musl[^ ]*" | head -n1 | tr -d ']' || true)
+      INTERP=$($READELF -l "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -o "/[^ ]*ld-musl[^ ]*" | head -n1 | tr -d ']' || true)
       if [ -z "$INTERP" ]; then
         # fallback parse Requesting program interpreter line
-        INTERP=$($READELF -l "$TMPDIR/usr/sbin/resize2fs" 2>&1 | grep "Requesting program interpreter" | sed -n 's/.*: \([^]]*\)].*/\1/p' | head -n1 | tr -d ']' || true)
+        INTERP=$($READELF -l "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep "Requesting program interpreter" | sed -n 's/.*: \([^]]*\)].*/\1/p' | head -n1 | tr -d ']' || true)
       fi
       if [ -n "$INTERP" ]; then
-        # INTERP is absolute like /lib/ld-musl-aarch64.so.1 — check under TMPDIR
-        if [ -f "$TMPDIR$INTERP" ]; then pass "resize2fs loader $INTERP"; else fail "resize2fs loader missing: $INTERP not in initramfs (expected $TMPDIR$INTERP)"; fi
+        # INTERP is absolute like /lib/ld-musl-aarch64.so.1 — check under RESIZE_DIR
+        if [ -f "$RESIZE_DIR$INTERP" ]; then pass "resize2fs loader $INTERP"; else fail "resize2fs loader missing: $INTERP not in initramfs (expected $RESIZE_DIR$INTERP)"; fi
       else
         fail "resize2fs could not determine PT_INTERP"
       fi
       for needed in libe2p libext2fs libcom_err; do
-        if $READELF --dynamic "$TMPDIR/usr/sbin/resize2fs" 2>&1 | grep -q "$needed"; then
-          if ls "$TMPDIR/usr/lib/$needed"* >/dev/null 2>&1 || ls "$TMPDIR/lib/$needed"* >/dev/null 2>&1; then pass "resize2fs $needed present"; else fail "resize2fs $needed NEEDED but not in initramfs"; fi
+        if $READELF --dynamic "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -q "$needed"; then
+          if ls "$RESIZE_DIR/usr/lib/$needed"* >/dev/null 2>&1 || ls "$RESIZE_DIR/lib/$needed"* >/dev/null 2>&1; then pass "resize2fs $needed present"; else fail "resize2fs $needed NEEDED but not in initramfs"; fi
         fi
       done
     else
       fail "resize2fs ELF closure skipped — no readelf available"
     fi
-    if file "$TMPDIR/usr/sbin/resize2fs" 2>&1 | grep -q "aarch64"; then pass "resize2fs aarch64"; else fail "resize2fs not aarch64"; fi
+    if file "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -q "aarch64"; then pass "resize2fs aarch64"; else fail "resize2fs not aarch64"; fi
   else
     fail "resize2fs not in initramfs for ELF check"
   fi
-  rm -rf "$TMPDIR"
   # kernel modules
   for mod in ext4 virtio_blk vsock vmw_vsock virtiofs; do
     if grep -q "$mod" <<< "$LISTING"; then pass "initramfs module $mod"; else fail "initramfs module $mod missing"; fi
   done
   # initramfs init matches source and has offline refresh
-  TMPDIR=$(mktemp -d)
-  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$TMPDIR" && cpio -idm 2>/dev/null || true)
-  if [ -f "$TMPDIR/init" ] && diff -q "$INIT_SRC" "$TMPDIR/init" >/dev/null 2>&1; then pass "initramfs init matches src"; else fail "initramfs init mismatch"; fi
+  INIT_DIR="$WORK_DIR/initramfs-init"
+  mkdir -p "$INIT_DIR"
+  gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$INIT_DIR" && cpio -idm 2>/dev/null || true)
+  if [ -f "$INIT_DIR/init" ] && diff -q "$INIT_SRC" "$INIT_DIR/init" >/dev/null 2>&1; then pass "initramfs init matches src"; else fail "initramfs init mismatch"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
-  rm -rf "$TMPDIR"
 else
   fail "initramfs missing"
 fi
@@ -135,17 +123,18 @@ if [ -f "$ROOT_IMG" ]; then
   # Python ELF closure (extract and inspect)
   if command -v /opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/debugfs >/dev/null 2>&1 && [ "$READELF" != "false" ]; then
     DF="/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/debugfs"
-    TMPDIR=$(mktemp -d)
+    PYTHON_DIR="$WORK_DIR/python"
+    mkdir -p "$PYTHON_DIR"
     # Extract python binary via debugfs dump
-    if grep -q "dump" <<< "$($DF -R "dump /usr/bin/python3.12 $TMPDIR/python3.12" "$ROOT_IMG" 2>&1)"; then
+    if grep -q "dump" <<< "$($DF -R "dump /usr/bin/python3.12 $PYTHON_DIR/python3.12" "$ROOT_IMG" 2>&1)"; then
       : # dump may not output; check file exists
       true
     fi
-    if [ -f "$TMPDIR/python3.12" ]; then
-      if $READELF --dynamic "$TMPDIR/python3.12" 2>&1 | grep -q "libpython3.12.so.1.0"; then pass "python3 DT_NEEDED libpython"; else fail "python3 missing libpython DT_NEEDED"; fi
-      if file "$TMPDIR/python3.12" 2>&1 | grep -q "aarch64"; then pass "python3 aarch64"; else fail "python3 not aarch64"; fi
-      INTERP_PY=$($READELF -l "$TMPDIR/python3.12" 2>&1 | grep -o "/[^ ]*ld-musl[^ ]*" | head -n1 | tr -d ']' || true)
-      if [ -z "$INTERP_PY" ]; then INTERP_PY=$($READELF -l "$TMPDIR/python3.12" 2>&1 | grep "Requesting program interpreter" | sed -n 's/.*: \([^]]*\)].*/\1/p' | head -n1 | tr -d ']' || true); fi
+    if [ -f "$PYTHON_DIR/python3.12" ]; then
+      if $READELF --dynamic "$PYTHON_DIR/python3.12" 2>&1 | grep -q "libpython3.12.so.1.0"; then pass "python3 DT_NEEDED libpython"; else fail "python3 missing libpython DT_NEEDED"; fi
+      if file "$PYTHON_DIR/python3.12" 2>&1 | grep -q "aarch64"; then pass "python3 aarch64"; else fail "python3 not aarch64"; fi
+      INTERP_PY=$($READELF -l "$PYTHON_DIR/python3.12" 2>&1 | grep -o "/[^ ]*ld-musl[^ ]*" | head -n1 | tr -d ']' || true)
+      if [ -z "$INTERP_PY" ]; then INTERP_PY=$($READELF -l "$PYTHON_DIR/python3.12" 2>&1 | grep "Requesting program interpreter" | sed -n 's/.*: \([^]]*\)].*/\1/p' | head -n1 | tr -d ']' || true); fi
       if [ -n "$INTERP_PY" ]; then
         # Check that loader exists in root image via debugfs (use stat for file, not ls -l dir)
         if grep -q "Inode:" <<< "$($DF -R "stat $INTERP_PY" "$ROOT_IMG" 2>&1)"; then pass "python3 loader $INTERP_PY present in root"; else
@@ -155,18 +144,17 @@ if [ -f "$ROOT_IMG" ]; then
         fail "python3 could not determine PT_INTERP"
       fi
       # Check libpython exists and is aarch64 ELF
-      TMPDIR2=$(mktemp -d)
-      $DF -R "dump /usr/lib/libpython3.12.so.1.0 $TMPDIR2/libpython.so" "$ROOT_IMG" 2>&1 >/dev/null || true
-      if [ -f "$TMPDIR2/libpython.so" ]; then
-        if file "$TMPDIR2/libpython.so" 2>&1 | grep -q "aarch64\|ELF"; then pass "libpython3.12 ELF present"; else fail "libpython3.12 not ELF"; fi
+      LIBPYTHON_DIR="$WORK_DIR/libpython"
+      mkdir -p "$LIBPYTHON_DIR"
+      $DF -R "dump /usr/lib/libpython3.12.so.1.0 $LIBPYTHON_DIR/libpython.so" "$ROOT_IMG" 2>&1 >/dev/null || true
+      if [ -f "$LIBPYTHON_DIR/libpython.so" ]; then
+        if file "$LIBPYTHON_DIR/libpython.so" 2>&1 | grep -q "aarch64\|ELF"; then pass "libpython3.12 ELF present"; else fail "libpython3.12 not ELF"; fi
       else
         fail "could not extract libpython3.12.so.1.0 for inspection"
       fi
-      rm -rf "$TMPDIR2"
     else
       fail "could not extract python3.12 from root for ELF inspection"
     fi
-    rm -rf "$TMPDIR"
   fi
 else
   fail "root missing"
