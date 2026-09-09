@@ -40,18 +40,18 @@ fi
 # 3. Initramfs content checks via cpio listing
 if [ -f "$INITRAMFS" ]; then
   LISTING=$(gzip -dc "$INITRAMFS" 2>/dev/null | cpio -it 2>/dev/null || echo "")
-  echo "$LISTING" | grep -q "usr/local/bin/harpoon-mgmt" && echo "[verify-guest] PASS: harpoon-mgmt in initramfs" >&2 || { echo "[verify-guest] FAIL: harpoon-mgmt missing in initramfs" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "lib/modules.*ext4.ko" && echo "[verify-guest] PASS: ext4.ko in initramfs" >&2 || { echo "[verify-guest] FAIL: ext4.ko missing" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "lib/modules.*virtio_blk.ko" && echo "[verify-guest] PASS: virtio_blk.ko present" >&2 || { echo "[verify-guest] FAIL: virtio_blk.ko missing" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "lib/modules.*vsock.ko" && echo "[verify-guest] PASS: vsock.ko present" >&2 || { echo "[verify-guest] FAIL: vsock.ko missing" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "lib/modules.*vmw_vsock" && echo "[verify-guest] PASS: vmw_vsock modules present" >&2 || { echo "[verify-guest] FAIL: vmw_vsock modules missing" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "lib/modules.*virtiofs.ko" && echo "[verify-guest] PASS: virtiofs.ko present" >&2 || { echo "[verify-guest] FAIL: virtiofs.ko missing" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "sbin/apk" && echo "[verify-guest] PASS: apk present" >&2 || { echo "[verify-guest] FAIL: apk missing" >&2; FAIL=1; }
+  grep -q "usr/local/bin/harpoon-mgmt" <<< "$LISTING" && echo "[verify-guest] PASS: harpoon-mgmt in initramfs" >&2 || { echo "[verify-guest] FAIL: harpoon-mgmt missing in initramfs" >&2; FAIL=1; }
+  grep -q "lib/modules.*ext4.ko" <<< "$LISTING" && echo "[verify-guest] PASS: ext4.ko in initramfs" >&2 || { echo "[verify-guest] FAIL: ext4.ko missing" >&2; FAIL=1; }
+  grep -q "lib/modules.*virtio_blk.ko" <<< "$LISTING" && echo "[verify-guest] PASS: virtio_blk.ko present" >&2 || { echo "[verify-guest] FAIL: virtio_blk.ko missing" >&2; FAIL=1; }
+  grep -q "lib/modules.*vsock.ko" <<< "$LISTING" && echo "[verify-guest] PASS: vsock.ko present" >&2 || { echo "[verify-guest] FAIL: vsock.ko missing" >&2; FAIL=1; }
+  grep -q "lib/modules.*vmw_vsock" <<< "$LISTING" && echo "[verify-guest] PASS: vmw_vsock modules present" >&2 || { echo "[verify-guest] FAIL: vmw_vsock modules missing" >&2; FAIL=1; }
+  grep -q "lib/modules.*virtiofs.ko" <<< "$LISTING" && echo "[verify-guest] PASS: virtiofs.ko present" >&2 || { echo "[verify-guest] FAIL: virtiofs.ko missing" >&2; FAIL=1; }
+  grep -q "sbin/apk" <<< "$LISTING" && echo "[verify-guest] PASS: apk present" >&2 || { echo "[verify-guest] FAIL: apk missing" >&2; FAIL=1; }
   # Artifact-level: resize2fs must be present in initramfs (offline, not via apk)
-  echo "$LISTING" | grep -q "sbin/resize2fs" && echo "[verify-guest] PASS: resize2fs in initramfs (offline)" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in initramfs" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "usr/sbin/resize2fs" && echo "[verify-guest] PASS: resize2fs in usr/sbin" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in usr/sbin" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "libext2fs" && echo "[verify-guest] PASS: libext2fs in initramfs" >&2 || { echo "[verify-guest] FAIL: libext2fs missing in initramfs" >&2; FAIL=1; }
-  echo "$LISTING" | grep -q "libblkid" && echo "[verify-guest] PASS: libblkid in initramfs" >&2 || { echo "[verify-guest] FAIL: libblkid missing in initramfs" >&2; FAIL=1; }
+  grep -q "sbin/resize2fs" <<< "$LISTING" && echo "[verify-guest] PASS: resize2fs in initramfs (offline)" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in initramfs" >&2; FAIL=1; }
+  grep -q "usr/sbin/resize2fs" <<< "$LISTING" && echo "[verify-guest] PASS: resize2fs in usr/sbin" >&2 || { echo "[verify-guest] FAIL: resize2fs missing in usr/sbin" >&2; FAIL=1; }
+  grep -q "libext2fs" <<< "$LISTING" && echo "[verify-guest] PASS: libext2fs in initramfs" >&2 || { echo "[verify-guest] FAIL: libext2fs missing in initramfs" >&2; FAIL=1; }
+  grep -q "libblkid" <<< "$LISTING" && echo "[verify-guest] PASS: libblkid in initramfs" >&2 || { echo "[verify-guest] FAIL: libblkid missing in initramfs" >&2; FAIL=1; }
   # Verify initramfs init will be able to run resize2fs: check it contains the refresh logic
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then echo "[verify-guest] PASS: init has resize2fs refresh to final root" >&2; else echo "[verify-guest] FAIL: init missing resize2fs refresh" >&2; FAIL=1; fi
 fi

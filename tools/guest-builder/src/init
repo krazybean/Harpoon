@@ -512,11 +512,13 @@ else
 fi
 
 # APK — offline-aware: if all required binaries already present (persistent root), skip network
+# python3 and resize2fs are provided offline via root template / initramfs, not via apk for core startup
 NEED_APK=0
-for _b in dockerd docker containerd socat python3; do
+for _b in dockerd docker containerd socat; do
   if ! command -v "$_b" >/dev/null 2>&1; then NEED_APK=1; break; fi
 done
 # resize2fs is already provided offline via initramfs copy, do not require apk for it
+# python3 is pinned in canonical root template (offline), not requiring apk for harpoon-mgmt
 if [ "$NEED_APK" -eq 0 ]; then
   echo "HARPOON_APK_SKIPPED all binaries present offline" > /dev/hvc0
   echo "HARPOON_APK_UPDATE_OK" > /dev/hvc0
@@ -558,7 +560,8 @@ fi
 echo "HARPOON_APK_INSTALL_START" > /dev/hvc0
 # Prefer explicit packages: docker-engine provides dockerd, docker-cli provides docker, containerd, socat, ca-certificates
 # e2fsprogs is provided offline via initramfs, do not require apk for resize2fs
-if ! apk add --no-cache docker-engine docker-cli containerd runc socat ca-certificates python3 > /tmp/apk2.log 2>&1; then
+# python3 is pinned in canonical root (offline) — not required via apk for core harpoon-mgmt
+if ! apk add --no-cache docker-engine docker-cli containerd runc socat ca-certificates > /tmp/apk2.log 2>&1; then
   cat /tmp/apk2.log 2>&1 | tee /dev/hvc0 >/dev/null
   echo "HARPOON_APK_INSTALL_FAILED rc=$?" > /dev/hvc0
   echo "HARPOON_APK_INSTALL_FAILED $(cat /tmp/apk2.log 2>&1 | head -n 30)" > /dev/hvc0
