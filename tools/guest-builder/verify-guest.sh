@@ -12,6 +12,7 @@ INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
+HARPOON_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
 REQUIRED_FEATURES="$REPO_ROOT/tools/guest-builder/required-kernel-features.txt"
 FEATURE_MODULES="$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt"
@@ -32,6 +33,7 @@ echo "[verify-guest] verifying canonical guest..." >&2
 check "initramfs exists" test -f "$INITRAMFS"
 check "root template exists" test -f "$ROOT_IMG"
 check "harpoon-mgmt source exists" test -f "$HARPOON_MGMT"
+check "harpoon-mgmt wrapper source exists" test -f "$HARPOON_MGMT_WRAPPER"
 check "init source exists" test -f "$INIT_SRC"
 
 # 2. Root template logical size exactly 2147483648
@@ -44,6 +46,7 @@ fi
 if [ -f "$INITRAMFS" ]; then
   LISTING=$(gzip -dc "$INITRAMFS" 2>/dev/null | cpio -it 2>/dev/null || echo "")
   grep -q "usr/local/bin/harpoon-mgmt" <<< "$LISTING" && echo "[verify-guest] PASS: harpoon-mgmt in initramfs" >&2 || { echo "[verify-guest] FAIL: harpoon-mgmt missing in initramfs" >&2; FAIL=1; }
+  grep -q "usr/local/bin/harpoon-mgmt-wrapper" <<< "$LISTING" && echo "[verify-guest] PASS: harpoon-mgmt wrapper in initramfs" >&2 || { echo "[verify-guest] FAIL: harpoon-mgmt wrapper missing in initramfs" >&2; FAIL=1; }
   grep -q "lib/modules.*ext4.ko" <<< "$LISTING" && echo "[verify-guest] PASS: ext4.ko in initramfs" >&2 || { echo "[verify-guest] FAIL: ext4.ko missing" >&2; FAIL=1; }
   GUEST_TMPDIR=$(mktemp -d)
   gzip -dc "$INITRAMFS" 2>/dev/null | (cd "$GUEST_TMPDIR" && cpio -idm 2>/dev/null || true)
@@ -120,6 +123,7 @@ if [ -f "$INIT_SRC" ]; then
   if grep -q "HARPOON_DISK_RESIZE_FAILED" "$INIT_SRC"; then echo "[verify-guest] PASS: resize failure handling" >&2; else echo "[verify-guest] FAIL: no resize failure handling" >&2; FAIL=1; fi
   # init must contain harpoon-mgmt startup with retry
   if grep -q "harpoon-mgmt" "$INIT_SRC" && grep -q "HARPOON_MGMT_READY" "$INIT_SRC"; then echo "[verify-guest] PASS: mgmt startup in init" >&2; else echo "[verify-guest] FAIL: mgmt startup missing" >&2; FAIL=1; fi
+  if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then echo "[verify-guest] PASS: mgmt listener uses wrapper" >&2; else echo "[verify-guest] FAIL: mgmt listener bypasses wrapper" >&2; FAIL=1; fi
   if grep -q 'mount -t devpts devpts /dev/pts' "$INIT_SRC"; then echo "[verify-guest] PASS: devpts mounted for management shell" >&2; else echo "[verify-guest] FAIL: devpts mount missing" >&2; FAIL=1; fi
   # Verify repacked initramfs matches source
   GUEST_TMPDIR=$(mktemp -d)

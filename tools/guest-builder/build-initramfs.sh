@@ -107,13 +107,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       curl -L --fail -o "$CACHE/modloop-virt" "$BASE/netboot/modloop-virt"
       echo "[rebuild] modloop sha256 $(sha256sum "$CACHE/modloop-virt" | cut -d" " -f1)" >&2
     fi
-    if [ "$(sha256sum "$CACHE/modloop-virt" | cut -d' ' -f1)" != "65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" ]; then echo "[rebuild] FAIL modloop sha mismatch expected 65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" >&2; exit 1; fi
+    if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" ]; then echo "[rebuild] FAIL modloop sha mismatch expected 65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" >&2; exit 1; fi
     if [ ! -f "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" ]; then
       echo "[rebuild] fetching alpine-minirootfs-3.22.1..." >&2
       curl -L --fail -o "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" "$BASE/alpine-minirootfs-3.22.1-aarch64.tar.gz"
       echo "[rebuild] minirootfs sha256 $(sha256sum "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" | cut -d" " -f1)" >&2
     fi
-    if [ "$(sha256sum "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" | cut -d' ' -f1)" != "188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" ]; then echo "[rebuild] FAIL minirootfs sha mismatch expected 188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" >&2; exit 1; fi
+    if [ "$(sha256sum "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" | awk "{print \$1}")" != "188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" ]; then echo "[rebuild] FAIL minirootfs sha mismatch expected 188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" >&2; exit 1; fi
     # Prepare staging
     STAGING=$(mktemp -d)
     echo "[rebuild] staging at $STAGING" >&2
@@ -155,15 +155,15 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       cp -a "$MODULES_DIR/$KVER/$path" "$STAGING/lib/modules/$KVER/$path"
     }
     feature_module() {
-      awk -v feature="$1" '$1==feature {print $2; exit}' "$FEATURE_MODULES"
+      awk -v feature="$1" "\$1==feature {print \$2; exit}" "$FEATURE_MODULES"
     }
     while IFS= read -r mod; do
-      case "$mod" in ''|'#'*) continue ;; esac
+      case "$mod" in ""|"#"*) continue ;; esac
       path=$(resolve_module "$mod") || exit 1
       copy_module "$path"
     done < "$REQUIRED_MODULES"
     while IFS= read -r feature; do
-      case "$feature" in ''|'#'*) continue ;; esac
+      case "$feature" in ""|"#"*) continue ;; esac
       mod=$(feature_module "$feature")
       [ -n "$mod" ] || { echo "[rebuild] FAIL required kernel feature $feature has no module mapping" >&2; exit 1; }
       if grep -q "/$mod\\.ko$" "$MODULES_DIR/$KVER/modules.builtin"; then
@@ -176,12 +176,14 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     done < "$REQUIRED_FEATURES"
     rm -f "$COPIED_MODULES"
     # Ensure modules.dep is correct for copied subset (keep original)
-    # Copy harpoon init and mgmt
+    # Copy harpoon init and management handoff
     cp -a "/repo/tools/guest-builder/src/init" "$STAGING/init"
     chmod +x "$STAGING/init"
     mkdir -p "$STAGING/usr/local/bin"
     cp -a "/repo/tools/guest-builder/src/harpoon-mgmt" "$STAGING/usr/local/bin/harpoon-mgmt"
     chmod +x "$STAGING/usr/local/bin/harpoon-mgmt"
+    cp -a "/repo/tools/guest-builder/src/harpoon-mgmt-wrapper" "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
+    chmod +x "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
     # Offline resize2fs for filesystem reconciliation (no network at boot)
     echo "[rebuild] adding offline resize2fs..." >&2
     apk add --no-cache e2fsprogs e2fsprogs-extra e2fsprogs-libs libblkid libuuid libcom_err > /dev/null 2>&1

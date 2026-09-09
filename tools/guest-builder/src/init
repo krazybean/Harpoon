@@ -105,13 +105,13 @@ REPOS2
       # Refresh immutable release payload; never touch Docker or user data paths.
       echo "HARPOON_RUNTIME_REFRESH_START" > /dev/hvc0
       RUNTIME_OK=1
-      for payload in init usr/local/bin/harpoon-mgmt usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
+      for payload in init usr/local/bin/harpoon-mgmt usr/local/bin/harpoon-mgmt-wrapper usr/sbin/resize2fs sbin/resize2fs usr/lib/libext2fs.so.2 usr/lib/libext2fs.so.2.4 usr/lib/libe2p.so.2 usr/lib/libe2p.so.2.3 usr/lib/libcom_err.so.2 usr/lib/libcom_err.so.2.1 usr/lib/libblkid.so.1 usr/lib/libblkid.so.1.1.0 usr/lib/libuuid.so.1 usr/lib/libuuid.so.1.3.0 etc/mke2fs.conf; do
         if [ -e "/$payload" ]; then
           mkdir -p "/newroot/$(dirname "$payload")" 2>&1 | tee /dev/hvc0 >/dev/null || true
           cp -a "/$payload" "/newroot/$payload" 2>&1 | tee /dev/hvc0 >/dev/null || { echo "HARPOON_RUNTIME_REFRESH_FAILED $payload" > /dev/hvc0; RUNTIME_OK=0; }
         else echo "HARPOON_RUNTIME_REFRESH_FAILED missing $payload" > /dev/hvc0; RUNTIME_OK=0; fi
       done
-      chmod +x /newroot/init /newroot/usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
+      chmod +x /newroot/init /newroot/usr/local/bin/harpoon-mgmt /newroot/usr/local/bin/harpoon-mgmt-wrapper 2>&1 | tee /dev/hvc0 >/dev/null || true
       [ $RUNTIME_OK -eq 1 ] || { echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; while true; do sleep 5; echo "HARPOON_DOCKER_FAILED runtime_refresh" > /dev/hvc0; done; }
       echo "HARPOON_INIT_REFRESHED" > /dev/hvc0
       echo "HARPOON_RESIZE2FS_REFRESH_DONE" > /dev/hvc0
@@ -845,9 +845,11 @@ if [ $READY -eq 1 ]; then
     fi
     # Management channel — dedicated vsock 2377, vsock-only, no TCP, no SSH (Stage 3A)
     echo "HARPOON_MGMT_START" > /dev/hvc0
-    chmod +x /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
+    chmod +x /usr/local/bin/harpoon-mgmt /usr/local/bin/harpoon-mgmt-wrapper 2>&1 | tee /dev/hvc0 >/dev/null || true
     # Verify harpoon-mgmt + python3 preconditions before listening
-    if [ ! -f /usr/local/bin/harpoon-mgmt ]; then
+    if [ ! -f /usr/local/bin/harpoon-mgmt-wrapper ]; then
+      echo "HARPOON_MGMT_FAILED missing /usr/local/bin/harpoon-mgmt-wrapper" > /dev/hvc0
+    elif [ ! -f /usr/local/bin/harpoon-mgmt ]; then
       echo "HARPOON_MGMT_FAILED missing /usr/local/bin/harpoon-mgmt" > /dev/hvc0
     elif ! command -v python3 >/dev/null 2>&1; then
       echo "HARPOON_MGMT_FAILED missing python3" > /dev/hvc0
@@ -867,8 +869,10 @@ if [ $READY -eq 1 ]; then
       MGMT_READY=0
       for attempt in 1 2 3; do
         echo "HARPOON_MGMT_ATTEMPT $attempt" > /dev/hvc0
-        socat VSOCK-LISTEN:2377,reuseaddr,fork EXEC:/usr/local/bin/harpoon-mgmt > /tmp/mgmt.log 2>&1 &
+        : > /tmp/mgmt.log
+        socat VSOCK-LISTEN:2377,reuseaddr,fork EXEC:/usr/local/bin/harpoon-mgmt-wrapper > /tmp/mgmt.log 2>&1 &
         MGMT_PID=$!
+        ( while kill -0 "$MGMT_PID" 2>/dev/null; do [ -s /tmp/mgmt.log ] && { echo "HARPOON_MGMT_SOCAT_STDERR" > /dev/hvc0; break; }; sleep 1; done ) &
         sleep 1
         if kill -0 $MGMT_PID 2>/dev/null; then
           # Probe vsock actually listening (netstat or ss if available, else check via python preflight)
@@ -876,16 +880,15 @@ if [ $READY -eq 1 ]; then
           echo "HARPOON_MGMT_READY" > /dev/hvc0
           echo "mgmt vsock 2377 pid=$MGMT_PID attempt=$attempt" > /dev/hvc0
           ls -l /usr/local/bin/harpoon-mgmt 2>&1 | tee /dev/hvc0 >/dev/null || true
-          cat /tmp/mgmt.log 2>&1 | head -n 20 | tee /dev/hvc0 >/dev/null || true
           MGMT_READY=1
           break
         else
-          echo "HARPOON_MGMT_RETRY mgmt_pid=$MGMT_PID attempt=$attempt log=$(cat /tmp/mgmt.log 2>&1 | head -n 20)" > /dev/hvc0
+          echo "HARPOON_MGMT_RETRY mgmt_pid=$MGMT_PID attempt=$attempt" > /dev/hvc0
           sleep 1
         fi
       done
       if [ "$MGMT_READY" -eq 0 ]; then
-        echo "HARPOON_MGMT_FAILED all attempts log=$(cat /tmp/mgmt.log 2>&1 | head -n 20)" > /dev/hvc0
+        echo "HARPOON_MGMT_FAILED all attempts" > /dev/hvc0
         echo "HARPOON_DOCKER_FAILED mgmt failed after retries" > /dev/hvc0
         while true; do sleep 5; echo "HARPOON_MGMT_FAILED" > /dev/hvc0; done
       fi

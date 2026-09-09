@@ -11,6 +11,7 @@ REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
 REQUIRED_FEATURES="$REPO_ROOT/tools/guest-builder/required-kernel-features.txt"
 FEATURE_MODULES="$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
+HARPOON_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 FAIL=0
@@ -86,6 +87,7 @@ if [ -f "$INITRAMFS" ]; then
   for mod in ext4 virtio_blk vsock vmw_vsock virtiofs; do
     if grep -q "$mod" <<< "$LISTING"; then pass "initramfs module $mod"; else fail "initramfs module $mod missing"; fi
   done
+  if grep -q "usr/local/bin/harpoon-mgmt-wrapper" <<< "$LISTING"; then pass "initramfs harpoon-mgmt wrapper"; else fail "initramfs harpoon-mgmt wrapper missing"; fi
   # initramfs init matches source and has offline refresh
   INIT_DIR="$WORK_DIR/initramfs-init"
   mkdir -p "$INIT_DIR"
@@ -131,6 +133,7 @@ if [ -f "$INITRAMFS" ]; then
     fi
   done < "$REQUIRED_FEATURES"
   if [ -f "$INIT_DIR/init" ] && diff -q "$INIT_SRC" "$INIT_DIR/init" >/dev/null 2>&1; then pass "initramfs init matches src"; else fail "initramfs init mismatch"; fi
+  if grep -q "EXEC:/usr/local/bin/harpoon-mgmt-wrapper" "$INIT_SRC"; then pass "mgmt listener uses wrapper"; else fail "mgmt listener bypasses wrapper"; fi
   if grep -q "HARPOON_RESIZE2FS_REFRESH" "$INIT_SRC"; then pass "init has resize2fs refresh"; else fail "init missing refresh"; fi
 else
   fail "initramfs missing"
@@ -244,6 +247,7 @@ if [ -f "$HARPOON_MGMT" ]; then
 else
   fail "harpoon-mgmt missing"
 fi
+if [ -x "$HARPOON_MGMT_WRAPPER" ]; then pass "harpoon-mgmt wrapper executable"; else fail "harpoon-mgmt wrapper missing or not executable"; fi
 
 if [ $FAIL -ne 0 ]; then say "FAIL: runtime closure incomplete"; exit 1; fi
 say "PASS: runtime closure complete"

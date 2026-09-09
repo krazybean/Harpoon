@@ -1,0 +1,33 @@
+#!/bin/sh
+# Keep handoff diagnostics off the management stream.
+MARKER_PATH="${HARPOON_MGMT_MARKER_PATH:-/dev/hvc0}"
+TARGET="${HARPOON_MGMT_TARGET:-/usr/local/bin/harpoon-mgmt}"
+
+marker() { printf 'HARPOON_MGMT_WRAPPER_%s\n' "$1" >> "$MARKER_PATH" 2>/dev/null || true; }
+
+marker START
+if [ ! -e "$TARGET" ]; then marker "TARGET exists=no"; exit 127; fi
+if [ ! -f "$TARGET" ]; then marker "TARGET exists=yes regular=no"; exit 126; fi
+if [ ! -x "$TARGET" ]; then marker "TARGET exists=yes regular=yes executable=no"; exit 126; fi
+marker "TARGET exists=yes regular=yes executable=yes"
+
+IFS= read -r shebang < "$TARGET" || shebang=""
+case "$shebang" in
+  '#!'*)
+    set -- ${shebang#\#!}
+    interpreter=$1
+    [ "${interpreter##*/}" = env ] && interpreter=$(command -v "${2:-}" 2>/dev/null || true)
+    ;;
+  *) marker "INTERPRETER exists=no executable=no"; exit 126 ;;
+esac
+if [ -x "$interpreter" ]; then
+  marker "INTERPRETER exists=yes executable=yes"
+else
+  marker "INTERPRETER exists=$( [ -e "$interpreter" ] && echo yes || echo no ) executable=no"
+  exit 126
+fi
+
+exec "$TARGET"
+status=$?
+marker "EXEC_FAILED status=$status"
+exit "$status"
