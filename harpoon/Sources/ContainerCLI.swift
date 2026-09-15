@@ -50,16 +50,24 @@ func runHarpoonContainerCommand(_ command: String, args: [String]) -> Int32 {
     }
 }
 
-private let machineRunOptions: Set<String> = [
-    "--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--help", "-h"
+private let machineLifecycleOptions: Set<String> = [
+    "--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--disk-size", "--help", "-h"
 ]
+
+/// Historical `start`/`restart` accepted Harpoon VM resource flags. Keep those
+/// spellings routed to the machine lifecycle while positional targets get normal
+/// Docker/Podman container semantics.
+func shouldUseLegacyMachineLifecycle(_ args: [String]) -> Bool {
+    guard let first = args.first else { return true }
+    if machineLifecycleOptions.contains(first) { return true }
+    return first.hasPrefix("--disk-size=")
+}
 
 /// Backward compatibility for the old foreground runtime entry point.
 /// `harpoon run` and `harpoon run --cpus ...` remain machine operations, while
 /// `harpoon run IMAGE ...` gets the Docker/Podman meaning.
 func shouldUseLegacyMachineRun(_ args: [String]) -> Bool {
-    guard let first = args.first else { return true }
-    return machineRunOptions.contains(first)
+    return shouldUseLegacyMachineLifecycle(args)
 }
 
 /// Preserve the historical runtime-log command when no container is named.
@@ -181,5 +189,5 @@ func printContainerParityHelp() {
     cliPrint("  login, logout, volume, network, system, compose, info, events")
     cliPrint("")
     cliPrint("Harpoon VM lifecycle now lives under: harpoon machine ...")
-    cliPrint("Backward compatibility: bare start/stop/restart/run and runtime-only logs remain machine aliases.")
+    cliPrint("Backward compatibility: bare lifecycle verbs and VM resource-option forms remain machine aliases.")
 }
