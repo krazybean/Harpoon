@@ -16,7 +16,11 @@ func printUsage() {
 let cliArgs = CommandLine.arguments
 if cliArgs.count >= 2 {
     let cmd = cliArgs[1]
-    // support --help for subcommands: harpoon start --help etc.
+    let commandArgs = Array(cliArgs.dropFirst(2))
+
+    // Preserve historical lifecycle help spellings. Container-specific help is
+    // always available through commands that do not collide, and lifecycle help
+    // has an unambiguous home under `harpoon machine ...`.
     if cliArgs.count>=3 && (cliArgs[2]=="--help" || cliArgs[2]=="-h") {
         switch cmd {
         case "start": fputs("usage: harpoon start [--cpus 1..8] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr); exit(0)
@@ -24,42 +28,64 @@ if cliArgs.count >= 2 {
         case "config": fputs("usage: harpoon config <show|set|reset|path>\n", stderr); exit(0)
         case "docker": fputs("usage: harpoon docker <setup|status|remove|use|env>\n", stderr); exit(0)
         case "status": fputs("usage: harpoon status [--json]\n", stderr); exit(0)
+        case "machine": printMachineUsage(); exit(0)
         default: break
         }
     }
+
     switch cmd {
+    case "machine":
+        exit(handleMachine(args: commandArgs))
+
+    // Collision-aware compatibility aliases. With no container target these keep
+    // the pre-parity machine behavior; with a target they take Docker/Podman
+    // semantics and operate against Harpoon's engine socket.
     case "start":
-        exit(handleStart(args: Array(cliArgs.dropFirst(2))))
+        if commandArgs.isEmpty { exit(handleStart(args: [])) }
+        exit(runHarpoonContainerCommand("start", args: commandArgs))
     case "stop":
-        exit(handleStop())
-    case "status":
-        exit(handleStatus(args: Array(cliArgs.dropFirst(2))))
-    case "logs":
-        exit(handleLogs(args: Array(cliArgs.dropFirst(2))))
+        if commandArgs.isEmpty { exit(handleStop()) }
+        exit(runHarpoonContainerCommand("stop", args: commandArgs))
     case "restart":
-        exit(handleRestart(args: Array(cliArgs.dropFirst(2))))
+        if commandArgs.isEmpty { exit(handleRestart(args: [])) }
+        exit(runHarpoonContainerCommand("restart", args: commandArgs))
+    case "logs":
+        if shouldUseLegacyMachineLogs(commandArgs) { exit(handleLogs(args: commandArgs)) }
+        exit(runHarpoonContainerCommand("logs", args: commandArgs))
+    case "exec":
+        if shouldUseLegacyGuestExec(commandArgs) { exit(handleExec(args: commandArgs)) }
+        exit(runHarpoonContainerCommand("exec", args: commandArgs))
+    case "run":
+        if shouldUseLegacyMachineRun(commandArgs) {
+            break // fall through to foreground VM runtime below
+        }
+        exit(runHarpoonContainerCommand("run", args: commandArgs))
+
+    // Non-colliding machine/runtime management aliases retained for compatibility.
+    case "status":
+        exit(handleStatus(args: commandArgs))
     case "config":
-        exit(handleConfig(args: Array(cliArgs.dropFirst(2))))
+        exit(handleConfig(args: commandArgs))
     case "doctor":
         exit(handleDoctor())
     case "disk":
-        exit(handleDisk(args: Array(cliArgs.dropFirst(2))))
+        exit(handleDisk(args: commandArgs))
     case "docker":
-        exit(handleDocker(args: Array(cliArgs.dropFirst(2))))
-    case "exec":
-        exit(handleExec(args: Array(cliArgs.dropFirst(2))))
+        exit(handleDocker(args: commandArgs))
     case "shell":
-        exit(handleShell(args: Array(cliArgs.dropFirst(2))))
+        exit(handleShell(args: commandArgs))
     case "version", "--version", "-v":
         exit(handleVersion())
     case "help", "--help", "-h":
         printUsageFull()
+        printContainerParityHelp()
         exit(0)
-    case "run":
-        break // fall through to foreground with stripped args
     default:
+        if harpoonContainerCommands.contains(cmd) {
+            exit(runHarpoonContainerCommand(cmd, args: commandArgs))
+        }
         if cmd.hasPrefix("-") {
-            break // legacy bare flags -> foreground
+            break // legacy bare flags -> foreground VM runtime
         } else {
             fputs("unknown command: \(cmd)\n", stderr)
             fputs("Try 'harpoon help' for usage.\n", stderr)
@@ -70,10 +96,12 @@ if cliArgs.count >= 2 {
 // also handle bare --help
 if cliArgs.count==2 && (cliArgs[1]=="--help" || cliArgs[1]=="-h") {
     printUsageFull()
+    printContainerParityHelp()
     exit(0)
 }
 
-// Determine foreground args
+// Determine foreground args. Reaching this point for `run` means it matched the
+// legacy machine-runtime form; ordinary `harpoon run IMAGE ...` exited above.
 let foregroundArgs: [String]
 if cliArgs.count >= 2 && cliArgs[1] == "run" {
     foregroundArgs = Array(cliArgs.dropFirst(2))
