@@ -23,10 +23,38 @@ private func containerDockerCLI() -> String? {
     return findDocker()
 }
 
+private let machineLifecycleOptions: Set<String> = [
+    "--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--disk-size", "--help", "-h"
+]
+
+/// Historical `start`/`restart` accepted Harpoon VM resource flags. Keep those
+/// spellings routed to the machine lifecycle while positional targets get normal
+/// Docker/Podman container semantics.
+func shouldUseLegacyMachineLifecycle(_ args: [String]) -> Bool {
+    guard let first = args.first else { return true }
+    if machineLifecycleOptions.contains(first) { return true }
+    return first.hasPrefix("--disk-size=")
+}
+
 /// Run the installed Docker CLI with inherited stdio so interactive commands
 /// (`login`, `run -it`, `exec -it`, etc.) behave naturally. We address the
 /// Harpoon socket directly rather than requiring a pre-created Docker context.
 func runHarpoonContainerCommand(_ command: String, args: [String]) -> Int32 {
+    // Backward compatibility for historical lifecycle invocations that contain
+    // VM resource options. main.swift intentionally sends non-empty collision
+    // forms here, so intercept them before resolving or launching Docker.
+    if command == "start" && shouldUseLegacyMachineLifecycle(args) {
+        return handleStart(args: args)
+    }
+    if command == "restart" && shouldUseLegacyMachineLifecycle(args) {
+        return handleRestart(args: args)
+    }
+    if command == "stop" && args.count == 1 && (args[0] == "--help" || args[0] == "-h") {
+        cliPrint("usage: harpoon stop")
+        cliPrint("       harpoon machine stop")
+        return 0
+    }
+
     guard let docker = containerDockerCLI() else {
         cliError("Docker CLI not found. Harpoon container commands currently use the Docker CLI as a thin client.")
         cliError("Install the Docker CLI only; Docker Desktop is not required.")
@@ -48,19 +76,6 @@ func runHarpoonContainerCommand(_ command: String, args: [String]) -> Int32 {
         cliError("failed to launch Docker CLI: \(error)")
         return 1
     }
-}
-
-private let machineLifecycleOptions: Set<String> = [
-    "--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--disk-size", "--help", "-h"
-]
-
-/// Historical `start`/`restart` accepted Harpoon VM resource flags. Keep those
-/// spellings routed to the machine lifecycle while positional targets get normal
-/// Docker/Podman container semantics.
-func shouldUseLegacyMachineLifecycle(_ args: [String]) -> Bool {
-    guard let first = args.first else { return true }
-    if machineLifecycleOptions.contains(first) { return true }
-    return first.hasPrefix("--disk-size=")
 }
 
 /// Backward compatibility for the old foreground runtime entry point.
