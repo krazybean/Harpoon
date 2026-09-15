@@ -68,6 +68,18 @@ pass "collision-aware container commands"
 [ ! -s "$FAKE_LOG" ] || fail "legacy start --help unexpectedly forwarded to Docker"
 
 : > "$FAKE_LOG"
+"$BIN" start --cpus definitely-not-a-number >/dev/null 2>&1 || true
+[ ! -s "$FAKE_LOG" ] || fail "legacy start --cpus unexpectedly forwarded to Docker"
+
+: > "$FAKE_LOG"
+"$BIN" restart --memory definitely-not-a-number >/dev/null 2>&1 || true
+[ ! -s "$FAKE_LOG" ] || fail "legacy restart --memory unexpectedly forwarded to Docker"
+
+: > "$FAKE_LOG"
+"$BIN" stop --help >/dev/null 2>&1 || fail "legacy stop --help failed"
+[ ! -s "$FAKE_LOG" ] || fail "legacy stop --help unexpectedly forwarded to Docker"
+
+: > "$FAKE_LOG"
 "$BIN" run --help >/dev/null 2>&1 || fail "legacy run --help failed"
 [ ! -s "$FAKE_LOG" ] || fail "legacy run --help unexpectedly forwarded to Docker"
 
