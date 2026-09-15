@@ -36,3 +36,5 @@ harpoon/results/
 node_modules/
 ui/harpoon-desktop/src-tauri/gen/
 ui/inspiration/
+
+.binder/
