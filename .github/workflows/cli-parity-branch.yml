@@ -1,0 +1,57 @@
+name: CLI parity branch validation
+
+on:
+  push:
+    branches:
+      - cli-parity-machine-namespace
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli-parity:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile production arm64 Harpoon
+        run: |
+          chmod +x harpoon/build.sh
+          harpoon/build.sh
+
+      - name: Compile native CLI test binary
+        run: |
+          ARCH="$(uname -m)"
+          MIN_MACOS="$(cat harpoon/MIN_MACOS 2>/dev/null || echo 15.1)"
+          xcrun swiftc -target "${ARCH}-apple-macosx${MIN_MACOS}" \
+            harpoon/Sources/RuntimeConfig.swift \
+            harpoon/Sources/HostPathTranslator.swift \
+            harpoon/Sources/Lifecycle.swift \
+            harpoon/Sources/VMManager.swift \
+            harpoon/Sources/Bridges.swift \
+            harpoon/Sources/PortForwardManager.swift \
+            harpoon/Sources/HarpoonCLI.swift \
+            harpoon/Sources/ContainerCLI.swift \
+            harpoon/Sources/main.swift \
+            -framework Virtualization \
+            -o /tmp/harpoon-cli-test \
+            -module-cache-path /tmp/harpoon-mcache-native
+
+      - name: Run CLI parity and compatibility regression tests
+        run: |
+          chmod +x harpoon/cli-parity-test.sh
+          HARPOON_BIN=/tmp/harpoon-cli-test harpoon/cli-parity-test.sh
+
+      - name: Existing CLI help regression slice
+        run: |
+          set -eu
+          BIN=/tmp/harpoon-cli-test
+          "$BIN" start --help 2>&1 | grep -q "usage: harpoon start"
+          "$BIN" logs --help 2>&1 | grep -q "usage: harpoon logs"
+          "$BIN" config --help 2>&1 | grep -q "usage: harpoon config"
+          "$BIN" docker --help 2>&1 | grep -q "usage: harpoon docker"
+          "$BIN" status --help 2>&1 | grep -q "usage: harpoon status"
+          "$BIN" disk --help 2>&1 | grep -q "usage: harpoon disk"
+          "$BIN" help 2>&1 | grep -q "Harpoon"
