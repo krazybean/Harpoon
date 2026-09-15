@@ -14,11 +14,20 @@ let harpoonContainerCommands: Set<String> = [
     "unpause", "update", "volume", "wait", "system"
 ]
 
+private func containerDockerCLI() -> String? {
+    if let override = ProcessInfo.processInfo.environment["HARPOON_DOCKER_CLI"],
+       !override.isEmpty,
+       FileManager.default.isExecutableFile(atPath: override) {
+        return override
+    }
+    return findDocker()
+}
+
 /// Run the installed Docker CLI with inherited stdio so interactive commands
 /// (`login`, `run -it`, `exec -it`, etc.) behave naturally. We address the
 /// Harpoon socket directly rather than requiring a pre-created Docker context.
 func runHarpoonContainerCommand(_ command: String, args: [String]) -> Int32 {
-    guard let docker = findDocker() else {
+    guard let docker = containerDockerCLI() else {
         cliError("Docker CLI not found. Harpoon container commands currently use the Docker CLI as a thin client.")
         cliError("Install the Docker CLI only; Docker Desktop is not required.")
         return 127
