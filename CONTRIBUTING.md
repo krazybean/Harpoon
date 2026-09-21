@@ -24,12 +24,24 @@ Do not duplicate build steps here — see the canonical guide:
 
 **[docs/building.md](docs/building.md)**
 
+## Validation
+
+Before opening or updating a pull request, run the repository-level validation command from the project root:
+
+```sh
+sh tools/validate.sh
+```
+
+It builds the Harpoon runtime, runs the CLI parity regression suite, verifies synchronized release versions, runs the frontend unit tests and production build, and performs a locked `cargo check` of the Tauri backend. On a clean checkout it installs frontend dependencies with `npm ci` when `node_modules` is absent.
+
+Some VM, networking, filesystem, release-bundle, and ecosystem acceptance tests require a healthy macOS Virtualization.framework environment and remain separate from this fast repository validation path. See [docs/building.md](docs/building.md) and the milestone harnesses under `harpoon/` for those tests.
+
 ## Pull Requests
 
 - Keep PRs small and focused — one change per PR.
 - Link the related issue (e.g., `Fixes #123`).
 - Explain *what* and *why*; note any trade-offs or follow-ups.
-- Ensure the project builds and existing tests pass.
+- Run `sh tools/validate.sh` and address failures before requesting review.
 - Update documentation if behavior or configuration changes.
 - Be responsive to review feedback.
 
