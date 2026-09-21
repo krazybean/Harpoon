@@ -38,6 +38,12 @@ expect_forward() {
 # Help exposes the new namespace without removing the historical help body.
 "$BIN" help 2>&1 | grep -q "harpoon machine" || fail "main help missing machine namespace"
 "$BIN" machine --help 2>&1 | grep -q "Machine lifecycle" || fail "machine help missing"
+"$BIN" start --help 2>&1 | grep -q "usage: harpoon start" || fail "start help regression"
+"$BIN" logs --help 2>&1 | grep -q "usage: harpoon logs" || fail "logs help regression"
+"$BIN" config --help 2>&1 | grep -q "usage: harpoon config" || fail "config help regression"
+"$BIN" docker --help 2>&1 | grep -q "usage: harpoon docker" || fail "docker help regression"
+"$BIN" status --help 2>&1 | grep -q "usage: harpoon status" || fail "status help regression"
+"$BIN" disk --help 2>&1 | grep -q "usage: harpoon disk" || fail "disk help regression"
 pass "help and machine namespace"
 
 # Common Docker/Podman verbs are pinned directly to Harpoon's engine socket.
