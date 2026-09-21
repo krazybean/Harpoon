@@ -44,22 +44,9 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      - name: Build Swift (manual for CodeQL)
+      - name: Build Swift production runtime (manual for CodeQL)
         if: matrix.build-mode == 'manual'
-        run: |
-          swiftc \
-            harpoon/Sources/RuntimeConfig.swift \
-            harpoon/Sources/HostPathTranslator.swift \
-            harpoon/Sources/Lifecycle.swift \
-            harpoon/Sources/VMManager.swift \
-            harpoon/Sources/Bridges.swift \
-            harpoon/Sources/PortForwardManager.swift \
-            harpoon/Sources/HarpoonCLI.swift \
-            harpoon/Sources/ContainerCLI.swift \
-            harpoon/Sources/main.swift \
-            -framework Virtualization \
-            -o /tmp/harpoon-codeql \
-            -module-cache-path /tmp/harpoon-mcache
+        run: bash harpoon/build.sh
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
