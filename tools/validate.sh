@@ -44,6 +44,9 @@ HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/cli-parity-test.sh
 say "Run host path translation regression suite"
 sh harpoon/regression-host-path.sh
 
+say "Run deterministic host path fuzz suite"
+sh harpoon/fuzz-host-path.sh
+
 UI_DIR="$ROOT/ui/harpoon-desktop"
 
 say "Run release tooling preflight"
