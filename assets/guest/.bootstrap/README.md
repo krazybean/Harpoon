@@ -1,6 +1,8 @@
-# Bootstrap — TEMPORARY until v0.1.1 publishes versioned artifacts
+# Guest artifact bootstrap
 
-Place production guest artifacts here to bootstrap a fresh clone **without** using historical prototype directories:
+Harpoon's source tree intentionally does not commit the production kernel (`Image-virt`) or sparse root image (`harpoon-root.img`). The current v0.1.1 GitHub release publishes the desktop DMG and `SHA256SUMS`, but it does **not** publish a standalone guest-artifact bundle for rebuilding a release from a fresh clone.
+
+Place trusted production guest artifacts here when bootstrapping a source-built release without using historical prototype directories:
 
 - `harpoon-initramfs.cpio.gz`
 - `harpoon-root.img`
@@ -14,7 +16,6 @@ bash tools/guest-builder/build-initramfs.sh
 bash tools/guest-builder/build-root.sh
 ```
 
-These files are **ignored** by `.gitignore` (`assets/guest/.bootstrap/` not tracked).
-Once https://github.com/Harpoon/releases/download/v0.1.1/ publishes, FETCH MODE will verify SHA-256 and this bootstrap will be unnecessary.
+These bootstrap files are ignored by `.gitignore` and are not release artifacts themselves. A future standalone guest-artifact release should publish versioned files plus SHA-256 provenance before this bootstrap path is retired.
 
 Do NOT point this at spike1/ or spike2/.
