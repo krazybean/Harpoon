@@ -10,7 +10,7 @@ HARPOON_MIN_MACOS="$(cat "$SCRIPT_DIR/MIN_MACOS" 2>/dev/null || echo "15.1")"
 export MACOSX_DEPLOYMENT_TARGET="$HARPOON_MIN_MACOS"
 echo "[harpoon] building production runtime for macOS $HARPOON_MIN_MACOS (swift target arm64-apple-macosx$HARPOON_MIN_MACOS)..." >&2
 xcrun swiftc -target "arm64-apple-macosx$HARPOON_MIN_MACOS" \
-  "$SCRIPT_DIR/Sources/RuntimeConfig.swift" "$SCRIPT_DIR/Sources/HostPathTranslator.swift" "$SCRIPT_DIR/Sources/Lifecycle.swift" "$SCRIPT_DIR/Sources/VMManager.swift" "$SCRIPT_DIR/Sources/Bridges.swift" "$SCRIPT_DIR/Sources/PortForwardManager.swift" "$SCRIPT_DIR/Sources/HarpoonDockerCLI.swift" "$SCRIPT_DIR/Sources/HarpoonCLI.swift" "$SCRIPT_DIR/Sources/ContainerCLI.swift" "$SCRIPT_DIR/Sources/main.swift" \
+  "$SCRIPT_DIR/Sources/RuntimeConfig.swift" "$SCRIPT_DIR/Sources/HostPathTranslator.swift" "$SCRIPT_DIR/Sources/Lifecycle.swift" "$SCRIPT_DIR/Sources/VMManager.swift" "$SCRIPT_DIR/Sources/Bridges.swift" "$SCRIPT_DIR/Sources/PortForwardManager.swift" "$SCRIPT_DIR/Sources/HarpoonDockerCLI.swift" "$SCRIPT_DIR/Sources/UnixBridge.swift" "$SCRIPT_DIR/Sources/HarpoonCLI.swift" "$SCRIPT_DIR/Sources/ContainerCLI.swift" "$SCRIPT_DIR/Sources/main.swift" \
   -framework Virtualization -o "$OUT" -module-cache-path /tmp/harpoon-mcache \
   -Xlinker -rpath -Xlinker "@executable_path/../../../Frameworks" \
   -Xlinker -rpath -Xlinker "@loader_path/../../../Frameworks" 2>&1
