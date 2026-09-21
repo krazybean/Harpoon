@@ -114,7 +114,7 @@ final class HostPathTranslator {
             }
         }
 
-        // HostConfig.Mounts: array of dict with Type bind and Source
+        // HostConfig.Mounts: translate bind mounts (and legacy entries with no Type), never named volumes.
         if var hostConfig = mutable["HostConfig"] as? [String: Any], let mounts = hostConfig["Mounts"] as? [[String: Any]] {
             var newMounts: [[String: Any]] = []
             var mountChanged = false
@@ -123,8 +123,8 @@ final class HostPathTranslator {
                 if let type = m["Type"] as? String, type == "bind", let src = m["Source"] as? String, let trans = translateHostPath(src) {
                     nm["Source"] = trans
                     mountChanged = true
-                } else if let src = m["Source"] as? String, let trans = translateHostPath(src) {
-                    // be permissive: if Source looks like host absolute and type missing, still translate
+                } else if m["Type"] == nil, let src = m["Source"] as? String, let trans = translateHostPath(src) {
+                    // be permissive only when Type is absent; explicit non-bind mounts must remain untouched
                     nm["Source"] = trans
                     mountChanged = true
                 }
