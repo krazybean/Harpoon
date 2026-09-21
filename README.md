@@ -19,14 +19,14 @@ Harpoon runs ordinary Docker development workloads on macOS without requiring Do
 
 Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit remain authoritative inside the guest for containers, images, volumes, networks, and builds. Harpoon owns the macOS↔Linux boundary.
 
-## Download Harpoon v0.1.0
+## Download Harpoon
 
-macOS Apple Silicon:
+macOS Apple Silicon release assets are published on [GitHub Releases](https://github.com/krazybean/Harpoon/releases):
 
-- **Desktop + CLI:** [GitHub Releases](https://github.com/krazybean/Harpoon/releases) → `Harpoon-0.1.0-arm64.dmg`
-- **CLI/runtime:** [GitHub Releases](https://github.com/krazybean/Harpoon/releases) → `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` (checksums)
+- **Latest desktop release:** `Harpoon-0.1.1-arm64.dmg` + `SHA256SUMS`.
+- **Standalone CLI/runtime archive:** `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` remains available from the v0.1.0 release. A standalone v0.1.1 CLI tarball is not currently published.
 
-Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). If a release asset URL is not yet published, use the Releases page linked above.
+Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). Use the Releases page above as the authoritative list of published artifacts.
 
 ## Screenshots / Desktop UI
 
@@ -136,6 +136,12 @@ Guest/container memory depends on workload and is not inferable from XPC RSS alo
 
 Collected evidence under `docs/results` and `harpoon/results` (M13–M18, R1, EC, UI, D1/D1.1) with `tier-status.csv`, `host.csv`, logs, and preserved healthy vs `HOST_VZ_START_FAILURE` windows.
 
+For the repository-level build/test gate used by contributors and pull requests, run:
+
+```sh
+sh tools/validate.sh
+```
+
 Links: [Performance](docs/performance.md), [Resources](docs/resources.md), [Validation results](docs/results/), [Architecture](docs/architecture.md).
 
 ## Security & Trust
@@ -143,16 +149,14 @@ Links: [Performance](docs/performance.md), [Resources](docs/resources.md), [Vali
 Harpoon intentionally exposes inspectable signals rather than claiming security:
 
 - Source available for inspection
-- [Security policy](SECURITY.md) with responsible disclosure via GitHub Private Vulnerability Reporting
+- [Security policy](SECURITY.md) with private disclosure guidance
 - [Contributing guide](CONTRIBUTING.md)
 - Dependency graph enabled, Dependabot alerts (including malware alerts) and security updates enabled
 - Dependabot configuration for `npm`, `cargo`, and `github-actions`
-- Repository configuration for **CodeQL** (javascript-typescript, rust with `build-mode: none`, swift with manual `swiftc` build on `macos-latest`) and **OpenSSF Scorecard** (`v2.4.4`, pinned Actions)
-- Pinned GitHub Actions (`actions/checkout`, `github/codeql-action/*`, `ossf/scorecard-action`, `actions/upload-artifact`) to commit SHAs
+- Repository configuration for **CodeQL** (javascript-typescript, rust with `build-mode: none`, Swift using the canonical production runtime build on `macos-latest`) and **OpenSSF Scorecard** (`v2.4.4`, pinned Actions)
+- Pinned GitHub Actions (`actions/checkout`, `actions/setup-node`, `github/codeql-action/*`, `ossf/scorecard-action`, `actions/upload-artifact`) to commit SHAs
 
 Harpoon includes repository configuration for CodeQL (javascript-typescript, rust, swift) and OpenSSF Scorecard. The repository is now public.
-
-Results become publicly inspectable only after those workflows have completed successfully on the public repository. No successful CodeQL or Scorecard run is claimed here. Dependabot is active, dependency remediation has been performed, and one known transitive glib advisory remains monitored.
 
 Automated analysis does not establish that Harpoon is safe, malware-free, or vulnerability-free. See [SECURITY.md](SECURITY.md) for scope, boundaries, and reporting.
 
@@ -182,7 +186,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Status
 
-Harpoon v0.1.0 is the first public release.
+Harpoon v0.1.1 is the latest published desktop release; v0.1.0 was the first public release and remains the latest release with a standalone CLI/runtime tarball.
 
 Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 
