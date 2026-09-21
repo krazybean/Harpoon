@@ -41,13 +41,13 @@ bash harpoon/build.sh
 say "Run CLI parity regression suite"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/cli-parity-test.sh
 
+say "Run host path translation regression suite"
+sh harpoon/regression-host-path.sh
+
 UI_DIR="$ROOT/ui/harpoon-desktop"
 
-say "Verify synchronized release versions"
-(
-  cd "$UI_DIR"
-  npm run version:check
-)
+say "Run release tooling preflight"
+sh tools/release-preflight.sh
 
 say "Install reproducible frontend dependencies when needed"
 if [ ! -d "$UI_DIR/node_modules" ]; then
