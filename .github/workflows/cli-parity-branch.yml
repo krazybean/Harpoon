@@ -1,9 +1,12 @@
-name: CLI parity branch validation
+name: CLI parity validation
 
 on:
   push:
     branches:
-      - cli-parity-machine-namespace
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -14,7 +17,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Compile production arm64 Harpoon
         run: |
