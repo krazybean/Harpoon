@@ -16,6 +16,7 @@ need() {
 }
 
 need xcrun
+need node
 need npm
 need cargo
 
@@ -26,6 +27,13 @@ case "$(uname -s)" in
     exit 2
     ;;
 esac
+
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if [ "$NODE_MAJOR" != "20" ]; then
+  echo "ERROR: Harpoon desktop validation requires Node 20; found $(node --version)." >&2
+  echo "See docs/building.md for the supported Node/NVM setup." >&2
+  exit 2
+fi
 
 say "Build Harpoon runtime"
 bash harpoon/build.sh
