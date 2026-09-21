@@ -3,91 +3,58 @@
 ## Supported Versions
 
 | Version | Supported |
-|---------|-----------|
+|---|---|
 | `main` | Active development |
+| `0.1.x` | Current public release line |
+| Older pre-release tags | Not supported |
 
-`v0.1` has not yet been published. This policy will be updated when `v0.1` is released to define its supported status.
-
-Older pre-release tags are not supported. As the project approaches a stable release, a versioned support matrix will be published here.
+Users on an older `0.1.x` patch release should upgrade to the latest published `0.1.x` release before reporting a version-specific issue when practical.
 
 ## Reporting a Vulnerability
 
 **Please do not open a public issue for security vulnerabilities.**
 
-The preferred way to report a vulnerability is via **GitHub Private Vulnerability Reporting**:
+The preferred reporting path is **GitHub Private Vulnerability Reporting** when the repository's Security tab exposes **Report a vulnerability**. Submit the report through the private advisory flow so maintainers can reproduce, discuss, fix, and coordinate disclosure without publishing exploit details prematurely.
 
-1. Go to the repository on GitHub → **Security** tab → **Report a vulnerability** (`/security/advisories/new`).
-2. Describe the issue privately — only maintainers will see it.
-3. Submit the report. You will receive acknowledgement and can discuss fixes and disclosure timing privately within the advisory.
+If private vulnerability reporting is unavailable, use only an alternative private contact method explicitly listed in the repository's GitHub Security tab. Do not send vulnerability details to an inferred or unverified email address.
 
-> **Note for maintainers:** GitHub Private Vulnerability Reporting must be enabled manually in repository settings (**Settings → Code security and analysis → Private vulnerability reporting**) if it is not already enabled. Until enabled, the Security tab workflow above will not be available.
+Please avoid public disclosure until a fix is available and a disclosure timeline has been coordinated with the maintainers.
 
-If private vulnerability reporting is unavailable, please use an alternative private channel provided in the repository's GitHub Security tab rather than public disclosure. Do not invent or use an unverified email address — use only contact methods explicitly listed on GitHub.
+## What to Include
 
-We ask that you **do not disclose the vulnerability publicly** until a fix has been made available and a coordinated disclosure timeline has been agreed with the maintainers.
+Include as much of the following as practical:
 
-## What to Include in a Report
-
-To help us triage quickly, please include where possible:
-
-- **Description** — clear summary of the vulnerability and affected component.
-- **Steps to reproduce** — minimal steps, proof-of-concept, or exploit code if available.
-- **Impact** — what an attacker could achieve (e.g., VM escape, privilege escalation, data exposure, DoS).
-- **Environment** — Harpoon version/commit, macOS version, hardware (Apple Silicon), and relevant configuration.
+- **Description** — a clear summary of the vulnerability and affected component.
+- **Steps to reproduce** — a minimal reproducer or proof of concept when available.
+- **Impact** — what an attacker could achieve, such as VM escape, privilege escalation, data exposure, or denial of service.
+- **Environment** — Harpoon version or commit, macOS version, Apple Silicon hardware, and relevant configuration.
+- **Observed vs. expected behavior** — especially for isolation, socket permissions, networking, or lifecycle boundaries.
 
 ## Response Expectations
 
-- We aim to **acknowledge** reports within **72 hours**.
-- We will **triage** the report, confirm reproducibility, and assess severity.
-- If confirmed, we will work on a fix and coordinate disclosure and release timing with you. We will keep you informed of progress within the private advisory.
-- As a community-maintained project, we cannot guarantee fixed SLAs for resolution, but security reports are treated as priority.
+- We aim to **acknowledge** security reports within **72 hours**.
+- We will triage the report, confirm reproducibility where possible, and assess severity and affected versions.
+- Confirmed issues will be fixed and disclosed on a timeline coordinated with the reporter where practical.
+- Harpoon is community-maintained, so resolution time is not a guaranteed SLA, but security reports are treated as priority work.
 
-We appreciate responsible disclosure and will credit reporters if desired once an advisory is published.
+Reporters may be credited after disclosure if they want attribution.
 
 ## Security Scope and Boundaries
 
-Harpoon **creates and manages a Linux VM via Apple's Virtualization.framework**, **exposes a Docker-compatible socket/API** on the host, and **executes user-requested container workloads** inside that VM.
+Harpoon creates and manages a Linux VM through Apple's `Virtualization.framework`, exposes a Docker-compatible Unix socket/API on the macOS host, and executes user-requested container workloads inside that VM.
 
 Security-relevant boundaries include:
 
-- **In scope:** VM lifecycle and isolation, the Docker-compatible API/socket surface, container runtime boundaries, host↔VM communication, and handling of privileges required to manage the VM and workloads.
-- **Out of scope / by design:** Harpoon is **not a sandbox for executing untrusted code without user awareness**. Running a container inherently executes the code the user requested. Users should only run workloads they trust, as containerized workloads can access resources granted by their configuration.
+- **In scope:** VM lifecycle and isolation, Harpoon-owned host↔guest communication, Docker-compatible host socket exposure, bind-mount/path translation behavior, published-port forwarding, and privilege handling performed by Harpoon.
+- **Guest runtime boundary:** Docker Engine, containerd, and BuildKit remain authoritative inside the Linux guest. Harpoon is responsible for how the macOS host connects those services to the guest.
+- **Out of scope / by design:** Harpoon is not a sandbox for executing arbitrary untrusted workloads without user awareness. Running a container executes software the user requested with the resources granted by its configuration.
 
-Reports concerning VM escape, unauthorized host access via the exposed API, privilege escalation beyond intended design, or bypass of documented isolation boundaries are of particular interest.
+Reports involving VM escape, unauthorized host access through Harpoon-owned sockets or bridges, privilege escalation beyond documented behavior, unintended host-path access, or bypass of an isolation boundary are particularly relevant.
 
-### Rust dependency advisories
+## Dependency Advisories
 
-Harpoon monitors Rust dependencies using RustSec and GitHub security
-scanning.
+Harpoon monitors dependencies through GitHub security scanning, Dependabot, CodeQL, OpenSSF Scorecard, and Rust ecosystem tooling where applicable.
 
-The current dependency graph may report informational RustSec advisories
-originating from transitive Tauri dependencies. These currently consist
-of unmaintained-crate warnings and a `glib` unsoundness advisory.
+Some Rust advisory results may originate from transitive Tauri dependencies that are not compiled into Harpoon's macOS ARM64 production target, including Linux GTK/WebKit dependency paths. Unmaintained transitive crates may also remain until compatible upstream replacements exist.
 
-The GTK3-related advisories are associated with Tauri's Linux WebKit/GTK
-dependency graph and are not compiled into Harpoon's macOS ARM64
-production target.
-
-The remaining `unic` advisories identify unmaintained transitive crates
-used by Tauri; no patched versions are currently available.
-
-`cargo audit` currently reports no known vulnerabilities. These
-transitive advisories will be monitored and updated as compatible
-upstream Tauri dependencies become available.
-
-## Reporting a Vulnerability
-
-Please do not report security vulnerabilities through public GitHub issues.
-
-Report suspected vulnerabilities privately using Harpoon's GitHub
-Security Advisories:
-
-https://github.com/krazybean/Harpoon/security/advisories/new
-
-Please include enough information to reproduce and assess the issue,
-including the affected Harpoon version, environment, observed behavior,
-expected behavior, and reproduction steps when available.
-
-Security reports will be acknowledged as soon as practical. Please allow
-reasonable time for investigation and remediation before public
-disclosure.
+Dependency findings are evaluated in the context of the production target rather than silently dismissed. A clean automated scan is not treated as proof that Harpoon is vulnerability-free.
