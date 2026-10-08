@@ -1,31 +1,40 @@
-# Harpoon 2.0 — Visual Reference Index
+## Harpoon 2.0 — Committed Design References
 
-This index preserves the **design intent** established in the October 2026 design discussion. The original user-uploaded reference images and generated concept board were attached to that conversation; they are **not yet present in this repository**. Do not claim binary provenance or create imagined copies. Once original bytes are made available through a binary-capable Git workflow, place the approved assets in `docs/ui/assets/harpoon-2/`, add file-specific source/licensing notes, and update this index.
+These assets establish the visual and interaction direction for Harpoon 2.0. They are **design references, not implemented application screenshots or authoritative runtime specifications**.
 
-## Inspiration images contributed in discussion
+### 1. Harpoon 2.0 — Visual Design Concept
 
-1. **Dark card-customization interface** — dense-but-clear icon and type treatment, calm negative space, color contrast; inspiration for compact controls and shell.
-2. **Dark analytics illustration** — restrained KPI cards and purposeful line/donut charts; inspiration for Resources and miniature sparklines.
-3. **Vaulto dark finance dashboard** — atmospheric lighting and surface depth; gradient use was judged too assertive. Borrow only subtle depth.
-4. **Blue smart-home dashboard** — thin borders establish affordances; activated items gain fill; likely strongest pattern for Harpoon group/tile interactions.
+![Harpoon 2.0 Design Concept](assets/harpoon-2/harpoon-v2-concept.png)
 
-These inspirations are third-party visual references of uncertain redistribution rights. **Do not commit/re-host them without confirming provenance and permission**; use descriptive notes or stable credited source links where appropriate.
+**File:** [`assets/harpoon-2/harpoon-v2-concept.png`](assets/harpoon-2/harpoon-v2-concept.png)
 
-## Generated Harpoon concept
+Primary reference for:
 
-A single wide multi-screen concept board was created in the discussion. This is a **new illustrative study**, not a screenshot of working Harpoon. Accepted: dark graphite base with restrained yellow accents, consistent iconography, compact typography, linked metrics, coherent sidebar, contextual resources, and recognizable multiple workspaces. Rejected/modified: assumes an ultrawide window, over-emphasizes solid yellow sidebar selection, and allocates large container-page space to graphs better represented as compact status-bar sparklines linking to Resources.
+- Dark graphite palette with restrained yellow accents
+- Typography, iconography, spacing, borders, and elevation
+- Consistent navigation and workspace layouts
+- Compact operational metrics and data visualizations
+- Responsive container management and contextual inspection
 
-**Pending:** commit the actual generated concept image via binary-capable Git transport after verifying its original source and file; no image has been uploaded to GitHub as part of this documentation-only pass.
+**Known limitation:** The main composition assumes an unusually wide window. Implementation must adapt to ordinary laptop dimensions. Large container-page graphs should instead become compact status-bar metrics linking to Resources.
 
-## Additional product references considered
+### 2. Harpoon 2.0 — Network Topology
 
-- Krust: compact inspector and native operational layout, but visually stuffed.
-- OrbStack: native simplicity, but too reminiscent of Docker Desktop for Harpoon's desired identity.
-- TablePlus: efficient table presentation, but feels dated to the design reviewers.
-- HyperDX: strongest reference for purposeful charts, clean left navigation, and operational data presentation.
+![Harpoon Network Topology](assets/harpoon-2/harpoon-network-topology.svg)
 
-These are inspiration sources, **not dependency, feature, or implementation requirements**.
+**File:** [`assets/harpoon-2/harpoon-network-topology.svg`](assets/harpoon-2/harpoon-network-topology.svg)
 
-## Governing decisions
+Primary reference for:
 
-See [Container workspace specification](harpoon-2-container-workspace-spec.md). Existing [UI reference guidance](README.md) applies: code and supported engine capabilities are authoritative for behavior; reference art only informs visual language.
+- Visualizing networks and their attached containers
+- Interactive relationships between infrastructure objects
+- Consistent node styling and connection rendering
+- Contextual navigation to container and network details
+
+**Design constraint:** Connections must represent actual engine-reported network attachments, not inferred traffic or fabricated relationships.
+
+### Reference Authority
+
+Visual references guide aesthetics, layout, and interaction design. The existing Harpoon implementation, supported engine capabilities, and canonical roadmap remain authoritative for runtime functionality.
+
+See [Container Workspace Specification](harpoon-2-container-workspace-spec.md) for agreed behavior and acceptance criteria.
