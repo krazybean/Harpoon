@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
@@ -25,10 +29,10 @@ jobs:
       matrix:
         include:
           - language: javascript-typescript
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, build]
             build-mode: none
           - language: rust
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, build]
             build-mode: none
           - language: swift
             os: macos-latest
