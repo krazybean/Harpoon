@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "tauri": "npm --prefix ui/harpoon-desktop run tauri --",
+    "tauri:dev": "npm run tauri -- dev"
+  }
+}

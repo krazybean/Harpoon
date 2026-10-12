@@ -38,3 +38,6 @@ ui/harpoon-desktop/src-tauri/gen/
 ui/inspiration/
 
 .binder/
+
+/.qmd/*.sqlite*
+/.qmd/index.yml
