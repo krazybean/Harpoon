@@ -1,0 +1,122 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Harpoon 2 — Collectiv</title><style>
+@page{size:1440px 900px;margin:0}
+:root{
+  color-scheme:dark;--bg:#0B0E11;--surface:#11161C;--surface2:#151B22;--surface3:#1A2129;
+  --line:#2A323B;--line2:#38424D;--text:#E6EDF3;--muted:#9AA6B2;--muted2:#74808C;
+  --accent:#E4B243;--accent-soft:rgba(228,178,67,.12);--green:#22C55E;--green-soft:rgba(34,197,94,.12);
+  --amber:#F59E0B;--red:#EF4444;--blue:#61A5FA;--purple:#A78BFA;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:1440px;height:900px;background:var(--bg);color:var(--text)}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;font-size:13px;letter-spacing:.005em;overflow:hidden}
+button,input{font:inherit}a{color:inherit;text-decoration:none}
+.app{display:grid;grid-template-columns:214px 1226px;width:1440px;height:900px;background:var(--bg)}
+.sidebar{display:flex;flex-direction:column;background:linear-gradient(180deg,#10151B 0%,#0E1318 100%);border-right:1px solid var(--line)}
+.window-dots{height:46px;display:flex;align-items:center;gap:7px;padding:0 18px}
+.dot{width:11px;height:11px;border-radius:50%}.dot.red{background:#FF5F57}.dot.yellow{background:#FEBB2E}.dot.green{background:#28C840}
+.brand{display:flex;align-items:center;gap:10px;padding:8px 16px 18px;font-weight:700;font-size:15px}
+.brand-mark{width:26px;height:26px;border-radius:7px;border:1px solid rgba(228,178,67,.45);display:grid;place-items:center;background:rgba(228,178,67,.08);color:var(--accent)}
+.nav{padding:4px 10px;display:grid;gap:4px}
+.nav-item{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:8px;color:#AAB5C0;border:1px solid transparent}
+.nav-item svg{width:16px;height:16px;stroke-width:1.8}.nav-item.active{color:#F4D785;background:var(--accent-soft);border-color:rgba(228,178,67,.18)}
+.nav-item .count{margin-left:auto;font-size:11px;color:#66727E}
+.side-label{padding:17px 20px 8px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#5F6A75}
+.sidebar-footer{margin-top:auto;padding:14px 12px 16px}
+.engine{border:1px solid var(--line);background:#0D1217;border-radius:10px;padding:11px 12px;display:grid;gap:7px}
+.engine-top{display:flex;align-items:center;justify-content:space-between}.engine-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(34,197,94,.08)}
+.engine small{color:var(--muted2);font-size:10px}
+.main{display:grid;grid-template-rows:52px 821px 27px;min-width:0;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--line);background:#0B0E11}
+.search{width:560px;height:32px;display:flex;align-items:center;gap:9px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#0F1419;color:var(--muted)}
+.search svg{width:14px;height:14px}.kbd{margin-left:auto;border:1px solid #313A43;background:#151B21;border-radius:5px;padding:2px 6px;color:#75818D;font-size:10px}
+.top-actions{margin-left:auto;display:flex;gap:7px}
+.icon-btn,.btn{border:1px solid var(--line);background:#12181E;color:#BAC4CE;border-radius:8px;height:32px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.icon-btn{width:32px;padding:0}.icon-btn svg,.btn svg{width:14px;height:14px}.btn{padding:0 12px;font-weight:600}.btn.primary{background:#D9A93E;border-color:#D9A93E;color:#16120A}
+.content{overflow:hidden;padding:24px 26px 34px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.11em;color:#687480;margin-bottom:6px}
+h1{margin:0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:-.02em}.subtitle{margin-top:6px;color:var(--muted);font-size:12px}
+.head-actions{display:flex;gap:8px}
+.toolbar{min-height:42px;display:flex;align-items:center;gap:9px;margin-bottom:17px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.segmented{display:flex;padding:3px;background:#0F1419;border:1px solid var(--line);border-radius:8px}
+.seg{min-width:72px;height:28px;border:0;border-radius:6px;background:transparent;color:#7E8A96;display:flex;gap:7px;align-items:center;justify-content:center;font-weight:600}
+.seg.active{background:#1A2128;color:#EDF2F7}.seg svg{width:13px;height:13px}
+.filter{margin-left:auto;color:#8995A1;display:flex;gap:7px;align-items:center}
+.filter-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#11171D;color:#9BA7B2;font-size:11px}
+.statusbar{border-top:1px solid var(--line);background:#0C1014;display:flex;align-items:center;padding:0 14px;color:#67727D;font-size:10px;gap:13px;white-space:nowrap}
+.statusbar .metric{display:flex;align-items:center;gap:5px}.spark{width:34px;height:11px}.statusbar .right{margin-left:auto;display:flex;gap:13px}
+.badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:10px;color:#A8B3BE;background:#11171D}
+.badge.green{border-color:rgba(34,197,94,.28);background:var(--green-soft);color:#7CE5A1}.badge.amber{border-color:rgba(245,158,11,.28);background:rgba(245,158,11,.1);color:#F5C45D}.badge.neutral{color:#8C98A4}
+.muted{color:var(--muted)}.muted2{color:var(--muted2)}.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}.tiny{font-size:10px}
+
+.breadcrumb{display:flex;align-items:center;gap:7px;color:#7C8894;font-size:11px;margin-bottom:14px}.breadcrumb svg{width:11px;height:11px}.breadcrumb .current{color:#BFC8D1}
+.stack-title-row{display:flex;align-items:center;gap:12px}.backbtn{width:32px;height:32px;border:1px solid var(--line);border-radius:8px;background:#11171D;color:#9AA6B2;display:grid;place-items:center}.backbtn svg{width:15px;height:15px}
+.stack-title-meta{display:flex;align-items:center;gap:7px;margin-top:6px;color:#7E8A96;font-size:11px}.stack-health{display:flex;align-items:center;gap:6px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#10161B}
+.health-bar{width:78px;height:6px;display:grid;grid-template-columns:repeat(5,1fr);gap:2px}.health-bar i{border-radius:8px;background:#57616B}.health-bar i.run{background:var(--green)}
+.tile-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px;padding-bottom:34px}.tile{border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#131920,#10161B);min-height:245px;padding:15px;display:flex;flex-direction:column}
+.tile-head{display:flex;align-items:flex-start;gap:10px}.tech{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-weight:800;font-size:13px;border:1px solid #35404A;background:#182028;color:#D8E1EA;flex:0 0 auto}
+.tech.node{color:#9CE06C;border-color:rgba(156,224,108,.28);background:rgba(79,123,50,.12)}.tech.pg{color:#79B6F2;border-color:rgba(121,182,242,.28);background:rgba(49,97,146,.13)}
+.tech.nats{color:#66D2F5;border-color:rgba(102,210,245,.28);background:rgba(38,114,139,.13)}.tech.redis{color:#FF837A;border-color:rgba(255,131,122,.28);background:rgba(136,57,52,.13)}.tech.worker{color:#C9A7FF;border-color:rgba(201,167,255,.28);background:rgba(101,73,144,.12)}
+.tile-title{font-size:13px;font-weight:700;margin-bottom:4px}.tile-image{font-size:10px;color:#74818D}.tile-menu{margin-left:auto;color:#6F7B87}.tile-menu svg{width:15px;height:15px}
+.tile-state{display:flex;align-items:center;gap:7px;margin-top:14px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:13px}
+.metric-card{border:1px solid #273039;border-radius:8px;background:#0E1419;padding:9px 10px}.metric-label{font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:#66727D}.metric-value{margin-top:5px;font-size:12px;font-weight:650}
+.detail-line{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;color:#7E8A96;font-size:10px}.detail-line code{color:#B9C4CE;font-size:10px}
+.tile-foot{display:flex;gap:6px;margin-top:auto;padding-top:12px;border-top:1px solid rgba(42,50,59,.72)}.tile-btn{height:28px;border:1px solid #29323B;background:#10161C;color:#8F9AA5;border-radius:7px;display:flex;align-items:center;gap:5px;padding:0 8px;font-size:10px}.tile-btn svg{width:11px;height:11px}.tile-btn.more{width:28px;padding:0;justify-content:center;margin-left:auto}
+.group-resources{display:flex;align-items:center;gap:8px}.context-note{margin-left:auto;color:#6E7985;font-size:10px}
+</style>
+<style>
+.icon-btn,.btn{display:flex}
+.filter-pill svg{width:12px;height:12px;min-width:12px;min-height:12px}
+</style>
+</head>
+<body><div class="app"><aside class="sidebar">
+<div class="window-dots"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span></div>
+<div class="brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></span>Harpoon</div>
+<div class="side-label">Workspace</div>
+<nav class="nav">
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>Overview</span></div>
+<div class="nav-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg><span>Containers</span><span class="count">12</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 4.5-4 3 2.5 3.5-4 5 5"/></svg><span>Images</span><span class="count">18</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><span>Volumes</span><span class="count">9</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg><span>Networks</span><span class="count">6</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 19V5M4 19h16"/><path d="m7 15 4-5 3 3 4-6"/></svg><span>Resources</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span>Diagnostics</span></div>
+</nav>
+<div class="sidebar-footer"><div class="engine"><div class="engine-top"><div class="engine-title"><span class="status-dot"></span>Harpoon Engine</div><span class="tiny muted">v0.1.1</span></div><small>Docker 28.3 · arm64 · 2 CPU · 1 GB</small></div></div>
+</aside><main class="main"><header class="topbar"><div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>Search containers, stacks, images…</span><span class="kbd">⌘ K</span></div>
+<div class="top-actions"><button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 10a7 7 0 0 0-12-2L4 11M20 13l-2.5 3a7 7 0 0 1-12-2"/></svg></button><button class="icon-btn"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></header><section class="content">
+<div class="breadcrumb"><span>Containers</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 6 6 6-6 6"/></svg><span>Stacks</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 6 6 6-6 6"/></svg><span class="current">Collectiv</span></div>
+<div class="page-head"><div class="stack-title-row"><a class="backbtn" href="harpoon_stacks_gallery.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m15 18-6-6 6-6"/></svg></a><div><div class="eyebrow">Compose stack</div><h1>Collectiv</h1><div class="stack-title-meta"><span>5 containers</span><span>·</span><span>2 networks</span><span>·</span><span>3 named volumes</span></div></div></div>
+<div class="head-actions"><div class="stack-health"><div class="health-bar"><i class="run"></i><i class="run"></i><i class="run"></i><i class="run"></i><i></i></div><span class="tiny muted">4 / 5 running</span></div><button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 5 11 7-11 7z"/></svg> Start</button><button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 10a7 7 0 0 0-12-2L4 11M20 13l-2.5 3a7 7 0 0 1-12-2"/></svg> Restart</button><button class="icon-btn"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></div>
+<div class="toolbar"><div class="group-resources"><span class="filter-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> collectiv_default</span><span class="filter-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> shared-edge</span><span class="filter-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> 3 volumes</span></div><div class="context-note">Engine-reported attachments · Compose labels used only as provenance</div></div>
+<div class="tile-grid"><article class="tile"><div class="tile-head"><div class="tech node">JS</div><div><div class="tile-title">collectiv-web</div><div class="tile-image mono">ghcr.io/krazybean/collectiv:dev</div></div><span class="tile-menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></span></div>
+<div class="tile-state"><span class="badge green">Running</span><span class="tiny muted">Up 2h 14m</span></div>
+<div class="metrics"><div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value">1.8%</div></div><div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value">184 MB</div></div></div>
+<div class="detail-line"><span>Published</span><code>3000 → 3000/tcp</code></div><div class="detail-line"><span>Network</span><code>collectiv_default</code></div>
+<div class="tile-foot"><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></svg> Shell</button><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg> Logs</button><button class="tile-btn more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></article>
+<article class="tile"><div class="tile-head"><div class="tech pg">PG</div><div><div class="tile-title">collectiv-postgres</div><div class="tile-image mono">postgres:16</div></div><span class="tile-menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></span></div>
+<div class="tile-state"><span class="badge green">Running</span><span class="tiny muted">Up 2h 14m</span></div>
+<div class="metrics"><div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value">0.3%</div></div><div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value">256 MB</div></div></div>
+<div class="detail-line"><span>Published</span><code>5432 → 5432/tcp</code></div><div class="detail-line"><span>Volume</span><code>collectiv_db</code></div>
+<div class="tile-foot"><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></svg> Shell</button><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg> Logs</button><button class="tile-btn more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></article>
+<article class="tile"><div class="tile-head"><div class="tech nats">N</div><div><div class="tile-title">collectiv-nats</div><div class="tile-image mono">nats:2.11-alpine</div></div><span class="tile-menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></span></div>
+<div class="tile-state"><span class="badge green">Running</span><span class="tiny muted">Up 2h 13m</span></div>
+<div class="metrics"><div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value">0.1%</div></div><div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value">34 MB</div></div></div>
+<div class="detail-line"><span>Exposed</span><code>4222 · 8222/tcp</code></div><div class="detail-line"><span>Network</span><code>collectiv_default</code></div>
+<div class="tile-foot"><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></svg> Shell</button><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg> Logs</button><button class="tile-btn more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></article>
+<article class="tile"><div class="tile-head"><div class="tech redis">R</div><div><div class="tile-title">collectiv-cache</div><div class="tile-image mono">redis:7-alpine</div></div><span class="tile-menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></span></div>
+<div class="tile-state"><span class="badge green">Running</span><span class="tiny muted">Up 2h 13m</span></div>
+<div class="metrics"><div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value">0.2%</div></div><div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value">29 MB</div></div></div>
+<div class="detail-line"><span>Exposed</span><code>6379/tcp</code></div><div class="detail-line"><span>Volume</span><code>collectiv_cache</code></div>
+<div class="tile-foot"><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></svg> Shell</button><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg> Logs</button><button class="tile-btn more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></article>
+<article class="tile"><div class="tile-head"><div class="tech worker">W</div><div><div class="tile-title">collectiv-worker</div><div class="tile-image mono">ghcr.io/krazybean/collectiv:dev</div></div><span class="tile-menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></span></div>
+<div class="tile-state"><span class="badge neutral">Exited</span><span class="tiny muted">3h ago · code 0</span></div>
+<div class="metrics"><div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value muted2">—</div></div><div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value muted2">—</div></div></div>
+<div class="detail-line"><span>Command</span><code>npm run worker</code></div><div class="detail-line"><span>Network</span><code>collectiv_default</code></div>
+<div class="tile-foot"><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 5 11 7-11 7z"/></svg> Start</button><button class="tile-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg> Logs</button><button class="tile-btn more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></article></div></section><footer class="statusbar">
+<span class="metric"><span class="status-dot" style="width:6px;height:6px"></span>Engine healthy</span>
+<span class="metric">CPU <svg class="spark" viewBox="0 0 34 11"><polyline points="0,9 5,7 9,8 14,5 18,6 23,3 27,5 34,2" fill="none" stroke="#E4B243" stroke-width="1.2"/></svg>7%</span>
+<span class="metric">Memory <svg class="spark" viewBox="0 0 34 11"><polyline points="0,8 5,8 9,6 14,7 18,4 23,5 27,4 34,3" fill="none" stroke="#A78BFA" stroke-width="1.2"/></svg>612 MB</span>
+<span class="metric">Network <svg class="spark" viewBox="0 0 34 11"><polyline points="0,9 5,9 9,7 14,3 18,8 23,5 27,7 34,4" fill="none" stroke="#61A5FA" stroke-width="1.2"/></svg>1.8 MB/s</span>
+<div class="right"><span>Context: harpoon</span><span>12 containers</span></div></footer></main></div></body></html>
