@@ -289,6 +289,12 @@ func handleStop() -> Int32 {
         // leave lock/socket check to status
         return 1
     }
+    let syncResult = mgmtExec(argv: ["sync"])
+    if syncResult == 0 {
+        cliPrint("Guest filesystem synced")
+    } else {
+        cliError("warning: guest filesystem sync failed (exit \(syncResult)); continuing shutdown")
+    }
     cliPrint("Stopping Harpoon (PID \(pid))...")
     // Try SIGTERM (production path)
     kill(pid, SIGTERM)
