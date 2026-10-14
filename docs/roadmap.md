@@ -27,14 +27,18 @@ performed because ownership could not be established. This is an external
 environment block, not a Harpoon product failure; the strict zero-container
 requirement remains unchanged. See `docs/underbelly/orchestration-log.md`.
 
-### Stage 6 Docker boundary barrier — PASS (2026-10-13/14 America/Chicago)
+### Stage 6 Docker boundary barrier — PASS, cleanup hardened (2026-10-14 America/Chicago)
 
 The Stage 6 Docker Boundary Audit passed on the current checkout. Source
 evidence and a live owned-container probe confirm that Docker Engine remains
 authoritative for Docker objects and semantics; Harpoon owns only the
 macOS↔Linux boundary, VM lifecycle, host integration, diagnostics, and
-resource envelope. Known duplicated-policy and observation risks are recorded
-for Stage 9 and were not changed. No Stage 7 or UI work was started. See
+resource envelope. The probe now labels its fixture, verifies removal before
+stopping a runtime it started, preserves an already-running runtime, and
+fails clearly on cleanup failure; the focused cleanup regression passes.
+Pre-fix unlabeled artifacts remain operator-reviewed one-time cleanup only.
+Known duplicated-policy and observation risks are recorded for Stage 9 and
+were not changed. No Stage 7 or UI work was started. See
 `docs/underbelly/stage-6-docker-boundary-audit.md`, its JSON matrix, and
 `tools/stage-6-docker-boundary-gate.sh`.
 

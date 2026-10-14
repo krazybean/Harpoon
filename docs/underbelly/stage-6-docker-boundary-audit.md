@@ -90,10 +90,22 @@ descriptors, translated paths, and UI observation/cache data.
 
 The Stage 6 gate reruns the existing Stage 0–5 barriers with Node 20 and then
 uses one uniquely named Alpine fixture to verify Docker create → start →
-inspect → logs → exec → stop → rm. Cleanup is restricted to that name.
-Existing M8/M9 evidence covers context/socket behavior, named-volume
-persistence, BuildKit/buildx, bind-mount translation, and published-port
-reachability. No new destructive scenario or production behavior was added.
+inspect → logs → exec → stop → rm. The fixture carries explicit
+`com.krazybean.harpoon.validation=stage6` and
+`com.krazybean.harpoon.stage=6` labels. Cleanup is an explicit operation
+followed by an inspect-based absence check, and it completes before stopping a
+Harpoon runtime started by the probe. An already-running runtime is preserved.
+The regression `tools/regression-stage6-cleanup.sh` covers labels, cleanup
+failure, ordering, and runtime preservation. Existing M8/M9 evidence covers
+context/socket behavior, named-volume persistence, BuildKit/buildx,
+bind-mount translation, and published-port reachability. No production
+behavior was added.
+
+Validation artifacts created before this ownership hardening may be unlabeled.
+Their ownership cannot be proven generically, so they must receive one-time,
+operator-reviewed cleanup using exact container IDs. Stage 2 must continue to
+preserve and block on unlabeled or ambiguous containers; it must not delete by
+name prefix.
 
 ## Stage 9 queue / explicit non-findings
 
