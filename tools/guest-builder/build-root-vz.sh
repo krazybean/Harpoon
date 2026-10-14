@@ -9,7 +9,9 @@ WORK="$(mktemp -d /tmp/harpoon-root-builder.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 EXPECTED_INITRAMFS_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c"
+EXPECTED_MODLOOP_SHA="da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218"
 INITRAMFS_CACHE="$CACHE/initramfs-virt"
+MODLOOP_CACHE="$CACHE/modloop-virt"
 BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot"
 mkdir -p "$CACHE" "$(dirname "$OUT")"
 for tool in curl gzip cpio swiftc codesign shasum; do
@@ -19,20 +21,37 @@ ENTITLEMENTS="$REPO_ROOT/harpoon/entitlements.plist"
 [ -f "$ENTITLEMENTS" ] || { echo "[build-root-vz] FAIL: missing canonical entitlements $ENTITLEMENTS" >&2; exit 1; }
 
 fetch_pinned() {
-  local tmp="$1.tmp" actual
-  if [ -f "$1" ] && [ "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$2" ]; then return; fi
-  curl -L --fail -o "$tmp" "$BASE/initramfs-virt"
+  local dest="$1" expected="$2" url="$3" tmp="$1.tmp" actual
+  if [ -f "$dest" ] && [ "$(shasum -a 256 "$dest" | cut -d' ' -f1)" = "$expected" ]; then return; fi
+  curl -L --fail -o "$tmp" "$url"
   actual="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
-  [ "$actual" = "$2" ] || { rm -f "$tmp"; echo "[build-root-vz] initramfs SHA mismatch" >&2; exit 1; }
-  mv "$tmp" "$1"
+  [ "$actual" = "$expected" ] || { rm -f "$tmp"; echo "[build-root-vz] SHA mismatch for $dest" >&2; exit 1; }
+  mv "$tmp" "$dest"
 }
 
 [ -f "$REPO_ROOT/assets/guest/Image-virt" ] || { echo "[build-root-vz] missing Image-virt; run fetch-kernel.sh" >&2; exit 1; }
-fetch_pinned "$INITRAMFS_CACHE" "$EXPECTED_INITRAMFS_SHA"
+fetch_pinned "$INITRAMFS_CACHE" "$EXPECTED_INITRAMFS_SHA" "$BASE/initramfs-virt"
+fetch_pinned "$MODLOOP_CACHE" "$EXPECTED_MODLOOP_SHA" "$BASE/modloop-virt"
+
+MODLOOP_ROOT="$WORK/modloop"
+if command -v unsquashfs >/dev/null 2>&1; then
+  unsquashfs -f -d "$MODLOOP_ROOT" "$MODLOOP_CACHE" >/dev/null
+elif command -v docker >/dev/null 2>&1; then
+  docker run --rm -v "$CACHE:/cache" -v "$WORK:/work" alpine:3.22 sh -c \
+    'apk add --no-cache squashfs-tools >/dev/null && unsquashfs -f -d /work/modloop /cache/modloop-virt >/dev/null'
+else
+  echo "[build-root-vz] FAIL: need unsquashfs or Docker to unpack pinned modloop-virt" >&2
+  exit 1
+fi
+KVER=$(find "$MODLOOP_ROOT/modules" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | head -n1)
+[ "$KVER" = "6.12.110-0-virt" ] || { echo "[build-root-vz] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
 
 STAGE="$WORK/initramfs"
 mkdir -p "$STAGE"
 (cd "$STAGE" && gzip -dc "$INITRAMFS_CACHE" | cpio -idmu --quiet)
+rm -rf "$STAGE/lib/modules"
+mkdir -p "$STAGE/lib"
+cp -a "$MODLOOP_ROOT/modules" "$STAGE/lib/modules"
 mkdir -p "$STAGE/builder-payload"
 cp "$SCRIPT_DIR/src/alpine-root-builder-init" "$STAGE/init"
 cp "$SCRIPT_DIR/src/init" "$STAGE/builder-payload/init"
@@ -80,5 +99,6 @@ contract dockerd docker containerd runc socat python3 resize2fs ip iptables nft 
 EOF
 printf 'kernel %s\n' "$(shasum -a 256 "$REPO_ROOT/assets/guest/Image-virt" | cut -d' ' -f1)" >> "$OUT.manifest"
 printf 'builder-initramfs %s\n' "$(shasum -a 256 "$INITRAMFS_CACHE" | cut -d' ' -f1)" >> "$OUT.manifest"
+printf 'builder-modloop %s\n' "$(shasum -a 256 "$MODLOOP_CACHE" | cut -d' ' -f1)" >> "$OUT.manifest"
 printf 'root %s\n' "$(shasum -a 256 "$OUT" | cut -d' ' -f1)" >> "$OUT.manifest"
 echo "[build-root-vz] populated Alpine root: $OUT" >&2

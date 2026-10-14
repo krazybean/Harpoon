@@ -6,6 +6,9 @@ final class BuilderDelegate: NSObject, VZVirtualMachineDelegate {
     var finished = false
     var failure = false
     var serialPath = ""
+    var serialBytes = 0
+    var startedAt = Date()
+    let timeout: TimeInterval = 300
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         fputs("[alpine-root-builder] VM stopped: \(error)\n", stderr)
@@ -18,21 +21,39 @@ final class BuilderDelegate: NSObject, VZVirtualMachineDelegate {
     }
 
     func poll() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: serialPath)),
-              let serial = String(data: data, encoding: .utf8) else { return }
-        if serial.contains("HARPOON_ROOT_BUILDER_DONE") {
-            fputs(serial, stderr)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: serialPath)) else {
+            if Date().timeIntervalSince(startedAt) > timeout { fail("timeout") }
+            return
+        }
+        if data.count > serialBytes,
+           let chunk = String(data: data.subdata(in: serialBytes..<data.count), encoding: .utf8) {
+            fputs(chunk, stderr)
+            serialBytes = data.count
+        }
+        guard let serial = String(data: data, encoding: .utf8) else { return }
+        if Date().timeIntervalSince(startedAt) > timeout {
+            fail("timeout", serial)
+            return
+        }
+        if serial.contains("Kernel panic - not syncing") || serial.contains("Attempted to kill init") {
+            fail("guest kernel panic", serial)
+        } else if serial.contains("HARPOON_ROOT_BUILDER_DONE") {
             finished = true
             vm?.stop { error in
                 if let error { fputs("[alpine-root-builder] stop failed: \(error)\n", stderr); self.failure = true }
                 self.finished = true
             }
         } else if serial.contains("HARPOON_ROOT_BUILDER_FAIL") {
-            fputs(serial, stderr)
-            failure = true
-            finished = true
-            vm?.stop { _ in }
+            fail("guest reported failure", serial)
         }
+    }
+
+    private func fail(_ reason: String, _ serial: String = "") {
+        fputs("[alpine-root-builder] FAIL: \(reason)\n", stderr)
+        if !serial.isEmpty { fputs("[alpine-root-builder] serial tail:\n\(String(serial.suffix(4096)))\n", stderr) }
+        failure = true
+        finished = true
+        vm?.stop { _ in }
     }
 }
 
@@ -76,6 +97,7 @@ do {
 
 let delegate = BuilderDelegate()
 delegate.serialPath = serialURL.path
+delegate.startedAt = Date()
 let vm = VZVirtualMachine(configuration: config)
 delegate.vm = vm
 vm.delegate = delegate

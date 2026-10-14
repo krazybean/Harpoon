@@ -9,6 +9,13 @@ mkdir -p "$TMP/assets/guest"
 VZ_SCRIPT="$REPO_ROOT/tools/guest-builder/build-root-vz.sh"
 grep -q 'codesign --entitlements "$ENTITLEMENTS" --force -s - "$WORK/AlpineRootBuilder"' "$VZ_SCRIPT"
 grep -q 'com.apple.security.virtualization' "$VZ_SCRIPT"
+grep -q 'EXPECTED_MODLOOP_SHA' "$VZ_SCRIPT"
+grep -q 'virtio_blk virtio_net af_packet' "$REPO_ROOT/tools/guest-builder/src/alpine-root-builder-init"
+grep -q '/bin/busybox' "$REPO_ROOT/tools/guest-builder/src/alpine-root-builder-init"
+grep -q 'bb sleep 5' "$REPO_ROOT/tools/guest-builder/src/alpine-root-builder-init"
+! grep -Eq '(^|[;&])[[:space:]]*sleep[[:space:]]' "$REPO_ROOT/tools/guest-builder/src/alpine-root-builder-init"
+grep -q 'Kernel panic - not syncing' "$REPO_ROOT/tools/guest-builder/AlpineRootBuilder.swift"
+grep -q 'timeout' "$REPO_ROOT/tools/guest-builder/AlpineRootBuilder.swift"
 
 MOCK_BIN="$TMP/bin"
 mkdir -p "$MOCK_BIN" "$TMP/seed"
@@ -30,7 +37,10 @@ cp "$MOCK_INITRAMFS" "$OUT"
 EOF
 cat > "$MOCK_BIN/shasum" <<'EOF'
 #!/bin/bash
-echo 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c  "$2"
+case "$3" in
+  *modloop*) echo da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218  "$3" ;;
+  *) echo 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c  "$3" ;;
+esac
 EOF
 cat > "$MOCK_BIN/codesign" <<'EOF'
 #!/bin/bash
@@ -39,6 +49,14 @@ if [ "$1" = "-d" ]; then
 else
   printf '%s\n' "$*" >> "$CODESIGN_LOG"
 fi
+EOF
+cat > "$MOCK_BIN/unsquashfs" <<'EOF'
+#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-d" ]; then OUT="$2"; shift 2; else shift; fi
+done
+mkdir -p "$OUT/modules/6.12.110-0-virt"
+printf '%s\n' 'fixture' > "$OUT/modules/6.12.110-0-virt/modules.dep"
 EOF
 chmod +x "$MOCK_BIN"/*
 MOCK_INITRAMFS="$TMP/initramfs-virt" CODESIGN_LOG="$TMP/codesign.log" \

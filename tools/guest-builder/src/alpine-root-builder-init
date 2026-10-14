@@ -4,47 +4,70 @@ set -eu
 MARKER=/dev/hvc0
 TARGET=/dev/vda
 ROOT=/target
+BUSYBOX=/bin/busybox
 REPOS="https://dl-cdn.alpinelinux.org/alpine/v3.22/main https://dl-cdn.alpinelinux.org/alpine/v3.22/community"
 PACKAGES="docker-engine docker-cli containerd runc socat python3 ca-certificates e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod"
 
-log() { printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
-fail() { log "FAIL $*"; while :; do sleep 5; done; }
+bb() { "$BUSYBOX" "$@"; }
+log() { bb printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
+fail() { log "FAIL $*"; while :; do bb sleep 5; done; }
 
-mount -t proc proc /proc 2>/dev/null || true
-mount -t sysfs sysfs /sys 2>/dev/null || true
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+bb mkdir -p /proc /sys /dev /tmp /etc/apk
+bb mount -t proc proc /proc 2>/dev/null || true
+bb mount -t sysfs sysfs /sys 2>/dev/null || true
+bb mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+bb --install -s
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 log START alpine=3.22 target=$TARGET
+for module in virtio_blk virtio_net af_packet; do
+  /sbin/modprobe "$module" || fail "modprobe-$module"
+done
+for module in ext4 jbd2 mbcache; do
+  /sbin/modprobe "$module" || fail "modprobe-$module"
+done
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -b "$TARGET" ] && break
+  bb sleep 0.1
+done
 [ -b "$TARGET" ] || fail "missing-block-device $TARGET"
 
-cat > /etc/apk/repositories <<EOF
+iface=
+for netdev in /sys/class/net/*; do
+  [ "${netdev##*/}" = lo ] || { iface="${netdev##*/}"; break; }
+done
+[ -n "$iface" ] || fail missing-network-interface
+bb ip link set dev "$iface" up || fail "network-link-$iface"
+bb udhcpc -i "$iface" -n -q -f || fail "network-dhcp-$iface"
+[ -s /etc/resolv.conf ] || fail network-dns
+
+bb cat > /etc/apk/repositories <<EOF
 $REPOS
 EOF
 log APK_BOOTSTRAP_START
-apk update > /tmp/apk-update.log 2>&1 || { cat /tmp/apk-update.log > "$MARKER"; fail apk-update; }
-apk add --no-cache e2fsprogs e2fsprogs-extra > /tmp/apk-tools.log 2>&1 || { cat /tmp/apk-tools.log > "$MARKER"; fail apk-tools; }
+/sbin/apk update > /tmp/apk-update.log 2>&1 || { bb cat /tmp/apk-update.log > "$MARKER"; fail apk-update; }
+/sbin/apk add --no-cache e2fsprogs e2fsprogs-extra > /tmp/apk-tools.log 2>&1 || { bb cat /tmp/apk-tools.log > "$MARKER"; fail apk-tools; }
 
 log FORMAT_START
 mkfs.ext4 -F -q -L harpoon-root -U 00000000-0000-0000-0000-000000000001 "$TARGET" || fail mkfs
-mkdir -p "$ROOT"
-mount -t ext4 "$TARGET" "$ROOT" || fail mount
+bb mkdir -p "$ROOT"
+bb mount -t ext4 "$TARGET" "$ROOT" || fail mount
 
-mkdir -p "$ROOT/etc/apk"
-cp /etc/apk/repositories "$ROOT/etc/apk/repositories"
+bb mkdir -p "$ROOT/etc/apk"
+bb cp /etc/apk/repositories "$ROOT/etc/apk/repositories"
 log APK_ROOT_START packages="$PACKAGES"
-apk --root "$ROOT" --initdb --no-cache add $PACKAGES > /tmp/apk-root.log 2>&1 || { cat /tmp/apk-root.log > "$MARKER"; fail apk-root; }
+/sbin/apk --root "$ROOT" --initdb --no-cache add $PACKAGES > /tmp/apk-root.log 2>&1 || { bb cat /tmp/apk-root.log > "$MARKER"; fail apk-root; }
 
-mkdir -p "$ROOT/usr/local/bin" "$ROOT/usr/local/share/harpoon-runtime"
-cp /builder-payload/init "$ROOT/init"
-cp /builder-payload/harpoon-mgmt "$ROOT/usr/local/bin/harpoon-mgmt"
-cp /builder-payload/harpoon-mgmt-wrapper "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
-chmod 0755 "$ROOT/init" "$ROOT/usr/local/bin/harpoon-mgmt" "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
+bb mkdir -p "$ROOT/usr/local/bin" "$ROOT/usr/local/share/harpoon-runtime"
+bb cp /builder-payload/init "$ROOT/init"
+bb cp /builder-payload/harpoon-mgmt "$ROOT/usr/local/bin/harpoon-mgmt"
+bb cp /builder-payload/harpoon-mgmt-wrapper "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
+bb chmod 0755 "$ROOT/init" "$ROOT/usr/local/bin/harpoon-mgmt" "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
 
 # The template is deliberately package-populated but Docker-state empty.
-rm -rf "$ROOT/var/lib/docker"/* "$ROOT/var/cache/apk"/* "$ROOT/tmp"/* "$ROOT/run"/*
-mkdir -p "$ROOT/var/lib/docker" "$ROOT/run" "$ROOT/tmp"
-chmod 1777 "$ROOT/tmp"
+bb rm -rf "$ROOT/var/lib/docker"/* "$ROOT/var/cache/apk"/* "$ROOT/tmp"/* "$ROOT/run"/*
+bb mkdir -p "$ROOT/var/lib/docker" "$ROOT/run" "$ROOT/tmp"
+bb chmod 1777 "$ROOT/tmp"
 
 for bin in dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe; do
   command -v "$bin" >/dev/null 2>&1 || fail "builder-missing-$bin"
@@ -54,11 +77,11 @@ python3 -c 'import sys; assert sys.version_info >= (3, 12)' || fail python-runti
 
 {
   printf 'harpoon-alpine-root-v1\n'
-  printf 'release '; cat "$ROOT/etc/alpine-release"
-  printf 'repositories '; tr '\n' ' ' < "$ROOT/etc/apk/repositories"; printf '\n'
-  apk --root "$ROOT" info -vv | LC_ALL=C sort
+  printf 'release '; bb cat "$ROOT/etc/alpine-release"
+  printf 'repositories '; bb tr '\n' ' ' < "$ROOT/etc/apk/repositories"; printf '\n'
+  /sbin/apk --root "$ROOT" info -vv | LC_ALL=C sort
 } > "$ROOT/usr/local/share/harpoon-runtime/package-closure.manifest"
-sync
+bb sync
 log VERIFY_PASS packages="$PACKAGES"
 log DONE
-while :; do sleep 5; done
+while :; do bb sleep 5; done
