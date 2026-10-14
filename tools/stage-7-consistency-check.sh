@@ -29,6 +29,10 @@ set +e
 HARPOON_GATE_LIVE=auto bash tools/stage-7-diagnostics-gate.sh >"$ARTIFACT_DIR/stage-7.log" 2>&1
 gate_rc=$?
 set -e
+for gate_log in /tmp/harpoon-stage7-stage*.log; do
+  [ -f "$gate_log" ] || continue
+  cp "$gate_log" "$ARTIFACT_DIR/$(basename "$gate_log")"
+done
 [ "$gate_rc" -eq 0 ] || fail "Stage 7 exit=$gate_rc"
 
 if ! docker --context harpoon version >/dev/null 2>&1; then
