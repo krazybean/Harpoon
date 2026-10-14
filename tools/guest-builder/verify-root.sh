@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ponytail: verify the actual Alpine/Docker/Python closure and sanitation contract.
-# Fails build if dirty. Uses raw byte inspection via `strings` (no mount required) + optional debugfs/mount check.
+# Fails build if dirty. Uses raw byte inspection via `strings` (no mount required) + debugfs structural check when available.
 IMG="${1:-assets/guest/harpoon-root.img}"
 # Resolve relative to repo root
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,10 +38,10 @@ FAIL=0
 
 # 1. Raw byte heuristics for test residue — use grep -a (no full strings dump, faster on 2G).
 # Regression tests validate the contract without scanning a synthetic sparse file.
+SKIP_SCAN=0
 if [ "${HARPOON_VERIFY_ROOT_SKIP_SCAN:-}" = "1" ]; then
   echo "[verify-root] scan skipped by explicit regression flag" >&2
-  echo "[verify-root] PASS: populated Alpine manifest present" >&2
-  exit 0
+  SKIP_SCAN=1
 fi
 
 # ponytail: ceiling is grep -a scan — heuristic without loop mount; upgrade path is guestfish/debugfs or VM docker API.
@@ -51,7 +51,7 @@ has_pattern() {
 
 # Named volume patterns — single combined grep to avoid scanning 2G file 14 times
 # ponytail: O(n) scan once; checking precise /var/lib/docker/volumes/<test-name> paths avoids binary false positives
-if grep -a -q -E "volumes/(m6-vol|m7-vol|m16-vol|pgdata|harpoon-test|ec-vol|redis-data)" "$IMG" 2>/dev/null; then
+if [ "$SKIP_SCAN" -eq 0 ] && grep -a -q -E "volumes/(m6-vol|m7-vol|m16-vol|pgdata|harpoon-test|ec-vol|redis-data)" "$IMG" 2>/dev/null; then
   # Find which matched for reporting (second scan only if first matched)
   for vol in "m6-vol" "m7-vol" "m16-vol" "pgdata" "harpoon-test" "ec-vol" "redis-data"; do
     if grep -a -q "volumes/$vol" "$IMG" 2>/dev/null; then
@@ -59,10 +59,10 @@ if grep -a -q -E "volumes/(m6-vol|m7-vol|m16-vol|pgdata|harpoon-test|ec-vol|redi
       FAIL=1
     fi
   done
-else
+elif [ "$SKIP_SCAN" -eq 0 ]; then
   echo "[verify-root] OK: no test volume residue" >&2
 fi
-if grep -a -q "volumes/m6" "$IMG" 2>/dev/null; then
+if [ "$SKIP_SCAN" -eq 0 ] && grep -a -q "volumes/m6" "$IMG" 2>/dev/null; then
   # verify it's not just binary k8s string; require exact volumes/m6 path with following - or /
   if grep -a -q "volumes/m6-vol\|volumes/m6_" "$IMG" 2>/dev/null; then
     echo "[verify-root] FAIL: m6 volume residue" >&2
@@ -77,11 +77,34 @@ fi
 
 # Try debugfs method if available (more precise)
 if command -v debugfs >/dev/null 2>&1; then
+  DEBUGFS_TMP=$(mktemp)
+  trap 'rm -f "$DEBUGFS_TMP"' EXIT
+  debugfs_checked() {
+    local request="$1"
+    if ! debugfs -R "$request" "$IMG" >"$DEBUGFS_TMP" 2>&1; then
+      echo "[verify-root] FAIL: debugfs could not read $IMG (request: $request)" >&2
+      cat "$DEBUGFS_TMP" >&2
+      FAIL=1
+      return 1
+    fi
+    if grep -Eiq 'filesystem not open|block bitmap checksum|bad magic|cannot open|(^|[[:space:]])error([:[:space:]]|$)' "$DEBUGFS_TMP"; then
+      echo "[verify-root] FAIL: debugfs reported an unreadable filesystem" >&2
+      cat "$DEBUGFS_TMP" >&2
+      FAIL=1
+      return 1
+    fi
+  }
+
+  # An installed debugfs that cannot open the image is a structural failure,
+  # never evidence that the Docker state is clean.
+  debugfs_checked "stat /" || exit 1
   # List /var/lib/docker on ext4 image read-only
-  if debugfs -R "ls -l /var/lib/docker" "$IMG" 2>/dev/null | grep -q "containers\|volumes\|image"; then
+  debugfs_checked "ls -l /var/lib/docker" || exit 1
+  if grep -q "containers\|volumes\|image" "$DEBUGFS_TMP"; then
     echo "[verify-root] debugfs: inspecting /var/lib/docker" >&2
     # Containers
-    CNT=$(debugfs -R "ls -l /var/lib/docker/containers" "$IMG" 2>/dev/null | grep -c "^d" || true)
+    debugfs_checked "ls -l /var/lib/docker/containers" || exit 1
+    CNT=$(grep -c "^d" "$DEBUGFS_TMP" || true)
     # fallback count dirs
     if [ "$CNT" -gt 0 ] 2>/dev/null; then
       echo "[verify-root] FAIL: containers=$CNT (expected 0)" >&2
@@ -90,12 +113,13 @@ if command -v debugfs >/dev/null 2>&1; then
       echo "[verify-root] OK: containers=0 (debugfs)" >&2
     fi
     # Volumes
-    VOLCNT=$(debugfs -R "ls -l /var/lib/docker/volumes" "$IMG" 2>/dev/null | grep -c "^d" || true)
+    debugfs_checked "ls -l /var/lib/docker/volumes" || exit 1
+    VOLCNT=$(grep -c "^d" "$DEBUGFS_TMP" || true)
     # debugfs ls includes . and .. so subtract
     VOLCNT=$((VOLCNT > 0 ? VOLCNT - 2 : 0))
     if [ "$VOLCNT" -gt 0 ] 2>/dev/null; then
       # filter out metadata.db single file case
-      if debugfs -R "ls -l /var/lib/docker/volumes" "$IMG" 2>/dev/null | grep -v "metadata.db" | grep -q "^d"; then
+      if grep -v "metadata.db" "$DEBUGFS_TMP" | grep -q "^d"; then
         echo "[verify-root] FAIL: named volumes=$VOLCNT (expected 0)" >&2
         FAIL=1
       else

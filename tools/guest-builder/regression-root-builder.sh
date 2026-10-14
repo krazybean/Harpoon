@@ -102,5 +102,26 @@ repositories https://dl-cdn.alpinelinux.org/alpine/v3.22/main https://dl-cdn.alp
 packages docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod
 contract dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe
 EOF
-HARPOON_VERIFY_ROOT_SKIP_SCAN=1 bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" "$TMP/assets/guest/harpoon-root.img" >/dev/null
+# debugfs is authoritative when installed: an unreadable image must fail.
+DEBUGFS_BIN="$TMP/debugfs-bin"
+mkdir -p "$DEBUGFS_BIN"
+cat > "$DEBUGFS_BIN/debugfs" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"stat /"*) printf 'Inode: 2\n' ;;
+  *"/var/lib/docker/containers"*) printf ' 2 .\n 2 ..\n' ;;
+  *"/var/lib/docker/volumes"*) printf ' 2 .\n 2 ..\n- metadata.db\n' ;;
+  *"/var/lib/docker"*) printf 'containers volumes image\n' ;;
+esac
+EOF
+chmod +x "$DEBUGFS_BIN/debugfs"
+PATH="$DEBUGFS_BIN:$PATH" HARPOON_VERIFY_ROOT_SKIP_SCAN=1 bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" "$TMP/assets/guest/harpoon-root.img" >/dev/null
+cat > "$DEBUGFS_BIN/debugfs" <<'EOF'
+#!/bin/bash
+echo 'Block bitmap checksum does not match bitmap' >&2
+exit 1
+EOF
+chmod +x "$DEBUGFS_BIN/debugfs"
+! PATH="$DEBUGFS_BIN:$PATH" HARPOON_VERIFY_ROOT_SKIP_SCAN=1 bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" "$TMP/assets/guest/harpoon-root.img" 2>"$TMP/debugfs-error"
+grep -q 'debugfs' "$TMP/debugfs-error"
 echo "root-builder PASS"

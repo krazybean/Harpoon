@@ -64,4 +64,22 @@ for mode in override host caller fallback; do
   [ "$mode" = fallback ] || grep -Eq '(^|[| ])run ' "$TMP/$mode.log" || fail "$mode build did not use selected engine"
   [ ! -e "$TMP/$mode-config" ] || fail "$mode mutated Docker config"
 done
+
+# Exercise the production extraction helper: debugfs failure must stop before
+# chmod and report the actual extraction operation.
+sed -n '/^    debugfs_extract() {/,/^    debugfs_extract dump \/usr\/bin\/python3.12/p' "$BUILDER" | sed '$d' | sed 's/^    //' > "$TMP/debugfs-extract.sh"
+cat >> "$TMP/debugfs-extract.sh" <<EOF
+#!/bin/bash
+set -euo pipefail
+ROOT_IMG="$ROOT/assets/guest/harpoon-root.img"
+STAGING="$TMP/staging"
+mkdir -p "\$STAGING"
+debugfs() { echo "corrupt image" >&2; return 1; }
+if debugfs_extract dump /usr/bin/python3.12 "\$STAGING/usr/bin/python3.12"; then
+  exit 1
+fi
+EOF
+chmod +x "$TMP/debugfs-extract.sh"
+! "$TMP/debugfs-extract.sh" 2>"$TMP/debugfs-extract-error"
+grep -q 'debugfs extraction failed' "$TMP/debugfs-extract-error"
 echo "initramfs-builder PASS"

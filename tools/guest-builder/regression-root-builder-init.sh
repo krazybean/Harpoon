@@ -67,4 +67,40 @@ printf '%s\n' 'main' > "$TMP/target/etc/apk/repositories"
 sh "$TMP/manifest-failure.sh"
 [ "$(cat "$TMP/fail-marker")" = 'HARPOON_ROOT_BUILDER_FAIL manifest' ] || fail "missing release did not route through FAIL marker"
 
+# Exercise the exact production teardown function and its ordering.
+sed -n '/^finalize_target() {/,/^if ! finalize_target; then/p' "$INIT" | sed '$d' > "$TMP/finalize.sh"
+cat > "$TMP/finalize-test.sh" <<EOF
+#!/bin/sh
+set -eu
+ROOT="$TMP/target"
+TARGET=/dev/vda
+MARKER="$TMP/marker"
+bb() {
+  case "\$1" in
+    umount) printf '%s %s\\n' "\$1" "\$2" >> "$TMP/events" ;;
+    sync) printf '%s\\n' "\$1" >> "$TMP/events" ;;
+    cat) cat ;;
+  esac
+}
+fail() { printf 'HARPOON_ROOT_BUILDER_FAIL %s\\n' "\$*" > "$TMP/fail-marker"; return 1; }
+. "$TMP/finalize.sh"
+finalize_target
+EOF
+mkdir -p "$TMP/bin" "$TMP/target"
+: > "$TMP/events"
+printf '#!/bin/sh\nprintf "clean\\n"\nexit 0\n' > "$TMP/bin/e2fsck"
+chmod +x "$TMP/bin/e2fsck"
+PATH="$TMP/bin:$PATH" sh "$TMP/finalize-test.sh"
+sed -n '1p' "$TMP/events" | grep -Fq "umount $TMP/target/sys" || fail "sys unmount ordering changed"
+sed -n '2p' "$TMP/events" | grep -Fq "umount $TMP/target/proc" || fail "proc unmount ordering changed"
+sed -n '3p' "$TMP/events" | grep -Fq "umount $TMP/target/dev" || fail "dev unmount ordering changed"
+sed -n '4p' "$TMP/events" | grep -Fxq "sync" || fail "sync ordering changed"
+sed -n '5p' "$TMP/events" | grep -Fq "umount $TMP/target" || fail "root unmount ordering changed"
+
+# A non-zero e2fsck status must route to the explicit FAIL marker.
+printf '#!/bin/sh\nexit 4\n' > "$TMP/bin/e2fsck"
+sed 's/^finalize_target$/! finalize_target/' "$TMP/finalize-test.sh" > "$TMP/finalize-failure-test.sh"
+PATH="$TMP/bin:$PATH" sh "$TMP/finalize-failure-test.sh"
+[ "$(cat "$TMP/fail-marker")" = 'HARPOON_ROOT_BUILDER_FAIL e2fsck-4' ] || fail "e2fsck failure did not route through FAIL marker"
+
 echo "root-builder-init PASS"

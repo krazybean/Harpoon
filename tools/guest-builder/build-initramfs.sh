@@ -244,11 +244,32 @@ if harpoon_detect_build_engine; then
     ROOT_IMG="/repo/assets/guest/harpoon-root.img"
     [ -f "$ROOT_IMG" ] || { echo "[rebuild] FAIL missing canonical root image" >&2; exit 1; }
     mkdir -p "$STAGING/usr/bin" "$STAGING/usr/lib" "$STAGING/lib" "$STAGING/usr/local/share/harpoon-runtime"
-    debugfs -R "dump /usr/bin/python3.12 $STAGING/usr/bin/python3.12" "$ROOT_IMG" >/dev/null
+    debugfs_extract() {
+      local operation="$1" destination="$2" output status
+      output=$(mktemp)
+      if debugfs -R "$operation $destination" "$ROOT_IMG" >"$output" 2>&1; then
+        :
+      else
+        status=$?
+        echo "[rebuild] FAIL debugfs extraction failed (operation: $operation, status: $status)" >&2
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+      fi
+      if grep -Eiq "filesystem not open|block bitmap checksum|bad magic|cannot open|(^|[[:space:]])error([:[:space:]]|$)" "$output"; then
+        echo "[rebuild] FAIL debugfs could not read canonical root image (operation: $operation)" >&2
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+      fi
+      rm -f "$output"
+      [ -e "$destination" ] || { echo "[rebuild] FAIL debugfs produced no file for $operation" >&2; exit 1; }
+    }
+    debugfs_extract dump /usr/bin/python3.12 "$STAGING/usr/bin/python3.12"
     ln -s python3.12 "$STAGING/usr/bin/python3"
-    debugfs -R "dump /usr/lib/libpython3.12.so.1.0 $STAGING/usr/lib/libpython3.12.so.1.0" "$ROOT_IMG" >/dev/null
-    debugfs -R "dump /lib/ld-musl-aarch64.so.1 $STAGING/lib/ld-musl-aarch64.so.1" "$ROOT_IMG" >/dev/null
-    debugfs -R "rdump /usr/lib/python3.12 $STAGING/usr/lib" "$ROOT_IMG" >/dev/null
+    debugfs_extract dump /usr/lib/libpython3.12.so.1.0 "$STAGING/usr/lib/libpython3.12.so.1.0"
+    debugfs_extract dump /lib/ld-musl-aarch64.so.1 "$STAGING/lib/ld-musl-aarch64.so.1"
+    debugfs_extract rdump /usr/lib/python3.12 "$STAGING/usr/lib"
     chmod 0755 "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1"
     RUNTIME_MANIFEST="$STAGING/usr/local/share/harpoon-runtime/python.manifest"
     {

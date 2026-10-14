@@ -108,7 +108,28 @@ write_manifest() {
 if ! write_manifest; then
   fail manifest
 fi
-bb sync
+
+# The host consumes the image after the VM stops.  Make that handoff explicit:
+# only a clean, offline filesystem may reach the DONE marker.
+finalize_target() {
+  bb umount "$ROOT/sys" || return 1
+  bb umount "$ROOT/proc" || return 1
+  bb umount "$ROOT/dev" || return 1
+  bb sync || return 1
+  bb umount "$ROOT" || return 1
+  # Deterministic policy: e2fsck must find a clean filesystem.  Any non-zero
+  # status, including a correctable error, fails the build instead of silently
+  # shipping a repaired image.
+  e2fsck -f -n "$TARGET" > /tmp/e2fsck.log 2>&1 || {
+    rc=$?
+    bb cat /tmp/e2fsck.log > "$MARKER"
+    fail "e2fsck-$rc"
+    return 1
+  }
+}
+if ! finalize_target; then
+  fail finalize
+fi
 log VERIFY_PASS packages="$PACKAGES"
 log DONE
 while :; do bb sleep 5; done
