@@ -107,7 +107,7 @@ cat > "$OUT.manifest" <<EOF
 alpine-root-builder-v1
 alpine-branch v3.22
 repositories https://dl-cdn.alpinelinux.org/alpine/v3.22/main https://dl-cdn.alpinelinux.org/alpine/v3.22/community
-packages docker-engine docker-cli containerd runc socat python3 ca-certificates e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod
+packages docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod
 contract dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe
 EOF
 printf 'kernel %s\n' "$(shasum -a 256 "$REPO_ROOT/assets/guest/Image-virt" | cut -d' ' -f1)" >> "$OUT.manifest"

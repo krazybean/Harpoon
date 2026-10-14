@@ -22,7 +22,7 @@ MANIFEST="$IMG.manifest"
 [ -s "$MANIFEST" ] || { echo "[verify-root] FAIL: missing Alpine population manifest $MANIFEST" >&2; exit 1; }
 grep -q '^alpine-root-builder-v1$' "$MANIFEST" || { echo "[verify-root] FAIL: invalid population manifest" >&2; exit 1; }
 grep -q '^alpine-branch v3.22$' "$MANIFEST" || { echo "[verify-root] FAIL: wrong Alpine branch" >&2; exit 1; }
-grep -q '^packages docker-engine docker-cli containerd runc socat python3 ca-certificates e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod$' "$MANIFEST" || { echo "[verify-root] FAIL: incomplete package closure manifest" >&2; exit 1; }
+grep -q '^packages docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod$' "$MANIFEST" || { echo "[verify-root] FAIL: incomplete package closure manifest" >&2; exit 1; }
 grep -q '^contract dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe$' "$MANIFEST" || { echo "[verify-root] FAIL: incomplete runtime contract manifest" >&2; exit 1; }
 if [ ! -f "$IMG" ]; then
   echo "[verify-root] FAIL: image not found: $IMG" >&2

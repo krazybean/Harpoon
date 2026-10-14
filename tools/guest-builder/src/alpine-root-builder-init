@@ -7,7 +7,7 @@ ROOT=/target
 BUSYBOX=/bin/busybox
 REPO_MAIN=https://dl-cdn.alpinelinux.org/alpine/v3.22/main
 REPO_COMMUNITY=https://dl-cdn.alpinelinux.org/alpine/v3.22/community
-PACKAGES="docker-engine docker-cli containerd runc socat python3 ca-certificates e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod"
+PACKAGES="docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod"
 
 bb() { "$BUSYBOX" "$@"; }
 log() { bb printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
@@ -92,12 +92,22 @@ bb chroot "$ROOT" /bin/sh -c '
   python3 -c "import sys; assert sys.version_info >= (3, 12)"
 ' || fail target-runtime
 
-{
-  printf 'harpoon-alpine-root-v1\n'
-  printf 'release '; bb cat "$ROOT/etc/alpine-release"
-  printf 'repositories '; bb tr '\n' ' ' < "$ROOT/etc/apk/repositories"; printf '\n'
-  /sbin/apk --root "$ROOT" info -vv | LC_ALL=C sort
-} > "$ROOT/usr/local/share/harpoon-runtime/package-closure.manifest"
+write_manifest() {
+  manifest="$ROOT/usr/local/share/harpoon-runtime/package-closure.manifest"
+  apk_info="$manifest.apk-info"
+  bb printf 'harpoon-alpine-root-v1\n' > "$manifest" || return 1
+  bb printf 'release ' >> "$manifest" || return 1
+  bb cat "$ROOT/etc/alpine-release" >> "$manifest" || return 1
+  bb printf 'repositories ' >> "$manifest" || return 1
+  bb tr '\n' ' ' < "$ROOT/etc/apk/repositories" >> "$manifest" || return 1
+  bb printf '\n' >> "$manifest" || return 1
+  /sbin/apk --root "$ROOT" info -vv > "$apk_info" || return 1
+  LC_ALL=C sort "$apk_info" >> "$manifest" || return 1
+  bb rm -f "$apk_info"
+}
+if ! write_manifest; then
+  fail manifest
+fi
 bb sync
 log VERIFY_PASS packages="$PACKAGES"
 log DONE
