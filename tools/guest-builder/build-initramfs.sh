@@ -16,6 +16,7 @@ SRC_INIT="$REPO_ROOT/tools/guest-builder/src/init"
 SRC_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 SRC_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+source "$SCRIPT_DIR/build-engine.sh"
 mkdir -p "$REPO_ROOT/assets/guest" "$CACHE_DIR"
 
 # Pinned production inputs — mismatch FAILs
@@ -131,36 +132,14 @@ if [ -f "$OUT" ]; then echo "[build-initramfs] STALE: input manifest missing, ma
 #   modloop-virt: (fetched, sha printed at build)
 #   alpine-minirootfs-3.22.1: (fetched, sha printed)
 
-CALLER_DOCKER_CONTEXT="${DOCKER_CONTEXT:-}"
-DOCKER_CONTEXT="${HARPOON_BUILD_DOCKER_CONTEXT:-}"
-docker_cmd() {
-  if [ -n "$DOCKER_CONTEXT" ]; then
-    env -u DOCKER_HOST -u DOCKER_CONTEXT docker --context "$DOCKER_CONTEXT" "$@"
-  else
-    docker "$@"
-  fi
-}
-if [ -n "$DOCKER_CONTEXT" ]; then
-  ENGINE="HARPOON_BUILD_DOCKER_CONTEXT=$DOCKER_CONTEXT"
-elif [ -n "${DOCKER_HOST:-}" ]; then
-  ENGINE="DOCKER_HOST=$DOCKER_HOST"
-elif [ -n "$CALLER_DOCKER_CONTEXT" ]; then
-  DOCKER_CONTEXT="$CALLER_DOCKER_CONTEXT"
-  ENGINE="DOCKER_CONTEXT=$DOCKER_CONTEXT"
-elif docker info >/dev/null 2>&1; then
-  ENGINE="default Docker endpoint"
-elif docker --context harpoon info >/dev/null 2>&1; then
-  DOCKER_CONTEXT=harpoon
-  ENGINE="harpoon Docker context"
-fi
-if [ -n "${ENGINE:-}" ] && docker_cmd info >/dev/null 2>&1; then
-  echo "[build-initramfs] build engine: $ENGINE" >&2
+if harpoon_detect_build_engine; then
+  echo "[build-initramfs] build engine: $HARPOON_BUILD_ENGINE_DESCRIPTION" >&2
   echo "[build-initramfs] REBUILD MODE: deterministic rebuild via Docker (Alpine 3.22)..." >&2
   # Ensure src init/mgmt exist (committed)
   if [ ! -f "$SRC_INIT" ]; then echo "[build-initramfs] FAIL: missing $SRC_INIT (committed init source)" >&2; exit 1; fi
   if [ ! -f "$SRC_MGMT" ]; then echo "[build-initramfs] FAIL: missing $SRC_MGMT" >&2; exit 1; fi
   # Run rebuild inside Alpine container
-  docker_cmd run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 sh -c '
+  harpoon_build_engine run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 sh -c '
     set -euo pipefail
     apk add --no-cache cpio gzip squashfs-tools curl e2fsprogs e2fsprogs-extra > /dev/null
     BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64"
@@ -330,7 +309,7 @@ if [ "${HARPOON_ALLOW_BOOTSTRAP:-}" = "1" ] && [ -f "$BOOTSTRAP" ]; then
 fi
 
 echo "[build-initramfs] FAIL: cannot obtain $OUT on fresh clone" >&2
-echo "[build-initramfs] No FETCH artifact (set HARPOON_INITRAMFS_URL/SHA256) and REBUILD requires Docker (docker info must succeed)" >&2
+echo "[build-initramfs] No FETCH artifact (set HARPOON_INITRAMFS_URL/SHA256) and REBUILD requires a reachable Docker-compatible engine" >&2
 echo "[build-initramfs] No BOOTSTRAP at $BOOTSTRAP (requires HARPOON_ALLOW_BOOTSTRAP=1)" >&2
-echo "[build-initramfs] BLOCKER: fresh clone cannot independently generate harpoon-initramfs.cpio.gz without Docker" >&2
+echo "[build-initramfs] BLOCKER: fresh clone requires an external Docker-compatible build engine to generate harpoon-initramfs.cpio.gz" >&2
 exit 1

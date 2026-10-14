@@ -10,7 +10,7 @@ BUILDER="$ROOT/tools/guest-builder/build-initramfs.sh"
 
 fail() { echo "initramfs-builder FAIL: $*" >&2; exit 1; }
 mkdir -p "$ROOT/tools/guest-builder/src" "$ROOT/assets/guest"
-for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
+for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/build-engine.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
   mkdir -p "$ROOT/$(dirname "$path")"
   cp "$REPO_ROOT/$path" "$ROOT/$path"
 done
@@ -56,12 +56,12 @@ for mode in override host caller fallback; do
     override) PATH="$FAKE:$PATH" DOCKER_LOG="$TMP/$mode.log" DOCKER_CONFIG="$TMP/$mode-config" HARPOON_INITRAMFS_OUT="$OUT" DOCKER_HOST=unix:///ignored HARPOON_BUILD_DOCKER_CONTEXT=chosen "$BUILDER" ;;
     host) PATH="$FAKE:$PATH" DOCKER_LOG="$TMP/$mode.log" DOCKER_CONFIG="$TMP/$mode-config" HARPOON_INITRAMFS_OUT="$OUT" DOCKER_HOST=unix:///chosen "$BUILDER" ;;
     caller) PATH="$FAKE:$PATH" DOCKER_LOG="$TMP/$mode.log" DOCKER_CONFIG="$TMP/$mode-config" HARPOON_INITRAMFS_OUT="$OUT" DOCKER_CONTEXT=chosen "$BUILDER" ;;
-    fallback) PATH="$FAKE:$PATH" DOCKER_LOG="$TMP/$mode.log" DOCKER_CONFIG="$TMP/$mode-config" HARPOON_INITRAMFS_OUT="$OUT" "$BUILDER" ;;
+    fallback) ! PATH="$FAKE:$PATH" DOCKER_LOG="$TMP/$mode.log" DOCKER_CONFIG="$TMP/$mode-config" HARPOON_INITRAMFS_OUT="$OUT" "$BUILDER" ;;
   esac
   case "$mode" in override|caller) grep -q -- '--context chosen' "$TMP/$mode.log" || fail "$mode context not selected" ;; esac
   [ "$mode" != host ] || grep -q '^unix:///chosen||' "$TMP/$mode.log" || fail "explicit endpoint not selected"
-  [ "$mode" != fallback ] || grep -q -- '--context harpoon' "$TMP/$mode.log" || fail "harpoon fallback not selected"
-  grep -Eq '(^|[| ])run ' "$TMP/$mode.log" || fail "$mode build did not use selected engine"
+  [ "$mode" != fallback ] || ! grep -q -- ' run ' "$TMP/$mode.log" || fail "implicit Harpoon fallback was selected"
+  [ "$mode" = fallback ] || grep -Eq '(^|[| ])run ' "$TMP/$mode.log" || fail "$mode build did not use selected engine"
   [ ! -e "$TMP/$mode-config" ] || fail "$mode mutated Docker config"
 done
 echo "initramfs-builder PASS"

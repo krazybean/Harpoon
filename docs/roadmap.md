@@ -4,6 +4,18 @@
 
 ## Current Position
 
+### Build-bootstrap repair — CODE PASS / LIVE CHAIN BLOCKED (2026-10-14 America/Chicago)
+
+The canonical guest builder now creates/verifies `harpoon-root.img` before
+fingerprinting and assembling the initramfs, whose offline Python closure is
+copied from that root image. Docker/Podman detection is shared by the root and
+initramfs builders, honors explicit Docker contexts and `DOCKER_HOST`, never
+selects Harpoon implicitly, and reports a distinct `BLOCKED_ENVIRONMENT` exit
+when no external build engine is reachable. Static checks and Swift
+build/signing passed. The live Stage 2–7 retry remains blocked because this
+environment has no reachable Docker-compatible engine, no Podman, and no
+trusted root-image fetch/bootstrap artifact. No runtime or UI behavior changed.
+
 ### Stage 7 diagnostics follow-up — IMPLEMENTATION PASS / FULL CHAIN BLOCKED (2026-10-14 America/Chicago)
 
 Stage 7 diagnostics implementation and deterministic checks remain passing, but

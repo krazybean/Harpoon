@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT="$REPO_ROOT/assets/guest/harpoon-root.img"
 BOOTSTRAP="$REPO_ROOT/assets/guest/.bootstrap/harpoon-root.img"
+source "$SCRIPT_DIR/build-engine.sh"
 mkdir -p "$REPO_ROOT/assets/guest"
 
 is_canonical_size() {
@@ -84,12 +85,12 @@ if [ -n "$FETCH_URL" ] && [ -n "$FETCH_SHA" ]; then
   exit 0
 fi
 
-# --- REBUILD MODE (deterministic, Docker Linux) ---
+# --- REBUILD MODE (deterministic, Linux container engine) ---
 echo "[build-root] REBUILD MODE: deterministic 2G sparse ext4..." >&2
-# Use Docker to ensure deterministic mkfs.ext4 with fixed UUID and no random
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo "[build-root] Docker available, creating via Alpine..." >&2
-  if docker run --rm --privileged -v "$REPO_ROOT/assets/guest:/out" alpine:3.22 sh -c '
+# Use a container engine to ensure deterministic mkfs.ext4 with fixed UUID and no random.
+if harpoon_detect_build_engine; then
+  echo "[build-root] build engine: $HARPOON_BUILD_ENGINE_DESCRIPTION" >&2
+  if harpoon_build_engine run --rm --privileged -v "$REPO_ROOT/assets/guest:/out" alpine:3.22 sh -c '
     set -e
     apk add --no-cache e2fsprogs qemu-img > /dev/null 2>&1
     # Create sparse 2G raw with fixed UUID, no discard, deterministic
@@ -112,7 +113,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     if command -v shasum >/dev/null; then echo "[build-root] sha256 $(shasum -a 256 "$OUT" | cut -d' ' -f1)" >&2; fi
     exit 0
   else
-    echo "[build-root] Docker rebuild failed" >&2
+    echo "[build-root] container-engine rebuild failed" >&2
   fi
 fi
 
@@ -151,7 +152,7 @@ if [ -f "$OUT" ] && ! is_canonical_size "$OUT"; then
 fi
 
 echo "[build-root] FAIL: cannot obtain $OUT on fresh clone" >&2
-echo "[build-root] No FETCH artifact (set HARPOON_ROOT_URL/SHA256) and REBUILD requires Docker (docker info must succeed)" >&2
+echo "[build-root] No FETCH artifact (set HARPOON_ROOT_URL/SHA256) and REBUILD requires a reachable Docker-compatible engine" >&2
 echo "[build-root] No BOOTSTRAP at $BOOTSTRAP (requires HARPOON_ALLOW_BOOTSTRAP=1)" >&2
-echo "[build-root] BLOCKER: fresh clone requires Docker to rebuild harpoon-root.img" >&2
+echo "[build-root] BLOCKER: fresh clone requires an external Docker-compatible build engine to rebuild harpoon-root.img" >&2
 exit 1
