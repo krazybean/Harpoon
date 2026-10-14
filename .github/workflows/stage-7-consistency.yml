@@ -1,0 +1,55 @@
+name: Stage 7 consistency
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 0"
+  push:
+    branches: [main]
+    paths:
+      - "harpoon/Sources/**"
+      - "harpoon/build.sh"
+      - "tools/stage-[0-7]*"
+      - "tools/regression-stage*.sh"
+      - "tools/guest-builder/**"
+      - "assets/guest/**"
+      - ".github/workflows/stage-7-consistency.yml"
+  pull_request:
+    paths:
+      - "harpoon/Sources/**"
+      - "harpoon/build.sh"
+      - "tools/stage-[0-7]*"
+      - "tools/regression-stage*.sh"
+      - "tools/guest-builder/**"
+      - "assets/guest/**"
+      - ".github/workflows/stage-7-consistency.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  consistency:
+    # Requires a dedicated macOS runner with Virtualization.framework enabled.
+    runs-on: [self-hosted, macOS, harpoon]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build runtime
+        run: bash harpoon/build.sh
+
+      - name: Run Stage 7 persistence consistency check
+        run: bash tools/stage-7-consistency-check.sh
+
+      - name: Upload consistency logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-7-consistency-logs
+          path: /tmp/harpoon-stage7-consistency/
+          if-no-files-found: ignore
