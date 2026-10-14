@@ -1,0 +1,33 @@
+name: Stage 8 disk reclamation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disk-reclamation:
+    # Live guest/APFS evidence requires the existing Virtualization.framework runner.
+    runs-on: [self-hosted, macOS, harpoon]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build guest assets
+        run: bash tools/guest-builder/build.sh
+      - name: Build runtime
+        run: bash harpoon/build.sh
+      - name: Run controlled reclamation probe
+        run: bash tools/stage-8-disk-reclamation-check.sh
+      - name: Upload Stage 8 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-8-disk-reclamation
+          path: /tmp/harpoon-stage8-disk-reclamation/
+          if-no-files-found: ignore
