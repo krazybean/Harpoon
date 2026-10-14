@@ -10,6 +10,8 @@ TEXT_REPORT="$HARPOON_STAGE2_TEXT_REPORT"; [ -n "$TEXT_REPORT" ] || TEXT_REPORT=
 SAMPLES="$HARPOON_STAGE2_SAMPLES"; [ -n "$SAMPLES" ] || SAMPLES=20
 DELAY="$HARPOON_STAGE2_SAMPLE_DELAY"; [ -n "$DELAY" ] || DELAY=0.1
 FAIL=0
+STARTED_BY_STAGE2=0
+RUNTIME_REASON=""
 mkdir -p "$(dirname "$REPORT")" "$(dirname "$TEXT_REPORT")"
 fail() { echo "FAIL $*" >&2; FAIL=$((FAIL+1)); }
 for x in docker python3 ps; do command -v "$x" >/dev/null || fail "missing $x"; done
@@ -18,12 +20,50 @@ for x in docker python3 ps; do command -v "$x" >/dev/null || fail "missing $x"; 
 [ "$FAIL" -eq 0 ] || exit 1
 stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmp="$(mktemp -d /tmp/harpoon-stage2.XXXXXX)"
-cleanup() { docker --context harpoon rm -f $(cat "$tmp/ids" 2>/dev/null) >/dev/null 2>&1 || true; "$BIN" stop >/dev/null 2>&1 || true; rm -rf "$tmp"; }
+cleanup() { docker --context harpoon rm -f $(cat "$tmp/ids" 2>/dev/null) >/dev/null 2>&1 || true; [ "$STARTED_BY_STAGE2" -eq 1 ] && "$BIN" stop >/dev/null 2>&1 || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 
+ensure_runtime() {
+  local state_json state ready start_output
+  docker --context harpoon ps -a --no-trunc >/dev/null 2>&1 && return 0
+
+  state_json="$($BIN status --json 2>/dev/null || printf '{}')"
+  state="$(printf '%s' "$state_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null || printf unknown)"
+  ready="$(printf '%s' "$state_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("dockerReady",False))' 2>/dev/null || printf False)"
+  if [ "$state" != running ] || [ "$ready" != True ]; then
+    start_output="$($BIN start 2>&1)" || {
+      RUNTIME_REASON="Harpoon start failed while Docker context was unavailable: $start_output"
+      return 1
+    }
+    printf '%s' "$start_output" | rg -qi 'already running' || STARTED_BY_STAGE2=1
+  fi
+
+  for _ in $(seq 1 "${HARPOON_STAGE2_READY_ATTEMPTS:-30}"); do
+    docker --context harpoon ps -a --no-trunc >/dev/null 2>&1 && return 0
+    sleep "${HARPOON_STAGE2_READY_DELAY:-1}"
+  done
+  RUNTIME_REASON="Harpoon did not become Docker-ready after bounded startup (state=$state dockerReady=$ready)"
+  return 1
+}
+
+[ "${HARPOON_STAGE2_LIB_ONLY:-0}" = 1 ] && return 0
+
 # State A is a strict zero-container baseline. Establish ownership before any
-# cleanup; unavailable Docker or ambiguous containers are environmental blocks.
+# cleanup; a stopped Harpoon runtime is recoverable, not an external blocker.
 docker_state="$(docker --context harpoon ps -a --no-trunc 2>&1)"
+if [ "$?" -ne 0 ]; then
+  if ! ensure_runtime; then
+    python3 - "$REPORT" "$TEXT_REPORT" "$RUNTIME_REASON" <<'PY'
+import json,sys
+report,text,reason=sys.argv[1:]
+json.dump({"schema":"harpoon.stage2.resource-attribution.v1","verdict":"FAIL","reason":reason,"cleanupPerformed":False},open(report,"w"),indent=2)
+open(text,"w").write("# Stage 2 Resource Attribution\n\nVerdict: **FAIL**\n\n"+reason+"\n")
+PY
+    echo "STAGE_2_GATE_FAIL" >&2
+    exit 1
+  fi
+  docker_state="$(docker --context harpoon ps -a --no-trunc 2>&1)"
+fi
 if [ "$?" -ne 0 ]; then
   python3 - "$REPORT" "$TEXT_REPORT" "$docker_state" <<'PY'
 import json,sys
@@ -119,9 +159,6 @@ json.dump(r,open(out,'w'),indent=2)
 PY
 }
 
-"$BIN" stop >/dev/null 2>&1 || true
-"$BIN" start >/dev/null || fail "Harpoon start"
-[ "$FAIL" -eq 0 ] || exit 1
 existing="$(docker --context harpoon ps -aq 2>/dev/null || true)"
 [ -z "$existing" ] || { fail "state A is not zero-container: pre-existing containers $existing"; exit 1; }
 capture A "$tmp/a.json"
