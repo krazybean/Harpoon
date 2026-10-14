@@ -4,7 +4,37 @@
 
 ## Current Position
 
-- **Current phase:** v0.1.1 Stage 2 standalone — **IN PROGRESS — Harpoon.app self-contained (15.1 min, Swift 15.1 target, Frameworks RPATH, no spike, no repo, no XC hardcode; verify-bundle.sh)**; Stage 1 canonical guest path PASS, Release Tooling PASS, D1.1 PASS, core MVP+EC+UI COMPLETE
+### Stage 7 diagnostics follow-up — IMPLEMENTATION PASS / FULL CHAIN BLOCKED (2026-10-14 America/Chicago)
+
+Stage 7 diagnostics implementation and deterministic checks remain passing, but
+formal Stage 0–7 closure is **BLOCKED_ENVIRONMENT**. The required Stage 2 State A
+baseline could not be inspected because `docker --context harpoon ps -a` could
+not connect to the absent `/tmp/harpoon-docker.sock`. No container cleanup was
+performed because ownership could not be established. This is an external
+environment block, not a Harpoon product failure; the strict zero-container
+requirement remains unchanged. See `docs/underbelly/orchestration-log.md`.
+
+### Stage 6 Docker boundary barrier — PASS (2026-10-13/14 America/Chicago)
+
+The Stage 6 Docker Boundary Audit passed on the current checkout. Source
+evidence and a live owned-container probe confirm that Docker Engine remains
+authoritative for Docker objects and semantics; Harpoon owns only the
+macOS↔Linux boundary, VM lifecycle, host integration, diagnostics, and
+resource envelope. Known duplicated-policy and observation risks are recorded
+for Stage 9 and were not changed. No Stage 7 or UI work was started. See
+`docs/underbelly/stage-6-docker-boundary-audit.md`, its JSON matrix, and
+`tools/stage-6-docker-boundary-gate.sh`.
+
+### Stage 0–1 exit barrier — PASS (2026-10-13 America/Chicago)
+
+The formal pre-Stage-2 gate passed on the current `main` checkout: repository
+state was recorded, existing validation passed under Node `v20.20.2`, and live
+VM/Docker acceptance passed for both actual host sockets, Docker API/run,
+management `exec`, and management shell. The repeatable barrier is
+`tools/stage-0-1-gate.sh`; Stage 2 resource-attribution implementation was not
+started by this run.
+
+- **Current phase:** Stage 0–1 exit barrier — **PASS**; Stage 2 resource-attribution implementation is **NOT STARTED** in this checkout. The older v0.1.1 milestone line below is retained as historical roadmap evidence pending a later roadmap refresh.
 - **v0.1.1 preserved-root module reconciliation:** **PASS** — canonical initramfs carries a hash/mode manifest for its complete bundled module closure and boot reconciles it atomically into preserved roots before `switch_root`. The disposable old-root migration regression proved in-place identity, immutable payload and NAT module/metadata restoration, Docker-canary preservation, management handoff, and idempotent second boot.
 - **Last completed milestone:** UI — Tauri UI (PASS — Tauri 2 + React-TS + Vite, 185kB dist, cargo check dev, status --json live, START_PASS 20:50:42Z running + EXPANSION + RESPONSIVENESS + BOOTSTRAP — resolver HARPOON_BIN/CARGO_MANIFEST_DIR/bundled/PATH + Docker resources + async cache/instant nav + bootstrap launching→ready/failed auto-start once + phase spinner + 750ms polling + per-action busy, no Sources redesign, no Redux, no launch agent)
 - **Next milestone:** UI Design / UX Polish — NEXT (Release Tooling PASS, do not begin Developer ID/notarization, updater, Homebrew, or UI redesign in this task)
@@ -524,6 +554,15 @@ Tauri + React + TypeScript GUI as **client of Harpoon control API** (never owns 
 - `harpoon/Sources` no diff (0 lines), `ui/harpoon-desktop/src-tauri/src/main.rs` 11 commands `get_status`/`start`/`stop`/`restart`/`get_doctor`/`get_log_path`/`get_recent_logs`/`get_config`/`set_memory`/`set_cpus`/`get_docker_info` (argv, no `sh -c`, bounded, `HOST_VZ` distinct)
 
 ---
+
+## Stage 7 — Diagnostics Contract
+
+Status: **IMPLEMENTED — deterministic diagnostics barrier PASS; full prior-chain rerun BLOCKED_ENVIRONMENT because the Harpoon Docker socket was unavailable**
+
+`harpoon diagnostics` exposes provenance-aware HOST/GUEST/WORKLOADS data and
+structured VM/Docker/management readiness. It intentionally emits no grand
+total, adds no daemon, and leaves Docker and Linux cgroups authoritative.
+See `docs/underbelly/stage-7-diagnostics-contract.md`.
 
 ## Explicit Non-Goals for v0.1 (post-v0.1 only)
 

@@ -1,0 +1,20 @@
+{
+  "schema": "harpoon.stage6.docker-boundary-matrix.v1",
+  "status": "STAGE_6_GATE_PASS",
+  "invariant": "Harpoon may transport, observe, translate, and invoke Docker; it must not infer or persist a second authoritative model of Docker-owned resources.",
+  "concerns": [
+    {"id":"api_transport","authority":"docker","interaction":["transport","translate","observe"],"competing_state":false,"classification":"REQUIRED_BOUNDARY_TRANSLATION","sources":["harpoon/Sources/UnixBridge.swift:7-181","tools/guest-builder/src/init:729-878"]},
+    {"id":"container_lifecycle","authority":"docker","interaction":["invoke","observe"],"competing_state":false,"classification":"THIN_CLIENT_CONTROL","sources":["harpoon/Sources/ContainerCLI.swift:198-208","ui/harpoon-desktop/src-tauri/src/main.rs:448-503"]},
+    {"id":"images","authority":"docker","interaction":["invoke","observe"],"competing_state":false,"classification":"THIN_CLIENT_CONTROL","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:522-543"]},
+    {"id":"networks","authority":"docker","interaction":["invoke","observe","translate"],"competing_state":false,"classification":"SAFE_OBSERVATION","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:569-591","tools/guest-builder/src/init:859-878"]},
+    {"id":"published_ports","authority":"docker","interaction":["observe","translate","mutate"],"competing_state":false,"classification":"DUPLICATED_SEMANTICS_REVIEW","sources":["harpoon/Sources/PortForwardManager.swift:67-198,210-320","harpoon/Sources/PortForwardBridge.swift:12-36"]},
+    {"id":"bind_mounts","authority":"docker","interaction":["translate","observe"],"competing_state":false,"classification":"REQUIRED_BOUNDARY_TRANSLATION","sources":["harpoon/Sources/UnixBridge.swift:65-73,129-181","harpoon/Sources/HostPathTranslator.swift:1-220"]},
+    {"id":"named_volumes","authority":"docker","interaction":["invoke","observe"],"competing_state":false,"classification":"THIN_CLIENT_CONTROL","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:545-567","tools/guest-builder/src/init:673-734"]},
+    {"id":"compose_buildkit","authority":"docker","interaction":["invoke","observe"],"competing_state":false,"classification":"THIN_CLIENT_CONTROL","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:636-647","harpoon/m8-test.sh:150-166","harpoon/m9-test.sh"]},
+    {"id":"context_discovery","authority":"docker_cli","interaction":["invoke","observe","cache","mutate"],"competing_state":true,"classification":"DUPLICATED_SEMANTICS_REVIEW","sources":["harpoon/Sources/HarpoonCLI.swift","ui/harpoon-desktop/src-tauri/src/main.rs:692-732","harpoon/m8-test.sh:46-65"]},
+    {"id":"logs_exec_shell","authority":"docker_or_harpoon_guest_by_target","interaction":["invoke","transport"],"competing_state":false,"classification":"THIN_CLIENT_CONTROL","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:504-520","tools/guest-builder/src/harpoon-mgmt:19-44,197-286","harpoon/Sources/ContainerCLI.swift:111-116"]},
+    {"id":"readiness_restart","authority":"harpoon_boundary_and_docker","interaction":["observe","invoke","translate"],"competing_state":false,"classification":"DUPLICATED_SEMANTICS_REVIEW","sources":["tools/guest-builder/src/init:729-878","harpoon/Sources/HarpoonLifecycleCLI.swift:160-218"]},
+    {"id":"resource_attribution","authority":"docker_linux_and_harpoon_host","interaction":["observe","cache","infer"],"competing_state":true,"classification":"DUPLICATED_SEMANTICS_REVIEW","sources":["ui/harpoon-desktop/src-tauri/src/main.rs:599-625","ui/harpoon-desktop/src-tauri/src/main.rs:315-337","docs/underbelly/stage-2-resource-attribution.json"]}
+  ],
+  "live_probe": {"path":"docker --context harpoon create/start/inspect/logs/exec/stop/rm", "destructive_scope":"one uniquely named Alpine fixture", "bind_mounts":"existing M9 evidence", "published_ports":"existing M9 evidence", "named_volumes":"existing M8 evidence"}
+}

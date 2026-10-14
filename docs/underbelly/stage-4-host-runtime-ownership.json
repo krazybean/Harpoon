@@ -1,0 +1,52 @@
+{
+  "schema": "harpoon.stage4.host-runtime-ownership.v1",
+  "scope": "Swift host runtime only; audit, no behavior change",
+  "authority": {
+    "transitionWriter": "Lifecycle.transition in harpoon/Sources/Lifecycle.swift",
+    "vmAndGuestObservation": "VMManager.bootReady, mgmtReady, bootFailedReason from serial markers",
+    "boundaryOwnership": "BridgeSet and its bridge extensions",
+    "externalStatusInference": "statusSnapshot plus runtime.json/runtime.pid/lock/socket/log probes",
+    "daemonConclusion": "not justified by current evidence; foreground child is the lifecycle owner"
+  },
+  "components": [
+    {"name":"Lifecycle","owner":"foreground run process","queue":"caller's queue; normally main","resources":["state + NSLock"],"classification":"GOOD_BOUNDARY_KEEP"},
+    {"name":"VMManager","owner":"foreground run process","queue":"main for VZ and serial timer","resources":["VZVirtualMachine","VZ socket device","balloon device","serial file"],"classification":"GOOD_BOUNDARY_KEEP"},
+    {"name":"BridgeSet","owner":"VMManager","queue":"main listeners; global per-connection I/O","resources":["Docker listener","management listener","balloon listener","port manager","timers"],"classification":"GOOD_BOUNDARY_KEEP"},
+    {"name":"PortForwardManager","owner":"BridgeSet","queue":"main state/reconciliation; global connection I/O","resources":["10s Docker poll","delayed sync timers","one listener per published TCP port"],"classification":"POLLING_RECONCILIATION_MEASURE"},
+    {"name":"CLI lifecycle","owner":"invoking CLI process + spawned foreground child","queue":"blocking CLI loop; child main run loop","resources":["runtime.pid","runtime.json","harpoon.log","/tmp/harpoon.lock"],"classification":"LIFECYCLE_COUPLING_REVIEW"}
+  ],
+  "sockets": [
+    {"path":"/tmp/harpoon-docker.sock","owner":"BridgeSet.startUnixBridge","mode":"0600","staleCleanup":"unlink only after connect probe fails; owned path removed by stopAll","listenerFd":"BridgeSet.listenerFd","clientFds":"per-connection global DispatchSources","classification":"IMPLICIT_OWNERSHIP_REVIEW"},
+    {"path":"/tmp/harpoon-mgmt.sock","owner":"BridgeSet.startMgmtBridge","mode":"0600","staleCleanup":"unlink only after connect probe fails; owned path removed by stopAll","listenerFd":"BridgeSet.mgmtListenerFd","clientFds":"per-connection global DispatchSources","classification":"IMPLICIT_OWNERSHIP_REVIEW"},
+    {"path":"/tmp/harpoon-control","owner":"BridgeSet.startBalloonControl","mode":"0600","staleCleanup":"unlink after failed connect probe; cancel handler also unlinks","listenerFd":"BridgeSet.balloonControlFd","clientFds":"BridgeSet.balloonClients","classification":"GOOD_BOUNDARY_KEEP"},
+    {"path":"/tmp/harpoon.lock","owner":"main.swift foreground process","mode":"0600","staleCleanup":"kernel flock release on process exit; pathname retained","listenerFd":"harpoonLockFd","classification":"GOOD_BOUNDARY_KEEP"}
+  ],
+  "timers": [
+    {"name":"serial/readiness poll","cadence":"1s","queue":"main","purpose":"scan serial for Docker ready/failure","fallback":"boot timeout fails and initiates shutdown"},
+    {"name":"stop-file poll","cadence":"1s","queue":"main","purpose":"sandbox-safe stop fallback","fallback":"initiates normal shutdown"},
+    {"name":"boot timeout","cadence":"one-shot bootTimeout (120s default)","queue":"main","purpose":"bound guest readiness","fallback":"FAILED then shutdown/exit 6"},
+    {"name":"guest IP discovery","cadence":"1s, max 15 attempts","queue":"main","purpose":"read HARPOON_GUEST_IP","fallback":"192.168.64.3 and sync"},
+    {"name":"Docker port reconciliation","cadence":"10s fallback; 200-3000ms event delays","queue":"main","purpose":"reconcile published TCP ports","fallback":"retain prior forwards; log failures"},
+    {"name":"shutdown watchdog","cadence":"one-shot 8s","queue":"main","purpose":"bound VZ stop","fallback":"cleanup and force exit"}
+  ],
+  "readiness": {"guestDocker":"serial HARPOON_DOCKER_READY -> VMManager.bootReady -> Lifecycle.dockerReady","guestManagement":"serial HARPOON_MGMT_READY stored by VMManager but not a Lifecycle gate","hostDocker":"Unix socket existence/connect plus HARPOON_RUNNING log in statusSnapshot","vmExit":"not directly observed after start; only VZ start failure and explicit shutdown are handled"},
+  "failurePaths": {
+    "partialStartup":"build/config/start failure exits; bridge start failures are logged and do not force FAILED or roll back already-started bridges",
+    "abruptHostCrash":"OS closes FDs and releases flock; socket pathnames can remain stale and are cleaned on next bridge start; pid/json may remain for status cleanup",
+    "unexpectedVmExit":"no dedicated VZ delegate/state transition path found; readiness/status may remain inferred from stale metadata until probes fail",
+    "restart":"stop sends SIGTERM and stop file, waits 10s, waits for socket/lock disappearance, then starts; no force kill",
+    "staleState":"dead/non-Harpoon PID metadata is removed; stale Unix sockets are connect-probed then unlinked; lock pathname is not removed"
+  },
+  "classifications": [
+    "GOOD_BOUNDARY_KEEP: Docker/containerd/runc remain guest-owned and are reached through the host boundary",
+    "DUPLICATED_AUTHORITY_REVIEW: Lifecycle state, VMManager booleans, log markers, PID/lock/socket probes all describe overlapping readiness/liveness",
+    "IMPLICIT_OWNERSHIP_REVIEW: active per-connection FDs and VZ connections are local closures, not represented in BridgeSet registries",
+    "BLOCKING_IO_REVIEW: serial Data(contentsOf:), status probes, Process.waitUntilExit, and first-request translation can block main or global queues",
+    "LIFECYCLE_COUPLING_REVIEW: main.swift owns signal/timer/VM shutdown while BridgeSet owns resource cleanup",
+    "HISTORICAL_OR_DEAD_CANDIDATE_REMOVE: legacy single host-forward fields and unreachable _legacy_startHostPortForward are retained but unused",
+    "LIFECYCLE_COUPLING_REVIEW: BridgeSet.startAll has no aggregate result, so bridge bind failures can coexist with RUNNING",
+    "DUPLICATED_AUTHORITY_REVIEW: RuntimeConfig socket paths can diverge from fixed HarpoonPaths CLI/status probes",
+    "IMPLICIT_OWNERSHIP_REVIEW: socket mode checks are permissive in source even though live sockets were observed as 0600",
+    "BLOCKING_IO_REVIEW: nonblocking proxy writes busy-wait on EAGAIN"
+  ]
+}

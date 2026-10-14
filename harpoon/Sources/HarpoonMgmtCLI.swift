@@ -57,6 +57,45 @@ func managementReady() -> Bool {
     isMgmtServiceReachable()
 }
 
+// Bounded request used by diagnostics collectors. It preserves argv boundaries
+// and the existing management socket contract; it is not a second guest API.
+func mgmtExecCapture(argv: [String], maxBytes: Int = 512 * 1024) -> (code: Int32, stdout: String, stderr: String) {
+    let snap = statusSnapshot()
+    guard snap.state != "stopped" && snap.state != "stale",
+          waitForManagementReady(), let fd = connectMgmtSocket() else {
+        return (1, "", "guest management service is not ready")
+    }
+    defer { close(fd) }
+    let req: [String: Any] = ["op": "exec", "argv": argv]
+    guard let data = try? JSONSerialization.data(withJSONObject: req, options: []) else {
+        return (1, "", "failed to encode management request")
+    }
+    let line = Array((String(data: data, encoding: .utf8)! + "\n").utf8)
+    var offset = 0
+    while offset < line.count {
+        let written = line.withUnsafeBytes { write(fd, $0.baseAddress!.advanced(by: offset), line.count - offset) }
+        if written <= 0 { return (1, "", "management request failed") }
+        offset += written
+    }
+    var timeout = timeval(tv_sec: 5, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    var response = Data()
+    var buffer = [UInt8](repeating: 0, count: 8192)
+    while response.count < maxBytes {
+        let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
+        if n <= 0 { break }
+        response.append(contentsOf: buffer[0..<n])
+        if response.contains(UInt8(ascii: "\n")) { break }
+    }
+    guard let nl = response.firstIndex(of: UInt8(ascii: "\n")),
+          let object = try? JSONSerialization.jsonObject(with: response.subdata(in: 0..<nl)) as? [String: Any] else {
+        return (1, "", "invalid management response")
+    }
+    return ((object["exit"] as? Int).map(Int32.init) ?? 1,
+            object["stdout"] as? String ?? "",
+            object["stderr"] as? String ?? "")
+}
+
 func waitForManagementReady() -> Bool {
     for _ in 0..<20 {
         if managementReady() { return true }

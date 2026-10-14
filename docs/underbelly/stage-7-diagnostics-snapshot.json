@@ -1,0 +1,22 @@
+{
+  "schema": "harpoon.diagnostics.snapshot.v1",
+  "capturedAt": "2026-10-14T00:00:00Z",
+  "semantics": {
+    "grandTotal": "omitted: host, guest, and workload domains are not mathematically additive",
+    "authorities": {
+      "HOST": "Harpoon/macOS observation",
+      "GUEST": "Linux /proc and process observation",
+      "WORKLOADS": "Docker identity plus Linux cgroup v2 resource truth"
+    }
+  },
+  "health": {
+    "vm": {"state": "running", "source": "Harpoon lifecycle runtime.json", "confidence": "observed"},
+    "docker": {"state": "ready", "source": "Docker Engine API probe", "confidence": "observed"},
+    "management": {"state": "ready", "source": "management vsock request", "confidence": "observed"}
+  },
+  "domains": {
+    "HOST": {"processes": [], "vzAssociation": {"status": "unavailable", "source": "no reliable public per-VM host metric", "confidence": "unavailable"}},
+    "GUEST": {"memory": [], "processes": [], "runtimeProcessNames": ["dockerd", "containerd", "containerd-shim", "runc"]},
+    "WORKLOADS": {"containers": [], "identitySource": "Docker inspect", "resourceSource": "Linux cgroup v2 files; docker stats is not used"}
+  }
+}

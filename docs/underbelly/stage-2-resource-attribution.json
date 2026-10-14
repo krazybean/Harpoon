@@ -1,0 +1,2707 @@
+{
+  "schema": "harpoon.stage2.resource-attribution.v1",
+  "latestGateVerdict": "BLOCKED_ENVIRONMENT",
+  "latestGateReason": "docker --context harpoon ps -a could not connect to /tmp/harpoon-docker.sock",
+  "latestGateCleanupPerformed": false,
+  "capturedAt": "2026-10-14T04:46:31Z",
+  "semantics": {
+    "host": "macOS process/VM domain; not additive with guest or cgroup",
+    "guest": "Linux process/kernel domain; not additive with host or cgroup",
+    "workload": "Linux cgroup v2 usage truth; Docker inspect is identity/metadata",
+    "grandTotal": "omitted intentionally"
+  },
+  "states": [
+    {
+      "state": "A",
+      "capturedAt": "2026-10-14T04:46:43.393789+00:00",
+      "domains": {
+        "host": {
+          "status": {
+            "cpus": 2,
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "dockerReady": true,
+            "lockHeld": true,
+            "lockPath": "/tmp/harpoon.lock",
+            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "memoryMiB": 4096,
+            "mgmtReady": false,
+            "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+            "pid": 79741,
+            "socketPath": "/tmp/harpoon-docker.sock",
+            "sockExists": true,
+            "state": "running"
+          },
+          "processes": [
+            {
+              "pid": "79741",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "20688",
+              "threads": "2.8",
+              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "command": "run\n"
+            }
+          ],
+          "vzAssociation": {
+            "status": "observed",
+            "candidatePids": [
+              "79743"
+            ],
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "source": "lsof -n -t <runtime disk> -> ps",
+            "processes": [
+              "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+            ]
+          },
+          "physicalFootprint": {
+            "value": "9425K",
+            "unit": "bytes",
+            "scope": "host-process",
+            "source": "vmmap -summary",
+            "status": "observed"
+          },
+          "source": "ps -p <status.pid> -o pid,ppid,state,rss,nlwp,pcpu,command"
+        },
+        "guest": {
+          "meminfo": {
+            "MemTotal": {
+              "value": 4013480,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemFree": {
+              "value": 3679324,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemAvailable": {
+              "value": 3736300,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Buffers": {
+              "value": 6580,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Cached": {
+              "value": 179308,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapCached": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active": {
+              "value": 183020,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive": {
+              "value": 46532,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(anon)": {
+              "value": 43672,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(anon)": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(file)": {
+              "value": 139348,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(file)": {
+              "value": 46532,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Unevictable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mlocked": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapTotal": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapFree": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswap": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Dirty": {
+              "value": 112,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Writeback": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonPages": {
+              "value": 43768,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mapped": {
+              "value": 81176,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Shmem": {
+              "value": 12,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KReclaimable": {
+              "value": 3896,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Slab": {
+              "value": 17708,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SReclaimable": {
+              "value": 3896,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SUnreclaim": {
+              "value": 13812,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KernelStack": {
+              "value": 1360,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "PageTables": {
+              "value": 932,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SecPageTables": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "NFS_Unstable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Bounce": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "WritebackTmp": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "CommitLimit": {
+              "value": 2006740,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Committed_AS": {
+              "value": 159372,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocTotal": {
+              "value": 135288315904,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocUsed": {
+              "value": 6840,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocChunk": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Percpu": {
+              "value": 296,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonHugePages": {
+              "value": 14336,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemPmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FileHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FilePmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugepagesize": {
+              "value": 2048,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugetlb": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            }
+          },
+          "runtimeProcesses": [
+            {
+              "pid": "9101",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "68m",
+              "command": "dockerd",
+              "args": "dockerd --host=unix:///var/run/docker.sock --dns=1.1.1.1 --dns=8.8.8.8"
+            },
+            {
+              "pid": "9111",
+              "ppid": "9101",
+              "state": "S",
+              "rssKiB": "40m",
+              "command": "containerd",
+              "args": "containerd --config /var/run/docker/containerd/containerd.toml"
+            }
+          ],
+          "pss": {
+            "1": {
+              "value": "297 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/1/smaps_rollup"
+            },
+            "8969": {
+              "value": "116 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/8969/smaps_rollup"
+            },
+            "9101": {
+              "value": "69695 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9101/smaps_rollup"
+            },
+            "9111": {
+              "value": "41315 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9111/smaps_rollup"
+            },
+            "9413": {
+              "value": "1206 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9413/smaps_rollup"
+            },
+            "9458": {
+              "value": "914 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9458/smaps_rollup"
+            },
+            "9459": {
+              "value": "278 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9459/smaps_rollup"
+            },
+            "9471": {
+              "value": "143 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9471/smaps_rollup"
+            },
+            "9472": {
+              "value": "141 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9472/smaps_rollup"
+            },
+            "9478": {
+              "value": "530 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9478/smaps_rollup"
+            },
+            "9479": {
+              "value": "9963 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9479/smaps_rollup"
+            },
+            "9481": {
+              "value": "191 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9481/smaps_rollup"
+            }
+          },
+          "cgroupFiles": {
+            "/sys/fs/cgroup/cpu.stat": [
+              "usage_usec 3780000",
+              "user_usec 890000",
+              "system_usec 2890000",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/io.stat": [
+              "253:0 rbytes=181367808 wbytes=3117056 rios=3375 wios=232 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/memory.stat": [
+              "anon 44920832",
+              "file 190349312",
+              "kernel 0",
+              "kernel_stack 0",
+              "pagetables 0",
+              "sec_pagetables 0",
+              "percpu 0",
+              "sock 0",
+              "vmalloc 0",
+              "shmem 12288",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 83214336",
+              "file_dirty 114688",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 14680064",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 44904448",
+              "inactive_file 47648768",
+              "active_file 142692352",
+              "unevictable 0",
+              "slab_reclaimable 0",
+              "slab_unreclaimable 0",
+              "slab 0",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 647811",
+              "pgmajfault 979",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 20",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ]
+          },
+          "source": "harpoon exec -> /proc, ps, smaps_rollup, /sys/fs/cgroup"
+        },
+        "workloads": {
+          "dockerInspect": [],
+          "cgroupTruthSource": "guest cgroup v2 files; Docker inspect is identity/metadata only"
+        }
+      }
+    },
+    {
+      "state": "B",
+      "capturedAt": "2026-10-14T04:46:44.743999+00:00",
+      "domains": {
+        "host": {
+          "status": {
+            "cpus": 2,
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "dockerReady": true,
+            "lockHeld": true,
+            "lockPath": "/tmp/harpoon.lock",
+            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "memoryMiB": 4096,
+            "mgmtReady": true,
+            "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+            "pid": 79741,
+            "socketPath": "/tmp/harpoon-docker.sock",
+            "sockExists": true,
+            "state": "running"
+          },
+          "processes": [
+            {
+              "pid": "79741",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "20832",
+              "threads": "1.7",
+              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "command": "run\n"
+            }
+          ],
+          "vzAssociation": {
+            "status": "observed",
+            "candidatePids": [
+              "79743"
+            ],
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "source": "lsof -n -t <runtime disk> -> ps",
+            "processes": [
+              "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+            ]
+          },
+          "physicalFootprint": {
+            "value": "9521K",
+            "unit": "bytes",
+            "scope": "host-process",
+            "source": "vmmap -summary",
+            "status": "observed"
+          },
+          "source": "ps -p <status.pid> -o pid,ppid,state,rss,nlwp,pcpu,command"
+        },
+        "guest": {
+          "meminfo": {
+            "MemTotal": {
+              "value": 4013480,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemFree": {
+              "value": 3662708,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemAvailable": {
+              "value": 3731624,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Buffers": {
+              "value": 6788,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Cached": {
+              "value": 190888,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapCached": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active": {
+              "value": 201796,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive": {
+              "value": 47000,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(anon)": {
+              "value": 51196,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(anon)": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(file)": {
+              "value": 150600,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(file)": {
+              "value": 47000,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Unevictable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mlocked": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapTotal": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapFree": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswap": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Dirty": {
+              "value": 108,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Writeback": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonPages": {
+              "value": 51224,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mapped": {
+              "value": 90392,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Shmem": {
+              "value": 80,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KReclaimable": {
+              "value": 4336,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Slab": {
+              "value": 18696,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SReclaimable": {
+              "value": 4336,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SUnreclaim": {
+              "value": 14360,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KernelStack": {
+              "value": 1568,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "PageTables": {
+              "value": 1092,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SecPageTables": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "NFS_Unstable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Bounce": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "WritebackTmp": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "CommitLimit": {
+              "value": 2006740,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Committed_AS": {
+              "value": 209928,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocTotal": {
+              "value": 135288315904,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocUsed": {
+              "value": 7108,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocChunk": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Percpu": {
+              "value": 320,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonHugePages": {
+              "value": 18432,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemPmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FileHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FilePmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugepagesize": {
+              "value": 2048,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugetlb": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            }
+          },
+          "runtimeProcesses": [
+            {
+              "pid": "9101",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "69m",
+              "command": "dockerd",
+              "args": "dockerd --host=unix:///var/run/docker.sock --dns=1.1.1.1 --dns=8.8.8.8"
+            },
+            {
+              "pid": "9111",
+              "ppid": "9101",
+              "state": "S",
+              "rssKiB": "41m",
+              "command": "containerd",
+              "args": "containerd --config /var/run/docker/containerd/containerd.toml"
+            },
+            {
+              "pid": "9646",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "13m",
+              "command": "containerd-shim",
+              "args": "/usr/bin/containerd-shim-runc-v2 -namespace moby -id 2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd -address /var/run/docker/containerd/containerd.sock"
+            }
+          ],
+          "pss": {
+            "1": {
+              "value": "297 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/1/smaps_rollup"
+            },
+            "8969": {
+              "value": "114 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/8969/smaps_rollup"
+            },
+            "9101": {
+              "value": "71172 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9101/smaps_rollup"
+            },
+            "9111": {
+              "value": "42010 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9111/smaps_rollup"
+            },
+            "9413": {
+              "value": "1204 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9413/smaps_rollup"
+            },
+            "9458": {
+              "value": "922 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9458/smaps_rollup"
+            },
+            "9459": {
+              "value": "277 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9459/smaps_rollup"
+            },
+            "9646": {
+              "value": "13672 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9646/smaps_rollup"
+            },
+            "9671": {
+              "value": "784 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9671/smaps_rollup"
+            },
+            "9711": {
+              "value": "139 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9711/smaps_rollup"
+            },
+            "9712": {
+              "value": "127 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9712/smaps_rollup"
+            },
+            "9719": {
+              "value": "532 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9719/smaps_rollup"
+            },
+            "9720": {
+              "value": "9958 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9720/smaps_rollup"
+            },
+            "9722": {
+              "value": "185 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9722/smaps_rollup"
+            }
+          },
+          "cgroupFiles": {
+            "/sys/fs/cgroup/cpu.stat": [
+              "usage_usec 3969000",
+              "user_usec 984000",
+              "system_usec 2985000",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/cpu.stat": [
+              "usage_usec 9447",
+              "user_usec 9447",
+              "system_usec 0",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/io.stat": [
+              "253:0 rbytes=1372160 wbytes=0 rios=23 wios=0 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/memory.current": [
+              "1900544"
+            ],
+            "/sys/fs/cgroup/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/memory.stat": [
+              "anon 45056",
+              "file 1372160",
+              "kernel 274432",
+              "kernel_stack 16384",
+              "pagetables 36864",
+              "sec_pagetables 0",
+              "percpu 1424",
+              "sock 0",
+              "vmalloc 8192",
+              "shmem 0",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 757760",
+              "file_dirty 0",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 0",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 45056",
+              "inactive_file 65536",
+              "active_file 1306624",
+              "unevictable 0",
+              "slab_reclaimable 89080",
+              "slab_unreclaimable 119432",
+              "slab 208512",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 968",
+              "pgmajfault 11",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 1",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "/sys/fs/cgroup/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/pids.current": [
+              "1"
+            ],
+            "/sys/fs/cgroup/docker/cpu.stat": [
+              "usage_usec 9447",
+              "user_usec 9447",
+              "system_usec 0",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/io.stat": [
+              "253:0 rbytes=1372160 wbytes=0 rios=23 wios=0 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/docker/memory.current": [
+              "1904640"
+            ],
+            "/sys/fs/cgroup/docker/memory.stat": [
+              "anon 45056",
+              "file 1372160",
+              "kernel 278528",
+              "kernel_stack 16384",
+              "pagetables 36864",
+              "sec_pagetables 0",
+              "percpu 1424",
+              "sock 0",
+              "vmalloc 8192",
+              "shmem 0",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 757760",
+              "file_dirty 0",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 0",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 45056",
+              "inactive_file 65536",
+              "active_file 1306624",
+              "unevictable 0",
+              "slab_reclaimable 89080",
+              "slab_unreclaimable 122520",
+              "slab 211600",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 968",
+              "pgmajfault 11",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 1",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "/sys/fs/cgroup/docker/pids.current": [
+              "1"
+            ],
+            "/sys/fs/cgroup/io.stat": [
+              "253:0 rbytes=193045504 wbytes=4632576 rios=3530 wios=390 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/memory.stat": [
+              "anon 52559872",
+              "file 202420224",
+              "kernel 278528",
+              "kernel_stack 16384",
+              "pagetables 36864",
+              "sec_pagetables 0",
+              "percpu 1424",
+              "sock 0",
+              "vmalloc 8192",
+              "shmem 81920",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 92573696",
+              "file_dirty 110592",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 18874368",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 52596736",
+              "inactive_file 48128000",
+              "active_file 154214400",
+              "unevictable 0",
+              "slab_reclaimable 89080",
+              "slab_unreclaimable 122520",
+              "slab 211600",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 669779",
+              "pgmajfault 1077",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 28",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "PID 9671": [
+              "0::/docker/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd"
+            ]
+          },
+          "source": "harpoon exec -> /proc, ps, smaps_rollup, /sys/fs/cgroup"
+        },
+        "workloads": {
+          "dockerInspect": [
+            {
+              "Id": "2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd",
+              "Created": "2026-10-14T04:46:43.227949922Z",
+              "Path": "sleep",
+              "Args": [
+                "300"
+              ],
+              "State": {
+                "Status": "running",
+                "Running": true,
+                "Paused": false,
+                "Restarting": false,
+                "OOMKilled": false,
+                "Dead": false,
+                "Pid": 9671,
+                "ExitCode": 0,
+                "Error": "",
+                "StartedAt": "2026-10-14T04:46:43.379713838Z",
+                "FinishedAt": "0001-01-01T00:00:00Z"
+              },
+              "Image": "sha256:2c15e55df5d63efb31b629a557df305130612a16feb029c93447e54dda2c4189",
+              "ResolvConfPath": "/var/lib/docker/containers/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/resolv.conf",
+              "HostnamePath": "/var/lib/docker/containers/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/hostname",
+              "HostsPath": "/var/lib/docker/containers/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/hosts",
+              "LogPath": "/var/lib/docker/containers/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd/2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd-json.log",
+              "Name": "/harpoon-stage2-idle",
+              "RestartCount": 0,
+              "Driver": "overlay2",
+              "Platform": "linux",
+              "MountLabel": "",
+              "ProcessLabel": "",
+              "AppArmorProfile": "",
+              "ExecIDs": null,
+              "HostConfig": {
+                "Binds": null,
+                "ContainerIDFile": "",
+                "LogConfig": {
+                  "Type": "json-file",
+                  "Config": {}
+                },
+                "NetworkMode": "bridge",
+                "PortBindings": {},
+                "RestartPolicy": {
+                  "Name": "no",
+                  "MaximumRetryCount": 0
+                },
+                "AutoRemove": false,
+                "VolumeDriver": "",
+                "VolumesFrom": null,
+                "ConsoleSize": [
+                  0,
+                  0
+                ],
+                "CapAdd": null,
+                "CapDrop": null,
+                "CgroupnsMode": "private",
+                "Dns": null,
+                "DnsOptions": [],
+                "DnsSearch": [],
+                "ExtraHosts": null,
+                "GroupAdd": null,
+                "IpcMode": "private",
+                "Cgroup": "",
+                "Links": null,
+                "OomScoreAdj": 0,
+                "PidMode": "",
+                "Privileged": false,
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false,
+                "SecurityOpt": null,
+                "UTSMode": "",
+                "UsernsMode": "",
+                "ShmSize": 67108864,
+                "Runtime": "runc",
+                "Isolation": "",
+                "CpuShares": 0,
+                "Memory": 0,
+                "NanoCpus": 0,
+                "CgroupParent": "",
+                "BlkioWeight": 0,
+                "BlkioWeightDevice": [],
+                "BlkioDeviceReadBps": [],
+                "BlkioDeviceWriteBps": [],
+                "BlkioDeviceReadIOps": [],
+                "BlkioDeviceWriteIOps": [],
+                "CpuPeriod": 0,
+                "CpuQuota": 0,
+                "CpuRealtimePeriod": 0,
+                "CpuRealtimeRuntime": 0,
+                "CpusetCpus": "",
+                "CpusetMems": "",
+                "Devices": [],
+                "DeviceCgroupRules": null,
+                "DeviceRequests": null,
+                "MemoryReservation": 0,
+                "MemorySwap": 0,
+                "MemorySwappiness": null,
+                "OomKillDisable": null,
+                "PidsLimit": null,
+                "Ulimits": null,
+                "CpuCount": 0,
+                "CpuPercent": 0,
+                "IOMaximumIOps": 0,
+                "IOMaximumBandwidth": 0,
+                "MaskedPaths": [
+                  "/proc/asound",
+                  "/proc/acpi",
+                  "/proc/interrupts",
+                  "/proc/kcore",
+                  "/proc/keys",
+                  "/proc/latency_stats",
+                  "/proc/timer_list",
+                  "/proc/timer_stats",
+                  "/proc/sched_debug",
+                  "/proc/scsi",
+                  "/sys/firmware",
+                  "/sys/devices/virtual/powercap"
+                ],
+                "ReadonlyPaths": [
+                  "/proc/bus",
+                  "/proc/fs",
+                  "/proc/irq",
+                  "/proc/sys",
+                  "/proc/sysrq-trigger"
+                ]
+              },
+              "GraphDriver": {
+                "Data": {
+                  "ID": "2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd",
+                  "LowerDir": "/var/lib/docker/overlay2/8798192acaf67f0cf03eafe2504582254749e72d0e62b281ccfcca444d91fdc7-init/diff:/var/lib/docker/overlay2/f29e7f6ada1c22259d1b39f783d4871fe7f31022cdc438712f707308a1d9f76c/diff",
+                  "MergedDir": "/var/lib/docker/overlay2/8798192acaf67f0cf03eafe2504582254749e72d0e62b281ccfcca444d91fdc7/merged",
+                  "UpperDir": "/var/lib/docker/overlay2/8798192acaf67f0cf03eafe2504582254749e72d0e62b281ccfcca444d91fdc7/diff",
+                  "WorkDir": "/var/lib/docker/overlay2/8798192acaf67f0cf03eafe2504582254749e72d0e62b281ccfcca444d91fdc7/work"
+                },
+                "Name": "overlay2"
+              },
+              "Mounts": [],
+              "Config": {
+                "Hostname": "2a7e18f0e597",
+                "Domainname": "",
+                "User": "",
+                "AttachStdin": false,
+                "AttachStdout": false,
+                "AttachStderr": false,
+                "Tty": false,
+                "OpenStdin": false,
+                "StdinOnce": false,
+                "Env": [
+                  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ],
+                "Cmd": [
+                  "sleep",
+                  "300"
+                ],
+                "Image": "alpine:3.22",
+                "Volumes": null,
+                "WorkingDir": "/",
+                "Entrypoint": null,
+                "OnBuild": null,
+                "Labels": {}
+              },
+              "NetworkSettings": {
+                "Bridge": "",
+                "SandboxID": "e4c0915486f42558ce6b9175cb88a8fd8c353c0f6f252f4b601a81d0e51e0114",
+                "SandboxKey": "/var/run/docker/netns/e4c0915486f4",
+                "Ports": {},
+                "HairpinMode": false,
+                "LinkLocalIPv6Address": "",
+                "LinkLocalIPv6PrefixLen": 0,
+                "SecondaryIPAddresses": null,
+                "SecondaryIPv6Addresses": null,
+                "EndpointID": "a7ce5a01597bb6fb256c80e9da74c479a0a295e7b0eb6ad128497bc04ca2c199",
+                "Gateway": "172.17.0.1",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "IPAddress": "172.17.0.2",
+                "IPPrefixLen": 16,
+                "IPv6Gateway": "",
+                "MacAddress": "32:00:15:0b:86:0d",
+                "Networks": {
+                  "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "MacAddress": "32:00:15:0b:86:0d",
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "5d4d7c4bf5c192732f613d0b081d6225bf085fa882197fecc79f00b62f228253",
+                    "EndpointID": "a7ce5a01597bb6fb256c80e9da74c479a0a295e7b0eb6ad128497bc04ca2c199",
+                    "Gateway": "172.17.0.1",
+                    "IPAddress": "172.17.0.2",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                  }
+                }
+              }
+            }
+          ],
+          "cgroupTruthSource": "guest cgroup v2 files; Docker inspect is identity/metadata only"
+        }
+      }
+    },
+    {
+      "state": "C",
+      "capturedAt": "2026-10-14T04:46:58.932685+00:00",
+      "domains": {
+        "host": {
+          "status": {
+            "cpus": 2,
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "dockerReady": true,
+            "lockHeld": true,
+            "lockPath": "/tmp/harpoon.lock",
+            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "memoryMiB": 4096,
+            "mgmtReady": true,
+            "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+            "pid": 79741,
+            "socketPath": "/tmp/harpoon-docker.sock",
+            "sockExists": true,
+            "state": "running"
+          },
+          "processes": [
+            {
+              "pid": "79741",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "21152",
+              "threads": "3.9",
+              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "command": "run\n"
+            }
+          ],
+          "vzAssociation": {
+            "status": "observed",
+            "candidatePids": [
+              "79743"
+            ],
+            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "source": "lsof -n -t <runtime disk> -> ps",
+            "processes": [
+              "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+            ]
+          },
+          "physicalFootprint": {
+            "value": "9841K",
+            "unit": "bytes",
+            "scope": "host-process",
+            "source": "vmmap -summary",
+            "status": "observed"
+          },
+          "source": "ps -p <status.pid> -o pid,ppid,state,rss,nlwp,pcpu,command"
+        },
+        "guest": {
+          "meminfo": {
+            "MemTotal": {
+              "value": 4013480,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemFree": {
+              "value": 3648852,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "MemAvailable": {
+              "value": 3735684,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Buffers": {
+              "value": 7256,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Cached": {
+              "value": 207800,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapCached": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active": {
+              "value": 217116,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive": {
+              "value": 64004,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(anon)": {
+              "value": 66208,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(anon)": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Active(file)": {
+              "value": 150908,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Inactive(file)": {
+              "value": 64004,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Unevictable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mlocked": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapTotal": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SwapFree": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswap": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Zswapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Dirty": {
+              "value": 52,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Writeback": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonPages": {
+              "value": 66168,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Mapped": {
+              "value": 90944,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Shmem": {
+              "value": 148,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KReclaimable": {
+              "value": 5544,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Slab": {
+              "value": 21224,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SReclaimable": {
+              "value": 5544,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SUnreclaim": {
+              "value": 15680,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "KernelStack": {
+              "value": 1792,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "PageTables": {
+              "value": 1308,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "SecPageTables": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "NFS_Unstable": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Bounce": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "WritebackTmp": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "CommitLimit": {
+              "value": 2006740,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Committed_AS": {
+              "value": 264836,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocTotal": {
+              "value": 135288315904,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocUsed": {
+              "value": 7312,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "VmallocChunk": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Percpu": {
+              "value": 344,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "AnonHugePages": {
+              "value": 34816,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "ShmemPmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FileHugePages": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "FilePmdMapped": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugepagesize": {
+              "value": 2048,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            },
+            "Hugetlb": {
+              "value": 0,
+              "unit": "kB",
+              "scope": "guest",
+              "source": "/proc/meminfo"
+            }
+          },
+          "runtimeProcesses": [
+            {
+              "pid": "9101",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "77m",
+              "command": "dockerd",
+              "args": "dockerd --host=unix:///var/run/docker.sock --dns=1.1.1.1 --dns=8.8.8.8"
+            },
+            {
+              "pid": "9111",
+              "ppid": "9101",
+              "state": "S",
+              "rssKiB": "43m",
+              "command": "containerd",
+              "args": "containerd --config /var/run/docker/containerd/containerd.toml"
+            },
+            {
+              "pid": "9899",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "12m",
+              "command": "containerd-shim",
+              "args": "/usr/bin/containerd-shim-runc-v2 -namespace moby -id b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b -address /var/run/docker/containerd/containerd.sock"
+            },
+            {
+              "pid": "9966",
+              "ppid": "1",
+              "state": "S",
+              "rssKiB": "13m",
+              "command": "containerd-shim",
+              "args": "/usr/bin/containerd-shim-runc-v2 -namespace moby -id 2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3 -address /var/run/docker/containerd/containerd.sock"
+            }
+          ],
+          "pss": {
+            "1": {
+              "value": "293 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/1/smaps_rollup"
+            },
+            "8969": {
+              "value": "113 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/8969/smaps_rollup"
+            },
+            "9101": {
+              "value": "78810 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9101/smaps_rollup"
+            },
+            "9111": {
+              "value": "44540 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9111/smaps_rollup"
+            },
+            "9413": {
+              "value": "1201 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9413/smaps_rollup"
+            },
+            "9458": {
+              "value": "918 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9458/smaps_rollup"
+            },
+            "9459": {
+              "value": "275 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9459/smaps_rollup"
+            },
+            "9899": {
+              "value": "8797 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9899/smaps_rollup"
+            },
+            "9926": {
+              "value": "480 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9926/smaps_rollup"
+            },
+            "9966": {
+              "value": "10190 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9966/smaps_rollup"
+            },
+            "9991": {
+              "value": "432 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/9991/smaps_rollup"
+            },
+            "12576": {
+              "value": "137 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/12576/smaps_rollup"
+            },
+            "12577": {
+              "value": "146 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/12577/smaps_rollup"
+            },
+            "12583": {
+              "value": "531 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/12583/smaps_rollup"
+            },
+            "12584": {
+              "value": "9943 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/12584/smaps_rollup"
+            },
+            "12586": {
+              "value": "185 kB",
+              "unit": "kB",
+              "scope": "guest-process",
+              "source": "/proc/12586/smaps_rollup"
+            }
+          },
+          "cgroupFiles": {
+            "/sys/fs/cgroup/cpu.stat": [
+              "usage_usec 10278000",
+              "user_usec 6738000",
+              "system_usec 3540000",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/cpu.stat": [
+              "usage_usec 14653",
+              "user_usec 4884",
+              "system_usec 9769",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/io.stat": [
+              "253:0 rbytes=4096 wbytes=16777216 rios=1 wios=16 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/memory.current": [
+              "17592320"
+            ],
+            "/sys/fs/cgroup/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/memory.stat": [
+              "anon 45056",
+              "file 16781312",
+              "kernel 765952",
+              "kernel_stack 16384",
+              "pagetables 40960",
+              "sec_pagetables 0",
+              "percpu 1424",
+              "sock 0",
+              "vmalloc 8192",
+              "shmem 0",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 0",
+              "file_dirty 0",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 0",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 45056",
+              "inactive_file 16781312",
+              "active_file 0",
+              "unevictable 0",
+              "slab_reclaimable 572392",
+              "slab_unreclaimable 117960",
+              "slab 690352",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 1329",
+              "pgmajfault 0",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 1",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "/sys/fs/cgroup/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/pids.current": [
+              "1"
+            ],
+            "/sys/fs/cgroup/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/cpu.stat": [
+              "usage_usec 5078945",
+              "user_usec 5077946",
+              "system_usec 999",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/io.stat": [
+              "253:0 rbytes=180224 wbytes=0 rios=2 wios=0 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/memory.current": [
+              "487424"
+            ],
+            "/sys/fs/cgroup/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/memory.stat": [
+              "anon 49152",
+              "file 180224",
+              "kernel 258048",
+              "kernel_stack 16384",
+              "pagetables 40960",
+              "sec_pagetables 0",
+              "percpu 1424",
+              "sock 0",
+              "vmalloc 8192",
+              "shmem 0",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 20480",
+              "file_dirty 0",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 0",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 49152",
+              "inactive_file 0",
+              "active_file 180224",
+              "unevictable 0",
+              "slab_reclaimable 66960",
+              "slab_unreclaimable 117960",
+              "slab 184920",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 1099",
+              "pgmajfault 2",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 1",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "/sys/fs/cgroup/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/pids.current": [
+              "1"
+            ],
+            "/sys/fs/cgroup/docker/cpu.stat": [
+              "usage_usec 5109650",
+              "user_usec 5096656",
+              "system_usec 12994",
+              "nice_usec 0",
+              "core_sched.force_idle_usec 0",
+              "nr_periods 0",
+              "nr_throttled 0",
+              "throttled_usec 0",
+              "nr_bursts 0",
+              "burst_usec 0"
+            ],
+            "/sys/fs/cgroup/docker/io.stat": [
+              "253:0 rbytes=1556480 wbytes=16777216 rios=26 wios=16 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/docker/memory.current": [
+              "19611648"
+            ],
+            "/sys/fs/cgroup/docker/memory.stat": [
+              "anon 94208",
+              "file 18333696",
+              "kernel 1114112",
+              "kernel_stack 32768",
+              "pagetables 81920",
+              "sec_pagetables 0",
+              "percpu 15520",
+              "sock 0",
+              "vmalloc 16384",
+              "shmem 0",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 839680",
+              "file_dirty 0",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 0",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 94208",
+              "inactive_file 16846848",
+              "active_file 1486848",
+              "unevictable 0",
+              "slab_reclaimable 668288",
+              "slab_unreclaimable 278960",
+              "slab 947248",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 3848",
+              "pgmajfault 13",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 3",
+              "thp_collapse_alloc 0",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "/sys/fs/cgroup/docker/pids.current": [
+              "2"
+            ],
+            "/sys/fs/cgroup/io.stat": [
+              "253:0 rbytes=193364992 wbytes=25059328 rios=3539 wios=798 dbytes=0 dios=0"
+            ],
+            "/sys/fs/cgroup/memory.stat": [
+              "anon 67915776",
+              "file 220217344",
+              "kernel 1114112",
+              "kernel_stack 32768",
+              "pagetables 81920",
+              "sec_pagetables 0",
+              "percpu 15520",
+              "sock 0",
+              "vmalloc 16384",
+              "shmem 151552",
+              "zswap 0",
+              "zswapped 0",
+              "file_mapped 93188096",
+              "file_dirty 53248",
+              "file_writeback 0",
+              "swapcached 0",
+              "anon_thp 35651584",
+              "file_thp 0",
+              "shmem_thp 0",
+              "inactive_anon 0",
+              "active_anon 68026368",
+              "inactive_file 65540096",
+              "active_file 154529792",
+              "unevictable 0",
+              "slab_reclaimable 668288",
+              "slab_unreclaimable 278960",
+              "slab 947248",
+              "workingset_refault_anon 0",
+              "workingset_refault_file 0",
+              "workingset_activate_anon 0",
+              "workingset_activate_file 0",
+              "workingset_restore_anon 0",
+              "workingset_restore_file 0",
+              "workingset_nodereclaim 0",
+              "pgdemote_kswapd 0",
+              "pgdemote_direct 0",
+              "pgdemote_khugepaged 0",
+              "pgpromote_success 0",
+              "pgscan 0",
+              "pgsteal 0",
+              "pgscan_kswapd 0",
+              "pgscan_direct 0",
+              "pgscan_khugepaged 0",
+              "pgsteal_kswapd 0",
+              "pgsteal_direct 0",
+              "pgsteal_khugepaged 0",
+              "pgfault 911651",
+              "pgmajfault 1083",
+              "pgrefill 0",
+              "pgactivate 0",
+              "pgdeactivate 0",
+              "pglazyfree 0",
+              "pglazyfreed 0",
+              "swpin_zero 0",
+              "swpout_zero 0",
+              "zswpin 0",
+              "zswpout 0",
+              "zswpwb 0",
+              "thp_fault_alloc 51",
+              "thp_collapse_alloc 6",
+              "thp_swpout 0",
+              "thp_swpout_fallback 0",
+              "numa_pages_migrated 0",
+              "numa_pte_updates 0",
+              "numa_hint_faults 0"
+            ],
+            "PID 9991": [
+              "0::/docker/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3"
+            ],
+            "PID 9926": [
+              "0::/docker/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b"
+            ]
+          },
+          "source": "harpoon exec -> /proc, ps, smaps_rollup, /sys/fs/cgroup"
+        },
+        "workloads": {
+          "dockerInspect": [
+            {
+              "Id": "2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3",
+              "Created": "2026-10-14T04:46:44.867176631Z",
+              "Path": "sh",
+              "Args": [
+                "-c",
+                "dd if=/dev/zero of=/tmp/harpoon-stage2 bs=1M count=16 >/dev/null 2>&1; sleep 300"
+              ],
+              "State": {
+                "Status": "running",
+                "Running": true,
+                "Paused": false,
+                "Restarting": false,
+                "OOMKilled": false,
+                "Dead": false,
+                "Pid": 9991,
+                "ExitCode": 0,
+                "Error": "",
+                "StartedAt": "2026-10-14T04:46:45.018910423Z",
+                "FinishedAt": "0001-01-01T00:00:00Z"
+              },
+              "Image": "sha256:2c15e55df5d63efb31b629a557df305130612a16feb029c93447e54dda2c4189",
+              "ResolvConfPath": "/var/lib/docker/containers/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/resolv.conf",
+              "HostnamePath": "/var/lib/docker/containers/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/hostname",
+              "HostsPath": "/var/lib/docker/containers/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/hosts",
+              "LogPath": "/var/lib/docker/containers/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3/2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3-json.log",
+              "Name": "/harpoon-stage2-mem",
+              "RestartCount": 0,
+              "Driver": "overlay2",
+              "Platform": "linux",
+              "MountLabel": "",
+              "ProcessLabel": "",
+              "AppArmorProfile": "",
+              "ExecIDs": null,
+              "HostConfig": {
+                "Binds": null,
+                "ContainerIDFile": "",
+                "LogConfig": {
+                  "Type": "json-file",
+                  "Config": {}
+                },
+                "NetworkMode": "bridge",
+                "PortBindings": {},
+                "RestartPolicy": {
+                  "Name": "no",
+                  "MaximumRetryCount": 0
+                },
+                "AutoRemove": false,
+                "VolumeDriver": "",
+                "VolumesFrom": null,
+                "ConsoleSize": [
+                  0,
+                  0
+                ],
+                "CapAdd": null,
+                "CapDrop": null,
+                "CgroupnsMode": "private",
+                "Dns": null,
+                "DnsOptions": [],
+                "DnsSearch": [],
+                "ExtraHosts": null,
+                "GroupAdd": null,
+                "IpcMode": "private",
+                "Cgroup": "",
+                "Links": null,
+                "OomScoreAdj": 0,
+                "PidMode": "",
+                "Privileged": false,
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false,
+                "SecurityOpt": null,
+                "UTSMode": "",
+                "UsernsMode": "",
+                "ShmSize": 67108864,
+                "Runtime": "runc",
+                "Isolation": "",
+                "CpuShares": 0,
+                "Memory": 0,
+                "NanoCpus": 0,
+                "CgroupParent": "",
+                "BlkioWeight": 0,
+                "BlkioWeightDevice": [],
+                "BlkioDeviceReadBps": [],
+                "BlkioDeviceWriteBps": [],
+                "BlkioDeviceReadIOps": [],
+                "BlkioDeviceWriteIOps": [],
+                "CpuPeriod": 0,
+                "CpuQuota": 0,
+                "CpuRealtimePeriod": 0,
+                "CpuRealtimeRuntime": 0,
+                "CpusetCpus": "",
+                "CpusetMems": "",
+                "Devices": [],
+                "DeviceCgroupRules": null,
+                "DeviceRequests": null,
+                "MemoryReservation": 0,
+                "MemorySwap": 0,
+                "MemorySwappiness": null,
+                "OomKillDisable": null,
+                "PidsLimit": null,
+                "Ulimits": null,
+                "CpuCount": 0,
+                "CpuPercent": 0,
+                "IOMaximumIOps": 0,
+                "IOMaximumBandwidth": 0,
+                "MaskedPaths": [
+                  "/proc/asound",
+                  "/proc/acpi",
+                  "/proc/interrupts",
+                  "/proc/kcore",
+                  "/proc/keys",
+                  "/proc/latency_stats",
+                  "/proc/timer_list",
+                  "/proc/timer_stats",
+                  "/proc/sched_debug",
+                  "/proc/scsi",
+                  "/sys/firmware",
+                  "/sys/devices/virtual/powercap"
+                ],
+                "ReadonlyPaths": [
+                  "/proc/bus",
+                  "/proc/fs",
+                  "/proc/irq",
+                  "/proc/sys",
+                  "/proc/sysrq-trigger"
+                ]
+              },
+              "GraphDriver": {
+                "Data": {
+                  "ID": "2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3",
+                  "LowerDir": "/var/lib/docker/overlay2/d1b2c53974eee27826e94ec1372533585d2b1524958442a9f8485328f5d4e299-init/diff:/var/lib/docker/overlay2/f29e7f6ada1c22259d1b39f783d4871fe7f31022cdc438712f707308a1d9f76c/diff",
+                  "MergedDir": "/var/lib/docker/overlay2/d1b2c53974eee27826e94ec1372533585d2b1524958442a9f8485328f5d4e299/merged",
+                  "UpperDir": "/var/lib/docker/overlay2/d1b2c53974eee27826e94ec1372533585d2b1524958442a9f8485328f5d4e299/diff",
+                  "WorkDir": "/var/lib/docker/overlay2/d1b2c53974eee27826e94ec1372533585d2b1524958442a9f8485328f5d4e299/work"
+                },
+                "Name": "overlay2"
+              },
+              "Mounts": [],
+              "Config": {
+                "Hostname": "2de456ed7f6b",
+                "Domainname": "",
+                "User": "",
+                "AttachStdin": false,
+                "AttachStdout": false,
+                "AttachStderr": false,
+                "Tty": false,
+                "OpenStdin": false,
+                "StdinOnce": false,
+                "Env": [
+                  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ],
+                "Cmd": [
+                  "sh",
+                  "-c",
+                  "dd if=/dev/zero of=/tmp/harpoon-stage2 bs=1M count=16 >/dev/null 2>&1; sleep 300"
+                ],
+                "Image": "alpine:3.22",
+                "Volumes": null,
+                "WorkingDir": "/",
+                "Entrypoint": null,
+                "OnBuild": null,
+                "Labels": {}
+              },
+              "NetworkSettings": {
+                "Bridge": "",
+                "SandboxID": "8554b05980746568fd42e94d57a6805a8c4ec687fb20e43a9b5e4100ecea6a94",
+                "SandboxKey": "/var/run/docker/netns/8554b0598074",
+                "Ports": {},
+                "HairpinMode": false,
+                "LinkLocalIPv6Address": "",
+                "LinkLocalIPv6PrefixLen": 0,
+                "SecondaryIPAddresses": null,
+                "SecondaryIPv6Addresses": null,
+                "EndpointID": "14db046b6774c650059e8c2b1eb8cbaddd824298bd167102057efa2a9c3d4ea9",
+                "Gateway": "172.17.0.1",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "IPAddress": "172.17.0.4",
+                "IPPrefixLen": 16,
+                "IPv6Gateway": "",
+                "MacAddress": "b2:e1:0e:9f:dd:59",
+                "Networks": {
+                  "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "MacAddress": "b2:e1:0e:9f:dd:59",
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "5d4d7c4bf5c192732f613d0b081d6225bf085fa882197fecc79f00b62f228253",
+                    "EndpointID": "14db046b6774c650059e8c2b1eb8cbaddd824298bd167102057efa2a9c3d4ea9",
+                    "Gateway": "172.17.0.1",
+                    "IPAddress": "172.17.0.4",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                  }
+                }
+              }
+            },
+            {
+              "Id": "b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b",
+              "Created": "2026-10-14T04:46:44.577163006Z",
+              "Path": "sh",
+              "Args": [
+                "-c",
+                "i=0; while [ $i -lt 5000000 ]; do i=$((i+1)); done; sleep 300"
+              ],
+              "State": {
+                "Status": "running",
+                "Running": true,
+                "Paused": false,
+                "Restarting": false,
+                "OOMKilled": false,
+                "Dead": false,
+                "Pid": 9926,
+                "ExitCode": 0,
+                "Error": "",
+                "StartedAt": "2026-10-14T04:46:44.730124672Z",
+                "FinishedAt": "0001-01-01T00:00:00Z"
+              },
+              "Image": "sha256:2c15e55df5d63efb31b629a557df305130612a16feb029c93447e54dda2c4189",
+              "ResolvConfPath": "/var/lib/docker/containers/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/resolv.conf",
+              "HostnamePath": "/var/lib/docker/containers/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/hostname",
+              "HostsPath": "/var/lib/docker/containers/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/hosts",
+              "LogPath": "/var/lib/docker/containers/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b/b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b-json.log",
+              "Name": "/harpoon-stage2-cpu",
+              "RestartCount": 0,
+              "Driver": "overlay2",
+              "Platform": "linux",
+              "MountLabel": "",
+              "ProcessLabel": "",
+              "AppArmorProfile": "",
+              "ExecIDs": null,
+              "HostConfig": {
+                "Binds": null,
+                "ContainerIDFile": "",
+                "LogConfig": {
+                  "Type": "json-file",
+                  "Config": {}
+                },
+                "NetworkMode": "bridge",
+                "PortBindings": {},
+                "RestartPolicy": {
+                  "Name": "no",
+                  "MaximumRetryCount": 0
+                },
+                "AutoRemove": false,
+                "VolumeDriver": "",
+                "VolumesFrom": null,
+                "ConsoleSize": [
+                  0,
+                  0
+                ],
+                "CapAdd": null,
+                "CapDrop": null,
+                "CgroupnsMode": "private",
+                "Dns": null,
+                "DnsOptions": [],
+                "DnsSearch": [],
+                "ExtraHosts": null,
+                "GroupAdd": null,
+                "IpcMode": "private",
+                "Cgroup": "",
+                "Links": null,
+                "OomScoreAdj": 0,
+                "PidMode": "",
+                "Privileged": false,
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false,
+                "SecurityOpt": null,
+                "UTSMode": "",
+                "UsernsMode": "",
+                "ShmSize": 67108864,
+                "Runtime": "runc",
+                "Isolation": "",
+                "CpuShares": 0,
+                "Memory": 0,
+                "NanoCpus": 0,
+                "CgroupParent": "",
+                "BlkioWeight": 0,
+                "BlkioWeightDevice": [],
+                "BlkioDeviceReadBps": [],
+                "BlkioDeviceWriteBps": [],
+                "BlkioDeviceReadIOps": [],
+                "BlkioDeviceWriteIOps": [],
+                "CpuPeriod": 0,
+                "CpuQuota": 0,
+                "CpuRealtimePeriod": 0,
+                "CpuRealtimeRuntime": 0,
+                "CpusetCpus": "",
+                "CpusetMems": "",
+                "Devices": [],
+                "DeviceCgroupRules": null,
+                "DeviceRequests": null,
+                "MemoryReservation": 0,
+                "MemorySwap": 0,
+                "MemorySwappiness": null,
+                "OomKillDisable": null,
+                "PidsLimit": null,
+                "Ulimits": null,
+                "CpuCount": 0,
+                "CpuPercent": 0,
+                "IOMaximumIOps": 0,
+                "IOMaximumBandwidth": 0,
+                "MaskedPaths": [
+                  "/proc/asound",
+                  "/proc/acpi",
+                  "/proc/interrupts",
+                  "/proc/kcore",
+                  "/proc/keys",
+                  "/proc/latency_stats",
+                  "/proc/timer_list",
+                  "/proc/timer_stats",
+                  "/proc/sched_debug",
+                  "/proc/scsi",
+                  "/sys/firmware",
+                  "/sys/devices/virtual/powercap"
+                ],
+                "ReadonlyPaths": [
+                  "/proc/bus",
+                  "/proc/fs",
+                  "/proc/irq",
+                  "/proc/sys",
+                  "/proc/sysrq-trigger"
+                ]
+              },
+              "GraphDriver": {
+                "Data": {
+                  "ID": "b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b",
+                  "LowerDir": "/var/lib/docker/overlay2/ef94834292a4450160b9405108fa4a1a0a65f94e449deed3df599c45708107b8-init/diff:/var/lib/docker/overlay2/f29e7f6ada1c22259d1b39f783d4871fe7f31022cdc438712f707308a1d9f76c/diff",
+                  "MergedDir": "/var/lib/docker/overlay2/ef94834292a4450160b9405108fa4a1a0a65f94e449deed3df599c45708107b8/merged",
+                  "UpperDir": "/var/lib/docker/overlay2/ef94834292a4450160b9405108fa4a1a0a65f94e449deed3df599c45708107b8/diff",
+                  "WorkDir": "/var/lib/docker/overlay2/ef94834292a4450160b9405108fa4a1a0a65f94e449deed3df599c45708107b8/work"
+                },
+                "Name": "overlay2"
+              },
+              "Mounts": [],
+              "Config": {
+                "Hostname": "b2bb53aa102c",
+                "Domainname": "",
+                "User": "",
+                "AttachStdin": false,
+                "AttachStdout": false,
+                "AttachStderr": false,
+                "Tty": false,
+                "OpenStdin": false,
+                "StdinOnce": false,
+                "Env": [
+                  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ],
+                "Cmd": [
+                  "sh",
+                  "-c",
+                  "i=0; while [ $i -lt 5000000 ]; do i=$((i+1)); done; sleep 300"
+                ],
+                "Image": "alpine:3.22",
+                "Volumes": null,
+                "WorkingDir": "/",
+                "Entrypoint": null,
+                "OnBuild": null,
+                "Labels": {}
+              },
+              "NetworkSettings": {
+                "Bridge": "",
+                "SandboxID": "ed7e8fe1108d6a6c8dd48cf835ccad31e85803a377f1b074833b615ec56fdd25",
+                "SandboxKey": "/var/run/docker/netns/ed7e8fe1108d",
+                "Ports": {},
+                "HairpinMode": false,
+                "LinkLocalIPv6Address": "",
+                "LinkLocalIPv6PrefixLen": 0,
+                "SecondaryIPAddresses": null,
+                "SecondaryIPv6Addresses": null,
+                "EndpointID": "b3c81908c67ca9758bed4d7ea06dc12fb73b2c8698e978c84ec1584d8a4acf5b",
+                "Gateway": "172.17.0.1",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "IPAddress": "172.17.0.3",
+                "IPPrefixLen": 16,
+                "IPv6Gateway": "",
+                "MacAddress": "a6:77:5f:ff:73:ce",
+                "Networks": {
+                  "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "MacAddress": "a6:77:5f:ff:73:ce",
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "5d4d7c4bf5c192732f613d0b081d6225bf085fa882197fecc79f00b62f228253",
+                    "EndpointID": "b3c81908c67ca9758bed4d7ea06dc12fb73b2c8698e978c84ec1584d8a4acf5b",
+                    "Gateway": "172.17.0.1",
+                    "IPAddress": "172.17.0.3",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                  }
+                }
+              }
+            }
+          ],
+          "cgroupTruthSource": "guest cgroup v2 files; Docker inspect is identity/metadata only"
+        }
+      }
+    }
+  ],
+  "lifecycle": {
+    "sampleCount": 13,
+    "cadenceSeconds": 0.1,
+    "events": [
+      "EVENT exec-before",
+      "EVENT exec-after",
+      "EVENT stop-after"
+    ],
+    "execObserved": true,
+    "stopObserved": true,
+    "shimObservations": [
+      "9646     1 S     13m containerd-shim  /usr/bin/containerd-shim-runc-v2 -namespace moby -id 2a7e18f0e597dd9df84b8ce30ea11e2ccfe87693a47c8173e61e949fcaa24afd -address /var/run/docker/containerd/containerd.sock",
+      "9899     1 S     12m containerd-shim  /usr/bin/containerd-shim-runc-v2 -namespace moby -id b2bb53aa102c88942ee5040dccf4dc9525ed09c783c64e8429b8698f0e84eb6b -address /var/run/docker/containerd/containerd.sock",
+      "9966     1 S     13m containerd-shim  /usr/bin/containerd-shim-runc-v2 -namespace moby -id 2de456ed7f6bcffd1c52b371d81e7ff786900bfb3a4b77dddc717e364c5cc8d3 -address /var/run/docker/containerd/containerd.sock"
+    ],
+    "shimLifecycle": "observed",
+    "runcLifecycle": "observed",
+    "source": "harpoon exec -> ps/proc/cgroup"
+  },
+  "exitCriteria": {
+    "hostProcessesAttributable": true,
+    "hostVZAssociation": true,
+    "guestInfrastructureAttributable": true,
+    "dockerToCgroupCorrelation": true,
+    "independentWorkloadTruth": true,
+    "shimLifecycleDirectlyObserved": true,
+    "runcLifecycleDirectlyObservedOrMarkedUnobserved": true,
+    "execLifecycleObserved": true,
+    "stopLifecycleObserved": true,
+    "noIncompatibleDomainsSummed": true,
+    "sameCollectorA_B_C": true,
+    "repeatable": true,
+    "machineReadable": true,
+    "humanReadable": true
+  }
+}

@@ -34,6 +34,8 @@ if cliArgs.count >= 2 {
     }
 
     switch cmd {
+    case "diagnostics":
+        exit(handleDiagnostics(args: commandArgs))
     case "machine":
         exit(handleMachine(args: commandArgs))
 

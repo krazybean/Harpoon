@@ -45,6 +45,7 @@ func printUsageFull() {
       exec        Execute command in guest (harpoon exec -- <cmd> [args...])
       shell       Open interactive shell in guest (harpoon shell)
       doctor      Diagnose common problems
+      diagnostics Snapshot, explain, or poll structured runtime diagnostics
       run         Run in foreground (debug)
       version     Show version
       help        Show help
@@ -86,6 +87,9 @@ func printUsageFull() {
     Diagnostics:
       harpoon status
       harpoon doctor
+      harpoon diagnostics snapshot --json
+      harpoon diagnostics explain
+      harpoon diagnostics subscribe --count 10 --interval 1
       harpoon logs --lines 100
     notes:
       harpoon start  - background managed runtime (log: ~/Library/Application Support/Harpoon/harpoon.log, socket: /tmp/harpoon-docker.sock, lock: /tmp/harpoon.lock)

@@ -1,0 +1,139 @@
+{
+  "schema": "harpoon.stage5.tooling-inventory.v1",
+  "scope": "repo-wide shell/python/socat/tooling audit; no behavior change",
+  "date": "2026-10-13",
+  "counts": {
+    "extensionScripts": 63,
+    "extensionScriptLines": 9392,
+    "extensionlessGuestRuntimeFiles": 3,
+    "extensionlessGuestRuntimeLines": 1279,
+    "socatBinariesInRepo": 0,
+    "socatInvocationsInGuestInit": 6,
+    "pythonFiles": 1
+  },
+  "releaseSurface": {
+    "competingOrchestrators": [
+      "ui/harpoon-desktop/scripts/release.mjs",
+      "tools/release/macos/release.sh"
+    ],
+    "authoritativeClosureCandidate": "tools/release/verify-runtime-closure.sh",
+    "ciWorkflow": ".github/workflows/validation.yml invokes tools/validate.sh; Stage 0-5 barriers are local audit barriers, not yet CI wiring"
+  },
+  "classifications": {
+    "KEEP_AS_SHELL": {
+      "files": [
+        "harpoon/build.sh",
+        "harpoon/install.sh",
+        "harpoon/uninstall.sh",
+        "tools/guest-builder/build.sh",
+        "tools/guest-builder/build-root.sh",
+        "tools/guest-builder/build-initramfs.sh",
+        "tools/guest-builder/fetch-kernel.sh",
+        "tools/guest-builder/sanitize-root.sh",
+        "tools/release-preflight.sh",
+        "tools/release/",
+        "ui/harpoon-desktop/src-tauri/prepare-bundle.sh",
+        "ui/harpoon-desktop/scripts/sign-app.sh",
+        "tools/guest-builder/src/harpoon-mgmt-wrapper"
+      ],
+      "reason": "linear orchestration, platform tooling, explicit install boundary, or small boot glue"
+    },
+    "COMPILED_CODE_CANDIDATE": {
+      "sections": [
+        "tools/guest-builder/src/init:106-196",
+        "tools/guest-builder/src/init:232-289",
+        "tools/guest-builder/src/init:417-575",
+        "tools/guest-builder/src/init:729-935",
+        "tools/guest-builder/src/harpoon-mgmt:1-302"
+      ],
+      "reason": "persistent state, retries, readiness, recovery, protocol parsing, or security-sensitive ownership"
+    },
+    "DELETE_OR_COLLAPSE_CANDIDATE": {
+      "filesOrSections": [
+        "harpoon/m3-test.sh through harpoon/m16-test.sh where coverage duplicates named regressions",
+        "tools/guest-builder/src/init:944",
+        "tools/stage-0-1-gate.sh through tools/stage-5-tooling-gate.sh repeated dependency invocation after program completion",
+        "Stage 4 legacy single-forward compatibility already recorded in stage-4-host-runtime-ownership.json"
+      ]
+    },
+    "TEST_HARNESS_ONLY": {
+      "files": [
+        "tools/validate.sh",
+        "tools/stage-0-1-gate.sh",
+        "tools/stage-2-resource-gate.sh",
+        "tools/stage-3-guest-boot-gate.sh",
+        "tools/stage-4-host-runtime-gate.sh",
+        "tools/guest-builder/regression-*.sh",
+        "tools/guest-builder/test-harpoon-mgmt.py",
+        "harpoon/cli-parity-test.sh",
+        "harpoon/regression-*.sh",
+        "harpoon/fuzz-host-path.sh",
+        "harpoon/m*-test.sh",
+        "harpoon/ec-test.sh",
+        "harpoon/ui-test.sh"
+      ]
+    },
+    "BUILD_RELEASE_ONLY": {
+      "files": [
+        "harpoon/package.sh",
+        "tools/guest-builder/verify-guest.sh",
+        "tools/guest-builder/verify-root.sh",
+        "tools/release/verify-runtime-closure.sh",
+        "tools/verify-bundle.sh",
+        "tools/release/",
+        "ui/harpoon-desktop/src-tauri/prepare-bundle.sh"
+      ]
+    },
+    "SECURITY_SENSITIVE_REVIEW": {
+      "sections": [
+        "tools/guest-builder/src/init:122-186 manifest parser and repair",
+        "tools/guest-builder/src/init:819-837 pkill-based socat preflight cleanup",
+        "tools/guest-builder/src/init:852,913 background socat listeners",
+        "tools/verify-bundle.sh:44-175 interpolated bash -c checks",
+        "tools/release/macos/verify-signatures.sh:69-70 interpolated bash -c checks",
+        "tools/stage-2-resource-gate.sh:20,56-57 unquoted Docker ID expansion",
+        "harpoon/m7-test.sh:82-109 synthetic runtime metadata mutation",
+        "tools/guest-builder/sanitize-root.sh:10-55 privileged Docker sh-c path handling",
+        "tools/guest-builder/src/harpoon-mgmt:19-43 root command output and timeout limits",
+        "harpoon/regression-stage5.sh:31-45 tracked source overwrite on interrupted test"
+      ]
+    },
+    "HISTORICAL_OR_MILESTONE_ONLY": {
+      "keepRegression": [
+        "harpoon/regression-bridges.sh",
+        "harpoon/regression-foreground-status.sh",
+        "harpoon/regression-host-path.sh",
+        "harpoon/fuzz-host-path.sh",
+        "harpoon/regression-m17-offline.sh",
+        "harpoon/regression-asset-resolution.sh",
+        "tools/guest-builder/regression-mgmt-migration.sh",
+        "tools/guest-builder/regression-packaged-mgmt-migration.sh",
+        "tools/guest-builder/regression-python-runtime-repair.sh"
+      ],
+      "retireCandidates": [
+        "harpoon/m3-test.sh through harpoon/m8-test.sh after coverage mapping",
+        "overlapping portions of harpoon/m9-test.sh through harpoon/m16-test.sh"
+      ]
+    }
+  },
+  "guestMigration": {
+    "currentImplementation": [
+      "tools/guest-builder/src/init:106-196",
+      "tools/guest-builder/src/init:232-289",
+      "tools/guest-builder/src/init:417-575",
+      "tools/guest-builder/src/init:729-935",
+      "tools/guest-builder/src/harpoon-mgmt:1-302",
+      "tools/guest-builder/src/harpoon-mgmt-wrapper:1-33"
+    ],
+    "estimatedRuntimeSurfaceRemovedOrCollapsedLines": "770-1030",
+    "estimatedTrueConsolidationLines": "470-690",
+    "estimatedBehaviorThatMustBeReimplemented": "300-340",
+    "conclusion": "ownership and failure semantics improve more than total line count; do not migrate without protocol-preserving evidence"
+  },
+  "conclusion": {
+    "pythonMgmtAndSocatNow": "acceptable current implementation",
+    "pythonMgmtAndSocatFuture": "clearly transitional guest runtime boundary",
+    "persistentHostDaemon": "not justified by Stage 4 or Stage 5 evidence",
+    "stage5": "STAGE_5_GATE_PASS"
+  }
+}
