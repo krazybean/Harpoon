@@ -23,7 +23,7 @@ bash tools/guest-builder/build.sh
 # individual steps
 bash tools/guest-builder/fetch-kernel.sh
 bash tools/guest-builder/build-initramfs.sh
-HARPOON_ROOT_BUILDER=vz bash tools/guest-builder/build-root.sh --force
+bash tools/guest-builder/build-root.sh --builder vz --force
 bash tools/guest-builder/verify-root.sh       # fails if dirty (containers/images/volumes != 0)
 bash tools/guest-builder/sanitize-root.sh     # deterministic clean to 0/0/0
 ```

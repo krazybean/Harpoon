@@ -17,7 +17,7 @@ bash "$SCRIPT_DIR/fetch-kernel.sh"
 # 2. Root image — clean Alpine population in a disposable VZ builder. Initramfs
 # fingerprints and copies files from this image, so it must exist before that step.
 echo "[guest-builder] step 2/3: root harpoon-root.img" >&2
-bash "$SCRIPT_DIR/build-root.sh" --force
+bash "$SCRIPT_DIR/build-root.sh" --builder vz --force
 
 # 3. Initramfs — fetch or rebuild (two-mode, no historical cache)
 echo "[guest-builder] step 3/3: initramfs harpoon-initramfs.cpio.gz" >&2

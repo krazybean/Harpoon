@@ -12,12 +12,8 @@ TMP=$(mktemp -d /tmp/harpoon-mgmt-migration.XXXXXX)
 DISK="$TMP/old-root.img"
 CANARY="$TMP/docker-canary"
 PAYLOAD="$TMP/initramfs"
-MODULE_DIR=/lib/modules/6.12.110-0-virt
-NAT_MODULES=(
-  "$MODULE_DIR/kernel/net/netfilter/xt_nat.ko"
-  "$MODULE_DIR/kernel/net/netfilter/xt_REDIRECT.ko"
-  "$MODULE_DIR/kernel/net/netfilter/xt_MASQUERADE.ko"
-)
+MODULE_DIR=""
+NAT_MODULES=()
 completed=0
 stop_fixture() {
   [ -f "$TMP/runtime/runtime.pid" ] || return 0
@@ -51,6 +47,14 @@ check test -x "$DUMPE2FS"
 check test -x "$E2FSCK"
 mkdir -p "$PAYLOAD"
 gzip -dc "$INITRAMFS" | (cd "$PAYLOAD" && cpio -idm >/dev/null 2>&1) || fail "cannot unpack initramfs payload"
+MODULE_DIR="/lib/modules/$(basename "$(find "$PAYLOAD/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+[ "$MODULE_DIR" != "/lib/modules/" ] || fail "initramfs has no module directory"
+for module in xt_nat xt_REDIRECT xt_MASQUERADE; do
+  path=$(find "$PAYLOAD$MODULE_DIR" -type f -name "$module.ko" -print -quit)
+  if [ -n "$path" ]; then NAT_MODULES+=("${path#$PAYLOAD}");
+  elif grep -q "/$module\.ko$" "$PAYLOAD$MODULE_DIR/modules.builtin"; then :
+  else fail "required NAT capability unavailable: $module"; fi
+done
 for path in "${NAT_MODULES[@]}" "$MODULE_DIR/modules.dep" "$MODULE_DIR/modules.alias"; do check test -f "$PAYLOAD$path"; done
 (cp -c "$ROOT" "$DISK" 2>/dev/null || cp "$ROOT" "$DISK") || fail "cannot clone old root"
 set +e

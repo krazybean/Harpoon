@@ -206,7 +206,7 @@ Their **authoritative build location** is `tools/guest-builder/`:
 ```sh
 bash tools/guest-builder/build.sh          # build all three (kernel + initramfs + root)
 bash tools/guest-builder/fetch-kernel.sh   # fetch Alpine 3.22 virt kernel -> Image-virt
-bash tools/guest-builder/build-root.sh     # requires HARPOON_ROOT_BUILDER=vz; fresh Alpine population
+bash tools/guest-builder/build-root.sh --builder vz --force     # fresh Alpine population
 bash tools/guest-builder/build-initramfs.sh # build harpoon-initramfs.cpio.gz
 bash tools/guest-builder/verify-root.sh    # FAILS if root contains Docker test state
 bash tools/guest-builder/sanitize-root.sh  # deterministically clean to 0/0/0
@@ -217,7 +217,7 @@ bash tools/guest-builder/sanitize-root.sh  # deterministically clean to 0/0/0
 - `harpoon-root.img` is a **2 GiB template** raw ext4 populated by real Alpine `apk` inside a disposable Virtualization.framework builder VM. It installs the declared Docker Engine/containerd/runc, Python, socat, networking, filesystem, kmod, and certificate closure, writes an exact package manifest inside the image, and removes APK/Docker build residue. The root path does not use Docker Desktop, Podman, an existing root, or host-side package emulation. **First provision** sparse-grows to **8 GiB logical minimum** (`8589934592`, physical ~1G) via `truncate` + guest `resize2fs`; supports `12G 16G 32G` via `harpoon start --disk-size 16G` (when no disk) or `harpoon disk resize 16G` (grow-only, VM stopped). See `tools/guest-builder/verify-root.sh` and `harpoon disk status`.
 - Management channel (Stage 3A): vsock `2377` dedicated to `harpoon exec`/`harpoon shell`, separate from Docker `2375`, vsock-only (no TCP, no SSH), host bridge at `0600` `/tmp/harpoon-mgmt.sock` → vsock `2377`.
 
-**Fresh-clone bootstrap (Stage 3D):** Root population requires Apple Virtualization.framework via `HARPOON_ROOT_BUILDER=vz`; it does not require Docker Desktop or Podman. The current initramfs rebuild still uses the separate external Docker-compatible Linux build path when no trusted initramfs artifact is available. Harpoon's own Docker Engine cannot bootstrap either path because its guest assets do not yet exist.
+**Fresh-clone bootstrap (Stage 3D):** Root population requires Apple Virtualization.framework via `build-root.sh --builder vz`; it does not require Docker Desktop or Podman. The current initramfs rebuild still uses the separate external Docker-compatible Linux build path when no trusted initramfs artifact is available. Harpoon's own Docker Engine cannot bootstrap either path because its guest assets do not yet exist.
 
 The canonical order is root image, then initramfs: the initramfs fingerprint includes the root image and the initramfs build copies the offline Python closure from that image. The initramfs builder detects a reachable Docker-compatible engine (Docker, including an explicit context or `DOCKER_HOST`, or Podman) only for its Linux archive build and never selects Harpoon's context implicitly.
 

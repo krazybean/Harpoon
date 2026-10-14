@@ -17,7 +17,8 @@ x_tables
 ip_tables
 iptable_nat
 iptable_filter
-xt_MASQUERADE
+# NAT feature modules are validated through required-kernel-features.txt so
+# built-in kernels and modular kernels use the same capability check.
 xt_addrtype
 xt_conntrack
 xt_comment
@@ -29,8 +30,6 @@ nfnetlink
 nf_tables
 nft_compat
 nft_chain_nat
-xt_nat
-xt_REDIRECT
 
 # VirtioFS, balloon, network, and vsock
 fuse

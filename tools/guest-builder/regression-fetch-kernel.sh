@@ -22,7 +22,11 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-printf 'canonical-%s' "${url##*/}" > "$out"
+if [ "${url##*/}" = vmlinuz-virt ]; then
+  printf 'canonical-%s' "${url##*/}" | gzip -c > "$out"
+else
+  printf 'canonical-%s' "${url##*/}" > "$out"
+fi
 printf '%s\n' "${url##*/}" >> "$CURL_LOG"
 EOF
 cat > "$TMP/bin/shasum" <<'EOF'

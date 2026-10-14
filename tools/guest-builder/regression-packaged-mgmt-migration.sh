@@ -20,13 +20,9 @@ ROOT="$LIB/harpoon-root.img"
 DISK="$TMP/old-root.img"
 PAYLOAD="$TMP/initramfs"
 CANARY="$TMP/docker-canary"
-MODULE_DIR=/lib/modules/6.12.110-0-virt
-NAT_MODULES=(
-  "$MODULE_DIR/kernel/net/netfilter/xt_nat.ko"
-  "$MODULE_DIR/kernel/net/netfilter/xt_REDIRECT.ko"
-  "$MODULE_DIR/kernel/net/netfilter/xt_MASQUERADE.ko"
-)
-MISSING_MODULES=("${NAT_MODULES[0]}" "${NAT_MODULES[1]}")
+MODULE_DIR=""
+NAT_MODULES=()
+MISSING_MODULES=()
 completed=0
 
 fail() { echo "packaged-migration FAIL: $*" >&2; exit 1; }
@@ -85,6 +81,15 @@ cp -p "$SOURCE_INITRAMFS" "$INITRAMFS"
 (cp -c "$SOURCE_ROOT" "$ROOT" 2>/dev/null || cp -p "$SOURCE_ROOT" "$ROOT") || fail "cannot build fake bundled root"
 gzip -dc "$INITRAMFS" | (cd "$PAYLOAD" && cpio -idm >/dev/null 2>&1) || fail "cannot unpack bundled initramfs"
 [ "$(shasum -a 256 "$INITRAMFS" | cut -d' ' -f1)" = "$SOURCE_INITRAMFS_SHA" ] || fail "bundled initramfs SHA"
+MODULE_DIR="/lib/modules/$(basename "$(find "$PAYLOAD/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+[ "$MODULE_DIR" != "/lib/modules/" ] || fail "initramfs has no module directory"
+for module in xt_nat xt_REDIRECT xt_MASQUERADE; do
+  path=$(find "$PAYLOAD$MODULE_DIR" -type f -name "$module.ko" -print -quit)
+  if [ -n "$path" ]; then NAT_MODULES+=("${path#$PAYLOAD}");
+  elif grep -q "/$module\.ko$" "$PAYLOAD$MODULE_DIR/modules.builtin"; then :
+  else fail "required NAT capability unavailable: $module"; fi
+done
+MISSING_MODULES=("${NAT_MODULES[@]:0:2}")
 for path in "${NAT_MODULES[@]}" "$MODULE_DIR/modules.dep" "$MODULE_DIR/modules.alias"; do check test -f "$PAYLOAD$path"; done
 
 (cp -c "$ROOT" "$DISK" 2>/dev/null || cp "$ROOT" "$DISK") || fail "cannot clone old root"
@@ -94,7 +99,7 @@ fsck_status=$?
 set -e
 [ "$fsck_status" -le 1 ] || fail "template e2fsck status $fsck_status"
 printf 'harpoon-packaged-migration-docker-canary\n' > "$CANARY"
-for path in "${MISSING_MODULES[@]}"; do "$DEBUGFS" -w -R "rm $path" "$DISK" >/dev/null 2>&1 || true; done
+for path in "${MISSING_MODULES[@]}"; do [ -n "$path" ] && "$DEBUGFS" -w -R "rm $path" "$DISK" >/dev/null 2>&1 || true; done
 grep -vE 'xt_(nat|REDIRECT)\.ko' "$PAYLOAD$MODULE_DIR/modules.dep" > "$TMP/modules.dep.old"
 grep -vE 'xt_(nat|REDIRECT)' "$PAYLOAD$MODULE_DIR/modules.alias" > "$TMP/modules.alias.old"
 for metadata in modules.dep modules.alias; do
@@ -107,8 +112,8 @@ set +e
 fsck_status=$?
 set -e
 [ "$fsck_status" -le 1 ] || fail "fixture e2fsck status $fsck_status"
-for path in "${MISSING_MODULES[@]}"; do if stat_path "$path" | grep -q 'Inode:'; then fail "old root still has $path"; fi; done
-stat_path "${NAT_MODULES[2]}" | grep -q 'Inode:' || fail "old root lost legacy xt_MASQUERADE"
+for path in "${MISSING_MODULES[@]}"; do [ -z "$path" ] || { if stat_path "$path" | grep -q 'Inode:'; then fail "old root still has $path"; fi; }; done
+for path in "${NAT_MODULES[@]:2}"; do stat_path "$path" | grep -q 'Inode:' || fail "old root lost legacy NAT module $path"; done
 cmp -s "$PAYLOAD$MODULE_DIR/modules.dep" "$TMP/modules.dep.old" && fail "old metadata still current"
 "$DEBUGFS" -R "dump /var/lib/docker/harpoon-mgmt-canary $TMP/canary-before" "$DISK" >/dev/null || fail "fixture Docker canary missing before boot"
 cmp -s "$CANARY" "$TMP/canary-before" || fail "fixture Docker canary differs before boot"
