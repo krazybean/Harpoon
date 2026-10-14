@@ -39,6 +39,13 @@ exit 0
 SH
 chmod +x "$tmp/harpoon"
 
+cat >"$tmp/prior-blocked" <<'SH'
+#!/usr/bin/env bash
+echo STAGE_2_GATE_BLOCKED_ENVIRONMENT
+exit 2
+SH
+chmod +x "$tmp/prior-blocked"
+
 run_case() {
   local label="$1" start="$2" rm_fail="$3" expected="$4"
   : >"$tmp/log"; rm -f "$tmp/container" "$tmp/started" "$tmp/stopped"
@@ -61,7 +68,19 @@ run_case() {
   fi
 }
 
+run_blocked_prior_case() {
+  : >"$tmp/log"; rm -f "$tmp/container" "$tmp/started" "$tmp/stopped"
+  MOCK_LOG="$tmp/log" MOCK_CONTAINER="$tmp/container" MOCK_CREATE_ARGS="$tmp/create" MOCK_NAME="harpoon-stage6-boundary-$$" MOCK_STARTED="$tmp/started" MOCK_STOPPED="$tmp/stopped" MOCK_RM_FAIL=0 \
+    PATH="$tmp:$PATH" HARPOON_STAGE6_BIN="$tmp/harpoon" HARPOON_STAGE6_PRIOR_GATE_BIN="$tmp/prior-blocked" HARPOON_STAGE6_LIVE=1 MOCK_PRESERVE=1 \
+    bash "$ROOT/tools/stage-6-docker-boundary-gate.sh" >"$tmp/out" 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || { cat "$tmp/out"; echo "FAIL blocked-prior exit=$rc expected=2"; exit 1; }
+  [ ! -e "$tmp/container" ] || { echo 'FAIL blocked-prior cleanup left container'; exit 1; }
+  rg -q 'STAGE_6_GATE_BLOCKED_ENVIRONMENT' "$tmp/out" || { echo 'FAIL blocked-prior verdict missing'; exit 1; }
+}
+
 run_case ownership 1 0 0
 run_case cleanup-failure 1 1 1
 run_case started 0 0 0
+run_blocked_prior_case
 echo STAGE_6_CLEANUP_REGRESSION_PASS
