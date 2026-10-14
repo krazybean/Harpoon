@@ -14,24 +14,10 @@ echo "[guest-builder] repo: $REPO_ROOT" >&2
 echo "[guest-builder] step 1/3: kernel Image-virt" >&2
 bash "$SCRIPT_DIR/fetch-kernel.sh"
 
-# 2. Root image — fetch/rebuild/bootstrap + sanitize. Initramfs fingerprints
-# and copies files from this image, so it must exist before that step.
+# 2. Root image — clean Alpine population in a disposable VZ builder. Initramfs
+# fingerprints and copies files from this image, so it must exist before that step.
 echo "[guest-builder] step 2/3: root harpoon-root.img" >&2
-if ! bash "$SCRIPT_DIR/build-root.sh" 2>&1; then
-  echo "[guest-builder] root build/sanitize reported issues (see above)" >&2
-  if [ ! -f "$OUT_DIR/harpoon-root.img" ] && ! harpoon_detect_build_engine; then
-    echo "[guest-builder] BLOCKED_ENVIRONMENT: no external Docker-compatible build engine is reachable" >&2
-    exit 2
-  fi
-  # For initial migration, we allow seeding but require verify to gate release
-  # If verify fails, build fails
-  echo "[guest-builder] verifying root image..." >&2
-  if ! bash "$SCRIPT_DIR/verify-root.sh" "$REPO_ROOT/assets/guest/harpoon-root.img" 2>&1; then
-    echo "[guest-builder] FAIL: harpoon-root.img contains test state — sanitize required before release" >&2
-    echo "[guest-builder] Run: bash tools/guest-builder/sanitize-root.sh" >&2
-    exit 1
-  fi
-fi
+bash "$SCRIPT_DIR/build-root.sh" --force
 
 # 3. Initramfs — fetch or rebuild (two-mode, no historical cache)
 echo "[guest-builder] step 3/3: initramfs harpoon-initramfs.cpio.gz" >&2

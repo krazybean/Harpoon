@@ -197,8 +197,8 @@ Canonical assets live at:
 ```
 assets/guest/
   Image-virt                  # ARM64 Linux kernel (uncompressed)
-  harpoon-initramfs.cpio.gz   # initramfs (Docker Engine at boot)
-  harpoon-root.img            # 2G sparse ext4 template (0 containers/images/volumes)
+  harpoon-initramfs.cpio.gz   # immutable boot/runtime closure
+  harpoon-root.img            # 2G sparse Alpine/Docker/Python template
 ```
 
 Their **authoritative build location** is `tools/guest-builder/`:
@@ -206,20 +206,20 @@ Their **authoritative build location** is `tools/guest-builder/`:
 ```sh
 bash tools/guest-builder/build.sh          # build all three (kernel + initramfs + root)
 bash tools/guest-builder/fetch-kernel.sh   # fetch Alpine 3.22 virt kernel -> Image-virt
-bash tools/guest-builder/build-root.sh     # create/sanitize harpoon-root.img
+bash tools/guest-builder/build-root.sh     # requires HARPOON_ROOT_BUILDER=vz; fresh Alpine population
 bash tools/guest-builder/build-initramfs.sh # build harpoon-initramfs.cpio.gz
 bash tools/guest-builder/verify-root.sh    # FAILS if root contains Docker test state
 bash tools/guest-builder/sanitize-root.sh  # deterministically clean to 0/0/0
 ```
 
 - `Image-virt` provenance: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt` (PE+gz wrapper decompressed at gzip offset) `virt` `6.12.110-0-virt`.
-- `harpoon-initramfs.cpio.gz` is the Docker + management + storage initramfs ported from `spike2/build.sh` (virtio modules injected from `modloop-virt` via `modules.dep`, `/init` apk-adds Docker + `python3` + `socat` + `e2fsprogs` at boot, installs `/usr/local/bin/harpoon-mgmt` and `socat VSOCK-LISTEN:2377` management listener `HARPOON_MGMT_READY`, plus auto `resize2fs /dev/vda` if `blockdev --getsize64 > df -B1` for grow-only sparse).
-- `harpoon-root.img` is a **2 GiB template** raw ext4 (`2147483648` logical, `~962M` physical APFS sparse, `0/0/0` sanitation). Build fails if it contains test residue. **First provision** sparse-grows to **8 GiB logical minimum** (`8589934592`, physical ~1G) via `truncate` + guest `resize2fs`; supports `12G 16G 32G` via `harpoon start --disk-size 16G` (when no disk) or `harpoon disk resize 16G` (grow-only, VM stopped). See `tools/guest-builder/verify-root.sh` and `harpoon disk status`.
+- `harpoon-initramfs.cpio.gz` is the Docker + management + storage initramfs ported from `spike2/build.sh` (virtio modules injected from `modloop-virt` via `modules.dep`, installs `/usr/local/bin/harpoon-mgmt` and `socat VSOCK-LISTEN:2377` management listener `HARPOON_MGMT_READY`, plus auto `resize2fs /dev/vda` if `blockdev --getsize64 > df -B1` for grow-only sparse).
+- `harpoon-root.img` is a **2 GiB template** raw ext4 populated by real Alpine `apk` inside a disposable Virtualization.framework builder VM. It installs the declared Docker Engine/containerd/runc, Python, socat, networking, filesystem, kmod, and certificate closure, writes an exact package manifest inside the image, and removes APK/Docker build residue. The root path does not use Docker Desktop, Podman, an existing root, or host-side package emulation. **First provision** sparse-grows to **8 GiB logical minimum** (`8589934592`, physical ~1G) via `truncate` + guest `resize2fs`; supports `12G 16G 32G` via `harpoon start --disk-size 16G` (when no disk) or `harpoon disk resize 16G` (grow-only, VM stopped). See `tools/guest-builder/verify-root.sh` and `harpoon disk status`.
 - Management channel (Stage 3A): vsock `2377` dedicated to `harpoon exec`/`harpoon shell`, separate from Docker `2375`, vsock-only (no TCP, no SSH), host bridge at `0600` `/tmp/harpoon-mgmt.sock` → vsock `2377`.
 
-**Fresh-clone Docker bootstrap (Stage 3D):** The **first** `bash tools/guest-builder/build.sh` on a fresh clone **requires an already-running external Docker-compatible build engine** (Docker Desktop `docker info` or any `DOCKER_HOST` that can `docker run --rm alpine:3.22`). Harpoon's own Docker Engine cannot be used for the first build because its guest assets do not yet exist. `tools/guest-builder/build.sh` fails clearly when no trusted artifact or usable engine is available — it does **not** install Docker Desktop automatically.
+**Fresh-clone bootstrap (Stage 3D):** Root population requires Apple Virtualization.framework via `HARPOON_ROOT_BUILDER=vz`; it does not require Docker Desktop or Podman. The current initramfs rebuild still uses the separate external Docker-compatible Linux build path when no trusted initramfs artifact is available. Harpoon's own Docker Engine cannot bootstrap either path because its guest assets do not yet exist.
 
-The canonical order is root image, then initramfs: the initramfs fingerprint includes the root image and the initramfs build copies the offline Python closure from that image. The builder detects a reachable Docker-compatible engine (Docker, including an explicit context or `DOCKER_HOST`, or Podman) and fails with an explicit external-engine blocker when neither a trusted fetch/bootstrap artifact nor a usable engine is available. Harpoon's own context is never selected implicitly.
+The canonical order is root image, then initramfs: the initramfs fingerprint includes the root image and the initramfs build copies the offline Python closure from that image. The initramfs builder detects a reachable Docker-compatible engine (Docker, including an explicit context or `DOCKER_HOST`, or Podman) only for its Linux archive build and never selects Harpoon's context implicitly.
 
 **Pinned guest inputs (Stage 3D, cryptographic — mismatch FAILs, not just prints):**
 ```text

@@ -8,8 +8,8 @@ It produces the three canonical assets consumed by production runtime,
 ```
 assets/guest/
   Image-virt                  # ARM64 Linux kernel (uncompressed, ~33M)
-  harpoon-initramfs.cpio.gz   # initramfs that apk-adds Docker at boot (~14M)
-  harpoon-root.img            # 2G sparse ext4 template (962M physical, 0 containers/images/volumes)
+  harpoon-initramfs.cpio.gz   # immutable boot/runtime closure (~14M)
+  harpoon-root.img            # 2G sparse Alpine/Docker/Python ext4 template
 ```
 
 Historical prototypes remain frozen evidence and MUST NOT be referenced by production code.
@@ -23,7 +23,7 @@ bash tools/guest-builder/build.sh
 # individual steps
 bash tools/guest-builder/fetch-kernel.sh
 bash tools/guest-builder/build-initramfs.sh
-bash tools/guest-builder/build-root.sh        # creates sparse 2G ext4 if missing
+HARPOON_ROOT_BUILDER=vz bash tools/guest-builder/build-root.sh --force
 bash tools/guest-builder/verify-root.sh       # fails if dirty (containers/images/volumes != 0)
 bash tools/guest-builder/sanitize-root.sh     # deterministic clean to 0/0/0
 ```
@@ -38,10 +38,12 @@ bash tools/guest-builder/sanitize-root.sh     # deterministic clean to 0/0/0
   `initramfs-virt`/`modloop-virt` (see `build-initramfs.sh` — production behavior, cleaned up).
   Two-mode: FETCH (versioned artifact with SHA-256) or REBUILD (Docker Linux).
   Until v0.1.1 publishes, a temporary bootstrap at `assets/guest/.bootstrap/` may be used.
-- root: 2G raw ext4 (`2147483648` logical, ~962M physical APFS sparse). Created
-  via `qemu-img`/`truncate` + `mkfs.ext4` when tools available, otherwise
-  sanitized from existing template. Guest-template sanitation is mandatory before
-  release (see `verify-root.sh` / `sanitize-root.sh`).
+- root: a 2G raw ext4 (`2147483648` logical) populated from pinned Alpine 3.22
+  repositories by `src/alpine-root-builder-init` inside a disposable
+  Virtualization.framework VM. The VM installs the declared Docker Engine,
+  containerd, runc, Python, transport, networking, filesystem, and certificate
+  closure with real `apk`, writes a package manifest, removes APK/Docker build
+  residue, and exits. Docker Desktop/Podman are not part of this path.
 
 ## Bug fix
 

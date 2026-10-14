@@ -4,17 +4,18 @@
 
 ## Current Position
 
-### Build-bootstrap repair — CODE PASS / LIVE CHAIN BLOCKED (2026-10-14 America/Chicago)
+### Alpine root bootstrap repair — CODE COMPLETE / VZ VALIDATION BLOCKED (2026-10-14 America/Chicago)
 
-The canonical guest builder now creates/verifies `harpoon-root.img` before
-fingerprinting and assembling the initramfs, whose offline Python closure is
-copied from that root image. Docker/Podman detection is shared by the root and
-initramfs builders, honors explicit Docker contexts and `DOCKER_HOST`, never
-selects Harpoon implicitly, and reports a distinct `BLOCKED_ENVIRONMENT` exit
-when no external build engine is reachable. Static checks and Swift
-build/signing passed. The live Stage 2–7 retry remains blocked because this
-environment has no reachable Docker-compatible engine, no Podman, and no
-trusted root-image fetch/bootstrap artifact. No runtime or UI behavior changed.
+The canonical root path now rejects historical images and runs a one-shot
+Alpine 3.22 builder VM through Virtualization.framework. Real `apk` populates a
+fresh ext4 target with the declared Docker Engine/containerd/runc/Python,
+transport, networking, filesystem, kmod, and certificate closure; the builder
+writes an exact package manifest, removes build residue, and exits. Docker
+Desktop/Podman are not dependencies of root population. Shell, Swift, and
+regression checks pass. Live population is **BLOCKED_ENVIRONMENT** here because
+this execution host reports `Virtualization.framework unavailable`; therefore
+no root/initramfs/live Stage 2–7 verdict is claimed. No Stage 8+, Stage 9, or UI
+work was started.
 
 ### Stage 7 diagnostics follow-up — IMPLEMENTATION PASS / FULL CHAIN BLOCKED (2026-10-14 America/Chicago)
 
