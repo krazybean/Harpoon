@@ -12,7 +12,8 @@ bb() { "$BUSYBOX" "$@"; }
 log() { bb printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
 fail() { log "FAIL $*"; while :; do bb sleep 5; done; }
 
-bb mkdir -p /proc /sys /dev /tmp /etc/apk
+bb mkdir -p /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin
+bb mkdir -p /proc /sys /dev /tmp /etc/apk /var/cache/apk /var/lib/apk /lib/apk/db
 bb mount -t proc proc /proc 2>/dev/null || true
 bb mount -t sysfs sysfs /sys 2>/dev/null || true
 bb mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
@@ -45,15 +46,21 @@ bb cat > /etc/apk/repositories <<EOF
 $REPOS
 EOF
 log APK_BOOTSTRAP_START
-/sbin/apk update > /tmp/apk-update.log 2>&1 || { bb cat /tmp/apk-update.log > "$MARKER"; fail apk-update; }
-/sbin/apk add --no-cache e2fsprogs e2fsprogs-extra > /tmp/apk-tools.log 2>&1 || { bb cat /tmp/apk-tools.log > "$MARKER"; fail apk-tools; }
+/sbin/apk --initdb add --no-cache e2fsprogs e2fsprogs-extra > /tmp/apk-tools.log 2>&1 || { bb cat /tmp/apk-tools.log > "$MARKER"; fail apk-tools; }
 
 log FORMAT_START
 mkfs.ext4 -F -q -L harpoon-root -U 00000000-0000-0000-0000-000000000001 "$TARGET" || fail mkfs
 bb mkdir -p "$ROOT"
 bb mount -t ext4 "$TARGET" "$ROOT" || fail mount
 
-bb mkdir -p "$ROOT/etc/apk"
+bb mkdir -p "$ROOT"/bin "$ROOT"/sbin "$ROOT"/usr/bin "$ROOT"/usr/sbin "$ROOT"/usr/local/bin "$ROOT"/usr/local/sbin
+bb mkdir -p "$ROOT"/dev "$ROOT"/proc "$ROOT"/sys "$ROOT"/etc/apk/keys "$ROOT"/lib/apk/db "$ROOT"/var/cache/apk "$ROOT"/var/lib/apk "$ROOT"/run "$ROOT"/tmp
+bb mount --bind /dev "$ROOT/dev" || fail target-mount-dev
+bb mount --bind /proc "$ROOT/proc" || fail target-mount-proc
+bb mount --bind /sys "$ROOT/sys" || fail target-mount-sys
+bb rm -f "$ROOT/etc/resolv.conf"
+bb cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
+bb cp -a /etc/apk/keys/. "$ROOT/etc/apk/keys/"
 bb cp /etc/apk/repositories "$ROOT/etc/apk/repositories"
 log APK_ROOT_START packages="$PACKAGES"
 /sbin/apk --root "$ROOT" --initdb --no-cache add $PACKAGES > /tmp/apk-root.log 2>&1 || { bb cat /tmp/apk-root.log > "$MARKER"; fail apk-root; }
@@ -64,16 +71,21 @@ bb cp /builder-payload/harpoon-mgmt "$ROOT/usr/local/bin/harpoon-mgmt"
 bb cp /builder-payload/harpoon-mgmt-wrapper "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
 bb chmod 0755 "$ROOT/init" "$ROOT/usr/local/bin/harpoon-mgmt" "$ROOT/usr/local/bin/harpoon-mgmt-wrapper"
 
-# The template is deliberately package-populated but Docker-state empty.
-bb rm -rf "$ROOT/var/lib/docker"/* "$ROOT/var/cache/apk"/* "$ROOT/tmp"/* "$ROOT/run"/*
-bb mkdir -p "$ROOT/var/lib/docker" "$ROOT/run" "$ROOT/tmp"
+# The target root needs the same runtime namespaces for package scripts and checks.
 bb chmod 1777 "$ROOT/tmp"
 
-for bin in dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe; do
-  command -v "$bin" >/dev/null 2>&1 || fail "builder-missing-$bin"
-  command -v "$bin" > "$ROOT/usr/local/share/harpoon-runtime/$bin.path"
-done
-python3 -c 'import sys; assert sys.version_info >= (3, 12)' || fail python-runtime
+# The template is deliberately package-populated but Docker-state empty.
+bb rm -rf "$ROOT/var/lib/docker"/* "$ROOT/var/cache/apk"/* "$ROOT/tmp"/* "$ROOT/run"/*
+bb mkdir -p "$ROOT/var/lib/docker" "$ROOT/run"
+
+bb chroot "$ROOT" /bin/sh -c '
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  for bin in dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe; do
+    path=$(command -v "$bin") || exit 1
+    printf "%s\\n" "$path" > "/usr/local/share/harpoon-runtime/$bin.path"
+  done
+  python3 -c "import sys; assert sys.version_info >= (3, 12)"
+' || fail target-runtime
 
 {
   printf 'harpoon-alpine-root-v1\n'

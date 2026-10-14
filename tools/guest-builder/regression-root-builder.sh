@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d /tmp/harpoon-root-builder-regression.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
+bash "$REPO_ROOT/tools/guest-builder/regression-root-builder-init.sh"
+
 mkdir -p "$TMP/assets/guest"
 VZ_SCRIPT="$REPO_ROOT/tools/guest-builder/build-root-vz.sh"
 grep -q 'codesign --entitlements "$ENTITLEMENTS" --force -s - "$WORK/AlpineRootBuilder"' "$VZ_SCRIPT"
