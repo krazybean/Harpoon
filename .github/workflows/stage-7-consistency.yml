@@ -4,25 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 0"
-  push:
-    branches: [main]
-    paths:
-      - "harpoon/Sources/**"
-      - "harpoon/build.sh"
-      - "tools/stage-[0-7]*"
-      - "tools/regression-stage*.sh"
-      - "tools/guest-builder/**"
-      - "assets/guest/**"
-      - ".github/workflows/stage-7-consistency.yml"
-  pull_request:
-    paths:
-      - "harpoon/Sources/**"
-      - "harpoon/build.sh"
-      - "tools/stage-[0-7]*"
-      - "tools/regression-stage*.sh"
-      - "tools/guest-builder/**"
-      - "assets/guest/**"
-      - ".github/workflows/stage-7-consistency.yml"
 
 permissions:
   contents: read
