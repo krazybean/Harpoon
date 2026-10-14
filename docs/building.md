@@ -212,7 +212,7 @@ bash tools/guest-builder/verify-root.sh    # FAILS if root contains Docker test 
 bash tools/guest-builder/sanitize-root.sh  # deterministically clean to 0/0/0
 ```
 
-- `Image-virt` provenance: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt` (PE+gz wrapper decompressed at gzip offset) `virt` `6.12.94-0-virt`.
+- `Image-virt` provenance: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt` (PE+gz wrapper decompressed at gzip offset) `virt` `6.12.110-0-virt`.
 - `harpoon-initramfs.cpio.gz` is the Docker + management + storage initramfs ported from `spike2/build.sh` (virtio modules injected from `modloop-virt` via `modules.dep`, `/init` apk-adds Docker + `python3` + `socat` + `e2fsprogs` at boot, installs `/usr/local/bin/harpoon-mgmt` and `socat VSOCK-LISTEN:2377` management listener `HARPOON_MGMT_READY`, plus auto `resize2fs /dev/vda` if `blockdev --getsize64 > df -B1` for grow-only sparse).
 - `harpoon-root.img` is a **2 GiB template** raw ext4 (`2147483648` logical, `~962M` physical APFS sparse, `0/0/0` sanitation). Build fails if it contains test residue. **First provision** sparse-grows to **8 GiB logical minimum** (`8589934592`, physical ~1G) via `truncate` + guest `resize2fs`; supports `12G 16G 32G` via `harpoon start --disk-size 16G` (when no disk) or `harpoon disk resize 16G` (grow-only, VM stopped). See `tools/guest-builder/verify-root.sh` and `harpoon disk status`.
 - Management channel (Stage 3A): vsock `2377` dedicated to `harpoon exec`/`harpoon shell`, separate from Docker `2375`, vsock-only (no TCP, no SSH), host bridge at `0600` `/tmp/harpoon-mgmt.sock` → vsock `2377`.
@@ -225,14 +225,14 @@ The canonical order is root image, then initramfs: the initramfs fingerprint inc
 ```text
 Alpine 3.22 aarch64
   vmlinuz-virt: https://dl-cdn.alpinelinux.org/.../netboot/vmlinuz-virt
-    sha256 f270bfa4324e37f0a28662909b0450c802c8279143f353cbc7fe250cdfb733a8
-    kernel 6.12.94-0-virt
+    sha256 dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332
+    kernel 6.12.110-0-virt
   initramfs-virt: https://.../netboot/initramfs-virt
-    sha256 508de7f561b94aac0b569611574502e4528eb21230318badac9626b7f1791bf4
+    sha256 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c
   modloop-virt: https://.../netboot/modloop-virt
-    sha256 7c2e9d8a3f1c... (fetched, verified at build, printed; fallback 9f1e... if not cached — see build-initramfs.sh)
+    sha256 da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218
   alpine-minirootfs-3.22.1-aarch64.tar.gz: https://.../alpine-minirootfs-3.22.1-aarch64.tar.gz
-    sha256 9f8a1b... (fetched, verified)
+    sha256 188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c
 ```
 Every downloaded `modloop`/`minirootfs` is verified via `shasum -a 256` against declared `EXPECTED_SHA`; mismatch → `FAIL` (not continuation). See `tools/guest-builder/build-initramfs.sh` `EXPECTED_*_SHA`.
 

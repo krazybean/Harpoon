@@ -20,11 +20,11 @@ source "$SCRIPT_DIR/build-engine.sh"
 mkdir -p "$REPO_ROOT/assets/guest" "$CACHE_DIR"
 
 # Pinned production inputs — mismatch FAILs
-EXPECTED_VMLINUZ_SHA="f270bfa4324e37f0a28662909b0450c802c8279143f353cbc7fe250cdfb733a8"
-EXPECTED_INITRAMFS_VIRT_SHA="508de7f561b94aac0b569611574502e4528eb21230318badac9626b7f1791bf4"
-EXPECTED_MODLOOP_SHA="65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810"
+EXPECTED_VMLINUZ_SHA="dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332"
+EXPECTED_INITRAMFS_VIRT_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c"
+EXPECTED_MODLOOP_SHA="da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218"
 EXPECTED_MINIROOTFS_SHA="188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c"
-EXPECTED_KERNEL="6.12.94-0-virt"
+EXPECTED_KERNEL="6.12.110-0-virt"
 
 input_manifest() {
   local file rel
@@ -119,16 +119,16 @@ fi
 if [ -f "$OUT" ]; then echo "[build-initramfs] STALE: input manifest missing, malformed, or changed; rebuilding" >&2; fi
 
 # 3. deterministic REBUILD via Docker Linux (Alpine 3.22)
-# Pinned inputs (Alpine 3.22 aarch64, kernel 6.12.94-0-virt):
-#   Kernel: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt (6.12.94-0-virt)
+# Pinned inputs (Alpine 3.22 aarch64, kernel 6.12.110-0-virt):
+#   Kernel: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt (6.12.110-0-virt)
 #   Initramfs-virt: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/initramfs-virt
 #   Modloop: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/modloop-virt
 #   Minirootfs: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.1-aarch64.tar.gz
 # Packages pinned at build time via apk add with explicit Alpine 3.22 repos (no latest).
 # Required modules injected from modloop via modules.dep dependency walk (virtio, vsock, etc).
 # SHA-256 for upstream artifacts where practical (recorded after fetch, verified on rebuild):
-#   vmlinuz-virt: f270bfa4324e37f0a28662909b0450c802c8279143f353cbc7fe250cdfb733a8 (cached .cache/vmlinuz-virt)
-#   initramfs-virt: 508de7f561b94aac0b569611574502e4528eb21230318badac9626b7f1791bf4 (cached)
+#   vmlinuz-virt: dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332 (cached .cache/vmlinuz-virt)
+#   initramfs-virt: 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c (cached)
 #   modloop-virt: (fetched, sha printed at build)
 #   alpine-minirootfs-3.22.1: (fetched, sha printed)
 
@@ -152,7 +152,7 @@ if harpoon_detect_build_engine; then
       curl -L --fail -o "$CACHE/modloop-virt" "$BASE/netboot/modloop-virt"
       echo "[rebuild] modloop sha256 $(sha256sum "$CACHE/modloop-virt" | cut -d" " -f1)" >&2
     fi
-    if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" ]; then echo "[rebuild] FAIL modloop sha mismatch expected 65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab810" >&2; exit 1; fi
+    if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218" ]; then echo "[rebuild] FAIL modloop sha mismatch expected da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218" >&2; exit 1; fi
     if [ ! -f "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" ]; then
       echo "[rebuild] fetching alpine-minirootfs-3.22.1..." >&2
       curl -L --fail -o "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" "$BASE/alpine-minirootfs-3.22.1-aarch64.tar.gz"

@@ -20,7 +20,7 @@ ROOT="$LIB/harpoon-root.img"
 DISK="$TMP/old-root.img"
 PAYLOAD="$TMP/initramfs"
 CANARY="$TMP/docker-canary"
-MODULE_DIR=/lib/modules/6.12.94-0-virt
+MODULE_DIR=/lib/modules/6.12.110-0-virt
 NAT_MODULES=(
   "$MODULE_DIR/kernel/net/netfilter/xt_nat.ko"
   "$MODULE_DIR/kernel/net/netfilter/xt_REDIRECT.ko"

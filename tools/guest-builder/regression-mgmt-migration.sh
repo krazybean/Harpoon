@@ -12,7 +12,7 @@ TMP=$(mktemp -d /tmp/harpoon-mgmt-migration.XXXXXX)
 DISK="$TMP/old-root.img"
 CANARY="$TMP/docker-canary"
 PAYLOAD="$TMP/initramfs"
-MODULE_DIR=/lib/modules/6.12.94-0-virt
+MODULE_DIR=/lib/modules/6.12.110-0-virt
 NAT_MODULES=(
   "$MODULE_DIR/kernel/net/netfilter/xt_nat.ko"
   "$MODULE_DIR/kernel/net/netfilter/xt_REDIRECT.ko"

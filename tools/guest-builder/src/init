@@ -13,7 +13,7 @@ echo "HARPOON_ROOTFS_TYPE $ROOTFS_TYPE" > /dev/hvc0
 if [ "$ROOTFS_TYPE" = "tmpfs" ] || [ "$ROOTFS_TYPE" = "rootfs" ] || echo "$ROOTFS_TYPE" | grep -q "tmpfs"; then
   echo "HARPOON_BLOCK_TRY_PIVOT" > /dev/hvc0
   # Load virtio-blk driver if needed (built-in on Alpine virt, but ensure)
-  modprobe virtio_blk 2>&1 | tee /dev/hvc0 >/dev/null || insmod /lib/modules/6.12.94-0-virt/kernel/drivers/block/virtio_blk.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+  modprobe virtio_blk 2>&1 | tee /dev/hvc0 >/dev/null || insmod /lib/modules/6.12.110-0-virt/kernel/drivers/block/virtio_blk.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
   sleep 1
   # Wait for virtio block device
   for i in $(seq 1 10); do
@@ -25,7 +25,7 @@ if [ "$ROOTFS_TYPE" = "tmpfs" ] || [ "$ROOTFS_TYPE" = "rootfs" ] || echo "$ROOTF
   if [ -b /dev/vda ]; then
     # ext4 filesystem driver — CONFIG_EXT4_FS=m, JBD2=m, FS_MBCACHE=m, CRC16=m — modular, not builtin
     echo "HARPOON_EXT4_MODPROBE_START" > /dev/hvc0
-    ls -lh /lib/modules/6.12.94-0-virt/kernel/fs/ext4/ext4.ko /lib/modules/6.12.94-0-virt/kernel/fs/jbd2/jbd2.ko /lib/modules/6.12.94-0-virt/kernel/fs/mbcache.ko /lib/modules/6.12.94-0-virt/kernel/lib/crc16.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+    ls -lh /lib/modules/6.12.110-0-virt/kernel/fs/ext4/ext4.ko /lib/modules/6.12.110-0-virt/kernel/fs/jbd2/jbd2.ko /lib/modules/6.12.110-0-virt/kernel/fs/mbcache.ko /lib/modules/6.12.110-0-virt/kernel/lib/crc16.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
     EXT4_MODPROBE_OK=1
     if command -v modprobe >/dev/null 2>&1; then
       if ! modprobe crc16 > /tmp/modprobe_crc16.log 2>&1; then cat /tmp/modprobe_crc16.log 2>&1 | tee /dev/hvc0 >/dev/null || true; EXT4_MODPROBE_OK=0; fi
@@ -37,28 +37,28 @@ if [ "$ROOTFS_TYPE" = "tmpfs" ] || [ "$ROOTFS_TYPE" = "rootfs" ] || echo "$ROOTF
     fi
     if [ $EXT4_MODPROBE_OK -eq 0 ]; then
       echo "modprobe ext4 failed or unavailable, trying direct insmod in dep order" > /dev/hvc0
-      if insmod /lib/modules/6.12.94-0-virt/kernel/lib/crc16.ko > /tmp/insmod_crc16.log 2>&1; then
+      if insmod /lib/modules/6.12.110-0-virt/kernel/lib/crc16.ko > /tmp/insmod_crc16.log 2>&1; then
         echo "HARPOON_EXT4_INSMOD_CRC16_OK" > /dev/hvc0
       else
         ERR=$(cat /tmp/insmod_crc16.log 2>&1 | head -n 5 | tr '\n' ' ')
         echo "HARPOON_EXT4_INSMOD_FAILED crc16 $ERR" > /dev/hvc0
         cat /tmp/insmod_crc16.log 2>&1 | tee /dev/hvc0 >/dev/null || true
       fi
-      if insmod /lib/modules/6.12.94-0-virt/kernel/fs/mbcache.ko > /tmp/insmod_mbcache.log 2>&1; then
+      if insmod /lib/modules/6.12.110-0-virt/kernel/fs/mbcache.ko > /tmp/insmod_mbcache.log 2>&1; then
         echo "HARPOON_EXT4_INSMOD_MBCACHE_OK" > /dev/hvc0
       else
         ERR=$(cat /tmp/insmod_mbcache.log 2>&1 | head -n 5 | tr '\n' ' ')
         echo "HARPOON_EXT4_INSMOD_FAILED mbcache $ERR" > /dev/hvc0
         cat /tmp/insmod_mbcache.log 2>&1 | tee /dev/hvc0 >/dev/null || true
       fi
-      if insmod /lib/modules/6.12.94-0-virt/kernel/fs/jbd2/jbd2.ko > /tmp/insmod_jbd2.log 2>&1; then
+      if insmod /lib/modules/6.12.110-0-virt/kernel/fs/jbd2/jbd2.ko > /tmp/insmod_jbd2.log 2>&1; then
         echo "HARPOON_EXT4_INSMOD_JBD2_OK" > /dev/hvc0
       else
         ERR=$(cat /tmp/insmod_jbd2.log 2>&1 | head -n 5 | tr '\n' ' ')
         echo "HARPOON_EXT4_INSMOD_FAILED jbd2 $ERR" > /dev/hvc0
         cat /tmp/insmod_jbd2.log 2>&1 | tee /dev/hvc0 >/dev/null || true
       fi
-      if insmod /lib/modules/6.12.94-0-virt/kernel/fs/ext4/ext4.ko > /tmp/insmod_ext4.log 2>&1; then
+      if insmod /lib/modules/6.12.110-0-virt/kernel/fs/ext4/ext4.ko > /tmp/insmod_ext4.log 2>&1; then
         echo "HARPOON_EXT4_INSMOD_EXT4_OK" > /dev/hvc0
       else
         ERR=$(cat /tmp/insmod_ext4.log 2>&1 | head -n 5 | tr '\n' ' ')
@@ -90,7 +90,7 @@ if [ "$ROOTFS_TYPE" = "tmpfs" ] || [ "$ROOTFS_TYPE" = "rootfs" ] || echo "$ROOTF
         tar -xzf /alpine-minirootfs.tar.gz -C /newroot 2>&1 | tee /dev/hvc0 >/dev/null || echo "populate tar failed" > /dev/hvc0
         # copy kernel modules tree for vsock/virtio
         mkdir -p /newroot/lib/modules
-        cp -a /lib/modules/6.12.94-0-virt /newroot/lib/modules/ 2>&1 | tee /dev/hvc0 >/dev/null || true
+        cp -a /lib/modules/6.12.110-0-virt /newroot/lib/modules/ 2>&1 | tee /dev/hvc0 >/dev/null || true
         # also copy init script itself to newroot for second stage (so switch_root has Docker logic)
         cp /init /newroot/init 2>&1 | tee /dev/hvc0 >/dev/null || true
         chmod +x /newroot/init 2>&1 | tee /dev/hvc0 >/dev/null || true
@@ -326,7 +326,7 @@ fi
 ip link set lo up 2>&1 | tee /dev/hvc0 >/dev/null
 # --- Spike 4 VirtioFS host bind mount (FINAL ext4 runtime) ---
 echo "HARPOON_VIRTIOFS_MODULE_START" > /dev/hvc0
-ls -lh /lib/modules/6.12.94-0-virt/kernel/fs/fuse/fuse.ko /lib/modules/6.12.94-0-virt/kernel/fs/fuse/virtiofs.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+ls -lh /lib/modules/6.12.110-0-virt/kernel/fs/fuse/fuse.ko /lib/modules/6.12.110-0-virt/kernel/fs/fuse/virtiofs.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
 VIRTIOFS_OK=1
 if ! modprobe fuse > /tmp/modprobe_fuse.log 2>&1; then
   cat /tmp/modprobe_fuse.log 2>&1 | tee /dev/hvc0 >/dev/null || true
@@ -388,7 +388,7 @@ else
 fi
 # --- Spike 5 memory balloon + observability (FINAL ext4 runtime) ---
 echo "HARPOON_BALLOON_DRIVER_START" > /dev/hvc0
-ls -lh /lib/modules/6.12.94-0-virt/kernel/drivers/virtio/virtio_balloon.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+ls -lh /lib/modules/6.12.110-0-virt/kernel/drivers/virtio/virtio_balloon.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
 if modprobe virtio_balloon > /tmp/modprobe_balloon.log 2>&1; then
   echo "HARPOON_BALLOON_DRIVER_OK virtio_balloon" > /dev/hvc0
   lsmod 2>&1 | grep balloon | tee /dev/hvc0 >/dev/null || true
@@ -432,16 +432,16 @@ fi
 # Load virtio-net driver — kernel has CONFIG_VIRTIO=y, VIRTIO_PCI=y built-in, VIRTIO_NET=m
 # Custom initramfs from minirootfs lacked modules; now injected from Alpine initramfs-virt
 echo "HARPOON_NET_MODPROBE_START" > /dev/hvc0
-ls -lh /lib/modules/6.12.94-0-virt/kernel/drivers/net/virtio_net.ko /lib/modules/6.12.94-0-virt/kernel/drivers/net/net_failover.ko /lib/modules/6.12.94-0-virt/kernel/net/core/failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+ls -lh /lib/modules/6.12.110-0-virt/kernel/drivers/net/virtio_net.ko /lib/modules/6.12.110-0-virt/kernel/drivers/net/net_failover.ko /lib/modules/6.12.110-0-virt/kernel/net/core/failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
 # modprobe handles deps via modules.dep; fallback to insmod ordered
 if command -v modprobe >/dev/null 2>&1; then
   modprobe failover 2>&1 | tee /dev/hvc0 >/dev/null || true
   modprobe net_failover 2>&1 | tee /dev/hvc0 >/dev/null || true
   modprobe virtio_net 2>&1 | tee /dev/hvc0 >/dev/null || echo "modprobe virtio_net rc=$?" > /dev/hvc0
 else
-  insmod /lib/modules/6.12.94-0-virt/kernel/net/core/failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
-  insmod /lib/modules/6.12.94-0-virt/kernel/drivers/net/net_failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
-  insmod /lib/modules/6.12.94-0-virt/kernel/drivers/net/virtio_net.ko 2>&1 | tee /dev/hvc0 >/dev/null || echo "insmod virtio_net rc=$?" > /dev/hvc0
+  insmod /lib/modules/6.12.110-0-virt/kernel/net/core/failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+  insmod /lib/modules/6.12.110-0-virt/kernel/drivers/net/net_failover.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+  insmod /lib/modules/6.12.110-0-virt/kernel/drivers/net/virtio_net.ko 2>&1 | tee /dev/hvc0 >/dev/null || echo "insmod virtio_net rc=$?" > /dev/hvc0
 fi
 sleep 1
 ls -la /sys/class/net 2>&1 | tee /dev/hvc0 >/dev/null
@@ -757,10 +757,10 @@ for i in $(seq 1 120); do
 done
 
 if [ $READY -eq 1 ]; then
-  # vsock driver check — Alpine 6.12.94-0-virt has CONFIG_VSOCKETS=m, VIRTIO_VSOCKETS=m, VIRTIO_VSOCKETS_COMMON=m (modular, not builtin, verified via boot/config-6.12.103-0-virt)
+  # vsock driver check — Alpine 6.12.110-0-virt has CONFIG_VSOCKETS=m, VIRTIO_VSOCKETS=m, VIRTIO_VSOCKETS_COMMON=m (modular, not builtin)
   # modloop-virt provides net/vmw_vsock/vsock.ko, vmw_vsock_virtio_transport_common.ko, vmw_vsock_virtio_transport.ko (not in initramfs-virt, newly injected)
   echo "HARPOON_VSOCK_MODPROBE_START" > /dev/hvc0
-  ls -lh /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vsock.ko /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
+  ls -lh /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vsock.ko /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko 2>&1 | tee /dev/hvc0 >/dev/null || true
   # load in dependency order: vsock -> common -> transport — modprobe preferred, insmod fallback observable
   # Try modprobe first; if it fails, fallback to explicit insmod with per-module markers
   MODPROBE_OK=1
@@ -783,21 +783,21 @@ if [ $READY -eq 1 ]; then
   # Direct insmod fallback — observable per-module
   if [ $MODPROBE_OK -eq 0 ]; then
     echo "modprobe failed or unavailable, trying direct insmod" > /dev/hvc0
-    if insmod /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vsock.ko > /tmp/insmod_vsock.log 2>&1; then
+    if insmod /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vsock.ko > /tmp/insmod_vsock.log 2>&1; then
       echo "HARPOON_VSOCK_INSMOD_VSOCK_OK" > /dev/hvc0
     else
       ERR=$(cat /tmp/insmod_vsock.log 2>&1 | head -n 5 | tr '\n' ' ')
       echo "HARPOON_VSOCK_INSMOD_FAILED vsock $ERR" > /dev/hvc0
       cat /tmp/insmod_vsock.log 2>&1 | tee /dev/hvc0 >/dev/null || true
     fi
-    if insmod /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko > /tmp/insmod_common.log 2>&1; then
+    if insmod /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko > /tmp/insmod_common.log 2>&1; then
       echo "HARPOON_VSOCK_INSMOD_COMMON_OK" > /dev/hvc0
     else
       ERR=$(cat /tmp/insmod_common.log 2>&1 | head -n 5 | tr '\n' ' ')
       echo "HARPOON_VSOCK_INSMOD_FAILED vmw_vsock_virtio_transport_common $ERR" > /dev/hvc0
       cat /tmp/insmod_common.log 2>&1 | tee /dev/hvc0 >/dev/null || true
     fi
-    if insmod /lib/modules/6.12.94-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko > /tmp/insmod_transport.log 2>&1; then
+    if insmod /lib/modules/6.12.110-0-virt/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko > /tmp/insmod_transport.log 2>&1; then
       echo "HARPOON_VSOCK_INSMOD_TRANSPORT_OK" > /dev/hvc0
     else
       ERR=$(cat /tmp/insmod_transport.log 2>&1 | head -n 5 | tr '\n' ' ')

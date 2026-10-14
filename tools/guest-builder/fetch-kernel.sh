@@ -12,15 +12,38 @@ BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot"
 KERNEL_CACHE="$CACHE_DIR/vmlinuz-virt"
 INITRAMFS_CACHE="$CACHE_DIR/initramfs-virt"
 OUT_IMAGE="$OUT_DIR/Image-virt"
+EXPECTED_VMLINUZ_SHA="dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332"
+EXPECTED_INITRAMFS_VIRT_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c"
 
-if [ ! -f "$KERNEL_CACHE" ]; then
-  echo "[fetch-kernel] fetching vmlinuz-virt..." >&2
-  curl -L --fail -o "$KERNEL_CACHE" "$BASE/vmlinuz-virt"
-fi
-if [ ! -f "$INITRAMFS_CACHE" ]; then
-  echo "[fetch-kernel] fetching initramfs-virt..." >&2
-  curl -L --fail -o "$INITRAMFS_CACHE" "$BASE/initramfs-virt"
-fi
+sha256_file() {
+  shasum -a 256 "$1" | cut -d' ' -f1
+}
+
+fetch_pinned() {
+  local name="$1" expected="$2" cache="$3" tmp actual
+  if [ -f "$cache" ]; then
+    actual=$(sha256_file "$cache")
+    if [ "$actual" = "$expected" ]; then
+      echo "[fetch-kernel] reusing pinned $name ($actual)" >&2
+      return 0
+    fi
+    echo "[fetch-kernel] stale $name cache: expected $expected got $actual; refreshing" >&2
+  else
+    echo "[fetch-kernel] fetching $name..." >&2
+  fi
+  tmp="$cache.tmp"
+  curl -L --fail -o "$tmp" "$BASE/$name"
+  actual=$(sha256_file "$tmp")
+  if [ "$actual" != "$expected" ]; then
+    echo "[fetch-kernel] FAIL: $name SHA mismatch expected $expected got $actual" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$cache"
+}
+
+fetch_pinned vmlinuz-virt "$EXPECTED_VMLINUZ_SHA" "$KERNEL_CACHE"
+fetch_pinned initramfs-virt "$EXPECTED_INITRAMFS_VIRT_SHA" "$INITRAMFS_CACHE"
 
 echo "[fetch-kernel] kernel $(stat -f%z "$KERNEL_CACHE" 2>/dev/null || stat -c%s "$KERNEL_CACHE") bytes" >&2
 echo "[fetch-kernel] initramfs-virt $(stat -f%z "$INITRAMFS_CACHE" 2>/dev/null || stat -c%s "$INITRAMFS_CACHE") bytes" >&2
