@@ -65,21 +65,64 @@ for mode in override host caller fallback; do
   [ ! -e "$TMP/$mode-config" ] || fail "$mode mutated Docker config"
 done
 
-# Exercise the production extraction helper: debugfs failure must stop before
-# chmod and report the actual extraction operation.
-sed -n '/^    debugfs_extract() {/,/^    debugfs_extract dump \/usr\/bin\/python3.12/p' "$BUILDER" | sed '$d' | sed 's/^    //' > "$TMP/debugfs-extract.sh"
+# Exercise the production extraction helpers: record exact source/destination
+# commands and require rdump to create the extracted subtree.
+sed -n '/^    debugfs_extract_file() {/,/^    debugfs_extract_file \/usr\/bin\/python3.12/p' "$BUILDER" | sed '$d' | sed 's/^    //' > "$TMP/debugfs-extract.sh"
 cat >> "$TMP/debugfs-extract.sh" <<EOF
 #!/bin/bash
 set -euo pipefail
 ROOT_IMG="$ROOT/assets/guest/harpoon-root.img"
 STAGING="$TMP/staging"
+DEBUGFS_LOG="$TMP/debugfs.log"
 mkdir -p "\$STAGING"
+debugfs() {
+  printf '%s\n' "\$2" >> "\$DEBUGFS_LOG"
+  case "\$2" in
+    "dump /usr/bin/python3.12 "*) destination="\${2#dump /usr/bin/python3.12 }"; mkdir -p "\$(dirname "\$destination")"; : > "\$destination" ;;
+    "dump /usr/lib/libpython3.12.so.1.0 "*) destination="\${2#dump /usr/lib/libpython3.12.so.1.0 }"; mkdir -p "\$(dirname "\$destination")"; : > "\$destination" ;;
+    "dump /lib/ld-musl-aarch64.so.1 "*) destination="\${2#dump /lib/ld-musl-aarch64.so.1 }"; mkdir -p "\$(dirname "\$destination")"; : > "\$destination" ;;
+    "rdump /usr/lib/python3.12 "*) destination="\${2#rdump /usr/lib/python3.12 }"; mkdir -p "\$destination/python3.12"; : > "\$destination/python3.12/os.py" ;;
+    *) echo "unexpected debugfs command: \$2" >&2; return 1 ;;
+  esac
+}
+debugfs_extract_file /usr/bin/python3.12 "\$STAGING/usr/bin/python3.12"
+debugfs_extract_file /usr/lib/libpython3.12.so.1.0 "\$STAGING/usr/lib/libpython3.12.so.1.0"
+debugfs_extract_file /lib/ld-musl-aarch64.so.1 "\$STAGING/lib/ld-musl-aarch64.so.1"
+debugfs_extract_tree /usr/lib/python3.12 "\$STAGING/usr/lib" "\$STAGING/usr/lib/python3.12"
+EOF
+chmod +x "$TMP/debugfs-extract.sh"
+"$TMP/debugfs-extract.sh"
+for command in \
+  "dump /usr/bin/python3.12 $TMP/staging/usr/bin/python3.12" \
+  "dump /usr/lib/libpython3.12.so.1.0 $TMP/staging/usr/lib/libpython3.12.so.1.0" \
+  "dump /lib/ld-musl-aarch64.so.1 $TMP/staging/lib/ld-musl-aarch64.so.1" \
+  "rdump /usr/lib/python3.12 $TMP/staging/usr/lib"; do
+  grep -Fqx "$command" "$TMP/debugfs.log" || fail "missing debugfs command: $command"
+done
+[ -f "$TMP/staging/usr/lib/python3.12/os.py" ] || fail "rdump subtree was not extracted"
+
+# The module selector must ignore a firmware sibling and enforce the pinned KVER.
+{
+  printf 'MODLOOP_TMP="%s"\n' "$TMP"
+  sed -n '/^    # Find the one kernel version dir with module metadata;/,/^    echo "\[rebuild\] kernel \$KVER"/p' "$BUILDER" | sed 's/^    //'
+} > "$TMP/select-kver.sh"
+mkdir -p "$TMP/modloop/modules/firmware" "$TMP/modloop/modules/6.12.110-0-virt"
+: > "$TMP/modloop/modules/6.12.110-0-virt/modules.dep"
+sh "$TMP/select-kver.sh" 2>"$TMP/select-kver.log"
+grep -q 'kernel 6.12.110-0-virt' "$TMP/select-kver.log" || fail "firmware sibling changed KVER selection"
+
+# Exercise the production extraction error path and report the actual command.
+sed -n '/^    debugfs_extract_file() {/,/^    debugfs_extract_tree()/p' "$BUILDER" | sed '$d' | sed 's/^    //' > "$TMP/debugfs-failure.sh"
+cat >> "$TMP/debugfs-failure.sh" <<EOF
+#!/bin/bash
+set -euo pipefail
+ROOT_IMG="$ROOT/assets/guest/harpoon-root.img"
 debugfs() { echo "corrupt image" >&2; return 1; }
-if debugfs_extract dump /usr/bin/python3.12 "\$STAGING/usr/bin/python3.12"; then
+if debugfs_extract_file /usr/bin/python3.12 "$TMP/missing"; then
   exit 1
 fi
 EOF
-chmod +x "$TMP/debugfs-extract.sh"
-! "$TMP/debugfs-extract.sh" 2>"$TMP/debugfs-extract-error"
+chmod +x "$TMP/debugfs-failure.sh"
+! "$TMP/debugfs-failure.sh" 2>"$TMP/debugfs-extract-error"
 grep -q 'debugfs extraction failed' "$TMP/debugfs-extract-error"
 echo "initramfs-builder PASS"

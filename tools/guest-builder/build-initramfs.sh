@@ -166,9 +166,24 @@ if harpoon_detect_build_engine; then
     # Extract modloop squashfs
     MODLOOP_TMP=$(mktemp -d)
     unsquashfs -f -d "$MODLOOP_TMP/modloop" "$CACHE/modloop-virt" > /dev/null
-    # Find kernel version dir
+    # Find the one kernel version dir with module metadata; firmware is a sibling.
     MODULES_DIR="$MODLOOP_TMP/modloop/modules"
-    KVER=$(ls "$MODULES_DIR" | head -n1)
+    KVER_CANDIDATES=""
+    for module_dir in "$MODULES_DIR"/*; do
+      [ -f "$module_dir/modules.dep" ] || continue
+      KVER_CANDIDATES="${KVER_CANDIDATES}${KVER_CANDIDATES:+
+}$(basename "$module_dir")"
+    done
+    if [ -z "$KVER_CANDIDATES" ]; then
+      echo "[rebuild] FAIL: no kernel module directory with modules.dep in $MODULES_DIR" >&2
+      exit 1
+    fi
+    if [ "$(printf '%s\n' "$KVER_CANDIDATES" | wc -l)" -ne 1 ]; then
+      printf '[rebuild] FAIL: multiple kernel module directories with modules.dep: %s\n' "$KVER_CANDIDATES" >&2
+      exit 1
+    fi
+    KVER="$KVER_CANDIDATES"
+    [ "$KVER" = "6.12.110-0-virt" ] || { echo "[rebuild] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
     echo "[rebuild] kernel $KVER" >&2
     # Create modules dir in staging
     mkdir -p "$STAGING/lib/modules/$KVER"
@@ -244,32 +259,56 @@ if harpoon_detect_build_engine; then
     ROOT_IMG="/repo/assets/guest/harpoon-root.img"
     [ -f "$ROOT_IMG" ] || { echo "[rebuild] FAIL missing canonical root image" >&2; exit 1; }
     mkdir -p "$STAGING/usr/bin" "$STAGING/usr/lib" "$STAGING/lib" "$STAGING/usr/local/share/harpoon-runtime"
-    debugfs_extract() {
-      local operation="$1" destination="$2" output status
+    debugfs_extract_file() {
+      local source="$1" destination="$2" output status
       output=$(mktemp)
-      if debugfs -R "$operation $destination" "$ROOT_IMG" >"$output" 2>&1; then
+      if debugfs -R "dump $source $destination" "$ROOT_IMG" >"$output" 2>&1; then
         :
       else
         status=$?
-        echo "[rebuild] FAIL debugfs extraction failed (operation: $operation, status: $status)" >&2
+        echo "[rebuild] FAIL debugfs extraction failed (operation: dump $source $destination, status: $status)" >&2
         cat "$output" >&2
         rm -f "$output"
         exit 1
       fi
       if grep -Eiq "filesystem not open|block bitmap checksum|bad magic|cannot open|(^|[[:space:]])error([:[:space:]]|$)" "$output"; then
-        echo "[rebuild] FAIL debugfs could not read canonical root image (operation: $operation)" >&2
+        echo "[rebuild] FAIL debugfs could not read canonical root image (operation: dump $source $destination)" >&2
         cat "$output" >&2
         rm -f "$output"
         exit 1
       fi
       rm -f "$output"
-      [ -e "$destination" ] || { echo "[rebuild] FAIL debugfs produced no file for $operation" >&2; exit 1; }
+      [ -e "$destination" ] || { echo "[rebuild] FAIL debugfs produced no file for dump $source $destination" >&2; exit 1; }
     }
-    debugfs_extract dump /usr/bin/python3.12 "$STAGING/usr/bin/python3.12"
+    debugfs_extract_tree() {
+      local source="$1" destination="$2" expected="$3" output status
+      output=$(mktemp)
+      if debugfs -R "rdump $source $destination" "$ROOT_IMG" >"$output" 2>&1; then
+        :
+      else
+        status=$?
+        echo "[rebuild] FAIL debugfs extraction failed (operation: rdump $source $destination, status: $status)" >&2
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+      fi
+      if grep -Eiq "filesystem not open|block bitmap checksum|bad magic|cannot open|(^|[[:space:]])error([:space:]]|$)" "$output"; then
+        echo "[rebuild] FAIL debugfs could not read canonical root image (operation: rdump $source $destination)" >&2
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+      fi
+      rm -f "$output"
+      [ -d "$expected" ] && find "$expected" -type f -print -quit | grep -q . || {
+        echo "[rebuild] FAIL debugfs produced no files for rdump $source $destination" >&2
+        exit 1
+      }
+    }
+    debugfs_extract_file /usr/bin/python3.12 "$STAGING/usr/bin/python3.12"
     ln -s python3.12 "$STAGING/usr/bin/python3"
-    debugfs_extract dump /usr/lib/libpython3.12.so.1.0 "$STAGING/usr/lib/libpython3.12.so.1.0"
-    debugfs_extract dump /lib/ld-musl-aarch64.so.1 "$STAGING/lib/ld-musl-aarch64.so.1"
-    debugfs_extract rdump /usr/lib/python3.12 "$STAGING/usr/lib"
+    debugfs_extract_file /usr/lib/libpython3.12.so.1.0 "$STAGING/usr/lib/libpython3.12.so.1.0"
+    debugfs_extract_file /lib/ld-musl-aarch64.so.1 "$STAGING/lib/ld-musl-aarch64.so.1"
+    debugfs_extract_tree /usr/lib/python3.12 "$STAGING/usr/lib" "$STAGING/usr/lib/python3.12"
     chmod 0755 "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1"
     RUNTIME_MANIFEST="$STAGING/usr/local/share/harpoon-runtime/python.manifest"
     {
