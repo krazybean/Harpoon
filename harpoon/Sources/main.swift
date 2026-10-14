@@ -234,6 +234,8 @@ func initiateShutdown(reason: String) {
     lifecycle.transition(to: .stopping)
     log("SHUTDOWN_INITIATED reason=\(reason) HARPOON_SIGNAL_RECEIVED \(reason)")
     manager.serialPoll?.cancel()
+    let syncResult = mgmtExec(argv: ["sync"])
+    log("HARPOON_GUEST_SYNC exit=\(syncResult)")
     manager.stopBridges()
     if let vm = manager.vm {
         if vm.canStop {
