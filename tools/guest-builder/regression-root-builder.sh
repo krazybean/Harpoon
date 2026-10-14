@@ -55,14 +55,36 @@ cat > "$MOCK_BIN/unsquashfs" <<'EOF'
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-d" ]; then OUT="$2"; shift 2; else shift; fi
 done
-mkdir -p "$OUT/modules/6.12.110-0-virt"
-printf '%s\n' 'fixture' > "$OUT/modules/6.12.110-0-virt/modules.dep"
+mkdir -p "$OUT/modules/firmware"
+case "${MOCK_MODLOOP_LAYOUT:-valid}" in
+  valid)
+    mkdir -p "$OUT/modules/6.12.110-0-virt"
+    printf '%s\n' 'fixture' > "$OUT/modules/6.12.110-0-virt/modules.dep"
+    ;;
+  zero)
+    ;;
+  multiple)
+    mkdir -p "$OUT/modules/6.12.110-0-virt" "$OUT/modules/6.12.111-0-virt"
+    printf '%s\n' 'fixture' > "$OUT/modules/6.12.110-0-virt/modules.dep"
+    printf '%s\n' 'fixture' > "$OUT/modules/6.12.111-0-virt/modules.dep"
+    ;;
+esac
 EOF
 chmod +x "$MOCK_BIN"/*
 MOCK_INITRAMFS="$TMP/initramfs-virt" CODESIGN_LOG="$TMP/codesign.log" \
   HARPOON_ROOT_OUT="$TMP/assets/guest/mock-root.img" PATH="$MOCK_BIN:$PATH" \
   bash "$VZ_SCRIPT" >/dev/null
 grep -Fq -- "--entitlements $REPO_ROOT/harpoon/entitlements.plist" "$TMP/codesign.log"
+
+! MOCK_INITRAMFS="$TMP/initramfs-virt" MOCK_MODLOOP_LAYOUT=zero \
+  HARPOON_ROOT_OUT="$TMP/assets/guest/zero-root.img" PATH="$MOCK_BIN:$PATH" \
+  bash "$VZ_SCRIPT" 2>"$TMP/zero-error"
+grep -q 'no kernel module directory with modules.dep' "$TMP/zero-error"
+
+! MOCK_INITRAMFS="$TMP/initramfs-virt" MOCK_MODLOOP_LAYOUT=multiple \
+  HARPOON_ROOT_OUT="$TMP/assets/guest/multiple-root.img" PATH="$MOCK_BIN:$PATH" \
+  bash "$VZ_SCRIPT" 2>"$TMP/multiple-error"
+grep -q 'multiple kernel module directories with modules.dep' "$TMP/multiple-error"
 
 ! HARPOON_ROOT_OUT="$TMP/assets/guest/harpoon-root.img" bash "$REPO_ROOT/tools/guest-builder/build-root.sh" 2>"$TMP/error"
 grep -q 'explicit --builder vz is required' "$TMP/error"

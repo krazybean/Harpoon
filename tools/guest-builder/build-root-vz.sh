@@ -43,8 +43,21 @@ else
   echo "[build-root-vz] FAIL: need unsquashfs or Docker to unpack pinned modloop-virt" >&2
   exit 1
 fi
-KVER=$(find "$MODLOOP_ROOT/modules" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | head -n1)
-[ "$KVER" = "6.12.110-0-virt" ] || { echo "[build-root-vz] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
+EXPECTED_KVER="6.12.110-0-virt"
+KVER_CANDIDATES=()
+while IFS= read -r module_dir; do
+  [ -f "$module_dir/modules.dep" ] && KVER_CANDIDATES+=("$(basename "$module_dir")")
+done < <(find "$MODLOOP_ROOT/modules" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
+if [ "${#KVER_CANDIDATES[@]}" -eq 0 ]; then
+  echo "[build-root-vz] FAIL: no kernel module directory with modules.dep in $MODLOOP_ROOT/modules" >&2
+  exit 1
+fi
+if [ "${#KVER_CANDIDATES[@]}" -ne 1 ]; then
+  printf '[build-root-vz] FAIL: multiple kernel module directories with modules.dep: %s\n' "${KVER_CANDIDATES[*]}" >&2
+  exit 1
+fi
+KVER="${KVER_CANDIDATES[0]}"
+[ "$KVER" = "$EXPECTED_KVER" ] || { echo "[build-root-vz] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
 
 STAGE="$WORK/initramfs"
 mkdir -p "$STAGE"
