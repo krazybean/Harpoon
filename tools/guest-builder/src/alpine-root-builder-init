@@ -5,12 +5,19 @@ MARKER=/dev/hvc0
 TARGET=/dev/vda
 ROOT=/target
 BUSYBOX=/bin/busybox
-REPOS="https://dl-cdn.alpinelinux.org/alpine/v3.22/main https://dl-cdn.alpinelinux.org/alpine/v3.22/community"
+REPO_MAIN=https://dl-cdn.alpinelinux.org/alpine/v3.22/main
+REPO_COMMUNITY=https://dl-cdn.alpinelinux.org/alpine/v3.22/community
 PACKAGES="docker-engine docker-cli containerd runc socat python3 ca-certificates e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod"
 
 bb() { "$BUSYBOX" "$@"; }
 log() { bb printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
 fail() { log "FAIL $*"; while :; do bb sleep 5; done; }
+write_repositories() {
+  bb cat > "$1" <<EOF
+$2
+$3
+EOF
+}
 
 bb mkdir -p /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin
 bb mkdir -p /proc /sys /dev /tmp /etc/apk /var/cache/apk /var/lib/apk /lib/apk/db
@@ -42,9 +49,7 @@ bb ip link set dev "$iface" up || fail "network-link-$iface"
 bb udhcpc -i "$iface" -n -q -f || fail "network-dhcp-$iface"
 [ -s /etc/resolv.conf ] || fail network-dns
 
-bb cat > /etc/apk/repositories <<EOF
-$REPOS
-EOF
+write_repositories /etc/apk/repositories "$REPO_MAIN" "$REPO_COMMUNITY"
 log APK_BOOTSTRAP_START
 /sbin/apk --initdb add --no-cache e2fsprogs e2fsprogs-extra > /tmp/apk-tools.log 2>&1 || { bb cat /tmp/apk-tools.log > "$MARKER"; fail apk-tools; }
 

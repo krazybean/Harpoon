@@ -12,6 +12,18 @@ grep -q '/sbin/apk --initdb add --no-cache e2fsprogs e2fsprogs-extra' "$INIT" ||
 ! grep -q '/sbin/apk update' "$INIT" || fail "bootstrap updates before database initialization"
 grep -q 'bb mkdir -p /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin' "$INIT" || fail "BusyBox destinations are not prepared"
 
+# Execute the production writer with host-side fixtures so this checks the
+# generated file format, not just the source spelling.
+sed -n '/^write_repositories() {/,/^}/p' "$INIT" > "$TMP/write-repositories.sh"
+source "$TMP/write-repositories.sh"
+REPO_MAIN=https://dl-cdn.alpinelinux.org/alpine/v3.22/main
+REPO_COMMUNITY=https://dl-cdn.alpinelinux.org/alpine/v3.22/community
+bb() { "$@"; }
+write_repositories "$TMP/repositories" "$REPO_MAIN" "$REPO_COMMUNITY"
+[ "$(wc -l < "$TMP/repositories" | tr -d ' ')" = 2 ] || fail "APK repositories are not newline-delimited"
+! grep -Fq "$REPO_MAIN $REPO_COMMUNITY" "$TMP/repositories" || fail "APK repositories collapsed onto one line"
+[ "$(tr '\n' ' ' < "$TMP/repositories")" = "$REPO_MAIN $REPO_COMMUNITY " ] || fail "APK repository set changed"
+
 apk_line=$(grep -n '/sbin/apk --root .* add' "$INIT" | cut -d: -f1)
 prep_line=$(grep -n 'bb cp -a /etc/apk/keys' "$INIT" | cut -d: -f1)
 [ "$prep_line" -lt "$apk_line" ] || fail "target APK keys are copied too late"
