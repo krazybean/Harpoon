@@ -1,6 +1,6 @@
 # Stage 8 — Performance Investigation
 
-Status: **IN PROGRESS — live APFS reclamation evidence pending the self-hosted macOS runner**
+Status: **8B VALIDATED — guest discard reaches APFS backing allocation; auto-prune remains deferred**
 
 ## Scope
 
@@ -63,15 +63,26 @@ runtime behavior before a measured hotspot exists.
   macOS APFS or Virtualization.framework behavior.
 - Existing M16 evidence proves sparse/APFS clone behavior and Docker accounting,
   but did not measure guest deletion through `fstrim` to host allocation.
-- Run 38631020307 established that deletion restored guest free space while host
-  allocation stayed unchanged; its `fstrim -av` attempt was rejected by BusyBox.
+- Run [38631020307](https://github.com/krazybean/Harpoon/actions/runs/38631020307)
+  established that deletion restored guest free space while host allocation
+  stayed unchanged; its `fstrim -av` attempt was rejected by BusyBox.
 - The current probe uses explicit `fstrim /` and records discard capability; no
   public Virtualization.framework disk-image API in the current attachment path
   exposes a discard toggle.
+- Run [38632009299](https://github.com/krazybean/Harpoon/actions/runs/38632009299)
+  on commit `ad9626cb632eb6d667045182cf05eace490fdc1b` completed successfully.
+  Artifact `stage-8-disk-reclamation` recorded:
+  - `image-removed`: 11,054,560 allocated blocks × 4096 bytes; guest free
+    space returned to the 843,849,728-byte baseline.
+  - `after-fstrim`: 1,915,784 allocated blocks × 4096 bytes; guest
+    `fstrim /` completed.
+  - `discard-capability.txt`: ext4 root, `/sbin/fstrim`, 512-byte discard
+    granularity, 34,359,738,368-byte maximum discard, zeroes-data false.
+  This validates the guest-to-APFS discard path on the self-hosted runner.
 
 ## Next
 
-Run the manually dispatched workflow, inspect `reclamation.csv`,
-`discard-capability.txt`, and `fstrim.log`, then characterize image deletion and
-build-cache cleanup separately. Only after that evidence should Stage 8 decide
-whether a narrow opt-in cleanup helper is warranted.
+Keep `fstrim /` as a diagnostic experiment only; it does not justify automatic
+pruning. Stage 8C remains deferred because Docker image and BuildKit prune
+commands are broader than this test-owned image, and Stage 8D still needs the
+focused regression/static validation record.
