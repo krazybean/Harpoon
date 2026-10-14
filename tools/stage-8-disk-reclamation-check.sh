@@ -66,10 +66,28 @@ docker --context harpoon image rm "$IMAGE" >/dev/null || fail "temporary image r
 IMAGE=""
 record image-removed
 
-if harpoon/build/harpoon exec -- fstrim -av >"$ARTIFACT_DIR/fstrim.log" 2>&1; then
-  note "guest fstrim completed"
+DISCARD_CAPABILITY="$ARTIFACT_DIR/discard-capability.txt"
+if harpoon/build/harpoon exec -- sh -c '
+  printf "fstrim="
+  command -v fstrim || true
+  printf "root="
+  awk '\''$2 == "/" { print $3; exit }'\'' /proc/mounts
+  for name in discard_granularity discard_max_bytes discard_zeroes_data; do
+    printf "%s=" "$name"
+    cat "/sys/class/block/vda/queue/$name" 2>/dev/null || printf "unavailable"
+  done
+' >"$DISCARD_CAPABILITY" 2>&1; then
+  note "guest discard capability recorded"
 else
-  note "guest fstrim unavailable or rejected; see fstrim.log"
+  note "guest discard capability query failed; see discard-capability.txt"
+fi
+
+if harpoon/build/harpoon exec -- sh -c 'command -v fstrim >/dev/null 2>&1 && fstrim /' >"$ARTIFACT_DIR/fstrim.log" 2>&1; then
+  TRIM_RESULT="completed"
+  note "guest root fstrim completed"
+else
+  TRIM_RESULT="unsupported-or-rejected"
+  note "guest root fstrim unavailable or rejected; see fstrim.log"
 fi
 record after-fstrim
 
@@ -78,9 +96,13 @@ Stage 8 image reclamation probe completed without broad cleanup.
 
 Interpretation:
 - image-created vs image-removed measures guest deletion and host backing allocation;
+- discard-capability.txt records whether the guest exposes fstrim and virtio-blk discard;
+- fstrim.log records an explicit root-filesystem trim attempt (BusyBox uses `fstrim /`);
+- a missing or rejected trim is unsupported-or-rejected evidence, never a trim pass;
 - after-fstrim tests whether guest discard reaches the sparse/APFS backing file;
 - unchanged host allocation is evidence that deletion alone did not reclaim APFS blocks;
 - build-cache pruning was not executed because Docker's broad builder prune is not
   scoped to this probe's temporary image and could remove user cache.
 EOF
-note "PASS controlled image lifecycle; build cache untouched"
+printf 'trim_result=%s\n' "$TRIM_RESULT" >>"$ARTIFACT_DIR/verdict.txt"
+note "controlled image lifecycle completed; build cache untouched; trim=$TRIM_RESULT"

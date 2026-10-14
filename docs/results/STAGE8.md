@@ -17,15 +17,19 @@ The probe is `tools/stage-8-disk-reclamation-check.sh` and is dispatched by
 - Creates one uniquely named temporary image from a generated tar archive.
 - Removes only that temporary image.
 - Does not remove containers, volumes, user images, or user build cache.
-- Attempts guest `fstrim` after deletion and records failure as unavailable evidence.
+- Records guest `fstrim` and virtio-blk discard-queue capability after deletion.
+- Attempts explicit root-filesystem `fstrim /`; missing or rejected trim is
+  `unsupported-or-rejected`, never a pass.
 - Does not run `docker system prune` or broad `docker builder prune`.
 
 ## Measurement
 
 `reclamation.csv` records, for baseline, image-created, image-removed, and
 after-fstrim: logical backing-file bytes, allocated host blocks and block size,
-and guest root used/free bytes. A drop in guest free space without a corresponding
-drop in host allocated blocks is not physical APFS reclamation.
+and guest root used/free bytes. `discard-capability.txt` records the guest
+`fstrim` path, root filesystem, and virtio-blk discard queue values. A drop in
+guest free space without a corresponding drop in host allocated blocks is not
+physical APFS reclamation.
 
 ## Pruning decision
 
@@ -59,12 +63,15 @@ runtime behavior before a measured hotspot exists.
   macOS APFS or Virtualization.framework behavior.
 - Existing M16 evidence proves sparse/APFS clone behavior and Docker accounting,
   but did not measure guest deletion through `fstrim` to host allocation.
-- The self-hosted workflow is added; no runner result is claimed until its artifact
-  is inspected.
+- Run 38631020307 established that deletion restored guest free space while host
+  allocation stayed unchanged; its `fstrim -av` attempt was rejected by BusyBox.
+- The current probe uses explicit `fstrim /` and records discard capability; no
+  public Virtualization.framework disk-image API in the current attachment path
+  exposes a discard toggle.
 
 ## Next
 
-Run the manually dispatched workflow, inspect `reclamation.csv` and `fstrim.log`,
-then characterize image deletion and build-cache cleanup separately. Only after
-that evidence should Stage 8 decide whether a narrow opt-in cleanup helper is
-warranted.
+Run the manually dispatched workflow, inspect `reclamation.csv`,
+`discard-capability.txt`, and `fstrim.log`, then characterize image deletion and
+build-cache cleanup separately. Only after that evidence should Stage 8 decide
+whether a narrow opt-in cleanup helper is warranted.
