@@ -1,6 +1,6 @@
 # Stage 8 — Performance Investigation
 
-Status: **8B VALIDATED — guest discard reaches APFS backing allocation; auto-prune remains deferred**
+Status: **8B/8D VALIDATED — guest discard reaches APFS backing allocation; auto-prune remains deferred**
 
 ## Scope
 
@@ -11,6 +11,10 @@ Guest `df` alone is not sufficient evidence.
 The probe is `tools/stage-8-disk-reclamation-check.sh` and is dispatched by
 `.github/workflows/stage-8-disk-reclamation.yml` on the existing
 `self-hosted, macOS, harpoon` runner.
+
+`tools/regression-stage8-disk-reclamation.sh` is the focused 8D check for probe
+syntax, explicit root trim, unsupported-trim classification, test-image-only
+cleanup, and failure-safe artifact upload.
 
 ## Safety contract
 
@@ -79,10 +83,13 @@ runtime behavior before a measured hotspot exists.
   - `discard-capability.txt`: ext4 root, `/sbin/fstrim`, 512-byte discard
     granularity, 34,359,738,368-byte maximum discard, zeroes-data false.
   This validates the guest-to-APFS discard path on the self-hosted runner.
+- Stage 8D focused regression: `PASS Stage 8 probe safety and trim
+  classification` via `bash tools/regression-stage8-disk-reclamation.sh`.
 
 ## Next
 
 Keep `fstrim /` as a diagnostic experiment only; it does not justify automatic
 pruning. Stage 8C remains deferred because Docker image and BuildKit prune
-commands are broader than this test-owned image, and Stage 8D still needs the
-focused regression/static validation record.
+commands are broader than this test-owned image. Stage 8 is complete for the
+8B investigation and 8D regression scope; no Stage 9 or UI work follows from
+this result.
