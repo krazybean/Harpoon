@@ -63,11 +63,16 @@ let network = VZVirtioNetworkDeviceConfiguration()
 network.attachment = VZNATNetworkDeviceAttachment()
 config.networkDevices = [network]
 let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-serial.attachment = try VZFileSerialPortAttachment(url: serialURL, append: false)
-config.serialPorts = [serial]
-let storage = try VZDiskImageStorageDeviceAttachment(url: disk, readOnly: false)
-config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: storage)]
-try config.validate()
+do {
+    serial.attachment = try VZFileSerialPortAttachment(url: serialURL, append: false)
+    config.serialPorts = [serial]
+    let storage = try VZDiskImageStorageDeviceAttachment(url: disk, readOnly: false)
+    config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: storage)]
+    try config.validate()
+} catch {
+    fputs("[alpine-root-builder] configuration failed: \(error)\n", stderr)
+    exit(1)
+}
 
 let delegate = BuilderDelegate()
 delegate.serialPath = serialURL.path

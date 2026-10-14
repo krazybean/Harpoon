@@ -6,6 +6,46 @@ TMP="$(mktemp -d /tmp/harpoon-root-builder-regression.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/assets/guest"
+VZ_SCRIPT="$REPO_ROOT/tools/guest-builder/build-root-vz.sh"
+grep -q 'codesign --entitlements "$ENTITLEMENTS" --force -s - "$WORK/AlpineRootBuilder"' "$VZ_SCRIPT"
+grep -q 'com.apple.security.virtualization' "$VZ_SCRIPT"
+
+MOCK_BIN="$TMP/bin"
+mkdir -p "$MOCK_BIN" "$TMP/seed"
+(cd "$TMP/seed" && printf 'seed\n' > seed && find . -print0 | cpio --null -o -H newc --quiet | gzip -n -9 > "$TMP/initramfs-virt")
+cat > "$MOCK_BIN/swiftc" <<'EOF'
+#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then OUT="$2"; shift 2; else shift; fi
+done
+printf '#!/bin/sh\nexit 0\n' > "$OUT"
+chmod +x "$OUT"
+EOF
+cat > "$MOCK_BIN/curl" <<'EOF'
+#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then OUT="$2"; shift 2; else shift; fi
+done
+cp "$MOCK_INITRAMFS" "$OUT"
+EOF
+cat > "$MOCK_BIN/shasum" <<'EOF'
+#!/bin/bash
+echo 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c  "$2"
+EOF
+cat > "$MOCK_BIN/codesign" <<'EOF'
+#!/bin/bash
+if [ "$1" = "-d" ]; then
+  echo 'com.apple.security.virtualization = true'
+else
+  printf '%s\n' "$*" >> "$CODESIGN_LOG"
+fi
+EOF
+chmod +x "$MOCK_BIN"/*
+MOCK_INITRAMFS="$TMP/initramfs-virt" CODESIGN_LOG="$TMP/codesign.log" \
+  HARPOON_ROOT_OUT="$TMP/assets/guest/mock-root.img" PATH="$MOCK_BIN:$PATH" \
+  bash "$VZ_SCRIPT" >/dev/null
+grep -Fq -- "--entitlements $REPO_ROOT/harpoon/entitlements.plist" "$TMP/codesign.log"
+
 ! HARPOON_ROOT_OUT="$TMP/assets/guest/harpoon-root.img" bash "$REPO_ROOT/tools/guest-builder/build-root.sh" 2>"$TMP/error"
 grep -q 'explicit --builder vz is required' "$TMP/error"
 

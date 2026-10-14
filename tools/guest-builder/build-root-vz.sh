@@ -12,9 +12,11 @@ EXPECTED_INITRAMFS_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022
 INITRAMFS_CACHE="$CACHE/initramfs-virt"
 BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot"
 mkdir -p "$CACHE" "$(dirname "$OUT")"
-for tool in curl gzip cpio swiftc shasum; do
+for tool in curl gzip cpio swiftc codesign shasum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "[build-root-vz] FAIL: missing host tool $tool" >&2; exit 1; }
 done
+ENTITLEMENTS="$REPO_ROOT/harpoon/entitlements.plist"
+[ -f "$ENTITLEMENTS" ] || { echo "[build-root-vz] FAIL: missing canonical entitlements $ENTITLEMENTS" >&2; exit 1; }
 
 fetch_pinned() {
   local tmp="$1.tmp" actual
@@ -51,6 +53,22 @@ fi
 SWIFT_CACHE="$WORK/swift-module-cache"
 mkdir -p "$SWIFT_CACHE"
 CLANG_MODULE_CACHE_PATH="$SWIFT_CACHE" swiftc "$SCRIPT_DIR/AlpineRootBuilder.swift" -o "$WORK/AlpineRootBuilder"
+echo "[build-root-vz] signing AlpineRootBuilder with $ENTITLEMENTS" >&2
+codesign --entitlements "$ENTITLEMENTS" --force -s - "$WORK/AlpineRootBuilder" 2>&1 || {
+  echo "[build-root-vz] FAIL: codesign failed for AlpineRootBuilder" >&2
+  exit 1
+}
+ENTITLEMENT_DUMP="$WORK/AlpineRootBuilder.entitlements"
+if ! codesign -d --entitlements - "$WORK/AlpineRootBuilder" >"$ENTITLEMENT_DUMP" 2>&1; then
+  echo "[build-root-vz] FAIL: unable to inspect AlpineRootBuilder entitlements" >&2
+  cat "$ENTITLEMENT_DUMP" >&2
+  exit 1
+fi
+if ! grep -q 'com.apple.security.virtualization' "$ENTITLEMENT_DUMP"; then
+  echo "[build-root-vz] FAIL: AlpineRootBuilder is missing com.apple.security.virtualization" >&2
+  cat "$ENTITLEMENT_DUMP" >&2
+  exit 1
+fi
 "$WORK/AlpineRootBuilder" "$REPO_ROOT/assets/guest/Image-virt" "$WORK/builder-initramfs.cpio.gz" "$WORK/harpoon-root.img" "$WORK/serial.log"
 mv "$WORK/harpoon-root.img" "$OUT"
 cat > "$OUT.manifest" <<EOF
