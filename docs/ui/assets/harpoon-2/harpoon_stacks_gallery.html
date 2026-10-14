@@ -1,0 +1,144 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Harpoon 2 — Stacks</title><style>
+@page{size:1440px 900px;margin:0}
+:root{
+  color-scheme:dark;--bg:#0B0E11;--surface:#11161C;--surface2:#151B22;--surface3:#1A2129;
+  --line:#2A323B;--line2:#38424D;--text:#E6EDF3;--muted:#9AA6B2;--muted2:#74808C;
+  --accent:#E4B243;--accent-soft:rgba(228,178,67,.12);--green:#22C55E;--green-soft:rgba(34,197,94,.12);
+  --amber:#F59E0B;--red:#EF4444;--blue:#61A5FA;--purple:#A78BFA;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:1440px;height:900px;background:var(--bg);color:var(--text)}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;font-size:13px;letter-spacing:.005em;overflow:hidden}
+button,input{font:inherit}a{color:inherit;text-decoration:none}
+.app{display:grid;grid-template-columns:214px 1226px;width:1440px;height:900px;background:var(--bg)}
+.sidebar{display:flex;flex-direction:column;background:linear-gradient(180deg,#10151B 0%,#0E1318 100%);border-right:1px solid var(--line)}
+.window-dots{height:46px;display:flex;align-items:center;gap:7px;padding:0 18px}
+.dot{width:11px;height:11px;border-radius:50%}.dot.red{background:#FF5F57}.dot.yellow{background:#FEBB2E}.dot.green{background:#28C840}
+.brand{display:flex;align-items:center;gap:10px;padding:8px 16px 18px;font-weight:700;font-size:15px}
+.brand-mark{width:26px;height:26px;border-radius:7px;border:1px solid rgba(228,178,67,.45);display:grid;place-items:center;background:rgba(228,178,67,.08);color:var(--accent)}
+.nav{padding:4px 10px;display:grid;gap:4px}
+.nav-item{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:8px;color:#AAB5C0;border:1px solid transparent}
+.nav-item svg{width:16px;height:16px;stroke-width:1.8}.nav-item.active{color:#F4D785;background:var(--accent-soft);border-color:rgba(228,178,67,.18)}
+.nav-item .count{margin-left:auto;font-size:11px;color:#66727E}
+.side-label{padding:17px 20px 8px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#5F6A75}
+.sidebar-footer{margin-top:auto;padding:14px 12px 16px}
+.engine{border:1px solid var(--line);background:#0D1217;border-radius:10px;padding:11px 12px;display:grid;gap:7px}
+.engine-top{display:flex;align-items:center;justify-content:space-between}.engine-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(34,197,94,.08)}
+.engine small{color:var(--muted2);font-size:10px}
+.main{display:grid;grid-template-rows:52px 821px 27px;min-width:0;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--line);background:#0B0E11}
+.search{width:560px;height:32px;display:flex;align-items:center;gap:9px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#0F1419;color:var(--muted)}
+.search svg{width:14px;height:14px}.kbd{margin-left:auto;border:1px solid #313A43;background:#151B21;border-radius:5px;padding:2px 6px;color:#75818D;font-size:10px}
+.top-actions{margin-left:auto;display:flex;gap:7px}
+.icon-btn,.btn{border:1px solid var(--line);background:#12181E;color:#BAC4CE;border-radius:8px;height:32px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.icon-btn{width:32px;padding:0}.icon-btn svg,.btn svg{width:14px;height:14px}.btn{padding:0 12px;font-weight:600}.btn.primary{background:#D9A93E;border-color:#D9A93E;color:#16120A}
+.content{overflow:hidden;padding:24px 26px 34px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.11em;color:#687480;margin-bottom:6px}
+h1{margin:0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:-.02em}.subtitle{margin-top:6px;color:var(--muted);font-size:12px}
+.head-actions{display:flex;gap:8px}
+.toolbar{min-height:42px;display:flex;align-items:center;gap:9px;margin-bottom:17px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.segmented{display:flex;padding:3px;background:#0F1419;border:1px solid var(--line);border-radius:8px}
+.seg{min-width:72px;height:28px;border:0;border-radius:6px;background:transparent;color:#7E8A96;display:flex;gap:7px;align-items:center;justify-content:center;font-weight:600}
+.seg.active{background:#1A2128;color:#EDF2F7}.seg svg{width:13px;height:13px}
+.filter{margin-left:auto;color:#8995A1;display:flex;gap:7px;align-items:center}
+.filter-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#11171D;color:#9BA7B2;font-size:11px}
+.statusbar{border-top:1px solid var(--line);background:#0C1014;display:flex;align-items:center;padding:0 14px;color:#67727D;font-size:10px;gap:13px;white-space:nowrap}
+.statusbar .metric{display:flex;align-items:center;gap:5px}.spark{width:34px;height:11px}.statusbar .right{margin-left:auto;display:flex;gap:13px}
+.badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:10px;color:#A8B3BE;background:#11171D}
+.badge.green{border-color:rgba(34,197,94,.28);background:var(--green-soft);color:#7CE5A1}.badge.amber{border-color:rgba(245,158,11,.28);background:rgba(245,158,11,.1);color:#F5C45D}.badge.neutral{color:#8C98A4}
+.muted{color:var(--muted)}.muted2{color:var(--muted2)}.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}.tiny{font-size:10px}
+
+.stack-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;padding-bottom:34px}
+.stack-card{position:relative;min-height:218px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#131920 0%,#11171D 100%);overflow:hidden}
+.stack-link{display:block;height:100%;padding:15px 15px 14px}.stack-head{display:flex;align-items:flex-start;gap:10px}
+.stack-icon{width:34px;height:34px;border-radius:9px;border:1px solid rgba(228,178,67,.25);display:grid;place-items:center;background:rgba(228,178,67,.08);color:#E7C363;flex:0 0 auto}
+.stack-icon svg{width:17px;height:17px}.stack-name{font-size:14px;font-weight:700;margin-bottom:4px}.stack-meta{color:#7E8A95;font-size:10px}
+.stack-more{position:absolute;right:10px;top:10px;width:28px;height:28px;border:0;background:transparent;color:#727F8B}.stack-more svg{width:15px;height:15px}
+.stack-summary{display:flex;align-items:center;gap:7px;margin-top:16px;color:#93A0AC;font-size:11px}
+.status-strip{display:grid;gap:3px;margin-top:9px;height:6px}.status-strip span{border-radius:99px;background:#4B5560}.status-strip .run{background:var(--green)}.status-strip .warn{background:var(--amber)}
+.stack-services{display:grid;grid-template-columns:1fr 1fr;gap:5px 14px;margin-top:14px}.service{display:flex;align-items:center;gap:6px;color:#B7C0C9;font-size:11px}
+.service-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:0 0 auto}.service-dot.off{background:#596470}.service-dot.warn{background:var(--amber)}
+.stack-foot{display:flex;align-items:center;gap:8px;margin-top:13px;padding-top:11px;border-top:1px solid rgba(42,50,59,.75)}
+.resource-chip{display:inline-flex;align-items:center;gap:5px;color:#7F8B96;font-size:10px;background:#0E1419;border:1px solid #273039;border-radius:6px;padding:4px 6px}
+.resource-chip svg{width:11px;height:11px}.stack-card.standalone{min-height:190px}.standalone .stack-icon{border-color:#32404D;background:#172029;color:#91A0AE}
+</style>
+<style>
+.icon-btn,.btn{display:flex}
+.filter-pill svg{width:12px;height:12px;min-width:12px;min-height:12px}
+</style>
+</head>
+<body><div class="app"><aside class="sidebar">
+<div class="window-dots"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span></div>
+<div class="brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></span>Harpoon</div>
+<div class="side-label">Workspace</div>
+<nav class="nav">
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>Overview</span></div>
+<div class="nav-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg><span>Containers</span><span class="count">12</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 4.5-4 3 2.5 3.5-4 5 5"/></svg><span>Images</span><span class="count">18</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><span>Volumes</span><span class="count">9</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg><span>Networks</span><span class="count">6</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 19V5M4 19h16"/><path d="m7 15 4-5 3 3 4-6"/></svg><span>Resources</span></div>
+<div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span>Diagnostics</span></div>
+</nav>
+<div class="sidebar-footer"><div class="engine"><div class="engine-top"><div class="engine-title"><span class="status-dot"></span>Harpoon Engine</div><span class="tiny muted">v0.1.1</span></div><small>Docker 28.3 · arm64 · 2 CPU · 1 GB</small></div></div>
+</aside><main class="main"><header class="topbar"><div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>Search containers, stacks, images…</span><span class="kbd">⌘ K</span></div>
+<div class="top-actions"><button class="icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 10a7 7 0 0 0-12-2L4 11M20 13l-2.5 3a7 7 0 0 1-12-2"/></svg></button><button class="icon-btn"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></header><section class="content">
+<div class="page-head"><div><div class="eyebrow">Containers</div><h1>Stacks</h1><div class="subtitle">Compose projects and standalone containers from the active Harpoon context.</div></div>
+<div class="head-actions"><button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 10a7 7 0 0 0-12-2L4 11M20 13l-2.5 3a7 7 0 0 1-12-2"/></svg> Refresh</button><button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg> Run container</button></div></div>
+<div class="toolbar"><div class="segmented"><button class="seg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 5v14M16 5v14"/></svg> Table</button><button class="seg active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg> Stacks</button></div>
+<span class="filter-pill">All states · 12</span><span class="filter-pill">Compose · 4</span><div class="filter">Grouped from engine metadata · no inferred stacks</div></div>
+<div class="stack-grid"><article class="stack-card">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<a class="stack-link" href="harpoon_stack_collectiv_tiles.html">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></div><div><div class="stack-name">Collectiv</div><div class="stack-meta">Compose project · 5 containers</div></div></div>
+<div class="stack-summary"><span class="badge green">4 running</span><span class="badge neutral">1 exited</span></div>
+<div class="status-strip" style="grid-template-columns:repeat(5,1fr)"><span class="run"></span><span class="run"></span><span class="run"></span><span class="run"></span><span></span></div><div class="stack-services"><div class="service"><i class="service-dot"></i><span>collectiv-web</span></div><div class="service"><i class="service-dot"></i><span>collectiv-postgres</span></div><div class="service"><i class="service-dot"></i><span>collectiv-nats</span></div><div class="service"><i class="service-dot off"></i><span>collectiv-worker</span></div><div class="service"><i class="service-dot"></i><span>collectiv-cache</span></div></div>
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> 2 networks</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> 3 volumes</span></div>
+</a></article>
+<article class="stack-card">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<div class="stack-link">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></div><div><div class="stack-name">Ghost</div><div class="stack-meta">Compose project · 3 containers</div></div></div>
+<div class="stack-summary"><span class="badge green">3 running</span></div>
+<div class="status-strip" style="grid-template-columns:repeat(3,1fr)"><span class="run"></span><span class="run"></span><span class="run"></span></div><div class="stack-services"><div class="service"><i class="service-dot"></i><span>ghost-app</span></div><div class="service"><i class="service-dot"></i><span>ghost-mysql</span></div><div class="service"><i class="service-dot"></i><span>ghost-nginx</span></div></div>
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> 1 network</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> 2 volumes</span></div>
+</div></article>
+<article class="stack-card">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<div class="stack-link">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></div><div><div class="stack-name">Spectra</div><div class="stack-meta">Compose project · 4 containers</div></div></div>
+<div class="stack-summary"><span class="badge green">3 running</span><span class="badge amber">1 restarting</span></div>
+<div class="status-strip" style="grid-template-columns:repeat(4,1fr)"><span class="run"></span><span class="run"></span><span class="warn"></span><span class="run"></span></div><div class="stack-services"><div class="service"><i class="service-dot"></i><span>spectra-ui</span></div><div class="service"><i class="service-dot"></i><span>spectra-bridge</span></div><div class="service"><i class="service-dot"></i><span>spectra-agent</span></div><div class="service"><i class="service-dot"></i><span>spectra-redis</span></div></div>
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> 2 networks</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> 1 volume</span></div>
+</div></article>
+<article class="stack-card">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<div class="stack-link">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg></div><div><div class="stack-name">Waypoint</div><div class="stack-meta">Compose project · 3 containers</div></div></div>
+<div class="stack-summary"><span class="badge green">2 running</span><span class="badge neutral">1 exited</span></div>
+<div class="status-strip" style="grid-template-columns:repeat(3,1fr)"><span class="run"></span><span class="run"></span><span></span></div><div class="stack-services"><div class="service"><i class="service-dot"></i><span>waypoint-web</span></div><div class="service"><i class="service-dot"></i><span>waypoint-db</span></div><div class="service"><i class="service-dot off"></i><span>waypoint-jobs</span></div></div>
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> 1 network</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> 2 volumes</span></div>
+</div></article>
+<article class="stack-card standalone">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<div class="stack-link">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg></div><div><div class="stack-name">redis-sandbox</div><div class="stack-meta">Standalone container · redis:7-alpine</div></div></div>
+<div class="stack-summary"><span class="badge green">Running</span><span class="mono tiny muted">6379/tcp</span></div>
+
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> bridge</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg> no named volume</span></div>
+</div></article>
+<article class="stack-card standalone">
+<button class="stack-more"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+<div class="stack-link">
+<div class="stack-head"><div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg></div><div><div class="stack-name">harpoon-bind-proof</div><div class="stack-meta">Standalone container · alpine:3.22</div></div></div>
+<div class="stack-summary"><span class="badge neutral">Exited</span><span class="mono tiny muted">3h ago</span></div>
+
+<div class="stack-foot"><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M5 16v-3h14v3M12 11H5M12 11h7"/></svg> bridge</span><span class="resource-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2"/></svg> bind mount</span></div>
+</div></article></div></section><footer class="statusbar">
+<span class="metric"><span class="status-dot" style="width:6px;height:6px"></span>Engine healthy</span>
+<span class="metric">CPU <svg class="spark" viewBox="0 0 34 11"><polyline points="0,9 5,7 9,8 14,5 18,6 23,3 27,5 34,2" fill="none" stroke="#E4B243" stroke-width="1.2"/></svg>7%</span>
+<span class="metric">Memory <svg class="spark" viewBox="0 0 34 11"><polyline points="0,8 5,8 9,6 14,7 18,4 23,5 27,4 34,3" fill="none" stroke="#A78BFA" stroke-width="1.2"/></svg>612 MB</span>
+<span class="metric">Network <svg class="spark" viewBox="0 0 34 11"><polyline points="0,9 5,9 9,7 14,3 18,8 23,5 27,7 34,4" fill="none" stroke="#61A5FA" stroke-width="1.2"/></svg>1.8 MB/s</span>
+<div class="right"><span>Context: harpoon</span><span>12 containers</span></div></footer></main></div></body></html>
