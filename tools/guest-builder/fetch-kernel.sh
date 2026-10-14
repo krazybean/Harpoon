@@ -55,19 +55,29 @@ echo "[fetch-kernel] source: $BASE (Alpine 3.22 virt 6.12.x)" >&2
 # Decompress PE+gz wrapper to uncompressed Image
 if [ ! -f "$OUT_IMAGE" ] || [ "$KERNEL_CACHE" -nt "$OUT_IMAGE" ]; then
   echo "[fetch-kernel] decompressing vmlinuz-virt -> Image-virt..." >&2
-  python3 -c "
-import pathlib, subprocess
-data=pathlib.Path('$KERNEL_CACHE').read_bytes()
-pos=data.find(b'\x1f\x8b\x08')
+  python3 - "$KERNEL_CACHE" "$OUT_IMAGE" <<'PY'
+import pathlib
+import sys
+import zlib
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+data = source.read_bytes()
+pos = data.find(b"\x1f\x8b\x08")
 if pos < 0:
-    raise SystemExit('gzip magic not found in vmlinuz-virt')
-open('/tmp/_harpoon_chunk.gz','wb').write(data[pos:])
-r=subprocess.run(['gunzip','-c','/tmp/_harpoon_chunk.gz'], capture_output=True)
-if r.returncode != 0:
-    raise SystemExit(r.stderr.decode())
-open('$OUT_IMAGE','wb').write(r.stdout)
-print(f'decompressed {len(r.stdout)} bytes')
-"
+    raise SystemExit("gzip magic not found in vmlinuz-virt")
+
+decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+try:
+    image = decoder.decompress(data[pos:]) + decoder.flush()
+except zlib.error as exc:
+    raise SystemExit(f"gzip decompression failed: {exc}")
+if not decoder.eof:
+    raise SystemExit("gzip member ended before its end marker")
+
+# vmlinuz-virt is a PE wrapper; unused_data is unrelated bytes after the gzip member.
+destination.write_bytes(image)
+print(f"decompressed {len(image)} bytes")
+PY
   echo "[fetch-kernel] Image-virt $(stat -f%z "$OUT_IMAGE" 2>/dev/null || stat -c%s "$OUT_IMAGE") bytes $(file "$OUT_IMAGE" | head -c 120)" >&2
   if command -v shasum >/dev/null; then
     echo "[fetch-kernel] sha256 Image-virt: $(shasum -a 256 "$OUT_IMAGE" | cut -d' ' -f1)" >&2

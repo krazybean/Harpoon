@@ -9,7 +9,7 @@ mkdir -p "$ROOT/tools/guest-builder" "$ROOT/assets/guest/.cache" "$TMP/bin"
 cp "$REPO_ROOT/tools/guest-builder/fetch-kernel.sh" "$ROOT/tools/guest-builder/fetch-kernel.sh"
 printf stale > "$ROOT/assets/guest/.cache/vmlinuz-virt"
 printf stale > "$ROOT/assets/guest/.cache/initramfs-virt"
-touch -d '2030-01-01' "$ROOT/assets/guest/Image-virt" 2>/dev/null || touch "$ROOT/assets/guest/Image-virt"
+rm -f "$ROOT/assets/guest/Image-virt"
 
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
@@ -23,7 +23,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "${url##*/}" = vmlinuz-virt ]; then
-  printf 'canonical-%s' "${url##*/}" | gzip -c > "$out"
+  printf 'PE-wrapper' > "$out"
+  printf 'canonical-%s' "${url##*/}" | gzip -c >> "$out"
+  printf 'trailing-wrapper-data' >> "$out"
 else
   printf 'canonical-%s' "${url##*/}" > "$out"
 fi
@@ -46,6 +48,8 @@ CURL_LOG="$TMP/curl.log" PATH="$TMP/bin:$PATH" bash "$ROOT/tools/guest-builder/f
 [ "$(wc -l < "$TMP/curl.log" | tr -d ' ')" = 2 ] || { echo 'fetch-kernel FAIL: stale cache was not refreshed' >&2; exit 1; }
 grep -q '^vmlinuz-virt$' "$TMP/curl.log"
 grep -q '^initramfs-virt$' "$TMP/curl.log"
+printf 'canonical-vmlinuz-virt' > "$TMP/expected-image"
+cmp "$TMP/expected-image" "$ROOT/assets/guest/Image-virt"
 
 CURL_LOG="$TMP/curl-second.log" PATH="$TMP/bin:$PATH" bash "$ROOT/tools/guest-builder/fetch-kernel.sh" >/dev/null
 [ ! -s "$TMP/curl-second.log" ] || { echo 'fetch-kernel FAIL: matching cache was downloaded again' >&2; exit 1; }
