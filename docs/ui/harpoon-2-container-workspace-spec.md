@@ -60,9 +60,31 @@ Opened identically from a table row or tile. Remain in same application shell wi
 | Stats | Container-scoped CPU/memory/network/I/O with clear units/time window and explicit missing-data behavior |
 | Inspect | Structured raw engine metadata with search/copy, JSON view; sensitive fields treated carefully |
 | Networks | Actual network attachments, addresses and clickable network resources |
+| Topology | Passive container-centric relationship view: this container, Docker-reported network attachments, and reported stack membership/links |
 | Storage | Named volumes, bind mounts, mount mode and related resource links; never imply ownership |
  
 No backend feature becomes a displayed promise without an engine capability and validation. Switching tabs does not silently destroy a running shell.
+
+### Container Topology tab — passive first slice
+
+Container Topology is a read-only tab in the existing **container detail workspace**. It is distinct from the primary Networks workspace and does not replace the existing Networks tab. The initial view is a compact, responsive relationship list centered on the selected container:
+
+- Show the selected container with its technology icon when the existing deterministic resolver has a supported identity; retain the generic icon fallback when it does not.
+- Show only Docker-authoritative relationships already available from inspected container metadata: network attachments and their reported endpoint/address fields, plus stack/project membership when the relevant Compose or engine metadata is present.
+- Treat stack membership as reported metadata, not a name-prefix guess. If the engine does not report a stack/project, say **No stack membership reported**.
+- A shared network means **membership only**. Never draw or describe traffic, reachability, request flow, dependency, or communication merely because containers share a network.
+- Initial scope is passive: no lifecycle actions, attach/detach actions, polling, graph library, or required click-through. Future navigation to the related network, stack, or container may be added only as an explicit follow-up.
+- Preserve the existing Overview, Logs, Inspect, Networks, and Storage navigation and their current responsibilities.
+
+States and acceptance:
+
+- Loading: identify that Docker metadata is being read without presenting guessed relationships.
+- Empty: distinguish **no network attachments reported** from **no stack membership reported**; do not collapse either into an error.
+- Error: identify unavailable/stale inspect metadata, offer retry, and never render stale relationships as current without labeling them.
+- Unsupported or incomplete metadata: show the known relationship fields and an explicit unavailable/unknown value for missing fields; do not infer a stack or network edge.
+- Keyboard: every relationship row and any future link affordance has a visible focus state and accessible name. The list is the canonical keyboard-accessible alternative to any later visual graph.
+- Responsive fallback: at ordinary laptop and narrow widths, use a single-column relationship list with labels and provenance; do not require pan/zoom or horizontal scrolling.
+- Acceptance requires fixture coverage for populated, empty, missing-metadata, stale/error, conflicting/incomplete metadata, technology-icon fallback, keyboard traversal, and narrow-width rendering.
 
 ## Interactive shell and Quake-style quick console
 
@@ -83,9 +105,11 @@ No backend feature becomes a displayed promise without an engine capability and 
 
 ## Networks workspace (related design direction)
 
-- Two complementary modes: list/table for network operations; interactive **topology** showing observed network-to-container attachments, not imagined packet flows.
+- This remains a separate, network-centric workspace feature: a list/table for network operations plus a future passive **Network Topology** view spanning networks, attached containers, and multi-network relationships.
+- Network Topology is not the container-detail Topology tab. It is scoped by selected network/context and may later support filtering across networks and containers; the initial planning boundary is read-only relationship inspection, not graph interaction.
 - Clicking network opens a network workspace; clicking container opens same container workspace; links from stack cards lead to same objects.
 - Distinguish actual shared network membership from proof of communication. Honor engine contexts and unsupported fields. Topology needs keyboard navigation, pan/zoom and a readable non-graph alternative.
+- Do not add a graph library or polling at planning stage. Any future graph must have a keyboard-accessible list/table alternative and a responsive non-graph fallback.
 
 ## Accessibility, security, acceptance
 
@@ -102,10 +126,10 @@ No backend feature becomes a displayed promise without an engine capability and 
 2. Visual tokens/application shell, responsive layouts, keyboard/accessibility baseline.
 3. Container table and stack-gallery composition with one detail route.
 4. Technology resolver and bundled icons.
-5. Container workspace tabs: Overview, Logs, Inspect, Stats, Networks, Storage.
+5. Container workspace tabs: preserve the current Overview, Shell, Logs, Inspect, Networks, and Storage navigation; retain the planned Stats tab and add the passive Container Topology slice without replacing or reordering the established tabs.
 6. Read-only engine/context discovery; capability-aware group actions.
 7. Shell transport/session lifecycle and xterm.js presentation; Quake overlay.
-8. Network topology and shared relationship navigation.
+8. Separate passive Container Topology and Network Topology relationship views; validate provenance, filtering scope, keyboard/list alternatives, and responsive fallbacks before any graph or click-through work.
 9. Functional regression, packaging, security audit and screenshot acceptance across sizes.
 
 Sequence can change after repository evidence. No phase is marked PASS from this specification.
