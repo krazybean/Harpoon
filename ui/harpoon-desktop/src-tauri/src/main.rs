@@ -1,10 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+mod shell;
+mod broadcast;
+mod runtime_refresh;
+mod resource_sampler;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -117,25 +123,26 @@ fn resolve_harpoon_binary() -> Result<PathBuf, String> {
         // Env var present but not executable -> error with detail, don't silently fall through to wrong binary
         return Err(format!("HARPOON_BIN points to non-executable '{}'", p.display()));
     }
-    // 2. Bundled application resource seam (preferred for production Harpoon.app)
-    if let Some(bundled) = bundled_harpoon_path() {
-        return Ok(bundled);
-    }
-    // 3. Development checkout derived from CARGO_MANIFEST_DIR (not CWD)
+    // Development builds must use the checkout they were compiled from, not an
+    // installed Harpoon.app that happens to be discoverable on this machine.
     //    src-tauri lives at <repo>/ui/harpoon-desktop/src-tauri
     //    development binary is <repo>/harpoon/build/harpoon
     let dev_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../harpoon/build/harpoon");
-    if is_executable(&dev_bin) {
-        if let Ok(c) = dev_bin.canonicalize() { return Ok(c); }
-        return Ok(dev_bin);
+    if cfg!(debug_assertions) {
+        if is_executable(&dev_bin) {
+            if let Ok(c) = dev_bin.canonicalize() { return Ok(c); }
+            return Ok(dev_bin);
+        }
+        if let Ok(c) = dev_bin.canonicalize() {
+            if c.exists() { return Ok(c); }
+        }
+        if dev_bin.exists() { return Ok(dev_bin); }
     }
-    // Also try canonicalize even if not executable bit yet (maybe built but not chmod)
-    if let Ok(c) = dev_bin.canonicalize() {
-        if c.exists() { return Ok(c); }
+    // Bundled application resource seam (preferred for production Harpoon.app)
+    if let Some(bundled) = bundled_harpoon_path() {
+        return Ok(bundled);
     }
-    // Also try dev_bin without canonicalize as fallback (for sandbox)
-    if dev_bin.exists() { return Ok(dev_bin); }
-    // 4. /usr/local/bin/harpoon
+    // Installed fallbacks for non-bundled release environments.
     let p4 = PathBuf::from("/usr/local/bin/harpoon");
     if is_executable(&p4) { return Ok(p4); }
     // 5. /opt/homebrew/bin/harpoon
@@ -443,6 +450,54 @@ fn enrich_compose_fields(value: &mut serde_json::Value) {
     }
 }
 
+fn enrich_container_attachments(value: &mut serde_json::Value, inspect: &serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return; };
+    let Some(details) = inspect.as_object() else { return; };
+
+    let networks = details
+        .get("NetworkSettings")
+        .and_then(|v| v.get("Networks"))
+        .and_then(|v| v.as_object())
+        .map(|map| map.keys().cloned().map(serde_json::Value::String).collect())
+        .unwrap_or_else(|| Vec::new());
+    obj.insert("NetworkNames".to_string(), serde_json::Value::Array(networks));
+
+    let mut named_volumes = Vec::new();
+    let mut bind_mounts = Vec::new();
+    if let Some(mounts) = details.get("Mounts").and_then(|v| v.as_array()) {
+        for mount in mounts {
+            let mount_type = mount.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+            let target = mount.get("Destination").and_then(|v| v.as_str()).unwrap_or("");
+            let read_only = mount.get("RW").and_then(|v| v.as_bool()).map(|rw| !rw).unwrap_or(false);
+            match mount_type {
+                "volume" => {
+                    if let Some(name) = mount.get("Name").and_then(|v| v.as_str()) {
+                        named_volumes.push(serde_json::json!({ "name": name, "target": target, "readOnly": read_only }));
+                    }
+                }
+                "bind" => {
+                    if let Some(source) = mount.get("Source").and_then(|v| v.as_str()) {
+                        bind_mounts.push(serde_json::json!({ "source": source, "target": target, "readOnly": read_only }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    obj.insert("NamedVolumes".to_string(), serde_json::Value::Array(named_volumes));
+    obj.insert("BindMounts".to_string(), serde_json::Value::Array(bind_mounts));
+    obj.insert("GroupKind".to_string(), if obj.get("ComposeProject").is_some() {
+        serde_json::Value::String("compose".to_string())
+    } else {
+        serde_json::Value::String("standalone".to_string())
+    });
+    obj.insert("GroupProvenance".to_string(), if obj.get("ComposeProject").is_some() {
+        serde_json::Value::String("docker.labels".to_string())
+    } else {
+        serde_json::Value::String("docker.engine".to_string())
+    });
+}
+
 #[tauri::command]
 fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
     let mut args = vec!["--context", "harpoon", "ps"];
@@ -455,6 +510,26 @@ fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> 
     let mut containers = docker_json_lines(&stdout);
     for c in &mut containers {
         enrich_compose_fields(c);
+    }
+    let ids: Vec<&str> = containers.iter()
+        .filter_map(|container| container.get("ID").or_else(|| container.get("Id")))
+        .filter_map(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if !ids.is_empty() {
+        let mut inspect_args = vec!["--context", "harpoon", "inspect", "--format", "{{json .}}"];
+        inspect_args.extend(ids.iter().copied());
+        if let Ok((inspect_stdout, _, inspect_code)) = run_docker(&inspect_args) {
+            if inspect_code == 0 {
+                let inspected = docker_json_lines(&inspect_stdout);
+                for container in &mut containers {
+                    let id = container.get("ID").or_else(|| container.get("Id")).and_then(|v| v.as_str());
+                    if let Some(details) = id.and_then(|wanted| inspected.iter().find(|item| item.get("Id").and_then(|v| v.as_str()).map(|actual| actual == wanted || actual.starts_with(wanted)).unwrap_or(false))) {
+                        enrich_container_attachments(container, details);
+                    }
+                }
+            }
+        }
     }
     Ok(containers)
 }
@@ -545,7 +620,38 @@ fn remove_image(id: String) -> Result<String, String> {
 fn list_volumes() -> Result<Vec<serde_json::Value>, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "volume", "ls", "--format", "{{json .}}"])?;
     if code != 0 && !stdout.contains("{") { return Err(stderr.trim().to_string()); }
-    Ok(docker_json_lines(&stdout))
+    let mut volumes = docker_json_lines(&stdout);
+    let (ids, _, ids_code) = run_docker(&["--context", "harpoon", "ps", "-aq"])?;
+    if ids_code == 0 {
+        let ids: Vec<&str> = ids.lines().map(str::trim).filter(|id| !id.is_empty()).collect();
+        if !ids.is_empty() {
+            let mut args = vec!["--context", "harpoon", "inspect", "--format", "{{json .}}"];
+            args.extend(ids);
+            if let Ok((inspect_stdout, _, inspect_code)) = run_docker(&args) {
+                if inspect_code == 0 {
+                    let mut attachments: HashMap<String, Vec<String>> = HashMap::new();
+                    for container in docker_json_lines(&inspect_stdout) {
+                        let name = container.get("Name").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches('/').to_string();
+                        if name.is_empty() { continue; }
+                        if let Some(mounts) = container.get("Mounts").and_then(|v| v.as_array()) {
+                            for mount in mounts {
+                                if mount.get("Type").and_then(|v| v.as_str()) != Some("volume") { continue; }
+                                if let Some(volume) = mount.get("Name").and_then(|v| v.as_str()) {
+                                    attachments.entry(volume.to_string()).or_default().push(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    for volume in &mut volumes {
+                        let name = volume.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+                        let users = attachments.remove(name).unwrap_or_default();
+                        volume["UsedBy"] = serde_json::Value::Array(users.into_iter().map(serde_json::Value::String).collect());
+                    }
+                }
+            }
+        }
+    }
+    Ok(volumes)
 }
 
 #[tauri::command]
@@ -623,6 +729,34 @@ fn get_counts() -> Result<serde_json::Value, String> {
         *guard = Some((val.clone(), Instant::now()));
     }
     Ok(val)
+}
+
+pub(crate) fn refresh_status() -> Result<HarpoonStatus, String> { get_status() }
+
+pub(crate) fn refresh_docker_info() -> Result<String, String> { get_docker_info() }
+
+pub(crate) fn refresh_counts() -> Result<serde_json::Value, String> { get_counts() }
+
+pub(crate) fn refresh_config() -> Result<ConfigResult, String> { get_config() }
+
+#[tauri::command]
+fn start_runtime_refresh_worker(app: tauri::AppHandle, config: runtime_refresh::Config) -> Result<u64, String> {
+    runtime_refresh::start(app, config)
+}
+
+#[tauri::command]
+fn stop_runtime_refresh_worker() {
+    runtime_refresh::stop();
+}
+
+#[tauri::command]
+fn start_resource_sampler(app: tauri::AppHandle, disk_path: Option<String>) -> Result<(), String> {
+    resource_sampler::start(app, disk_path)
+}
+
+#[tauri::command]
+fn stop_resource_sampler() {
+    resource_sampler::stop();
 }
 
 // --- Stage 3B: Docker host integration ---
@@ -750,6 +884,32 @@ fn resize_disk(size: String) -> Result<String, String> {
     if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
 }
 
+#[tauri::command]
+fn open_shell_session(app: tauri::AppHandle, manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, context: String, container_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<shell::ShellSession, String> {
+    shell::open(app, manager.inner().clone(), context, container_id, cols, rows)
+}
+
+#[tauri::command]
+fn write_shell_input(manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, session_id: String, input: String) -> Result<(), String> {
+    shell::write(manager.inner(), session_id, input)
+}
+
+#[tauri::command]
+fn resize_shell_session(manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    shell::resize(manager.inner(), session_id, cols, rows)
+}
+
+#[tauri::command]
+fn close_shell_session(manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, session_id: String) -> Result<(), String> {
+    manager.close(&session_id)
+}
+
+#[tauri::command]
+fn run_universal_command(command: String, targets: Vec<broadcast::Target>) -> Result<Vec<broadcast::ResultRow>, String> {
+    let docker = resolve_docker_binary()?;
+    broadcast::execute(&docker, &command, targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,10 +988,32 @@ mod tests {
         assert_eq!(v.get("ComposeProject").and_then(|x| x.as_str()), Some("proj"));
         assert_eq!(v.get("ComposeService").and_then(|x| x.as_str()), Some("api"));
     }
+
+    #[test]
+    fn test_container_attachments_keep_named_and_bind_mounts_distinct() {
+        let mut listed = serde_json::json!({"ID":"abc", "ComposeProject":"proj"});
+        let inspected = serde_json::json!({
+            "Id":"abc-full",
+            "Mounts":[
+                {"Type":"volume","Name":"proj_db","Destination":"/var/lib/db","RW":true},
+                {"Type":"bind","Source":"/tmp/project","Destination":"/app","RW":false}
+            ],
+            "NetworkSettings":{"Networks":{"proj_default":{},"shared-edge":{}}}
+        });
+        enrich_container_attachments(&mut listed, &inspected);
+        assert_eq!(listed["NetworkNames"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["NamedVolumes"][0]["name"], "proj_db");
+        assert_eq!(listed["BindMounts"][0]["source"], "/tmp/project");
+        assert_eq!(listed["GroupKind"], "compose");
+        assert_eq!(listed["GroupProvenance"], "docker.labels");
+    }
+
 }
 
 fn main() {
-    tauri::Builder::default()
+    let shell_manager = std::sync::Arc::new(shell::ShellManager::new());
+    let builder = tauri::Builder::default()
+        .manage(shell_manager.clone())
         .invoke_handler(tauri::generate_handler![
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
@@ -840,8 +1022,20 @@ fn main() {
             list_images, inspect_image, remove_image,
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
-            get_counts
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+            get_counts,
+            start_runtime_refresh_worker, stop_runtime_refresh_worker,
+            start_resource_sampler, stop_resource_sampler,
+            open_shell_session, write_shell_input, resize_shell_session, close_shell_session, run_universal_command
+        ]);
+
+    builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app, event| {
+            if matches!(event, tauri::RunEvent::Exit { .. }) {
+                shell_manager.close_all();
+                resource_sampler::stop();
+                runtime_refresh::stop();
+            }
+        });
 }

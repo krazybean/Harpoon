@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test src/lib/resourceBatch.test.mjs",
+    "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:runtime": "bash ../../harpoon/build.sh",
@@ -26,6 +26,8 @@
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
     "@tauri-apps/api": "2.12.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
