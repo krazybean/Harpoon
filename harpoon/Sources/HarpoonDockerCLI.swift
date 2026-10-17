@@ -7,34 +7,52 @@ let harpoonContextName = "harpoon"
 let harpoonSocketEndpoint = "unix:///tmp/harpoon-docker.sock"
 
 func findDocker() -> String? {
-    let candidates = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/usr/bin/docker", "/run/current-system/sw/bin/docker"]
-    for c in candidates {
-        if FileManager.default.isExecutableFile(atPath: c) { return c }
+    var candidates: [String] = []
+    if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+        candidates += pathEnv.split(separator: ":").map { dir in
+            URL(fileURLWithPath: String(dir)).appendingPathComponent("docker").path
+        }
     }
+    // Finder-launched apps may have a minimal PATH. Keep only current, known-safe
+    // fallbacks; every candidate still has to launch successfully below.
+    candidates += ["/opt/homebrew/bin/docker", "/usr/bin/docker", "/run/current-system/sw/bin/docker"]
+    return candidates.first(where: isRunnableDocker)
+}
+
+private func isRunnableDocker(_ path: String) -> Bool {
+    guard FileManager.default.isExecutableFile(atPath: path) else { return false }
     let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-    proc.arguments = ["docker"]
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError = FileHandle.nullDevice
+    proc.executableURL = URL(fileURLWithPath: path)
+    proc.arguments = ["--version"]
+    proc.standardOutput = Pipe()
+    proc.standardError = Pipe()
     do {
         try proc.run()
         proc.waitUntilExit()
-        if proc.terminationStatus == 0 {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !out.isEmpty {
-                if FileManager.default.isExecutableFile(atPath: out) { return out }
-            }
-        }
-    } catch {}
-    // try whereis via env
-    if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
-        for dir in pathEnv.split(separator: ":") {
-            let cand = URL(fileURLWithPath: String(dir)).appendingPathComponent("docker").path
-            if FileManager.default.isExecutableFile(atPath: cand) { return cand }
-        }
+        return proc.terminationStatus == 0
+    } catch {
+        // Includes macOS's exec-format error for stale Intel binaries.
+        return false
     }
-    return nil
+}
+
+struct DockerContextInspection {
+    let endpoint: String?
+    let error: String?
+}
+
+func inspectDockerContext(_ name: String) -> DockerContextInspection {
+    let (code, out, err) = runDocker(["context", "inspect", name])
+    guard code == 0 else { return DockerContextInspection(endpoint: nil, error: err.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    guard let data = out.data(using: .utf8),
+          let arr = try? JSONSerialization.jsonObject(with: data) as? [[String:Any]],
+          let first = arr.first,
+          let endpoints = first["Endpoints"] as? [String:Any],
+          let dockerEp = endpoints["docker"] as? [String:Any],
+          let host = dockerEp["Host"] as? String else {
+        return DockerContextInspection(endpoint: nil, error: "invalid context inspect output")
+    }
+    return DockerContextInspection(endpoint: host, error: nil)
 }
 
 func runDocker(_ args: [String], env: [String:String]? = nil) -> (Int32, String, String) {
@@ -63,22 +81,11 @@ func runDocker(_ args: [String], env: [String:String]? = nil) -> (Int32, String,
 }
 
 func dockerContextEndpoint(_ name: String) -> String? {
-    let (code, out, _) = runDocker(["context", "inspect", name])
-    if code != 0 { return nil }
-    // parse JSON
-    guard let data = out.data(using: .utf8) else { return nil }
-    if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String:Any]],
-       let first = arr.first,
-       let endpoints = first["Endpoints"] as? [String:Any],
-       let dockerEp = endpoints["docker"] as? [String:Any],
-       let host = dockerEp["Host"] as? String {
-        return host
-    }
-    return nil
+    inspectDockerContext(name).endpoint
 }
 
 func dockerContextExists(_ name: String) -> Bool {
-    return dockerContextEndpoint(name) != nil
+    inspectDockerContext(name).endpoint != nil
 }
 
 func currentDockerContext() -> String? {
@@ -140,7 +147,7 @@ func credsStoreStatus() -> (store: String?, status: String, warning: String?) {
 
 func handleDockerSetup() -> Int32 {
     guard let docker = findDocker() else {
-        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked PATH, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)")
+        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker)")
         cliError("Install Docker CLI (https://docs.docker.com/engine/install/) — Docker Desktop NOT required")
         return 1
     }
