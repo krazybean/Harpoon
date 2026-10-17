@@ -1,6 +1,8 @@
-# Harpoon
+# Harpoon 2.0
 
-Lightweight Docker-compatible container environment for macOS using Apple's Virtualization.framework and a minimal Linux VM.
+*Containers, under control.*
+
+A native macOS workspace for managing Docker-compatible containers, Compose stacks, networks, and development environments without Docker Desktop. Harpoon uses Apple's `Virtualization.framework` and a minimal Linux VM while keeping Docker Engine authoritative for container workloads.
 [![Release](https://img.shields.io/github/v/release/krazybean/Harpoon)](https://github.com/krazybean/Harpoon/releases/latest)
 [![CodeQL](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml/badge.svg)](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/krazybean/Harpoon/badge)](https://securityscorecards.dev/viewer/?uri=github.com/krazybean/Harpoon)
@@ -8,7 +10,13 @@ Lightweight Docker-compatible container environment for macOS using Apple's Virt
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://github.com/krazybean/Harpoon)
 
 
-Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. It provides the macOS-side virtualization substrate needed to run a standard Linux container stack while preserving compatibility with the Docker CLI, Compose, and surrounding tooling.
+Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. The host runtime owns the macOS↔Linux boundary; Docker Engine, containerd, and BuildKit remain inside the guest.
+
+## Harpoon 2.0 teaser
+
+[![Watch the Harpoon 2.0 teaser](docs/media/Harpoon-2.0-teaser-v2-thumbnail.jpg)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
+
+Watch or download the approved 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1). GitHub README pages use a linked thumbnail here so the video remains a reliable release download rather than relying on unsupported embedded-video behavior.
 
 ## Why Harpoon?
 
@@ -19,26 +27,39 @@ Harpoon runs ordinary Docker development workloads on macOS without requiring Do
 
 Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit remain authoritative inside the guest for containers, images, volumes, networks, and builds. Harpoon owns the macOS↔Linux boundary.
 
-## Download Harpoon
+## Download Harpoon 2.0 RC
 
-macOS Apple Silicon release assets are published on [GitHub Releases](https://github.com/krazybean/Harpoon/releases):
+The [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) is for testing only, not a stable 2.0.0 release:
 
-- **Latest desktop release:** `Harpoon-0.1.1-arm64.dmg` + `SHA256SUMS`.
-- **Standalone CLI/runtime archive:** `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` remains available from the v0.1.0 release. A standalone v0.1.1 CLI tarball is not currently published.
+- **Apple Silicon DMG:** [Harpoon-2.0.0-rc.1-arm64.dmg](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0.0-rc.1-arm64.dmg)
+- **Desktop teaser:** [Harpoon-2.0-teaser-v2-15s.mp4](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
+
+Install safely:
+
+1. Download the DMG and verify its SHA256 on the release page.
+2. Open the DMG and copy Harpoon to `/Applications`.
+3. The build is ad-hoc signed and unnotarized. If macOS blocks first launch, use the app's contextual **Open** action or approve Harpoon specifically in System Settings → Privacy & Security.
+4. Test with disposable containers and preserve existing development VM data.
+
+The [v0.1.1 release](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) remains the latest stable desktop release. Standalone CLI/runtime archives remain available from [v0.1.0](https://github.com/krazybean/Harpoon/releases/tag/v0.1.0).
 
 Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). Use the Releases page above as the authoritative list of published artifacts.
 
-## Screenshots / Desktop UI
+## Desktop workspace
 
-The Tauri/React desktop app is a client of the Harpoon runtime. Seven curated views are included under `docs/ui`:
+The Tauri/React desktop app is a client of the Harpoon runtime. These captures are from the current Harpoon 2 application and show the verified surfaces available for the RC:
 
-![Overview](docs/ui/01-overview.png)
-![Containers](docs/ui/02-containers.png)
-![Images](docs/ui/03-images.png)
+| Stacks | Network topology |
+|---|---|
+| ![Stacks](docs/ui/assets/harpoon-2/screenshots/stacks.jpg) | ![Network topology](docs/ui/assets/harpoon-2/screenshots/network-topology.jpg) |
 
-Additional views: volumes, networks, resources, diagnostics. See [UI documentation](docs/ui/README.md) for visual-language notes (reference images are not specifications for runtime behavior).
+| Container details | CSSH cluster shell |
+|---|---|
+| ![Container details](docs/ui/assets/harpoon-2/screenshots/container-details.jpg) | ![CSSH cluster shell](docs/ui/assets/harpoon-2/screenshots/cssh.jpg) |
 
-## Current Capabilities
+The workspace also includes Overview, Quake Shell, and read-only Context Discovery surfaces. Their current behavior and acceptance status are documented in [the UI notes](docs/ui/README.md), [Context Discovery](docs/context-discovery.md), and [the Harpoon 2 roadmap](docs/roadmap.md). The older images under `docs/ui` remain visual references, not runtime screenshots.
+
+## Harpoon 2.0 RC capabilities
 
 All items below have been demonstrated on the documented test system (see results). Fresh-start DNS validation has now passed — see below.
 
@@ -47,7 +68,7 @@ All items below have been demonstrated on the documented test system (see result
 - **Compose & dev workflow:** `compose build/up/down`, bind mounts (`ro` enforcement, named volume `pgdata` persistence), bridge `m9net` + DNS, published ports, `env`/`.env`/`healthcheck`/`scale`/`mem_limit`.
 - **Networking:** VZNAT + virtio-net, host loopback forwarder for published ports (`docker run -p 8080:80` → `curl 127.0.0.1:8080`), `/tmp/harpoon-share` VirtioFS bind mounts, `net.ipv4.ip_forward=1`.
 - **Installation / distribution:** relocatable `dist/harpoon-0.1.0-darwin-arm64` (bin 802K, kernel 33M, initramfs 14M, root 2G sparse), `harpoon/install.sh` to `/usr/local`, `uninstall.sh`, APFS clone-aware `cp -c` provisioning, ad-hoc signing with `com.apple.security.virtualization`.
-- **Desktop app:** Tauri 2 + React + Vite (185 kB `dist`), 7 views, `status --json` live polling, per-action busy states, bootstrap `launching→ready/failed` with `Retry`, resource/config views backed by CLI.
+- **Desktop workspace:** Tauri 2 + React + Vite with Overview, container table and Compose Stacks, container details, network topology, CSSH cluster shell, Quake Shell prototype, and read-only Context Discovery. Prototype and acceptance-pending surfaces are labeled in the UI and docs.
 - **Ecosystem compatibility:** matrix A–H via `harpoon/ec-test.sh` (when host healthy) — compose, contexts, buildx verified; specific matrix rows preserved as `BLOCKED` only by host transient, not product.
 - **Validation:** dense acceptance harnesses (M7–M18, EC, UI, D1/D1.1) with logs, `tier-status.csv`, and preserved historical evidence.
 
@@ -186,7 +207,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Status
 
-Harpoon v0.1.1 is the latest published desktop release; v0.1.0 was the first public release and remains the latest release with a standalone CLI/runtime tarball.
+Harpoon v2.0.0-rc.1 is a testing prerelease for Apple Silicon. Second-Mac acceptance, notarized distribution, and several follow-up validation items remain open. Harpoon v0.1.1 remains the latest stable desktop release.
 
 Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 
