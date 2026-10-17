@@ -3,14 +3,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 mod shell;
 mod broadcast;
 mod runtime_refresh;
 mod resource_sampler;
+mod context_discovery;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -53,6 +55,19 @@ struct ConfigResult {
     memory: u32,
     raw: String,
     path: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ContainerStats {
+    source: &'static str,
+    container_id: String,
+    cpu_percent: Option<String>,
+    memory_usage: Option<String>,
+    memory_percent: Option<String>,
+    network_io: Option<String>,
+    block_io: Option<String>,
+    pids: Option<String>,
 }
 
 // --- Harpoon binary resolution with correct precedence ---
@@ -165,11 +180,10 @@ fn resolve_harpoon_binary() -> Result<PathBuf, String> {
 fn resolve_docker_binary() -> Result<PathBuf, String> {
     // ponytail: explicit, no `zsh -l -c`, no sourcing startup files.
     // Finder-launched apps have minimal PATH (e.g. /usr/bin:/bin:/usr/sbin:/sbin).
-    // We safely consider: 1) current PATH, 2) /opt/homebrew/bin/docker, 3) /usr/local/bin/docker, 4) other standard locations.
-    // Return absolute path for diagnostics; callers must use this, not bare `docker`.
+    // We safely consider PATH first, then Apple Silicon Homebrew and other
+    // standard locations. Every candidate must launch successfully.
     let candidates = [
         PathBuf::from("/opt/homebrew/bin/docker"),
-        PathBuf::from("/usr/local/bin/docker"),
         PathBuf::from("/usr/bin/docker"),
         PathBuf::from("/run/current-system/sw/bin/docker"),
     ];
@@ -178,21 +192,30 @@ fn resolve_docker_binary() -> Result<PathBuf, String> {
         for dir in path_var.split(':') {
             if dir.is_empty() { continue; }
             let p = PathBuf::from(dir).join("docker");
-            if is_executable(&p) { return Ok(p); }
+            if is_runnable_docker(&p) { return Ok(p); }
         }
     }
     // 2-4) Check standard locations regardless of PATH (Finder fallback)
     for p in &candidates {
-        if is_executable(p) { return Ok(p.clone()); }
+        if is_runnable_docker(p) { return Ok(p.clone()); }
     }
     // Also try `which` with extended PATH that includes homebrew locations (still no shell sourcing)
-    let extended = format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}", std::env::var("PATH").unwrap_or_default());
+    let extended = format!("/opt/homebrew/bin:/usr/bin:/bin:{}", std::env::var("PATH").unwrap_or_default());
     for dir in extended.split(':') {
         if dir.is_empty() { continue; }
         let p = PathBuf::from(dir).join("docker");
-        if is_executable(&p) { return Ok(p); }
+        if is_runnable_docker(&p) { return Ok(p); }
     }
-    Err("Docker CLI not installed/found (checked PATH, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)".to_string())
+    Err("Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker)".to_string())
+}
+
+fn is_runnable_docker(path: &PathBuf) -> bool {
+    is_executable(path)
+        && Command::new(path)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
 }
 
 fn docker_command(args: &[&str]) -> Result<Command, String> {
@@ -384,6 +407,36 @@ fn run_docker(args: &[&str]) -> Result<(String, String, i32), String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let code = output.status.code().unwrap_or(-1);
     Ok((stdout, stderr, code))
+}
+
+fn run_docker_bounded(args: &[&str], timeout: Duration) -> Result<(String, String, i32), String> {
+    let mut cmd = docker_command(args).map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
+    run_command_bounded(&mut cmd, timeout).map_err(|error| format!("docker {}: {}", args.join(" "), error))
+}
+
+fn run_command_bounded(cmd: &mut Command, timeout: Duration) -> Result<(String, String, i32), String> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .map_err(|e| format!("failed to execute bounded command: {}", e))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().map_err(|e| format!("failed to read docker output: {e}"))?;
+                return Ok((
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    output.status.code().unwrap_or(-1),
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Docker stats timed out after {} ms", timeout.as_millis()));
+            }
+            Err(e) => return Err(format!("failed waiting for docker: {e}")),
+        }
+    }
 }
 
 fn docker_json_lines(stdout: &str) -> Vec<serde_json::Value> {
@@ -590,6 +643,34 @@ fn inspect_container(id: String) -> Result<serde_json::Value, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "inspect", &id])?;
     if code != 0 { return Err(stderr.trim().to_string()); }
     serde_json::from_str::<serde_json::Value>(&stdout).map_err(|e| format!("inspect parse failed: {}", e))
+}
+
+fn stats_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|field| field.as_str()).map(str::trim).filter(|field| !field.is_empty()).map(str::to_string)
+}
+
+#[tauri::command]
+fn stats_container(id: String) -> Result<ContainerStats, String> {
+    if id.trim().is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err("invalid container id".to_string());
+    }
+    let args = ["--context", "harpoon", "stats", "--no-stream", "--format", "{{json .}}", &id];
+    let (stdout, stderr, code) = run_docker_bounded(&args, Duration::from_secs(2))?;
+    let value = docker_json_lines(&stdout).into_iter().next();
+    if code != 0 || value.is_none() {
+        return Err(if stderr.trim().is_empty() { "Docker stats returned no sample".to_string() } else { stderr.trim().to_string() });
+    }
+    let value = value.expect("checked above");
+    Ok(ContainerStats {
+        source: "docker.stats --no-stream",
+        container_id: id,
+        cpu_percent: stats_field(&value, "CPUPerc"),
+        memory_usage: stats_field(&value, "MemUsage"),
+        memory_percent: stats_field(&value, "MemPerc"),
+        network_io: stats_field(&value, "NetIO"),
+        block_io: stats_field(&value, "BlockIO"),
+        pids: stats_field(&value, "PIDs"),
+    })
 }
 
 #[tauri::command]
@@ -915,6 +996,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stats_fields_preserve_docker_units_and_missing_values() {
+        let value = serde_json::json!({"CPUPerc":"0.12%", "MemUsage":"12.3MiB / 1GiB", "PIDs":"4"});
+        assert_eq!(stats_field(&value, "CPUPerc"), Some("0.12%".to_string()));
+        assert_eq!(stats_field(&value, "MemUsage"), Some("12.3MiB / 1GiB".to_string()));
+        assert_eq!(stats_field(&value, "NetIO"), None);
+    }
+
+    #[test]
+    fn stats_payload_matches_frontend_camel_case_contract() {
+        let payload = ContainerStats {
+            source: "docker.stats --no-stream",
+            container_id: "abc123".to_string(),
+            cpu_percent: Some("0.12%".to_string()),
+            memory_usage: Some("12.3MiB / 1GiB".to_string()),
+            memory_percent: Some("1.20%".to_string()),
+            network_io: Some("1.2kB / 3.4kB".to_string()),
+            block_io: Some("0B / 0B".to_string()),
+            pids: Some("4".to_string()),
+        };
+        let json = serde_json::to_value(payload).unwrap();
+        assert_eq!(json["cpuPercent"], "0.12%");
+        assert_eq!(json["memoryUsage"], "12.3MiB / 1GiB");
+        assert_eq!(json["memoryPercent"], "1.20%");
+        assert_eq!(json["networkIo"], "1.2kB / 3.4kB");
+        assert_eq!(json["blockIo"], "0B / 0B");
+        assert_eq!(json["pids"], "4");
+        assert!(json.get("cpu_percent").is_none());
+    }
+
+    #[test]
+    fn stats_fixture_parsing_preserves_partial_and_zero_values() {
+        let full = docker_json_lines(include_str!("fixtures/stats/full.jsonl")).into_iter().next().unwrap();
+        assert_eq!(stats_field(&full, "CPUPerc"), Some("0.00%".to_string()));
+        assert_eq!(stats_field(&full, "NetIO"), Some("0B / 0B".to_string()));
+        assert_eq!(stats_field(&full, "BlockIO"), Some("0B / 0B".to_string()));
+
+        let partial = docker_json_lines(include_str!("fixtures/stats/partial.jsonl")).into_iter().next().unwrap();
+        assert_eq!(stats_field(&partial, "PIDs"), Some("31".to_string()));
+        assert_eq!(stats_field(&partial, "MemUsage"), None);
+        assert!(docker_json_lines(include_str!("fixtures/stats/empty.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn bounded_command_reports_slow_output_without_waiting_forever() {
+        let mut command = Command::new("sleep");
+        command.arg("1");
+        let error = run_command_bounded(&mut command, Duration::from_millis(10)).unwrap_err();
+        assert!(error.contains("timed out after 10 ms"));
+    }
+
+    #[test]
     fn test_parse_valid_project_service_number() {
         let labels = "com.docker.compose.project=collectiv,com.docker.compose.service=api,com.docker.compose.container-number=1,com.docker.compose.config-hash=abc";
         assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), Some("collectiv".to_string()));
@@ -1019,9 +1151,10 @@ fn main() {
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
             get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
             list_containers, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
-            list_images, inspect_image, remove_image,
+            list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
+            context_discovery::discover_contexts,
             get_counts,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,

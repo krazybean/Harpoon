@@ -1,10 +1,10 @@
-import { Component, useEffect, useState, useCallback, useRef, memo } from "react";
+import { Component, lazy, Suspense, useEffect, useState, useCallback, useRef, memo } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./styles/primitives.css";
-import { House, Stack, Images, Database, ShareNetwork, Sliders, Heartbeat, CaretDown, Play, Stop, ArrowClockwise } from "@phosphor-icons/react";
+import { House, Stack, Images, Database, ShareNetwork, Sliders, Heartbeat, Gear, CaretDown, Play, Stop, ArrowClockwise } from "@phosphor-icons/react";
 import { useShelf } from "./hooks/useShelf";
 import { OverviewView } from "./views/OverviewView";
 import { ContainersView } from "./views/ContainersView";
@@ -14,8 +14,10 @@ import { NetworksView } from "./views/NetworksView";
 import { ResourcesView } from "./views/ResourcesView";
 import { DiagnosticsView } from "./views/DiagnosticsView";
 import { ContainerDetailView } from "./views/ContainerDetailView";
+import { ContextsView } from "./views/ContextsView";
 import { ResourceMeters } from "./components/ResourceMeters";
 import { TechnologyIconShowcase } from "./components/TechnologyIconShowcase";
+import { QuakeShellPrototype } from "./components/QuakeShellPrototype";
 import { configureResourceSampler } from "./lib/resourceSamplerStore";
 import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
@@ -37,8 +39,10 @@ type HarpoonStatus = {
 type DoctorResult = { raw: string; passed: number; warnings: number; failures: number };
 type ConfigResult = { cpus: number; memory: number; raw: string; path: string };
 type Counts = { containers: number; running: number; images: number; volumes: number; networks: number };
+type DiscoveredContext = { id: string; name: string; engine: string; endpoint?: string | null; source: string; state: "detected" | "connected" | "unavailable" | "authentication_needed"; current: boolean; harpoon: boolean; detail: string; capabilities: Record<string, "available" | "unsupported" | "unknown"> };
 type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting" | "vm_booting" | "docker_starting" | "ready" | "failed";
 type RuntimeRefreshEvent = { key: string; ok: boolean; generation?: number; value?: unknown; error?: string; values?: RuntimeRefreshEvent[] };
+const DevTopologyPrototype = import.meta.env.DEV ? lazy(() => import("./components/TopologyPrototype").then((module) => ({ default: module.TopologyPrototype }))) : null;
 
 function stateBadge(state: string) {
   const s = state.toLowerCase();
@@ -113,6 +117,7 @@ const NavItems = memo(function NavItems({ active, onNav }: { active: Nav; onNav:
         ["networks", ShareNetwork, "Networks"],
         ["resources", Sliders, "Resources"],
         ["diagnostics", Heartbeat, "Diagnostics"],
+        ["contexts", Gear, "Contexts"],
       ] as const).map(([n, Icon, label]) => (
         <button key={n} aria-current={active===n ? "page" : undefined} aria-label={label} title={label} onClick={() => onNav(n as Nav)} className={active===n ? "shell-nav__item shell-nav__item--active" : "shell-nav__item"}>
           <Icon size={20} weight={active===n ? "fill" : "regular"} className="shell-nav__icon" aria-hidden="true" />
@@ -166,6 +171,7 @@ class ContentErrorBoundary extends Component<{ children: ReactNode }, { error: E
 export default function App() {
   const tauriAvailable = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
   const technologyShowcase = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("technology-showcase");
+  const topologyPrototype = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("topology-prototype");
   const [destination, setDestination] = useState<Destination>({ kind: "nav", nav: "overview" });
   const active: Nav = destination.kind === "container" ? "containers" : destination.nav;
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
@@ -190,6 +196,7 @@ export default function App() {
   const imagesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_images"), []), { ttlMs: 30000 });
   const volumesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_volumes"), []), { ttlMs: 30000 });
   const networksShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_networks"), []), { ttlMs: 30000 });
+  const contextsShelf = useShelf<DiscoveredContext[]>(useCallback(()=>invoke<DiscoveredContext[]>("discover_contexts"), []), { ttlMs: 30000 });
 
   const status = statusShelf.data;
   const statusAt = statusShelf.updatedAt;
@@ -220,6 +227,7 @@ export default function App() {
   const refreshImages = imagesShelf.refresh;
   const refreshVolumes = volumesShelf.refresh;
   const refreshNetworks = networksShelf.refresh;
+  const refreshContexts = contextsShelf.refresh;
   const publishStatus = statusShelf.publish;
   const publishDocker = dockerShelf.publish;
   const publishCounts = countsShelf.publish;
@@ -233,6 +241,7 @@ export default function App() {
     setActionError(null);
     try {
       setBootstrapPhase("launching");
+      void refreshContexts();
       await refreshBinary();
       await new Promise(r => setTimeout(r, 120));
       setBootstrapPhase("discovering");
@@ -305,7 +314,7 @@ export default function App() {
       }
       setBootstrapPhase("ready");
     } finally { bootstrapActiveRef.current = false; }
-  }, [refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
+  }, [refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks, refreshContexts]);
 
   useEffect(()=>{
     if (!tauriAvailable) {
@@ -541,9 +550,9 @@ export default function App() {
 
   const isStopped = status?.state==="stopped" || status?.state==="stale" || bootstrapPhase==="stopped";
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
-  const showBootstrapOverlay = !technologyShowcase && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
-  const showFailed = !technologyShowcase && bootstrapPhase==="failed";
-  const showStoppedPanel = !technologyShowcase && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed;
+  const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
+  const showFailed = !technologyShowcase && !topologyPrototype && bootstrapPhase==="failed";
+  const showStoppedPanel = !technologyShowcase && !topologyPrototype && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed;
 
   return (
     <div className="shell">
@@ -605,20 +614,22 @@ export default function App() {
         {!showBootstrapOverlay && !showFailed && (
           <ContentErrorBoundary>
           <>
-            {technologyShowcase ? <TechnologyIconShowcase /> : <>
+            {technologyShowcase ? <TechnologyIconShowcase /> : topologyPrototype && DevTopologyPrototype ? <Suspense fallback={<div className="panel">Loading topology prototype…</div>}><DevTopologyPrototype /></Suspense> : <>
             {active==="overview" && <OverviewView status={status} statusAt={statusAt} dockerVersion={dockerVersion} dockerAt={dockerAt} counts={counts} countsAt={countsAt} config={config} configAt={configAt} doctor={doctor} doctorAt={doctorAt} binaryPath={binaryPath} logPath={logPath} bootstrapPhase={bootstrapPhase} runtimePolling={true} runtimePollingPaused={[]} onOpenDiagnostics={()=>handleNav("diagnostics")} onOpenContainers={()=>handleNav("containers")} onOpenResources={()=>handleNav("resources")} />}
             {active==="resources" && <ResourcesView config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
             {active==="diagnostics" && <DiagnosticsView binaryPath={binaryPath} logs={logs} logsAt={logsAt} logsRefreshing={logsShelf.refreshing} logsError={logsShelf.error} logPath={logPath} doctor={doctor} doctorAt={doctorAt} doctorRefreshing={doctorShelf.refreshing} doctorError={doctorShelf.error} status={status} configRaw={config?.raw ?? null} bootstrapPhase={bootstrapPhase} onCopy={handleCopyDiagnostics} copied={copied} onRefreshDoctor={()=>doctorShelf.refresh()} onRefreshLogs={()=>logsShelf.refresh()} />}
+            {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} refresh={()=>contextsShelf.refresh()} />}
             {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
             {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}
             {active==="volumes" && <VolumesView volumes={volumesShelf.data ?? []} refreshing={volumesShelf.refreshing} error={volumesShelf.error} updatedAt={volumesShelf.updatedAt} hasCache={volumesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>volumesShelf.refresh()} />}
-            {active==="networks" && <NetworksView networks={networksShelf.data ?? []} refreshing={networksShelf.refreshing} error={networksShelf.error} updatedAt={networksShelf.updatedAt} hasCache={networksShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>networksShelf.refresh()} />}
+            {active==="networks" && <NetworksView networks={networksShelf.data ?? []} containers={containersShelf.data ?? []} refreshing={networksShelf.refreshing} error={networksShelf.error} updatedAt={networksShelf.updatedAt} hasCache={networksShelf.hasCache} containersError={containersShelf.error} containersUpdatedAt={containersShelf.updatedAt} containersHasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>networksShelf.refresh()} refreshContainers={()=>containersShelf.refresh()} />}
             </>}
           </>
           </ContentErrorBoundary>
         )}
       </div>
+      <QuakeShellPrototype containers={containersShelf.data ?? []} />
     </div>
   );
 }

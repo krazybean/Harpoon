@@ -2,22 +2,29 @@ import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MagnifyingGlass, Trash } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
+import { NetworkTopologyDiagram, NetworkTopologyList } from "../components/NetworkTopologyDiagram";
 
 export const NetworksView = memo(function NetworksView({
-  networks, refreshing, error, updatedAt, hasCache, actionInProgress, doAction, refresh
+  networks, containers, refreshing, error, updatedAt, hasCache, containersError, containersUpdatedAt, containersHasCache, actionInProgress, doAction, refresh, refreshContainers
 }: {
   networks: any[];
+  containers: any[];
   refreshing: boolean;
   error: string | null;
   updatedAt: number | null;
   hasCache: boolean;
+  containersError: string | null;
+  containersUpdatedAt: number | null;
+  containersHasCache: boolean;
   actionInProgress: string | null;
   doAction: (name: string, fn: () => Promise<any>) => Promise<void>;
   refresh: () => Promise<any>;
+  refreshContainers: () => Promise<any>;
 }) {
   const [detail,setDetail]=useState<string>("");
   const [confirmNetwork,setConfirmNetwork]=useState<any>(null);
   const [alertMsg,setAlertMsg]=useState<string>("");
+  const [view,setView]=useState<"inventory"|"topology">("inventory");
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(()=>{ if(confirmNetwork) cancelRef.current?.focus(); }, [confirmNetwork]);
   const isDefault = (n:string)=> n==="bridge"||n==="host"||n==="none";
@@ -36,11 +43,19 @@ export const NetworksView = memo(function NetworksView({
   }
   if (!hasCache && !refreshing) return <div className="panel" style={{ padding: 16 }}>No networks. <span className="text-meta" style={{ color: "var(--text-secondary)" }}>Create with <code className="text-code">docker --context harpoon network create &lt;name&gt;</code>.</span> <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Refresh</button></div>;
 
+  if (view === "topology") return <div className="table-wrap" aria-busy={refreshing ? "true" : undefined}>
+    <div className="panel-header networks-view__header"><span className="text-panel-title">Network Topology <span className="text-meta">Docker-authoritative · updated {fmtTs(updatedAt)}</span></span><div className="networks-view__actions"><button className="btn btn--ghost btn--sm" aria-pressed="false" onClick={() => setView("inventory")}>Inventory</button><button className="btn btn--secondary btn--sm" aria-pressed="true">Topology</button><button onClick={() => { refresh(); refreshContainers(); }} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button></div></div>
+    {(error || containersError) && <div className="networks-view__warning" role="status">{error || containersError} · showing last available data</div>}
+    {(Date.now() - (updatedAt ?? 0) > 30000 || Date.now() - (containersUpdatedAt ?? 0) > 30000) && <div className="networks-view__warning" role="status">Topology data may be stale. Refresh before relying on current membership.</div>}
+    {!containersHasCache && <div className="panel" style={{ margin: 12, padding: 16 }} role="status"><strong>Container membership is unavailable</strong><p className="text-meta">Docker network inventory is available, but attached-container data has not loaded.</p><button onClick={refreshContainers} className="btn btn--secondary btn--sm">Retry container data</button></div>}
+    {containersHasCache && <><NetworkTopologyDiagram networks={networks} containers={containers} /><details className="network-topology__details"><summary>Keyboard-accessible details list</summary><NetworkTopologyList networks={networks} containers={containers} /></details></>}
+  </div>;
+
   return (
     <div className="table-wrap" aria-busy={refreshing ? "true" : undefined}>
-      <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="panel-header networks-view__header">
         <span className="text-panel-title">Networks ({networks.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
-        <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
+        <div className="networks-view__actions"><button onClick={() => setView("inventory")} className="btn btn--secondary btn--sm" aria-pressed="true">Inventory</button><button onClick={() => setView("topology")} className="btn btn--ghost btn--sm" aria-pressed="false">Topology</button><button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button></div>
       </div>
       {error && hasCache && <div style={{ padding: "8px 12px", background: "var(--error-bg)", color: "var(--error-fg)", fontSize: 12, borderBottom: "1px solid #7F1D1D" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>}
       <div style={{ overflowX: "auto" }}>
