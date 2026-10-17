@@ -10,6 +10,12 @@ Lightweight Docker-compatible container environment for macOS using Apple's Virt
 
 Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. It provides the macOS-side virtualization substrate needed to run a standard Linux container stack while preserving compatibility with the Docker CLI, Compose, and surrounding tooling.
 
+## Harpoon 2.0 teaser
+
+[![Watch the Harpoon 2.0 teaser](docs/media/Harpoon-2.0-teaser-v2-thumbnail.jpg)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
+
+Watch or download the 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1). This release candidate is for testing only and is not a stable 2.0.0 release.
+
 ## Why Harpoon?
 
 - **Native macOS integration** — built directly on `Virtualization.framework` (no bundled third-party hypervisor).
@@ -24,6 +30,7 @@ Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit 
 macOS Apple Silicon release assets are published on [GitHub Releases](https://github.com/krazybean/Harpoon/releases):
 
 - **Latest desktop release:** `Harpoon-0.1.1-arm64.dmg` + `SHA256SUMS`.
+- **Harpoon 2.0 release candidate:** [v2.0.0-rc.1](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) includes the arm64 DMG and the [15-second desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4). It is for testing only, not a stable release.
 - **Standalone CLI/runtime archive:** `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` remains available from the v0.1.0 release. A standalone v0.1.1 CLI tarball is not currently published.
 
 Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). Use the Releases page above as the authoritative list of published artifacts.
