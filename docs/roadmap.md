@@ -31,7 +31,7 @@ Evidence classes are deliberately separate:
   Context matrix; Docker Desktop, Harpoon, Podman/rootless, stale-socket,
   duplicate-endpoint, and authentication-required Context cases; and the
   dedicated WKWebView CPU/input measurements.
-- **Defects / polish:** truthful startup progress transitions, compact Compose
+- **Defects / polish:** compact Compose
   network labels with full tooltips, network-attachment hover metadata,
   Network Topology stale handling and overview preservation, and the other
   validated UX issues listed below.
@@ -39,14 +39,26 @@ Evidence classes are deliberately separate:
   broad pruning, and release distribution work (Developer ID/notarization and
   related packaging gates) until feature and reliability acceptance are both
   complete.
+- **Candidate preparation:** the local `2.0.0-rc.1` plan, second-Mac gate,
+  portability matrix, and redacted diagnostic collection procedure are recorded
+  in [`docs/releases/v2.0.0-rc.md`](releases/v2.0.0-rc.md). No version bump,
+  tag, signing, notarization, push, or publication has occurred.
 
 #### Stabilization and polish backlog
 
-- Make startup progress messages represent only real initialization events in
-  a spinner-centered, fixed-height viewport. On replacement, slide the old
-  message downward and fade it out over roughly 200–300 ms; do not fabricate
-  progress or add polling, preserve long-step/failure detail, and honor
-  reduced-motion preferences.
+- Runtime inventory failure semantics — **FIXED / NATIVE ACCEPTANCE PENDING
+  (2026-10-17):** `get_counts` now propagates Docker inventory failures instead
+  of converting them to zero counts. The existing shelf keeps the last good
+  snapshot or presents unavailable data; native reproduction of the socket
+  failure remains pending.
+- Startup status messaging — **BOUNDED STOP / VISUAL ACCEPTANCE NOT ACHIEVED
+  (2026-10-17):** retain the cleaner single-message bootstrap presentation and
+  the stable default startup path. The intended 20 px / 360 ms replacement
+  animation was not visually accepted, so this roadmap makes no success claim.
+  The development-only `?bootstrap-events` / `&bootstrap-trace` experiment is
+  disabled by default and remains only as reversible, unaccepted code; do not
+  spend further time on it unless a materially simpler path appears. Do not
+  alter the Rust-owned refresh worker for this polish item.
 - Use short Compose network labels in graph nodes and retain the full network
   name in a tooltip and accessible name.
 - Replace repeated generic network-edge labels with hover/focus metadata for

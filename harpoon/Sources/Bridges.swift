@@ -52,6 +52,9 @@ final class BridgeSet {
 
     func stopAll() {
         log("HARPOON_BRIDGES_STOP_ALL begin dockerSock=\(config.dockerSocketPath) balloonControl=\(config.balloonControlPath) listenerFd=\(listenerFd) balloonFd=\(balloonControlFd) ownsDocker=\(ownsDockerSocket) ownsBalloon=\(ownsBalloonControlSocket)")
+        let dockerSocketIdentity = ownedSocketIdentity(fd: listenerFd, path: config.dockerSocketPath, owned: ownsDockerSocket)
+        let balloonSocketIdentity = ownedSocketIdentity(fd: balloonControlFd, path: config.balloonControlPath, owned: ownsBalloonControlSocket)
+        let mgmtSocketIdentity = ownedSocketIdentity(fd: mgmtListenerFd, path: config.mgmtSocketPath, owned: ownsMgmtSocket)
         // FD ownership: DispatchSource cancelHandler owns close; stopAll only cancels and nils.
         if listenerSource != nil {
             listenerSource?.cancel(); listenerSource = nil
@@ -62,8 +65,7 @@ final class BridgeSet {
         }
         // socket pathname removed only if this BridgeSet owns it
         if ownsDockerSocket {
-            try? FileManager.default.removeItem(atPath: config.dockerSocketPath)
-            log("HARPOON_BRIDGES_STOP_ALL removed \(config.dockerSocketPath) (owned)")
+            removeOwnedSocket(config.dockerSocketPath, identity: dockerSocketIdentity)
             ownsDockerSocket = false
         } else {
             log("HARPOON_BRIDGES_STOP_ALL skip remove \(config.dockerSocketPath) (not owned)")
@@ -82,8 +84,7 @@ final class BridgeSet {
         for (fd, src) in balloonClients { src.cancel(); close(fd) }
         balloonClients.removeAll(); balloonBuffers.removeAll()
         if ownsBalloonControlSocket {
-            try? FileManager.default.removeItem(atPath: config.balloonControlPath)
-            log("HARPOON_BRIDGES_STOP_ALL removed \(config.balloonControlPath) (owned) end")
+            removeOwnedSocket(config.balloonControlPath, identity: balloonSocketIdentity)
             ownsBalloonControlSocket = false
         } else {
             log("HARPOON_BRIDGES_STOP_ALL skip remove \(config.balloonControlPath) (not owned) end")
@@ -95,12 +96,38 @@ final class BridgeSet {
             close(mgmtListenerFd); mgmtListenerFd = -1
         }
         if ownsMgmtSocket {
-            try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
-            log("HARPOON_BRIDGES_STOP_ALL removed \(config.mgmtSocketPath) (owned) end")
+            removeOwnedSocket(config.mgmtSocketPath, identity: mgmtSocketIdentity)
             ownsMgmtSocket = false
         } else {
             log("HARPOON_BRIDGES_STOP_ALL skip remove \(config.mgmtSocketPath) (not owned) end")
         }
+    }
+
+    private func ownedSocketIdentity(fd: Int32, path: String, owned: Bool) -> (dev: Int64, ino: Int64)? {
+        guard owned, fd >= 0 else { return nil }
+        var fdStat = stat()
+        var pathStat = stat()
+        guard fstat(fd, &fdStat) == 0, stat(path, &pathStat) == 0,
+              (fdStat.st_mode & S_IFMT) == S_IFSOCK,
+              (pathStat.st_mode & S_IFMT) == S_IFSOCK else { return nil }
+        guard fdStat.st_dev == pathStat.st_dev && fdStat.st_ino == pathStat.st_ino else { return nil }
+        return (Int64(fdStat.st_dev), Int64(fdStat.st_ino))
+    }
+
+    private func removeOwnedSocket(_ path: String, identity: (dev: Int64, ino: Int64)?) {
+        guard let identity else {
+            log("HARPOON_SOCKET_REMOVE_SKIP path=\(path) reason=owner-mismatch")
+            return
+        }
+        var current = stat()
+        guard stat(path, &current) == 0,
+              Int64(current.st_dev) == identity.dev,
+              Int64(current.st_ino) == identity.ino else {
+            log("HARPOON_SOCKET_REMOVE_SKIP path=\(path) reason=path-replaced")
+            return
+        }
+        try? FileManager.default.removeItem(atPath: path)
+        log("HARPOON_SOCKET_REMOVED path=\(path) owner=inode")
     }
 
     func isSocketLive(_ path: String) -> Bool {

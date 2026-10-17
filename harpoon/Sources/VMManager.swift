@@ -55,7 +55,7 @@ func hostDNSServers() -> [String] {
 }
 
 // ponytail: minimal VM owner — no abstractions, explicit FD/DispatchSource ownership for bounded cleanup
-final class VMManager {
+final class VMManager: NSObject, VZVirtualMachineDelegate {
     let config: RuntimeConfig
     let lifecycle: Lifecycle
     var vm: VZVirtualMachine?
@@ -68,6 +68,9 @@ final class VMManager {
     var bootReady = false
     var mgmtReady = false
     var bootFailedReason: String?
+    var explicitStopInProgress = false
+    var unexpectedStopHandled = false
+    var unexpectedStopHandler: ((VZVirtualMachine, Error?) -> Void)?
 
     // bridges owned here, cleaned on stop
     var bridge: BridgeSet?
@@ -75,6 +78,30 @@ final class VMManager {
     init(config: RuntimeConfig, lifecycle: Lifecycle) {
         self.config = config
         self.lifecycle = lifecycle
+    }
+
+    func markExplicitStop() {
+        explicitStopInProgress = true
+    }
+
+    static func safeErrorDetails(_ error: Error?) -> String {
+        guard let error else { return "none" }
+        let ns = error as NSError
+        let description = ns.localizedDescription.replacingOccurrences(of: "\n", with: " ")
+        return "domain=\(ns.domain) code=\(ns.code) description=\(String(description.prefix(240)))"
+    }
+
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
+        let detail = Self.safeErrorDetails(error)
+        log("HARPOON_VM_STOP_CALLBACK kind=error state=\(virtualMachine.state.rawValue) explicit=\(explicitStopInProgress) error=\(detail)")
+        guard !explicitStopInProgress else { return }
+        unexpectedStopHandler?(virtualMachine, error)
+    }
+
+    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        log("HARPOON_VM_STOP_CALLBACK kind=guest state=\(virtualMachine.state.rawValue) explicit=\(explicitStopInProgress)")
+        guard !explicitStopInProgress else { return }
+        unexpectedStopHandler?(virtualMachine, nil)
     }
 
     func log(_ m: String) {
@@ -152,6 +179,8 @@ final class VMManager {
         configurationSummary = "cpus=\(cfg.cpuCount) memoryBytes=\(cfg.memorySize) entropy=\(cfg.entropyDevices.count) serial=\(cfg.serialPorts.count) network=\(cfg.networkDevices.count) storage=\(cfg.storageDevices.count) virtiofs=\(cfg.directorySharingDevices.count) socket=\(cfg.socketDevices.count) balloon=\(cfg.memoryBalloonDevices.count)"
         log("validate OK HARPOON_HOST_NETDEV_COUNT \(cfg.networkDevices.count)")
         let vm = VZVirtualMachine(configuration: cfg)
+        vm.delegate = self
+        log("HARPOON_VM_DELEGATE_INSTALLED")
         self.vm = vm
         return vm
     }

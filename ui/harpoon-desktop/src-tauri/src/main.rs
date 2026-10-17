@@ -13,6 +13,7 @@ mod broadcast;
 mod runtime_refresh;
 mod resource_sampler;
 mod context_discovery;
+mod bootstrap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -39,6 +40,19 @@ struct HarpoonStatus {
     log_path: Option<String>,
     #[serde(default, rename = "dockerReady")]
     docker_ready: Option<bool>,
+    #[serde(default)]
+    failure: Option<RuntimeFailure>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RuntimeFailure {
+    category: String,
+    message: String,
+    source: String,
+    #[serde(rename = "occurredAt")]
+    occurred_at: String,
+    #[serde(rename = "underlyingError")]
+    underlying_error: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -514,6 +528,18 @@ fn enrich_container_attachments(value: &mut serde_json::Value, inspect: &serde_j
         .map(|map| map.keys().cloned().map(serde_json::Value::String).collect())
         .unwrap_or_else(|| Vec::new());
     obj.insert("NetworkNames".to_string(), serde_json::Value::Array(networks));
+    let attachments = details
+        .get("NetworkSettings")
+        .and_then(|v| v.get("Networks"))
+        .and_then(|v| v.as_object())
+        .map(|map| map.iter().map(|(name, network)| serde_json::json!({
+            "name": name,
+            "endpointId": network.get("EndpointID").and_then(|v| v.as_str()),
+            "ipAddress": network.get("IPAddress").and_then(|v| v.as_str()),
+            "gateway": network.get("Gateway").and_then(|v| v.as_str()),
+        })).collect())
+        .unwrap_or_else(|| Vec::new());
+    obj.insert("NetworkAttachments".to_string(), serde_json::Value::Array(attachments));
 
     let mut named_volumes = Vec::new();
     let mut bind_mounts = Vec::new();
@@ -781,6 +807,17 @@ fn counts_cache() -> &'static Mutex<Option<(serde_json::Value, Instant)>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+fn count_docker_json_response(stdout: &str, stderr: &str, code: i32, resource: &str) -> Result<usize, String> {
+    if code != 0 && !stdout.contains("{") {
+        return Err(if stderr.trim().is_empty() {
+            format!("Docker {} failed (exit {})", resource, code)
+        } else {
+            stderr.trim().to_string()
+        });
+    }
+    Ok(docker_json_lines(stdout).len())
+}
+
 #[tauri::command]
 fn get_counts() -> Result<serde_json::Value, String> {
     // ponytail: coalesce duplicate counts requests (frontend polls status 3.5s + resource tabs); 1.5s TTL avoids duplicate docker storms without daemon polling
@@ -791,14 +828,12 @@ fn get_counts() -> Result<serde_json::Value, String> {
             }
         }
     }
-    let containers = list_containers(Some(true)).unwrap_or_default().len();
-    let images = list_images().unwrap_or_default().len();
-    let volumes = list_volumes().unwrap_or_default().len();
-    let networks = list_networks().unwrap_or_default().len();
-    let running2 = {
-        let (stdout, _, _) = run_docker(&["--context", "harpoon", "ps", "--format", "{{json .}}"]).unwrap_or(("".to_string(),"".to_string(),0));
-        docker_json_lines(&stdout).len()
-    };
+    let containers = list_containers(Some(true))?.len();
+    let images = list_images()?.len();
+    let volumes = list_volumes()?.len();
+    let networks = list_networks()?.len();
+    let (running_stdout, running_stderr, running_code) = run_docker(&["--context", "harpoon", "ps", "--format", "{{json .}}"])?;
+    let running2 = count_docker_json_response(&running_stdout, &running_stderr, running_code, "running containers")?;
     let val = serde_json::json!({
         "containers": containers,
         "running": running2,
@@ -838,6 +873,16 @@ fn start_resource_sampler(app: tauri::AppHandle, disk_path: Option<String>) -> R
 #[tauri::command]
 fn stop_resource_sampler() {
     resource_sampler::stop();
+}
+
+#[tauri::command]
+fn start_bootstrap_worker(app: tauri::AppHandle) -> Result<(), String> {
+    bootstrap::start(app)
+}
+
+#[tauri::command]
+fn stop_bootstrap_worker() {
+    bootstrap::stop();
 }
 
 // --- Stage 3B: Docker host integration ---
@@ -1047,6 +1092,12 @@ mod tests {
     }
 
     #[test]
+    fn failed_inventory_response_is_not_an_empty_count() {
+        let error = count_docker_json_response("", "permission denied", 1, "containers").unwrap_err();
+        assert_eq!(error, "permission denied");
+    }
+
+    #[test]
     fn test_parse_valid_project_service_number() {
         let labels = "com.docker.compose.project=collectiv,com.docker.compose.service=api,com.docker.compose.container-number=1,com.docker.compose.config-hash=abc";
         assert_eq!(parse_compose_label(labels, "com.docker.compose.project"), Some("collectiv".to_string()));
@@ -1134,6 +1185,7 @@ mod tests {
         });
         enrich_container_attachments(&mut listed, &inspected);
         assert_eq!(listed["NetworkNames"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["NetworkAttachments"][0]["name"], "proj_default");
         assert_eq!(listed["NamedVolumes"][0]["name"], "proj_db");
         assert_eq!(listed["BindMounts"][0]["source"], "/tmp/project");
         assert_eq!(listed["GroupKind"], "compose");
@@ -1158,6 +1210,7 @@ fn main() {
             get_counts,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,
+            start_bootstrap_worker, stop_bootstrap_worker,
             open_shell_session, write_shell_input, resize_shell_session, close_shell_session, run_universal_command
         ]);
 

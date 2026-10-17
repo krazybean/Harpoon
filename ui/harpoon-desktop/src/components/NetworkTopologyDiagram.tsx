@@ -29,7 +29,7 @@ function graphFor(topology: Topology) {
   const nodes: TopologyNode[] = [
     ...topology.containers.map((container) => {
       const point = topology.layout.node(container.id);
-      return { id: container.id, type: "network-topology" as const, position: { x: point.x - 240 / 2, y: point.y - 78 / 2 }, data: { kind: "container" as const, label: shortName(container.name), fullName: container.fullName, status: container.status, image: container.image } };
+      return { id: container.id, type: "network-topology" as const, position: { x: point.x - 240 / 2, y: point.y - 78 / 2 }, data: { kind: "container" as const, label: shortName(container.label), fullName: container.fullName, status: container.status, image: container.image } };
     }),
     ...topology.networks.map((network) => {
       const point = topology.layout.node(network.id);
@@ -39,7 +39,9 @@ function graphFor(topology: Topology) {
   const edges: Edge[] = topology.containers.flatMap((container) => container.networks.map((network) => {
     const networkNode = topology.networks.find((candidate) => candidate.name === network);
     const running = container.status === "running" && !networkNode?.missing;
-    return { id: `${container.id}-${network}`, source: container.id, target: networkNode?.id ?? `network-${network}`, label: "attachment", animated: running, className: networkNode?.missing ? "is-unresolved" : undefined, style: { stroke: running ? "var(--accent-yellow)" : "var(--text-tertiary)" } };
+    const attachment = container.attachments.find((candidate: any) => candidate.name === network);
+    const address = attachment?.ipAddress ? `IP ${attachment.ipAddress}` : "IP not reported";
+    return { id: `${container.id}-${network}`, source: container.id, target: networkNode?.id ?? `network-${network}`, label: address, labelShowBg: true, labelBgStyle: { fill: "var(--panel)" }, labelStyle: { fill: "var(--text-secondary)", fontSize: 9 }, focusable: true, ariaRole: "group", domAttributes: { "aria-description": `${network}; ${address}${attachment?.gateway ? `; gateway ${attachment.gateway}` : ""}` }, animated: running, className: networkNode?.missing ? "is-unresolved" : undefined, style: { stroke: running ? "var(--accent-yellow)" : "var(--text-tertiary)" } };
   }));
   return { nodes, edges };
 }
@@ -65,7 +67,7 @@ export function NetworkTopologyList({ networks, containers }: { networks: any[];
   return <ul className="network-topology__list" aria-label="Docker network membership details">
     {topology.networks.map((network) => {
       const members = topology.containers.filter((container) => container.networks.includes(network.name));
-      return <li key={network.id}><ShareNetwork size={17} aria-hidden="true" /><div><strong>{network.name}</strong><span className="text-meta">{network.missing ? "Not in current network inventory · " : "Docker network · "}{members.length ? `${members.length} attached container${members.length === 1 ? "" : "s"}: ${members.map((member) => member.name).join(", ")}` : "No attached containers reported"}</span></div></li>;
+      return <li key={network.id}><ShareNetwork size={17} aria-hidden="true" /><div><strong title={network.name}>{network.name}</strong><span className="text-meta">{network.missing ? "Not in current network inventory · " : "Docker network · "}{members.length ? `${members.length} attached container${members.length === 1 ? "" : "s"}: ${members.map((member) => { const attachment = member.attachments.find((candidate: any) => candidate.name === network.name); return `${member.name} (${attachment?.ipAddress ? `IP ${attachment.ipAddress}` : "IP not reported"}${attachment?.gateway ? `, gateway ${attachment.gateway}` : ""})`; }).join(", ")}` : "No attached containers reported"}</span></div></li>;
     })}
   </ul>;
 }

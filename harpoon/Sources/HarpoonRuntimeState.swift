@@ -138,6 +138,22 @@ struct RuntimeMetadata: Codable {
     let binary: String
     let diskIdentity: String?
     let diskResolvedPath: String?
+    var failure: RuntimeFailure?
+}
+
+struct RuntimeFailure: Codable {
+    let category: String
+    let message: String
+    let source: String
+    let occurredAt: String
+    let underlyingError: String?
+}
+
+func recordRuntimeFailure(_ failure: RuntimeFailure) {
+    guard var metadata = readMetadata() else { return }
+    metadata.failure = failure
+    guard let data = try? JSONEncoder().encode(metadata) else { return }
+    try? data.write(to: HarpoonPaths.jsonFile, options: .atomic)
 }
 
 // MARK: - Process checks
@@ -368,7 +384,7 @@ func resolveConfigFromArgs(_ args: [String]) -> RuntimeConfig {
     return c
 }
 
-func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?) {
+func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?) {
     let pid = readPIDFile()
     let meta = readMetadata()
     let alive: Bool
@@ -404,6 +420,8 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     let state: String
     if activeRuntime {
         state = sockExists && effectiveReady ? "running" : "starting"
+    } else if meta?.failure != nil {
+        state = "failed"
     } else if pid != nil {
         state = "stale"
     } else if sockExists {
@@ -411,5 +429,5 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     } else {
         state = "stopped"
     }
-    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta)
+    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta, meta?.failure)
 }

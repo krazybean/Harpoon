@@ -9,4 +9,13 @@ test("contexts view presents honest discovery states and a visible read-only bou
   assert.match(source, /Discovery only/);
   assert.match(source, /does not switch contexts/);
   assert.match(source, /unsupported in discovery/);
+  assert.match(source, /context-card__name-text/);
+  assert.match(source, /title=\{context\.name\}/);
+  assert.match(source, /tabIndex=\{0\}/);
+});
+
+test("contexts view refreshes only on entry when the cache is absent or stale", () => {
+  assert.match(source, /if \(hasCache && !stale\) return;/);
+  assert.match(source, /\}, \[refresh\]\);/);
+  assert.doesNotMatch(source, /setInterval/);
 });

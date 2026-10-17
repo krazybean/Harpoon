@@ -38,6 +38,20 @@ export function QuakeShellPrototype({ containers = [] }: { containers?: any[] })
   }, [open]);
 
   useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const path = event.composedPath();
+      const panel = panelRef.current;
+      const trigger = triggerRef.current;
+      if ((panel && path.includes(panel)) || (trigger && path.includes(trigger))) return;
+      setOpen(false);
+      trigger?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  useEffect(() => {
     if (open) panelRef.current?.querySelector<HTMLElement>("button, select")?.focus();
   }, [open]);
 

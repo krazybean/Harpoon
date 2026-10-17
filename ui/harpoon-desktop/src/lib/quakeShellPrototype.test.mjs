@@ -47,3 +47,12 @@ test("Quake keeps the launcher discoverable and identifies the selected technolo
   assert.match(styles, /outline: 2px solid var\(--accent-yellow\)/);
   assert.match(styles, /prefers-reduced-motion: reduce.*quake-prototype-trigger/);
 });
+
+test("Quake dismisses only on pointerdown outside the panel and launcher", () => {
+  const componentSource = readFileSync(new URL("../components/QuakeShellPrototype.tsx", import.meta.url), "utf8");
+  assert.match(componentSource, /event\.composedPath\(\)/);
+  assert.match(componentSource, /panel && path\.includes\(panel\)/);
+  assert.match(componentSource, /trigger && path\.includes\(trigger\)/);
+  assert.match(componentSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
+  assert.match(componentSource, /setOpen\(false\);\s*triggerRef\.current\?\.focus\(\);/);
+});

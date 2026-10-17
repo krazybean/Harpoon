@@ -34,6 +34,9 @@ for f in "$OUT_DIR/Image-virt" "$OUT_DIR/harpoon-initramfs.cpio.gz" "$OUT_DIR/ha
   du -h "$f" >&2 | tail -n 1 >&2
 done
 
+# Emit the pair contract only after an explicit complete guest build.
+bash "$SCRIPT_DIR/guest-assets-manifest.sh" --write
+
 # Canonical size check for root
 SZ=$(stat -f%z "$OUT_DIR/harpoon-root.img" 2>/dev/null || stat -c%s "$OUT_DIR/harpoon-root.img")
 if [ "$SZ" != "2147483648" ]; then

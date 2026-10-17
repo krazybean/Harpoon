@@ -41,9 +41,11 @@ export const ContainersView = memo(function ContainersView({
   const [view, setView] = useState<"table" | "stacks">("stacks");
   const [selectedStack, setSelectedStack] = useState<string | null>(null);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [openContainerMenu, setOpenContainerMenu] = useState<string | null>(null);
   const galleryRef = useRef<HTMLDivElement>(null);
   const galleryScrollTop = useRef(0);
   const stackCardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const containerMenuTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const firstTileRef = useRef<HTMLButtonElement>(null);
   const transitionTimer = useRef<number | null>(null);
   const [stackTransition, setStackTransition] = useState<"idle" | "opening" | "closing">("idle");
@@ -158,11 +160,19 @@ export const ContainersView = memo(function ContainersView({
       setBatchResult({ message: result.failed.length ? `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}; ${result.failed.length} failed.${skipped}` : `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}.${skipped}`, failed: result.failed.length });
     });
   };
+  const runContainerMenuAction = (container: any, verb: "start" | "stop" | "restart") => {
+    const id = resourceId(container);
+    const name = container.Names || container.Name || id;
+    setOpenContainerMenu(null);
+    if (verb !== "start" && !confirmLifecycle(verb, [name], `container ${name}`)) return;
+    doAction(`${verb}-${id}`, () => invoke(`${verb}_container`, { id }));
+  };
   const reducedMotion = () => typeof window === "undefined" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
   const focusWithoutScroll = (target: HTMLElement | null) => target?.focus({ preventScroll: true });
   const selectStack = (project: string) => {
     galleryScrollTop.current = galleryRef.current?.scrollTop ?? 0;
     setOpenMenu(null);
+    setOpenContainerMenu(null);
     if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
     setStackTransition("opening");
     setSelectedStack(project);
@@ -178,6 +188,7 @@ export const ContainersView = memo(function ContainersView({
   const returnToGallery = () => {
     if (!selectedStack) return;
     if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    setOpenContainerMenu(null);
     const card = stackCardRefs.current[selectedStack];
     if (reducedMotion()) {
       setSelectedStack(null);
@@ -200,6 +211,26 @@ export const ContainersView = memo(function ContainersView({
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [selectedStack]);
+  useEffect(() => {
+    if (!openContainerMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".container-tile__actions")) setOpenContainerMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const trigger = containerMenuTriggerRefs.current[openContainerMenu];
+      setOpenContainerMenu(null);
+      requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(".container-tile__menu-popover [role=menuitem]:not(:disabled)")?.focus());
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openContainerMenu]);
   useEffect(() => {
     if (!selectedStack) requestAnimationFrame(() => { if (galleryRef.current) galleryRef.current.scrollTop = galleryScrollTop.current; });
   }, [selectedStack]);
@@ -272,7 +303,7 @@ export const ContainersView = memo(function ContainersView({
               {isOpen && <div id={`stack-workspace-${group.project}`} className="stack-workspace" aria-label={`${group.project} containers`}>
                 <div className="stack-workspace__header"><div><div className="overview-eyebrow">Compose stack · main workspace</div><h2>{group.project}</h2><p>{group.containers.length} containers · Docker engine metadata</p></div><button className="btn btn--secondary" onClick={returnToGallery}>Back to stacks <span aria-hidden="true">×</span></button></div>
                 {(group.networks.length > 0 || group.volumes.length > 0) && <div className="stack-resource-row">{group.networks.map((network) => <span className="resource-chip" key={`network-${network}`}><ShareNetwork size={13} aria-hidden="true" />{network}</span>)}{group.volumes.map((volume) => <span className="resource-chip" key={`volume-${volume}`}><Database size={13} aria-hidden="true" />{volume}</span>)}</div>}
-                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); return <button ref={index === 0 ? firstTileRef : undefined} key={id} className="container-tile" style={{ "--tile-index": index } as CSSProperties} onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button>; })}</div>
+                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}</div>}</div></article>; })}</div>
                 <CsshWorkspace project={group.project} containers={group.containers} />
               </div>}
             </article>; })}

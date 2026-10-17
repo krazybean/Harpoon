@@ -96,7 +96,7 @@ export function ShellTab({ context, containerId, running, executable = "/bin/sh"
     {!running && <div className="shell-tab__empty"><strong>Container is not running</strong><span>Start the container before opening an interactive shell.</span></div>}
     {running && <div ref={hostRef} className="shell-tab__terminal" role="application" aria-label={`Shell for ${containerId.slice(0, 12)}`} />}
     {running && state === "connecting" && <div className="shell-tab__overlay" role="status">Opening interactive shell…</div>}
-    {running && state === "disconnected" && <div className="shell-tab__overlay"><strong>Interactive shell</strong><span>Connect to open /bin/sh in this running container.</span></div>}
+    {running && state === "disconnected" && <button className="shell-tab__overlay shell-tab__connect-target" type="button" onClick={connect} aria-label={`Connect to interactive shell for ${containerId.slice(0, 12)}`}><strong>Interactive shell</strong><span>Connect to open /bin/sh in this running container.</span><span className="shell-tab__connect-target-action">Connect</span></button>}
     {state === "connected" && <p className="text-meta shell-tab__hint">Select text to copy. Scrollback keeps the latest 2,000 terminal lines.</p>}
   </div>;
 }

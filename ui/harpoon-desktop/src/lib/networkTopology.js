@@ -21,8 +21,14 @@ export function mapNetworkTopology(networks, containers) {
     if (seenContainers.has(id)) return;
     seenContainers.add(id);
     const name = (text(container?.Names) ?? text(container?.Name) ?? id).replace(/^\//, "");
+    const composeService = text(container?.ComposeService);
+    const composeNumber = text(container?.ComposeNumber);
+    const label = composeService
+      ? `${composeService}${composeNumber && composeNumber !== "1" ? ` #${composeNumber}` : ""}`
+      : name;
     const status = text(container?.State) ?? (text(container?.Status)?.toLowerCase().startsWith("up") ? "running" : text(container?.Status)) ?? "unknown";
-    attached.push({ id: `container-${id}`, name, fullName: name, status: status.toLowerCase(), image: text(container?.Image), networks: [...new Set(names)] });
+    const attachments = Array.isArray(container?.NetworkAttachments) ? container.NetworkAttachments : [];
+    attached.push({ id: `container-${id}`, name, label, fullName: name, status: status.toLowerCase(), image: text(container?.Image), networks: [...new Set(names)], attachments });
     names.forEach(ensureNetwork);
   });
 

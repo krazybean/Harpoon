@@ -177,7 +177,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
     let uuid = UUID().uuidString
     let iso = ISO8601DateFormatter().string(from: Date())
     let resolvedDiskPath = cfg.diskURL.standardized.resolvingSymlinksInPath().path
-    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath)
+    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil)
     if let data = try? JSONEncoder().encode(meta) {
         try? data.write(to: HarpoonPaths.jsonFile)
     }
@@ -204,7 +204,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
                 }
                 // cleanup stale files (no socket, no lock should remain; pid/json removed)
                 try? FileManager.default.removeItem(at: HarpoonPaths.pidFile)
-                try? FileManager.default.removeItem(at: HarpoonPaths.jsonFile)
+                if readMetadata()?.failure == nil { try? FileManager.default.removeItem(at: HarpoonPaths.jsonFile) }
                 // ensure sockets not leaked (they shouldn't exist since start failed pre-bridges) but check
                 try? fh.close()
                 return Int32(status != 0 ? status : 1)

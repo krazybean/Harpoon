@@ -35,13 +35,16 @@ type HarpoonStatus = {
   lockPath?: string;
   logPath?: string;
   dockerReady?: boolean;
+  failure?: RuntimeFailure;
 };
+type RuntimeFailure = { category: string; message: string; source: string; occurredAt: string; underlyingError?: string | null };
 type DoctorResult = { raw: string; passed: number; warnings: number; failures: number };
 type ConfigResult = { cpus: number; memory: number; raw: string; path: string };
 type Counts = { containers: number; running: number; images: number; volumes: number; networks: number };
 type DiscoveredContext = { id: string; name: string; engine: string; endpoint?: string | null; source: string; state: "detected" | "connected" | "unavailable" | "authentication_needed"; current: boolean; harpoon: boolean; detail: string; capabilities: Record<string, "available" | "unsupported" | "unknown"> };
 type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting" | "vm_booting" | "docker_starting" | "ready" | "failed";
 type RuntimeRefreshEvent = { key: string; ok: boolean; generation?: number; value?: unknown; error?: string; values?: RuntimeRefreshEvent[] };
+type BootstrapEvent = { status?: HarpoonStatus; observedAtMs?: number; ok?: boolean; error?: string | null };
 const DevTopologyPrototype = import.meta.env.DEV ? lazy(() => import("./components/TopologyPrototype").then((module) => ({ default: module.TopologyPrototype }))) : null;
 
 function stateBadge(state: string) {
@@ -53,26 +56,31 @@ function stateBadge(state: string) {
   if (s === "stale") return { bg: "var(--warning-bg)", fg: "var(--warning-fg)", label: "STALE", cls: "badge--warning" };
   return { bg: "var(--info-bg)", fg: "var(--info-fg)", label: state.toUpperCase(), cls: "badge--info" };
 }
-function phaseLabel(p: BootstrapPhase): string {
-  switch(p) {
-    case "launching": return "Preparing Harpoon…";
-    case "discovering": return "Checking runtime…";
-    case "stopped": return "Harpoon stopped";
-    case "starting": return "Starting Harpoon…";
-    case "vm_booting": return "Starting Linux VM…";
-    case "docker_starting": return "Waiting for Docker Engine…";
-    case "ready": return "Ready";
-    case "failed": return "Harpoon could not start";
-  }
-}
-function phaseDetail(p: BootstrapPhase, status: HarpoonStatus | null): string {
-  if (p==="launching") return "Resolving Harpoon binary…";
-  if (p==="discovering") return "Checking runtime…";
-  if (p==="starting") return status ? `Harpoon state: ${status.state}` : "Starting runtime…";
-  if (p==="vm_booting") return status ? `VM ${status.state} • PID ${status.pid ?? "—"}` : "Booting Linux VM…";
-  if (p==="docker_starting") return "Docker socket exists, waiting for Engine…";
-  if (p==="ready") return "Harpoon ready";
-  return "";
+function BootstrapStatus({ message, trace }: { message: string; trace: boolean }) {
+  const [current, setCurrent] = useState(message);
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (message === current) return;
+    if (trace) console.debug("[bootstrap-trace] render", { message, atMs: Date.now() });
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    setLeaving(current);
+    setCurrent(message);
+    timer.current = window.setTimeout(() => {
+      setLeaving(null);
+      timer.current = null;
+    }, 360);
+  }, [message]);
+
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+
+  return <div className="bootstrap-status" role="status" aria-live="polite" aria-atomic="true">
+    {leaving && <span key={`leaving-${leaving}`} onAnimationStart={trace ? () => console.debug("[bootstrap-trace] animation-start", { message: leaving, atMs: Date.now() }) : undefined} className="bootstrap-status__message bootstrap-status__message--leaving">{leaving}</span>}
+    <span key={`current-${current}`} onAnimationStart={trace ? () => console.debug("[bootstrap-trace] animation-start", { message: current, atMs: Date.now() }) : undefined} className="bootstrap-status__message bootstrap-status__message--current">{current}</span>
+  </div>;
 }
 function fmtTs(ts: number | null) {
   if (!ts) return "—";
@@ -172,16 +180,21 @@ export default function App() {
   const tauriAvailable = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
   const technologyShowcase = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("technology-showcase");
   const topologyPrototype = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("topology-prototype");
+  const bootstrapEventPush = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("bootstrap-events");
+  const bootstrapTrace = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("bootstrap-trace");
   const [destination, setDestination] = useState<Destination>({ kind: "nav", nav: "overview" });
   const active: Nav = destination.kind === "container" ? "containers" : destination.nav;
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [bootstrapPhase, setBootstrapPhase] = useState<BootstrapPhase>("launching");
+  const [bootstrapStatus, setBootstrapStatus] = useState("Resolving Harpoon binary…");
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [rustRefreshFallback, setRustRefreshFallback] = useState(false);
   const bootstrapAttempted = useRef(false);
   const bootstrapActiveRef = useRef(false);
+  const bootstrapEventReadyRef = useRef<Promise<void> | null>(null);
+  const bootstrapEventCleanupRef = useRef<(() => void)[]>([]);
 
   // Shelves — smallest shared in-memory read model, no Redux/Zustand
   const statusShelf = useShelf<HarpoonStatus>(useCallback(()=>invoke<HarpoonStatus>("get_status"), []), { ttlMs: 30000 });
@@ -196,7 +209,7 @@ export default function App() {
   const imagesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_images"), []), { ttlMs: 30000 });
   const volumesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_volumes"), []), { ttlMs: 30000 });
   const networksShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_networks"), []), { ttlMs: 30000 });
-  const contextsShelf = useShelf<DiscoveredContext[]>(useCallback(()=>invoke<DiscoveredContext[]>("discover_contexts"), []), { ttlMs: 30000 });
+  const contextsShelf = useShelf<DiscoveredContext[]>(useCallback(()=>invoke<DiscoveredContext[]>("discover_contexts"), []), { ttlMs: 300000 });
 
   const status = statusShelf.data;
   const statusAt = statusShelf.updatedAt;
@@ -233,6 +246,41 @@ export default function App() {
   const publishCounts = countsShelf.publish;
   const publishConfig = configShelf.publish;
 
+  useEffect(() => {
+    if (!tauriAvailable || !bootstrapEventPush) return;
+    let disposed = false;
+    bootstrapEventReadyRef.current = Promise.all([
+      listen<BootstrapEvent>("bootstrap-status", ({ payload }) => {
+        if (disposed || !payload.status) return;
+        if (bootstrapTrace) console.debug("[bootstrap-trace] event", { observedAtMs: payload.observedAtMs, receivedAtMs: Date.now(), state: payload.status.state, dockerReady: payload.status.dockerReady });
+        const status = payload.status;
+        publishStatus(status);
+        if (status.state === "starting") { setBootstrapStatus("Starting Harpoon…"); setBootstrapPhase("starting"); }
+        else if (status.state === "booting") { setBootstrapStatus("Starting Linux VM…"); setBootstrapPhase("vm_booting"); }
+        else if (status.state === "running" && !status.dockerReady) { setBootstrapStatus("Waiting for Docker Engine readiness…"); setBootstrapPhase("docker_starting"); }
+        else if (status.state === "running" && status.dockerReady) setBootstrapStatus("Harpoon is ready.");
+      }),
+      listen<BootstrapEvent>("bootstrap-complete", ({ payload }) => {
+        if (disposed) return;
+        if (payload.ok) {
+          setBootstrapStatus("Harpoon is ready.");
+          setBootstrapPhase("ready");
+          bootstrapActiveRef.current = false;
+          refreshCounts(); refreshDocker();
+          setTimeout(() => { refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300);
+        } else {
+          setBootstrapError(payload.error ?? "Harpoon could not start.");
+          setBootstrapPhase("failed");
+          bootstrapActiveRef.current = false;
+        }
+      }),
+    ]).then(([unlistenStatus, unlistenComplete]) => {
+      if (disposed) { unlistenStatus(); unlistenComplete(); return; }
+      bootstrapEventCleanupRef.current = [unlistenStatus, unlistenComplete];
+    }).then(() => undefined);
+    return () => { disposed = true; bootstrapEventCleanupRef.current.splice(0).forEach((unlisten) => unlisten()); void invoke("stop_bootstrap_worker"); bootstrapEventReadyRef.current = null; };
+  }, [tauriAvailable, bootstrapEventPush, bootstrapTrace, publishStatus, refreshCounts, refreshDocker, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
+
   // Bootstrap state machine — must use authoritative shelf data, not stale closure
   const runBootstrap = useCallback(async (manual: boolean) => {
     if (bootstrapActiveRef.current) return;
@@ -241,54 +289,72 @@ export default function App() {
     setActionError(null);
     try {
       setBootstrapPhase("launching");
-      void refreshContexts();
+      setBootstrapStatus("Resolving Harpoon binary…");
       await refreshBinary();
       await new Promise(r => setTimeout(r, 120));
       setBootstrapPhase("discovering");
+      setBootstrapStatus("Checking runtime status…");
       const s0 = await refreshStatus();
+      setBootstrapStatus("Reading runtime configuration and Docker state…");
       await Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]);
       // Stage 3B: ensure Harpoon docker context exists (idempotent, no default switch, Finder-safe resolver)
       // This fixes clean-install where context was manually required; safe to run repeatedly
+      setBootstrapStatus("Ensuring Harpoon Docker context…");
       try { await invoke<string>("ensure_harpoon_context"); } catch (e) { console.warn("ensure_harpoon_context failed", e); }
+      if (bootstrapEventPush) {
+        await bootstrapEventReadyRef.current;
+        try { await invoke("start_bootstrap_worker"); }
+        catch (error) { setBootstrapError(String(error)); setBootstrapPhase("failed"); bootstrapActiveRef.current = false; }
+        return;
+      }
       // Doctor is independent; keep the verbose log tail out of clean performance runs.
       refreshDoctor();
       if (!s0) { setBootstrapError("Could not read Harpoon status."); setBootstrapPhase("failed"); return; }
       if (s0.state === "running" && s0.dockerReady) {
+        setBootstrapStatus("Harpoon is ready.");
         setBootstrapPhase("ready");
         setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300);
         return;
       }
       if (s0.state === "running" && !s0.dockerReady) {
+        setBootstrapStatus("Waiting for Docker Engine readiness…");
         setBootstrapPhase("docker_starting");
         const deadline = Date.now() + 30000;
         while (Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 750));
           const ns = await refreshStatus();
           await refreshDocker();
-          if (ns && ns.state === "running" && ns.dockerReady) { setBootstrapPhase("ready"); refreshCounts(); refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); return; }
+          if (ns && ns.state === "running" && ns.dockerReady) { setBootstrapStatus("Harpoon is ready."); setBootstrapPhase("ready"); refreshCounts(); refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); return; }
           if (ns && ns.state === "failed") break;
         }
         setBootstrapError("Docker Engine did not become ready within 30 seconds."); setBootstrapPhase("failed"); return;
       }
       if (s0.state === "starting" || s0.state === "booting") {
         const startPhase = s0.state === "booting" ? "vm_booting" : "starting";
+        setBootstrapStatus(startPhase === "vm_booting" ? "Starting Linux VM…" : "Starting Harpoon…");
         setBootstrapPhase(startPhase as BootstrapPhase);
         const deadline = Date.now() + 60000;
         while (Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 750));
           const ns = await refreshStatus();
           if (!ns) continue;
-          if (ns.state === "starting") setBootstrapPhase("starting");
-          else if (ns.state === "booting") setBootstrapPhase("vm_booting");
-          else if (ns.state === "running" && !ns.dockerReady) setBootstrapPhase("docker_starting");
-          else if (ns.state === "running" && ns.dockerReady) { setBootstrapPhase("ready"); refreshCounts(); refreshDocker(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300); return; }
+          if (ns.state === "starting") { setBootstrapStatus("Starting Harpoon…"); setBootstrapPhase("starting"); }
+          else if (ns.state === "booting") { setBootstrapStatus("Starting Linux VM…"); setBootstrapPhase("vm_booting"); }
+          else if (ns.state === "running" && !ns.dockerReady) { setBootstrapStatus("Waiting for Docker Engine readiness…"); setBootstrapPhase("docker_starting"); }
+          else if (ns.state === "running" && ns.dockerReady) { setBootstrapStatus("Harpoon is ready."); setBootstrapPhase("ready"); refreshCounts(); refreshDocker(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300); return; }
           else if (ns.state === "failed") break;
         }
         setBootstrapError("Harpoon startup timed out."); setBootstrapPhase("failed"); return;
       }
-      if (s0.state === "stopped" || s0.state === "stale" || s0.state === "failed") {
+      if (s0.state === "failed") {
+        setBootstrapError(s0.failure?.message ?? "Harpoon reported an authoritative runtime failure.");
+        setBootstrapPhase("failed");
+        return;
+      }
+      if (s0.state === "stopped" || s0.state === "stale") {
         if (!manual && bootstrapAttempted.current) { setBootstrapPhase("stopped"); return; }
         if (!manual) bootstrapAttempted.current = true;
+        setBootstrapStatus("Starting Harpoon…");
         setBootstrapPhase("starting");
         try { await invoke<string>("start_harpoon"); } catch (e:any) {
           const msg = String(e);
@@ -301,20 +367,22 @@ export default function App() {
           await new Promise(r => setTimeout(r, 750));
           const ns = await refreshStatus();
           if (!ns) continue;
-          if (ns.state === "starting") setBootstrapPhase("starting");
-          else if (ns.state === "booting") setBootstrapPhase("vm_booting");
+          if (ns.state === "starting") { setBootstrapStatus("Starting Harpoon…"); setBootstrapPhase("starting"); }
+          else if (ns.state === "booting") { setBootstrapStatus("Starting Linux VM…"); setBootstrapPhase("vm_booting"); }
           else if (ns.state === "running" && !ns.dockerReady) {
+            setBootstrapStatus("Waiting for Docker Engine readiness…");
             setBootstrapPhase("docker_starting");
             if (dockerWaitStart === null) dockerWaitStart = Date.now();
             if (Date.now() - dockerWaitStart > 30000) { setBootstrapError("Docker Engine did not become ready within 30 seconds."); setBootstrapPhase("failed"); return; }
-          } else if (ns.state === "running" && ns.dockerReady) { setBootstrapPhase("ready"); await refreshCounts(); await refreshDocker(); await refreshConfig(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300); return; }
+          } else if (ns.state === "running" && ns.dockerReady) { setBootstrapStatus("Harpoon is ready."); setBootstrapPhase("ready"); await refreshCounts(); await refreshDocker(); await refreshConfig(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); }, 300); return; }
           else if (ns.state === "failed" || ns.state === "stale") { setBootstrapError("Harpoon could not start. VM failed."); setBootstrapPhase("failed"); return; }
         }
         setBootstrapError("Harpoon startup timed out."); setBootstrapPhase("failed"); return;
       }
+      setBootstrapStatus("Harpoon is ready.");
       setBootstrapPhase("ready");
-    } finally { bootstrapActiveRef.current = false; }
-  }, [refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks, refreshContexts]);
+    } finally { if (!bootstrapEventPush) bootstrapActiveRef.current = false; }
+  }, [bootstrapEventPush, refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
 
   useEffect(()=>{
     if (!tauriAvailable) {
@@ -474,13 +542,13 @@ export default function App() {
     setActionInProgress(name);
     setActionError(null);
     setBootstrapError(null);
-    if (name==="start") setBootstrapPhase("starting");
-    if (name==="restart") setBootstrapPhase("starting");
-    if (name==="stop") setBootstrapPhase("starting");
+    if (name==="start" || name==="restart") { setBootstrapStatus("Starting Harpoon…"); setBootstrapPhase("starting"); }
+    if (name==="stop") { setBootstrapStatus("Stopping Harpoon…"); setBootstrapPhase("starting"); }
     try {
       await fn();
       if (name==="start") { await runBootstrap(true); return; }
       if (name==="restart") {
+        setBootstrapStatus("Starting Harpoon…");
         setBootstrapPhase("starting");
         const deadline = Date.now()+60000;
         let dockerWaitStart: number|null=null;
@@ -488,13 +556,14 @@ export default function App() {
           await new Promise(r=>setTimeout(r,750));
           const ns = await refreshStatus();
           if (!ns) continue;
-          if (ns.state==="starting") setBootstrapPhase("starting");
-          else if (ns.state==="booting") setBootstrapPhase("vm_booting");
+          if (ns.state==="starting") { setBootstrapStatus("Starting Harpoon…"); setBootstrapPhase("starting"); }
+          else if (ns.state==="booting") { setBootstrapStatus("Starting Linux VM…"); setBootstrapPhase("vm_booting"); }
           else if (ns.state==="running" && !ns.dockerReady) {
+            setBootstrapStatus("Waiting for Docker Engine readiness…");
             setBootstrapPhase("docker_starting");
             if (dockerWaitStart===null) dockerWaitStart=Date.now();
             if (Date.now()-dockerWaitStart>30000){ setBootstrapError("Docker Engine did not become ready within 30 seconds."); setBootstrapPhase("failed"); break; }
-          } else if (ns.state==="running" && ns.dockerReady){ setBootstrapPhase("ready"); await refreshCounts(); await refreshDocker(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); },300); break; }
+          } else if (ns.state==="running" && ns.dockerReady){ setBootstrapStatus("Harpoon is ready."); setBootstrapPhase("ready"); await refreshCounts(); await refreshDocker(); setTimeout(()=>{ refreshContainers(); refreshImages(); refreshVolumes(); refreshNetworks(); },300); break; }
           else if (ns.state==="failed"){ setBootstrapError("Harpoon could not start."); setBootstrapPhase("failed"); break; }
           else if (ns.state==="stopped"||ns.state==="stale"){ setBootstrapPhase("stopped"); break; }
         }
@@ -576,30 +645,33 @@ export default function App() {
         </header>
         {actionError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{actionError}</div>}
         {statusError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>status error: {statusError}</div>}
+        {status?.failure && status.state !== "failed" && !showFailed && <div role="alert" style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{status.failure.message} <button className="btn btn--secondary btn--sm" onClick={() => handleNav("diagnostics")} style={{ marginLeft: 8 }}>View diagnostics</button></div>}
         {actionInProgress && <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 8 }}>{actionInProgress} in progress…</div>}
 
         {showBootstrapOverlay && (
           <div className="panel bootstrap-panel" style={{ padding:"40px 24px", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:320, textAlign:"center" }}>
             <div style={{ fontWeight:700, fontSize:20, marginBottom:12 }}>Harpoon</div>
             <div className="bootstrap-spinner" style={{ width:32, height:32, border:"3px solid var(--border-strong)", borderTopColor:"var(--accent-yellow)", borderRadius:"50%", animation:"spin 0.9s linear infinite", marginBottom:16 }}></div>
-            <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>{phaseLabel(bootstrapPhase)}</div>
-            <div style={{ fontSize:12, color:"#6b7280", marginBottom:4 }}>{phaseDetail(bootstrapPhase, status)}</div>
-            <div className="text-meta">{status ? `${status.state} • ${status.dockerReady? "Docker ready":"Docker starting"} • ${binaryPath ? "binary resolved":"resolving…"}` : "Checking runtime…"}</div>
+            <BootstrapStatus message={bootstrapStatus} trace={bootstrapTrace} />
             <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
           </div>
         )}
 
         {showFailed && (
           <div className="panel" style={{ borderColor:"var(--error)", padding:24, minHeight:320 }}>
-            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>Harpoon could not start</div>
+            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>{status?.failure?.category === "vm_terminated" ? "Harpoon VM unexpectedly terminated" : status?.failure?.message || "Harpoon could not start"}</div>
             <div style={{ fontSize:13, color:"#374151", marginBottom:4 }}>Phase: <code style={{ background:"#f3f4f6", padding:"2px 6px", borderRadius:6 }}>{bootstrapPhase}</code> {status && <span style={{ fontSize:12, color:"#6b7280" }}>• state {status.state}</span>}</div>
-            <div role="alert" style={{ fontSize:13, color:"var(--error-fg)", background:"var(--error-bg)", border:"1px solid var(--error)", borderRadius:8, padding:10, marginBottom:12, whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{bootstrapError || actionError || "Unknown error"}</div>
+            <div role="alert" aria-live="assertive" style={{ fontSize:13, color:"var(--error-fg)", background:"var(--error-bg)", border:"1px solid var(--error)", borderRadius:8, padding:10, marginBottom:12, whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
+              <div>{bootstrapError || actionError || "Unknown error"}</div>
+              {status?.failure && <div style={{ marginTop:8, color:"var(--text-secondary)" }}>Source: {status.failure.source} · {new Date(status.failure.occurredAt).toLocaleString()}</div>}
+              {status?.failure?.underlyingError && <details style={{ marginTop:8 }}><summary>View underlying diagnostics</summary><code>{status.failure.underlyingError}</code></details>}
+            </div>
             <div style={{ display:"flex", gap:8 }}>
               <button onClick={()=>runBootstrap(true)} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"1px solid #111827", fontSize:13 }}>Retry</button>
               <button onClick={()=>handleNav("diagnostics")} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Diagnostics</button>
               <button onClick={()=>{ refreshStatus(); setBootstrapPhase("discovering"); runBootstrap(true); }} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Check again</button>
             </div>
-            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>Binary: <code>{binaryPath || "—"}</code> • Log: <code>{logPath || status?.logPath || "—"}</code></div>
+            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again.</div>
           </div>
         )}
 
@@ -618,7 +690,7 @@ export default function App() {
             {active==="overview" && <OverviewView status={status} statusAt={statusAt} dockerVersion={dockerVersion} dockerAt={dockerAt} counts={counts} countsAt={countsAt} config={config} configAt={configAt} doctor={doctor} doctorAt={doctorAt} binaryPath={binaryPath} logPath={logPath} bootstrapPhase={bootstrapPhase} runtimePolling={true} runtimePollingPaused={[]} onOpenDiagnostics={()=>handleNav("diagnostics")} onOpenContainers={()=>handleNav("containers")} onOpenResources={()=>handleNav("resources")} />}
             {active==="resources" && <ResourcesView config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
             {active==="diagnostics" && <DiagnosticsView binaryPath={binaryPath} logs={logs} logsAt={logsAt} logsRefreshing={logsShelf.refreshing} logsError={logsShelf.error} logPath={logPath} doctor={doctor} doctorAt={doctorAt} doctorRefreshing={doctorShelf.refreshing} doctorError={doctorShelf.error} status={status} configRaw={config?.raw ?? null} bootstrapPhase={bootstrapPhase} onCopy={handleCopyDiagnostics} copied={copied} onRefreshDoctor={()=>doctorShelf.refresh()} onRefreshLogs={()=>logsShelf.refresh()} />}
-            {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} refresh={()=>contextsShelf.refresh()} />}
+            {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
             {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
             {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}

@@ -55,7 +55,8 @@ echo "[fetch-kernel] source: $BASE (Alpine 3.22 virt 6.12.x)" >&2
 # Decompress PE+gz wrapper to uncompressed Image
 if [ ! -f "$OUT_IMAGE" ] || [ "$KERNEL_CACHE" -nt "$OUT_IMAGE" ]; then
   echo "[fetch-kernel] decompressing vmlinuz-virt -> Image-virt..." >&2
-  python3 - "$KERNEL_CACHE" "$OUT_IMAGE" <<'PY'
+  TMP_IMAGE="$OUT_IMAGE.tmp.$$"
+  python3 - "$KERNEL_CACHE" "$TMP_IMAGE" <<'PY'
 import pathlib
 import sys
 import zlib
@@ -78,6 +79,7 @@ if not decoder.eof:
 destination.write_bytes(image)
 print(f"decompressed {len(image)} bytes")
 PY
+  mv "$TMP_IMAGE" "$OUT_IMAGE"
   echo "[fetch-kernel] Image-virt $(stat -f%z "$OUT_IMAGE" 2>/dev/null || stat -c%s "$OUT_IMAGE") bytes $(file "$OUT_IMAGE" | head -c 120)" >&2
   if command -v shasum >/dev/null; then
     echo "[fetch-kernel] sha256 Image-virt: $(shasum -a 256 "$OUT_IMAGE" | cut -d' ' -f1)" >&2

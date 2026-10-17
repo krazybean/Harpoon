@@ -94,7 +94,9 @@ fn docker_contexts(binary: &Path) -> Vec<DiscoveredContext> {
     command.args(["context", "ls", "--format", "{{json .}}"]).env("DOCKER_CLI_HINTS", "false");
     let Ok((stdout, _stderr, code)) = run_bounded(command) else { return Vec::new() };
     if code != 0 { return Vec::new(); }
-    let current = Command::new(binary).args(["context", "show"]).env("DOCKER_CLI_HINTS", "false").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string());
+    let mut current_command = Command::new(binary);
+    current_command.args(["context", "show"]).env("DOCKER_CLI_HINTS", "false");
+    let current = run_bounded(current_command).ok().and_then(|(stdout, _, code)| (code == 0).then_some(stdout)).map(|s| s.trim().to_string());
     json_lines(&stdout).into_iter().filter_map(|row| {
         let name = row.get("Name").and_then(|v| v.as_str())?.trim().to_string();
         let endpoint = row.get("DockerEndpoint").and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty());
@@ -134,8 +136,7 @@ fn find_binary(name: &str) -> Option<std::path::PathBuf> {
     path.split(':').map(|dir| Path::new(dir).join(name)).find(|candidate| candidate.is_file())
 }
 
-#[tauri::command]
-pub fn discover_contexts() -> Result<Vec<DiscoveredContext>, String> {
+fn discover_contexts_blocking() -> Result<Vec<DiscoveredContext>, String> {
     let mut discovered = Vec::new();
     if let Ok(binary) = crate::resolve_docker_binary() {
         for item in docker_contexts(&binary) {
@@ -167,6 +168,13 @@ pub fn discover_contexts() -> Result<Vec<DiscoveredContext>, String> {
     let mut seen = HashSet::new();
     discovered.retain(|item| seen.insert(item.id.clone()));
     Ok(discovered)
+}
+
+#[tauri::command]
+pub async fn discover_contexts() -> Result<Vec<DiscoveredContext>, String> {
+    tauri::async_runtime::spawn_blocking(discover_contexts_blocking)
+        .await
+        .map_err(|error| format!("context discovery worker failed: {error}"))?
 }
 
 #[cfg(test)]
