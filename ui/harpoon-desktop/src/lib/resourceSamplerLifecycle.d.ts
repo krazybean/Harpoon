@@ -1,0 +1,1 @@
+export function subscribeResourceSampler(args: { listen: (onSnapshot: (payload: unknown) => void) => Promise<(() => void) | void>; start: () => void; stop: () => void; onSnapshot: (payload: any) => void }): () => void;
