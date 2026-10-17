@@ -228,7 +228,7 @@ signal(SIGPIPE, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 var shuttingDown = false
-func initiateShutdown(reason: String) {
+func initiateShutdown(reason: String, failureCode: Int32 = 0) {
     if shuttingDown { return }
     shuttingDown = true
     lifecycle.transition(to: .stopping)
@@ -238,26 +238,43 @@ func initiateShutdown(reason: String) {
     if let vm = manager.vm {
         if vm.canStop {
             vm.stop { err in
-                if let err = err { log("stop error: \(err)") }
+                if let err = err {
+                    lifecycle.fail("VM stop failure \(err)")
+                    log("SHUTDOWN_FAILED stop error=\(err)")
+                    manager.cleanupEphemeral()
+                    exit(failureCode == 0 ? 8 : failureCode)
+                }
+                guard vm.state == .stopped else {
+                    lifecycle.fail("VM stop completed without STOPPED state")
+                    log("SHUTDOWN_FAILED state=\(vm.state.rawValue)")
+                    manager.cleanupEphemeral()
+                    exit(failureCode == 0 ? 8 : failureCode)
+                }
                 manager.cleanupEphemeral()
                 lifecycle.transition(to: .stopped)
                 log("SHUTDOWN_OK")
-                exit(0)
+                exit(failureCode)
             }
             DispatchQueue.main.asyncAfter(deadline: .now()+8) {
-                log("SHUTDOWN_TIMEOUT force exit")
+                lifecycle.fail("VM stop timeout")
+                log("SHUTDOWN_TIMEOUT VM termination unconfirmed")
                 manager.cleanupEphemeral()
-                exit(0)
+                exit(failureCode == 0 ? 8 : failureCode)
             }
         } else {
+            guard vm.state == .stopped else {
+                lifecycle.fail("VM cannot stop and termination is unconfirmed")
+                manager.cleanupEphemeral()
+                exit(failureCode == 0 ? 8 : failureCode)
+            }
             manager.cleanupEphemeral()
             lifecycle.transition(to: .stopped)
-            exit(0)
+            exit(failureCode)
         }
     } else {
         manager.cleanupEphemeral()
         lifecycle.transition(to: .stopped)
-        exit(0)
+        exit(failureCode)
     }
 }
 
@@ -317,8 +334,7 @@ DispatchQueue.main.asyncAfter(deadline: .now()+config.bootTimeout) {
         let reason = "guest readiness timeout after \(config.bootTimeout)s"
         lifecycle.fail(reason)
         log("GUEST_INIT_FAILURE no HARPOON_DOCKER_READY after \(config.bootTimeout)s tail=\(tail)")
-        initiateShutdown(reason: "BOOT_TIMEOUT")
-        DispatchQueue.main.asyncAfter(deadline: .now()+3) { exit(6) }
+        initiateShutdown(reason: "BOOT_TIMEOUT", failureCode: 6)
     }
 }
 

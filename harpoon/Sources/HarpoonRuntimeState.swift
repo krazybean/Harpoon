@@ -59,6 +59,25 @@ enum HarpoonPaths {
     static var dockerSocketPath: String { "/tmp/harpoon-docker.sock" }
     static var controlSocketPath: String { "/tmp/harpoon-control" }
     static var mgmtSocketPath: String { "/tmp/harpoon-mgmt.sock" }
+    static var lifecycleLockPath: String { "/tmp/harpoon-lifecycle.lock" }
+}
+
+final class LifecycleControlLock {
+    private let fd: Int32
+
+    init?() {
+        let opened = open(HarpoonPaths.lifecycleLockPath, O_CREAT | O_RDWR, 0o600)
+        guard opened >= 0, flock(opened, LOCK_EX | LOCK_NB) == 0 else {
+            if opened >= 0 { close(opened) }
+            return nil
+        }
+        fd = opened
+    }
+
+    deinit {
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
 }
 
 struct HarpoonUserConfig: Codable {
@@ -117,6 +136,8 @@ struct RuntimeMetadata: Codable {
     let socketPath: String
     let uuid: String
     let binary: String
+    let diskIdentity: String?
+    let diskResolvedPath: String?
 }
 
 // MARK: - Process checks
@@ -260,6 +281,19 @@ func readMetadata() -> RuntimeMetadata? {
         }
     }
     return nil
+}
+
+func diskIdentity(at path: String) -> String? {
+    var st = stat()
+    guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+    return "\(st.st_dev):\(st.st_ino)"
+}
+
+func sameDiskIdentity(_ metadata: RuntimeMetadata) -> Bool {
+    let currentPath = URL(fileURLWithPath: metadata.diskPath).standardized.resolvingSymlinksInPath().path
+    guard let recordedPath = metadata.diskResolvedPath, currentPath == recordedPath,
+          let expected = metadata.diskIdentity else { return false }
+    return diskIdentity(at: currentPath) == expected
 }
 
 func ensureAppSupport() -> String? {
