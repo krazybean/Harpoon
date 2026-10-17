@@ -61,6 +61,7 @@ final class VMManager {
     var vm: VZVirtualMachine?
     var vsockDevice: VZVirtioSocketDevice?
     var balloonDevice: VZVirtioTraditionalMemoryBalloonDevice?
+    var configurationSummary = "unavailable"
 
     // serial poll
     var serialPoll: DispatchSourceTimer?
@@ -148,6 +149,7 @@ final class VMManager {
         cfg.memoryBalloonDevices = [balloonConfig]
         log("HARPOON_BALLOON_CONFIGURED \(config.memoryMIB)MiB cpu=\(config.cpuCount) balloon=virtio-traditional memorySize=\(config.memorySizeBytes) balloonInitial=\(config.memorySizeBytes)")
         try cfg.validate()
+        configurationSummary = "cpus=\(cfg.cpuCount) memoryBytes=\(cfg.memorySize) entropy=\(cfg.entropyDevices.count) serial=\(cfg.serialPorts.count) network=\(cfg.networkDevices.count) storage=\(cfg.storageDevices.count) virtiofs=\(cfg.directorySharingDevices.count) socket=\(cfg.socketDevices.count) balloon=\(cfg.memoryBalloonDevices.count)"
         log("validate OK HARPOON_HOST_NETDEV_COUNT \(cfg.networkDevices.count)")
         let vm = VZVirtualMachine(configuration: cfg)
         self.vm = vm

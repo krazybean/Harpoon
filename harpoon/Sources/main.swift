@@ -6,6 +6,51 @@ func log(_ m: String) {
     fputs("[\(ts)] \(m)\n", stderr)
 }
 
+private let vmStartDiagnosticMaxDepth = 4
+private let vmStartDiagnosticMaxEntries = 24
+private let vmStartDiagnosticMaxText = 240
+
+private func boundedDiagnosticText(_ value: String) -> String {
+    let singleLine = value.replacingOccurrences(of: "\n", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+    return String(singleLine.prefix(vmStartDiagnosticMaxText))
+}
+
+private func diagnosticKeyIsSensitive(_ key: String) -> Bool {
+    let key = key.lowercased()
+    return ["password", "secret", "token", "credential", "private", "authorization", "cookie"].contains { key.contains($0) }
+}
+
+private func boundedNSErrorDetails(_ error: NSError, depth: Int = 0) -> String {
+    guard depth < vmStartDiagnosticMaxDepth else { return "<max-depth>" }
+    let fields = error.userInfo.keys.sorted().prefix(vmStartDiagnosticMaxEntries).map { key -> String in
+        let value = error.userInfo[key]
+        if key == NSUnderlyingErrorKey, let underlying = value as? NSError {
+            return "\(boundedDiagnosticText(key))=\(boundedNSErrorDetails(underlying, depth: depth + 1))"
+        }
+        if diagnosticKeyIsSensitive(key) { return "\(boundedDiagnosticText(key))=<redacted>" }
+        if let string = value as? String { return "\(boundedDiagnosticText(key))=\(boundedDiagnosticText(string))" }
+        if let number = value as? NSNumber { return "\(boundedDiagnosticText(key))=\(number)" }
+        if let nested = value as? NSError { return "\(boundedDiagnosticText(key))=\(boundedNSErrorDetails(nested, depth: depth + 1))" }
+        return "\(boundedDiagnosticText(key))=<\(String(describing: type(of: value)))>"
+    }
+    return "domain=\(boundedDiagnosticText(error.domain)) code=\(error.code) description=\(boundedDiagnosticText(error.localizedDescription)) userInfo={\(fields.joined(separator: ","))}"
+}
+
+private func assetDiagnostic(_ role: String, url: URL) -> String {
+    let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .fileResourceIdentifierKey])
+    let identity = values?.fileResourceIdentifier.map { boundedDiagnosticText(String(describing: $0)) } ?? "unavailable"
+    return "role=\(role) path=\(boundedDiagnosticText(url.path)) exists=\(FileManager.default.fileExists(atPath: url.path)) regular=\(values?.isRegularFile ?? false) bytes=\(values?.fileSize ?? 0) identity=\(identity)"
+}
+
+private func vmStartDiagnostics(error: NSError, vm: VZVirtualMachine, manager: VMManager, config: RuntimeConfig) {
+    log("HARPOON_VZ_START_DIAGNOSTICS state=\(vm.state.rawValue) configuration={\(manager.configurationSummary)}")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("kernel", url: config.kernelURL))")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("initramfs", url: config.initramfsURL))")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("disk", url: config.diskURL))")
+    log("HARPOON_VZ_START_ERROR \(boundedNSErrorDetails(error))")
+}
+
 func printUsage() {
     fputs("usage: harpoon [--cpus 1|2] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr)
     fputs("defaults: --cpus 2 --memory 4096  (HARPOON_CPUS/HARPOON_MEMORY_MIB env fallback, CLI wins)\n", stderr)
@@ -343,7 +388,8 @@ vm.start { result in
         let ne = e as NSError
         let reason = "VM start failure \(ne.domain) \(ne.code) \(ne.localizedDescription)"
         lifecycle.fail(reason)
-        fputs("start FAIL \(ne.domain) \(ne.code) \(ne.userInfo)\n", stderr)
+        vmStartDiagnostics(error: ne, vm: vm, manager: manager, config: config)
+        fputs("start FAIL \(ne.domain) \(ne.code)\n", stderr)
         log("HOST_VZ_START_FAILURE")
         manager.cleanupEphemeral()
         exit(7)
