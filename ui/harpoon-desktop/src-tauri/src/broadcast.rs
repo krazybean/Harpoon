@@ -50,10 +50,14 @@ pub fn validate_dispatch(command: &str, targets: &[Target]) -> Result<(), String
 
 fn read_bounded<R: Read>(reader: R) -> String {
     let mut bytes = Vec::with_capacity(MAX_OUTPUT_BYTES.min(8192));
-    BufReader::new(reader)
+    let mut reader = BufReader::new(reader);
+    (&mut reader)
         .take((MAX_OUTPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .ok();
+    // Keep draining past the cap: closing the pipe early kills a chatty command
+    // with SIGPIPE and reports it as failed. The timeout still bounds this.
+    std::io::copy(&mut reader, &mut std::io::sink()).ok();
     let truncated = bytes.len() > MAX_OUTPUT_BYTES;
     bytes.truncate(MAX_OUTPUT_BYTES);
     let mut output = String::from_utf8_lossy(&bytes).into_owned();
@@ -166,7 +170,27 @@ fn inspect_running(docker: &Path, target: &Target, timeout: Duration) -> Result<
     Ok(())
 }
 
+/// Shortens `output` to at most `max` bytes without splitting a character.
+fn truncate_utf8(output: &mut String, max: usize) {
+    if output.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.truncate(end);
+}
+
+/// Killing the local `docker exec` client does not stop the process inside the
+/// container, so the command also runs under the container's own `timeout`
+/// when the image has one. The user's command is passed as `$0`, not quoted.
+const IN_CONTAINER_TIMEOUT: &str = r#"if command -v timeout >/dev/null 2>&1; then exec timeout -s KILL "$HARPOON_TIMEOUT_SECS" /bin/sh -c "$0"; else exec /bin/sh -c "$0"; fi"#;
+
 fn execute_one(docker: &Path, target: Target, command: &str, timeout: Duration) -> ResultRow {
+    // Validation and the command share one budget so a target never takes
+    // longer than `timeout` in total.
+    let deadline = Instant::now() + timeout;
     if let Err(error) = inspect_running(docker, &target, timeout) {
         let status = if error == "container validation timed out" {
             "timeout"
@@ -181,15 +205,21 @@ fn execute_one(docker: &Path, target: Target, command: &str, timeout: Duration) 
             error: Some(error),
         };
     }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let container_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+    let container_secs = container_secs.max(1).to_string();
     let mut child_command = Command::new(docker);
     child_command
         .args([
             "--context",
             "harpoon",
             "exec",
+            "--env",
+            &format!("HARPOON_TIMEOUT_SECS={container_secs}"),
             &target.container_id,
             "/bin/sh",
             "-c",
+            IN_CONTAINER_TIMEOUT,
             command.trim(),
         ])
         .stdout(Stdio::piped())
@@ -207,14 +237,14 @@ fn execute_one(docker: &Path, target: Target, command: &str, timeout: Duration) 
             }
         }
     };
-    let result = run_bounded(child, timeout);
+    let result = run_bounded(child, remaining);
     let mut output = [result.stdout, result.stderr]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("");
     if output.len() > MAX_OUTPUT_BYTES {
-        output.truncate(MAX_OUTPUT_BYTES);
+        truncate_utf8(&mut output, MAX_OUTPUT_BYTES);
         output.push_str("\n[combined output truncated at 64 KiB]");
     }
     if result.timed_out {
@@ -308,13 +338,10 @@ if [ "$3" = "inspect" ]; then
   exit 0
 fi
 if [ "$3" = "exec" ]; then
-  case "$7" in
-    fail) printf 'rejected\n' >&2; exit 7 ;;
-    mix) case "$4" in b*) printf 'rejected\n' >&2; exit 7 ;; esac; printf 'ok\n' ;;
-    slow) sleep 2 ;;
-    huge) head -c 70000 /dev/zero | tr '\0' 'x' ;;
-    *) printf '%s\n' "$7" ;;
-  esac
+  # Stand in for the container: run the exec argv on the host.
+  export "$5" TARGET="$6"
+  shift 6
+  exec "$@"
 fi
 "#,
         )
@@ -352,7 +379,7 @@ fi
         let targets = vec![target("a"), target("b"), target("c"), target("d")];
         let started = Instant::now();
         let results =
-            execute_with_timeout(&docker, "slow", targets, Duration::from_millis(500)).unwrap();
+            execute_with_timeout(&docker, "sleep 2", targets, Duration::from_millis(500)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(results.len(), 4);
         assert!(
@@ -362,7 +389,7 @@ fi
 
         let results = execute_with_timeout(
             &docker,
-            "fail",
+            "printf 'rejected\\n' >&2; exit 7",
             vec![target("a"), target("b")],
             Duration::from_secs(1),
         )
@@ -373,7 +400,7 @@ fi
 
         let results = execute_with_timeout(
             &docker,
-            "mix",
+            "case \"$TARGET\" in b*) printf 'rejected\\n' >&2; exit 7 ;; esac; printf 'ok\\n'",
             vec![target("a"), target("b")],
             Duration::from_secs(1),
         )
@@ -382,7 +409,7 @@ fi
         assert_eq!(results[1].status, "failed");
 
         let results =
-            execute_with_timeout(&docker, "huge", vec![target("a")], Duration::from_secs(1))
+            execute_with_timeout(&docker, "head -c 70000 /dev/zero | tr '\\0' x", vec![target("a")], Duration::from_secs(1))
                 .unwrap();
         assert_eq!(results[0].status, "success");
         assert!(results[0].output.len() <= MAX_OUTPUT_BYTES + 40);
@@ -406,5 +433,59 @@ fi
             Some("container validation timed out")
         );
         fs::remove_file(docker).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multibyte_output_over_the_cap_is_truncated_without_panicking() {
+        let docker = fake_docker();
+        // 25,000 three-byte characters plus stderr pushes the combined output past
+        // 64 KiB at an offset that is not a character boundary.
+        let results = execute_with_timeout(
+            &docker,
+            "i=0; while [ $i -lt 25000 ]; do printf '中'; i=$((i+1)); done; echo warn >&2",
+            vec![target("a")],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(results[0].container_id, "a".repeat(64));
+        assert_eq!(results[0].status, "success");
+        assert!(results[0].output.contains("truncated"));
+        fs::remove_file(docker).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_commands_are_stopped_inside_the_container() {
+        // The fake container is the host, so this needs a host `timeout` (absent
+        // on stock macOS, where the wrapper correctly falls back to plain sh).
+        let has_timeout = Command::new("sh")
+            .args(["-c", "command -v timeout"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !has_timeout {
+            return;
+        }
+        let docker = fake_docker();
+        let marker = std::env::temp_dir().join(format!(
+            "harpoon-broadcast-marker-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let command = format!("sleep 2; touch {}", marker.display());
+        let results =
+            execute_with_timeout(&docker, &command, vec![target("a")], Duration::from_millis(800))
+                .unwrap();
+        assert_eq!(results[0].status, "timeout");
+        thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "command kept running after the timeout");
+        fs::remove_file(docker).unwrap();
+    }
+
+    #[test]
+    fn utf8_truncation_backs_off_to_a_character_boundary() {
+        let mut text = "a中".to_string();
+        truncate_utf8(&mut text, 2);
+        assert_eq!(text, "a");
     }
 }

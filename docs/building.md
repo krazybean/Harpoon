@@ -125,14 +125,14 @@ No minimum macOS version is invented here; the repository does not declare one b
 
 ## 3. Node / NVM setup
 
-The desktop UI (`ui/harpoon-desktop`) expects **Node 20**. `ui/harpoon-desktop/package.json` declares the frontend toolchain and pins `@tauri-apps/cli` as a local `devDependency`.
+The desktop UI (`ui/harpoon-desktop`) expects **Node 22** (the unit tests use `--experimental-strip-types`, which Node 20 lacks). `ui/harpoon-desktop/package.json` declares the frontend toolchain and pins `@tauri-apps/cli` as a local `devDependency`.
 
 On a shell where NVM is not automatically sourced, use:
 
 ```sh
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 20
+nvm use 22
 
 node --version
 npm --version
@@ -141,7 +141,7 @@ npm --version
 Expected (example):
 
 ```
-v20.x.x
+v22.x.x
 10.x.x
 ```
 
@@ -151,7 +151,7 @@ Troubleshooting: if the wrong system Node is active, `npm` may fail with:
 Error: Cannot find module '../lib/cli.js'
 ```
 
-Fix by sourcing NVM as above, running `nvm use 20`, and verifying `which node` and `which npm` point inside `$NVM_DIR/versions/node/v20*/bin`.
+Fix by sourcing NVM as above, running `nvm use 22`, and verifying `which node` and `which npm` point inside `$NVM_DIR/versions/node/v22*/bin`.
 
 ## 4. Install development dependencies
 
@@ -414,17 +414,17 @@ Symptom:
 Error: Cannot find module '../lib/cli.js'
 ```
 
-Cause: system Node (often an old `/usr/local/bin/npm`) is active instead of NVM's Node 20.
+Cause: system Node (often an old `/usr/local/bin/npm`) is active instead of NVM's Node 22.
 
 Fix:
 
 ```sh
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 20
+nvm use 22
 
-which node   # should be $NVM_DIR/versions/node/v20*/bin/node
-which npm    # should be $NVM_DIR/versions/node/v20*/bin/npm
+which node   # should be $NVM_DIR/versions/node/v22*/bin/node
+which npm    # should be $NVM_DIR/versions/node/v22*/bin/npm
 node --version
 npm --version
 ```
@@ -536,7 +536,7 @@ Concise copy/paste from repository root (verify paths exist before running):
 ```sh
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 20
+nvm use 22
 
 bash tools/guest-builder/build.sh
 bash harpoon/build.sh

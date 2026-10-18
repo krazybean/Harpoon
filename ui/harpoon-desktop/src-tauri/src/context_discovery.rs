@@ -107,9 +107,20 @@ fn docker_contexts(binary: &Path) -> Vec<DiscoveredContext> {
     }).collect()
 }
 
-fn probe_docker(binary: &Path, name: String, endpoint: Option<String>, current: bool, source: String, harpoon: bool) -> DiscoveredContext {
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Probe { Context, Host }
+
+fn probe_args<'a>(probe: Probe, name: &'a str, endpoint: Option<&'a str>) -> Vec<&'a str> {
+    // A named context carries its TLS and SSH settings; `--host` would drop them.
+    match (probe, endpoint) {
+        (Probe::Host, Some(endpoint)) => vec!["--host", endpoint],
+        _ => vec!["--context", name],
+    }
+}
+
+fn probe_docker(binary: &Path, probe: Probe, name: String, endpoint: Option<String>, current: bool, source: String, harpoon: bool) -> DiscoveredContext {
     let mut command = Command::new(binary);
-    if let Some(endpoint) = endpoint.as_deref() { command.args(["--host", endpoint]); } else { command.args(["--context", &name]); }
+    command.args(probe_args(probe, &name, endpoint.as_deref()));
     command.args(["version", "--format", "{{json .}}"]);
     match run_bounded(command) {
         Ok((stdout, _stderr, code)) if code == 0 && stdout.contains("Server") => {
@@ -141,12 +152,12 @@ fn discover_contexts_blocking() -> Result<Vec<DiscoveredContext>, String> {
     if let Ok(binary) = crate::resolve_docker_binary() {
         for item in docker_contexts(&binary) {
             if let Some(endpoint) = item.endpoint.clone() {
-                discovered.push(probe_docker(&binary, item.name, Some(endpoint), item.current, item.source, item.harpoon));
+                discovered.push(probe_docker(&binary, Probe::Context, item.name, Some(endpoint), item.current, item.source, item.harpoon));
             } else { discovered.push(item); }
         }
         for endpoint in socket_candidates() {
             if !discovered.iter().any(|item| item.endpoint.as_deref().map(endpoint_key).as_deref() == Some(endpoint_key(&endpoint).as_str())) {
-                discovered.push(probe_docker(&binary, endpoint.clone(), Some(endpoint.clone()), false, "local Unix socket".into(), endpoint.ends_with("/tmp/harpoon-docker.sock")));
+                discovered.push(probe_docker(&binary, Probe::Host, endpoint.clone(), Some(endpoint.clone()), false, "local Unix socket".into(), endpoint.ends_with("/tmp/harpoon-docker.sock")));
             }
         }
     } else {
@@ -198,5 +209,11 @@ mod tests {
         let rows: Vec<DiscoveredContext> = serde_json::from_str(include_str!("fixtures/context-discovery/duplicate-endpoints.json")).unwrap();
         let unique: HashSet<String> = rows.iter().filter_map(|row| row.endpoint.as_deref()).map(endpoint_key).collect();
         assert_eq!(unique.len(), 1);
+    }
+
+    #[test]
+    fn named_contexts_probe_by_name_and_sockets_by_host() {
+        assert_eq!(probe_args(Probe::Context, "remote-tls", Some("tcp://10.0.0.5:2376")), vec!["--context", "remote-tls"]);
+        assert_eq!(probe_args(Probe::Host, "unix:///var/run/docker.sock", Some("unix:///var/run/docker.sock")), vec!["--host", "unix:///var/run/docker.sock"]);
     }
 }

@@ -305,11 +305,18 @@ func diskIdentity(at path: String) -> String? {
     return "\(st.st_dev):\(st.st_ino)"
 }
 
-func sameDiskIdentity(_ metadata: RuntimeMetadata) -> Bool {
+enum DiskIdentityCheck: Equatable {
+    case matches
+    /// Metadata written by a Harpoon that did not record disk identity.
+    case unrecorded
+    case changed
+}
+
+func checkDiskIdentity(_ metadata: RuntimeMetadata) -> DiskIdentityCheck {
+    guard let recordedPath = metadata.diskResolvedPath, let expected = metadata.diskIdentity else { return .unrecorded }
     let currentPath = URL(fileURLWithPath: metadata.diskPath).standardized.resolvingSymlinksInPath().path
-    guard let recordedPath = metadata.diskResolvedPath, currentPath == recordedPath,
-          let expected = metadata.diskIdentity else { return false }
-    return diskIdentity(at: currentPath) == expected
+    guard currentPath == recordedPath else { return .changed }
+    return diskIdentity(at: currentPath) == expected ? .matches : .changed
 }
 
 func ensureAppSupport() -> String? {

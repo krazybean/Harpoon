@@ -124,7 +124,7 @@ remain limited to the existing refresh architecture. Native visual acceptance
 passed after the shared payload contract was corrected from Rust snake_case to
 the React camelCase fields. Offline regression
 evidence covers Docker's `CPUPerc`, `MemUsage`, `MemPerc`, `NetIO`, `BlockIO`,
-and `PIDs` fields, including missing and explicit-zero values, plus the two-
+and `PIDs` fields, including missing and explicit-zero values, plus the four-
 second timeout. The initial visual defect was a Rust/Tauri payload naming
 mismatch: Rust emitted snake_case fields while the React view consumed
 camelCase; the shared payload now declares the camelCase contract. Empty

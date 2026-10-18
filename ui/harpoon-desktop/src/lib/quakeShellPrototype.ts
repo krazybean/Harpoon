@@ -50,6 +50,15 @@ export function isQuakeTargetSafe(target: QuakeTarget | null) {
   return Boolean(target && target.state !== "stale" && target.containerId.length === 64 && target.context === "harpoon");
 }
 
+/// Resolves the shell target by container ID. Before the user picks one, the
+/// first running container is the default; once picked, a refresh that reorders
+/// or drops containers never silently moves input to a different container.
+export function resolveQuakeTarget(targets: QuakeTarget[], selectedId: string | null) {
+  const selected = targets.find((candidate) => candidate.containerId === selectedId) ?? null;
+  if (selectedId === null) return { target: targets[0] ?? null, gone: false };
+  return { target: selected, gone: !selected };
+}
+
 export function quakeFixtureOutput(target: QuakeTarget) {
   return `$ target ${target.name}\n${target.user}@${target.name}:~$ printf 'native PTY pending\\n'\nnative PTY pending\n`;
 }

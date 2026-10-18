@@ -132,10 +132,22 @@ fn sysctl_u64(name: &str) -> Option<u64> {
 #[cfg(not(target_os = "macos"))]
 fn sysctl_u64(_name: &str) -> Option<u64> { None }
 
+// natural_t offsets in vm_statistics64 (mach/vm_statistics.h); 64-bit counters
+// between them occupy two slots each.
+const VM_WIRE_COUNT: usize = 3;
+const VM_PURGEABLE_COUNT: usize = 22;
+const VM_COMPRESSOR_PAGE_COUNT: usize = 32;
+const VM_INTERNAL_PAGE_COUNT: usize = 35;
+
+/// Matches Activity Monitor's "Memory Used": app memory (internal minus
+/// purgeable) + wired + compressed. Counting only `free_count` as free reported
+/// file cache and inactive pages as used, pinning the gauge near 100%.
 fn memory_from_page_stats(stats: &[u32], page_size: i64, total: u64) -> Option<(u64, u64)> {
-    if stats.is_empty() || page_size <= 0 || total == 0 { return None; }
-    let free = u64::from(stats[0]).checked_mul(page_size as u64)?;
-    Some((total.saturating_sub(free), total))
+    if stats.len() <= VM_INTERNAL_PAGE_COUNT || page_size <= 0 || total == 0 { return None; }
+    let app = u64::from(stats[VM_INTERNAL_PAGE_COUNT]).saturating_sub(u64::from(stats[VM_PURGEABLE_COUNT]));
+    let pages = app + u64::from(stats[VM_WIRE_COUNT]) + u64::from(stats[VM_COMPRESSOR_PAGE_COUNT]);
+    let used = pages.checked_mul(page_size as u64)?;
+    Some((used.min(total), total))
 }
 
 fn image_allocation(path: Option<&PathBuf>) -> (Option<u64>, Option<u64>, &'static str) {
@@ -240,14 +252,23 @@ mod tests {
     }
 
     #[test]
-    fn mac_memory_pages_are_converted_to_nonzero_bytes() {
-        assert_eq!(memory_from_page_stats(&[10, 20, 30, 40], 4096, 1_000_000), Some((959_040, 1_000_000)));
+    fn mac_memory_used_counts_app_wired_and_compressed_pages() {
+        let mut stats = [0u32; 38];
+        stats[0] = 900; // free
+        stats[2] = 5_000; // inactive file cache is not "used"
+        stats[VM_WIRE_COUNT] = 10;
+        stats[VM_PURGEABLE_COUNT] = 5;
+        stats[VM_COMPRESSOR_PAGE_COUNT] = 20;
+        stats[VM_INTERNAL_PAGE_COUNT] = 105;
+        // (105 - 5) + 10 + 20 = 130 pages
+        assert_eq!(memory_from_page_stats(&stats, 16384, 1 << 30), Some((130 * 16384, 1 << 30)));
     }
 
     #[test]
     fn mac_memory_missing_or_invalid_source_is_unavailable() {
         assert_eq!(memory_from_page_stats(&[], 4096, 1_000_000), None);
-        assert_eq!(memory_from_page_stats(&[10], 0, 1_000_000), None);
-        assert_eq!(memory_from_page_stats(&[10], 4096, 0), None);
+        assert_eq!(memory_from_page_stats(&[10], 4096, 1_000_000), None);
+        assert_eq!(memory_from_page_stats(&[10; 38], 0, 1_000_000), None);
+        assert_eq!(memory_from_page_stats(&[10; 38], 4096, 0), None);
     }
 }

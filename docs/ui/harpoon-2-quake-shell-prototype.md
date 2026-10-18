@@ -2,8 +2,12 @@
 
 Status: **BOUNDED UX PASS / LIVE ACCEPTANCE PENDING** (2026-10-17 America/Chicago)
 
-The development-only `?quake-shell-prototype` surface validates the global
-slide-down interaction without creating a second PTY owner. `Ctrl+\`` toggles
+The Quake Shell ships globally in every build (decided 2026-10-18): one
+slide-down console with a target dropdown that runs commands in a single
+selected running container, without creating a second PTY owner. The
+selection is tracked by full container ID, so a refresh that reorders or
+drops containers never moves input to a different container; if the selected
+container stops, the panel says so instead of falling through to another. `Ctrl+\`` toggles
 the panel, `Escape` closes it and restores focus to the trigger, and target
 identity remains visible as engine/context, full container ID prefix,
 executable, and effective user. The fixture includes a stale target that is

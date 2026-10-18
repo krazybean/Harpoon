@@ -54,7 +54,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             return;
         }
         if matches!(initial.state.as_str(), "stopped" | "stale") {
-            if let Err(error) = crate::start_harpoon() {
+            if let Err(error) = crate::start_harpoon_blocking() {
                 emit_complete(&app, false, Some(error));
                 return;
             }

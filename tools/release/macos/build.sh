@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ponytail: build release Harpoon.app from source (clean, deterministic, no stale bundle)
-# Prerequisites: Xcode CLT (swiftc, codesign), Rust stable, Node 20, Docker (for guest REBUILD if needed)
+# Prerequisites: Xcode CLT (swiftc, codesign), Rust stable, Node 22, Docker (for guest REBUILD if needed)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VERSION="${HARPOON_VERSION:-$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version" 2>/dev/null || echo "0.1.1")}"
