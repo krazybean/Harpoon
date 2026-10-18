@@ -29,8 +29,10 @@ case "$(uname -s)" in
 esac
 
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" != "20" ]; then
-  echo "ERROR: Harpoon desktop validation requires Node 20; found $(node --version)." >&2
+# Node 22 is required: the frontend unit tests import TypeScript modules with
+# --experimental-strip-types, which Node 20 rejects.
+if [ "$NODE_MAJOR" != "22" ]; then
+  echo "ERROR: Harpoon desktop validation requires Node 22; found $(node --version)." >&2
   echo "See docs/building.md for the supported Node/NVM setup." >&2
   exit 2
 fi
