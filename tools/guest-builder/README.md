@@ -26,6 +26,10 @@ bash tools/guest-builder/build-initramfs.sh
 bash tools/guest-builder/build-root.sh --builder vz --force
 bash tools/guest-builder/verify-root.sh       # fails if dirty (containers/images/volumes != 0)
 bash tools/guest-builder/sanitize-root.sh     # deterministic clean to 0/0/0
+
+# after changing the kernel or initramfs outside build.sh, re-pin the pair;
+# the runtime refuses to boot a pair that does not match the manifest
+bash tools/guest-builder/guest-assets-manifest.sh --write
 ```
 
 ## Provenance

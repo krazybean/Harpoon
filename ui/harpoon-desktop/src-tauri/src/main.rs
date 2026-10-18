@@ -712,7 +712,9 @@ fn stats_container(id: String) -> Result<ContainerStats, String> {
         return Err("invalid container id".to_string());
     }
     let args = ["--context", "harpoon", "stats", "--no-stream", "--format", "{{json .}}", &id];
-    let (stdout, stderr, code) = run_docker_bounded(&args, Duration::from_secs(2))?;
+    // `docker stats --no-stream` waits for two samples, which alone can take
+    // about two seconds over the VM socket.
+    let (stdout, stderr, code) = run_docker_bounded(&args, Duration::from_secs(4))?;
     let value = docker_json_lines(&stdout).into_iter().next();
     if code != 0 || value.is_none() {
         return Err(if stderr.trim().is_empty() { "Docker stats returned no sample".to_string() } else { stderr.trim().to_string() });
