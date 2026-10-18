@@ -250,13 +250,21 @@ fn run_harpoon(args: &[&str]) -> Result<(String, String, i32), String> {
     Ok((stdout, stderr, code))
 }
 
+/// Tauri runs commands that are not `async` on the main thread, so anything that
+/// waits on a subprocess must not be one: it would freeze the window.
+async fn off_main<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("background task failed: {error}"))?
+}
+
 #[tauri::command]
 fn get_harpoon_binary_path() -> Result<String, String> {
     let p = resolve_harpoon_binary()?;
     Ok(p.display().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_status() -> Result<HarpoonStatus, String> {
     let (stdout, stderr, code) = run_harpoon(&["status", "--json"])?;
     if code != 0 && stdout.trim().is_empty() {
@@ -266,8 +274,7 @@ fn get_status() -> Result<HarpoonStatus, String> {
     serde_json::from_str(&json_str).map_err(|e| format!("malformed status JSON: {} | raw: {}", e, json_str))
 }
 
-#[tauri::command]
-fn start_harpoon() -> Result<String, String> {
+fn start_harpoon_blocking() -> Result<String, String> {
     let (stdout, stderr, code) = run_harpoon(&["start"])?;
     let combined = format!("{}{}", stdout, stderr);
     if combined.contains("VZErrorDomain") || combined.contains("HOST_VZ_START_FAILURE") {
@@ -282,8 +289,7 @@ fn start_harpoon() -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
-fn stop_harpoon() -> Result<String, String> {
+fn stop_harpoon_blocking() -> Result<String, String> {
     let (stdout, stderr, code) = run_harpoon(&["stop"])?;
     let combined = format!("{}{}", stdout, stderr);
     if code != 0 && !combined.to_lowercase().contains("already stopped") && !combined.to_lowercase().contains("not running") {
@@ -292,8 +298,7 @@ fn stop_harpoon() -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
-fn restart_harpoon() -> Result<String, String> {
+fn restart_harpoon_blocking() -> Result<String, String> {
     let (stdout, stderr, code) = run_harpoon(&["restart"])?;
     let combined = format!("{}{}", stdout, stderr);
     if combined.contains("VZErrorDomain") || combined.contains("HOST_VZ_START_FAILURE") {
@@ -305,7 +310,7 @@ fn restart_harpoon() -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_doctor() -> Result<DoctorResult, String> {
     let (stdout, _stderr, _code) = run_harpoon(&["doctor"])?;
     let raw = stdout.clone();
@@ -333,7 +338,7 @@ fn get_doctor() -> Result<DoctorResult, String> {
     Ok(DoctorResult { raw, passed, warnings, failures })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_log_path() -> Result<String, String> {
     let (stdout, stderr, code) = run_harpoon(&["logs", "--path"])?;
     let combined = format!("{}{}", stdout, stderr);
@@ -344,7 +349,7 @@ fn get_log_path() -> Result<String, String> {
     Ok(path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_recent_logs(lines: Option<u32>) -> Result<String, String> {
     let n = lines.unwrap_or(200).min(500);
     let (stdout, _stderr, _code) = run_harpoon(&["logs", "--lines", &n.to_string()])?;
@@ -355,7 +360,7 @@ fn get_recent_logs(lines: Option<u32>) -> Result<String, String> {
     Ok(s)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_config() -> Result<ConfigResult, String> {
     let (stdout, stderr, code) = run_harpoon(&["config", "show"])?;
     let raw = format!("{}{}", stdout, stderr);
@@ -381,7 +386,7 @@ fn get_config() -> Result<ConfigResult, String> {
     Ok(ConfigResult { cpus, memory, raw, path })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_memory(memory: u32) -> Result<String, String> {
     if memory < 512 { return Err(format!("memory must be at least 512 MiB, got {}", memory)); }
     let (stdout, stderr, code) = run_harpoon(&["config", "set", "memory", &memory.to_string()])?;
@@ -390,7 +395,7 @@ fn set_memory(memory: u32) -> Result<String, String> {
     Ok(combined)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_cpus(cpus: u32) -> Result<String, String> {
     let allowed = [1, 2, 4];
     if !allowed.contains(&cpus) { return Err(format!("unsupported cpus {}, allowed {:?}", cpus, allowed)); }
@@ -400,7 +405,7 @@ fn set_cpus(cpus: u32) -> Result<String, String> {
     Ok(combined)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_docker_info() -> Result<String, String> {
     let mut cmd = docker_command(&["--context", "harpoon", "info", "--format", "{{.ServerVersion}}"]).map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
     let output = cmd.output().map_err(|e| format!("Docker CLI: FAIL — Docker CLI not installed/found ({})", e))?;
@@ -577,7 +582,7 @@ fn enrich_container_attachments(value: &mut serde_json::Value, inspect: &serde_j
     });
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
     let mut args = vec!["--context", "harpoon", "ps"];
     if all.unwrap_or(true) { args.push("-a"); }
@@ -613,7 +618,7 @@ fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> 
     Ok(containers)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_container(id: String) -> Result<String, String> {
     if id.trim().is_empty() || id.contains(' ') || id.contains(';') || id.contains('&') || id.contains('|') {
         return Err("invalid container id".to_string());
@@ -624,7 +629,7 @@ fn start_container(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_container(id: String) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "stop", &id])?;
@@ -633,7 +638,7 @@ fn stop_container(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn restart_container(id: String) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "restart", &id])?;
@@ -642,7 +647,7 @@ fn restart_container(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_container(id: String) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "rm", "-f", &id])?;
@@ -651,7 +656,7 @@ fn remove_container(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn logs_container(id: String, tail: Option<u32>) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
     let t = tail.unwrap_or(100).min(500).to_string();
@@ -663,7 +668,7 @@ fn logs_container(id: String, tail: Option<u32>) -> Result<String, String> {
     Ok(s)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect_container(id: String) -> Result<serde_json::Value, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "inspect", &id])?;
@@ -675,7 +680,7 @@ fn stats_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value.get(key).and_then(|field| field.as_str()).map(str::trim).filter(|field| !field.is_empty()).map(str::to_string)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stats_container(id: String) -> Result<ContainerStats, String> {
     if id.trim().is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return Err("invalid container id".to_string());
@@ -699,14 +704,14 @@ fn stats_container(id: String) -> Result<ContainerStats, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_images() -> Result<Vec<serde_json::Value>, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "images", "--format", "{{json .}}", "--no-trunc"])?;
     if code != 0 && !stdout.contains("{") { return Err(stderr.trim().to_string()); }
     Ok(docker_json_lines(&stdout))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect_image(id: String) -> Result<serde_json::Value, String> {
     if id.trim().is_empty() { return Err("invalid image id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "image", "inspect", &id])?;
@@ -714,7 +719,7 @@ fn inspect_image(id: String) -> Result<serde_json::Value, String> {
     serde_json::from_str(&stdout).map_err(|e| format!("inspect parse failed: {}", e))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_image(id: String) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid image id".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "rmi", &id])?;
@@ -723,7 +728,7 @@ fn remove_image(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_volumes() -> Result<Vec<serde_json::Value>, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "volume", "ls", "--format", "{{json .}}"])?;
     if code != 0 && !stdout.contains("{") { return Err(stderr.trim().to_string()); }
@@ -761,7 +766,7 @@ fn list_volumes() -> Result<Vec<serde_json::Value>, String> {
     Ok(volumes)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect_volume(name: String) -> Result<serde_json::Value, String> {
     if name.trim().is_empty() { return Err("invalid volume name".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "volume", "inspect", &name])?;
@@ -769,7 +774,7 @@ fn inspect_volume(name: String) -> Result<serde_json::Value, String> {
     serde_json::from_str(&stdout).map_err(|e| format!("inspect parse failed: {}", e))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_volume(name: String) -> Result<String, String> {
     if name.trim().is_empty() { return Err("invalid volume name".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "volume", "rm", &name])?;
@@ -778,14 +783,14 @@ fn remove_volume(name: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_networks() -> Result<Vec<serde_json::Value>, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "network", "ls", "--format", "{{json .}}"])?;
     if code != 0 && !stdout.contains("{") { return Err(stderr.trim().to_string()); }
     Ok(docker_json_lines(&stdout))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect_network(name: String) -> Result<serde_json::Value, String> {
     if name.trim().is_empty() { return Err("invalid network name".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "network", "inspect", &name])?;
@@ -793,7 +798,7 @@ fn inspect_network(name: String) -> Result<serde_json::Value, String> {
     serde_json::from_str(&stdout).map_err(|e| format!("inspect parse failed: {}", e))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_network(name: String) -> Result<String, String> {
     if name.trim().is_empty() { return Err("invalid network name".to_string()); }
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "network", "rm", &name])?;
@@ -818,7 +823,7 @@ fn count_docker_json_response(stdout: &str, stderr: &str, code: i32, resource: &
     Ok(docker_json_lines(stdout).len())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_counts() -> Result<serde_json::Value, String> {
     // ponytail: coalesce duplicate counts requests (frontend polls status 3.5s + resource tabs); 1.5s TTL avoids duplicate docker storms without daemon polling
     if let Ok(guard) = counts_cache().lock() {
@@ -855,44 +860,44 @@ pub(crate) fn refresh_counts() -> Result<serde_json::Value, String> { get_counts
 
 pub(crate) fn refresh_config() -> Result<ConfigResult, String> { get_config() }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_runtime_refresh_worker(app: tauri::AppHandle, config: runtime_refresh::Config) -> Result<u64, String> {
     runtime_refresh::start(app, config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_runtime_refresh_worker() {
     runtime_refresh::stop();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_resource_sampler(app: tauri::AppHandle, disk_path: Option<String>) -> Result<(), String> {
     resource_sampler::start(app, disk_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_resource_sampler() {
     resource_sampler::stop();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_bootstrap_worker(app: tauri::AppHandle) -> Result<(), String> {
     bootstrap::start(app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_bootstrap_worker() {
     bootstrap::stop();
 }
 
 // --- Stage 3B: Docker host integration ---
-#[tauri::command]
+#[tauri::command(async)]
 fn get_docker_cli_path() -> Result<String, String> {
     let p = resolve_docker_binary()?;
     Ok(p.display().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_docker_compose_info() -> Result<serde_json::Value, String> {
     let bin = resolve_docker_binary().map_err(|e| format!("Docker CLI: FAIL — {}", e))?;
     let out = Command::new(&bin).args(["compose", "version"]).output().map_err(|e| format!("Docker Compose plugin ... FAIL — spawn failed: {}", e))?;
@@ -929,7 +934,7 @@ fn find_helper_in_path(name: &str) -> bool {
     false
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_creds_helper_status() -> Result<serde_json::Value, String> {
     let cfg_path = docker_config_path();
     if !cfg_path.exists() {
@@ -948,7 +953,7 @@ fn get_creds_helper_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({"path": cfg_path.display().to_string(), "credsStore": if creds.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(creds.to_string()) }, "status": "PASS", "warning": null}))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ensure_harpoon_context() -> Result<String, String> {
     // Reuse Swift logic via harpoon CLI for single source of truth, but also fallback to direct docker logic if harpoon binary not available.
     // Prefer harpoon binary if resolvable
@@ -994,7 +999,7 @@ fn ensure_harpoon_context() -> Result<String, String> {
 }
 
 // Stage 3C: disk (via harpoon CLI, single source of truth)
-#[tauri::command]
+#[tauri::command(async)]
 fn get_disk_status() -> Result<String, String> {
     let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
     let out = Command::new(&bin).args(["disk", "status"]).output().map_err(|e| e.to_string())?;
@@ -1002,15 +1007,14 @@ fn get_disk_status() -> Result<String, String> {
     if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
 }
 
-#[tauri::command]
-fn resize_disk(size: String) -> Result<String, String> {
+fn resize_disk_blocking(size: String) -> Result<String, String> {
     let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
     let out = Command::new(&bin).args(["disk", "resize", &size]).output().map_err(|e| e.to_string())?;
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_shell_session(app: tauri::AppHandle, manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, context: String, container_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<shell::ShellSession, String> {
     shell::open(app, manager.inner().clone(), context, container_id, cols, rows)
 }
@@ -1031,10 +1035,26 @@ fn close_shell_session(manager: tauri::State<'_, std::sync::Arc<shell::ShellMana
 }
 
 #[tauri::command]
-fn run_universal_command(command: String, targets: Vec<broadcast::Target>) -> Result<Vec<broadcast::ResultRow>, String> {
-    let docker = resolve_docker_binary()?;
-    broadcast::execute(&docker, &command, targets)
+async fn run_universal_command(command: String, targets: Vec<broadcast::Target>) -> Result<Vec<broadcast::ResultRow>, String> {
+    off_main(move || {
+        let docker = resolve_docker_binary()?;
+        broadcast::execute(&docker, &command, targets)
+    }).await
 }
+
+// Lifecycle and disk operations can take a minute; they run on the blocking pool
+// rather than holding an async worker for that long.
+#[tauri::command]
+async fn start_harpoon() -> Result<String, String> { off_main(start_harpoon_blocking).await }
+
+#[tauri::command]
+async fn stop_harpoon() -> Result<String, String> { off_main(stop_harpoon_blocking).await }
+
+#[tauri::command]
+async fn restart_harpoon() -> Result<String, String> { off_main(restart_harpoon_blocking).await }
+
+#[tauri::command]
+async fn resize_disk(size: String) -> Result<String, String> { off_main(move || resize_disk_blocking(size)).await }
 
 #[cfg(test)]
 mod tests {
