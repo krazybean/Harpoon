@@ -320,9 +320,18 @@ func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
         // leave lock/socket check to status
         return 1
     }
-    if let metadata = readMetadata(), !sameDiskIdentity(metadata) {
-        cliError("persistent Docker root disk identity missing or changed; refusing shutdown")
-        return 1
+    // Stopping never touches the disk image (the VM keeps its original disk open
+    // until it exits), so an identity mismatch is reported but never blocks stop.
+    // Refusing here left runtimes started by older builds impossible to stop.
+    if let metadata = readMetadata() {
+        switch checkDiskIdentity(metadata) {
+        case .matches:
+            break
+        case .unrecorded:
+            cliPrint("Disk identity was not recorded by the Harpoon that started this runtime; stopping anyway")
+        case .changed:
+            cliError("warning: persistent Docker root disk at \(metadata.diskPath) changed since start; stopping the running VM anyway")
+        }
     }
     switch syncGuestFilesystem() {
     case .completed:

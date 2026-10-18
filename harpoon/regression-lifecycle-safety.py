@@ -84,11 +84,22 @@ def test_sync_and_disk_identity_guards_exist() -> None:
     assert "disk identity" in CONFIG.lower()
 
 
+def test_disk_identity_never_blocks_stop() -> None:
+    # A runtime started by an older Harpoon has no recorded identity; stop must
+    # still reach the guest sync and SIGTERM instead of returning early.
+    stop = CLI.split("func handleStop", 1)[1].split("func handleRestart", 1)[0]
+    identity = stop.split("checkDiskIdentity(metadata)", 1)[1].split("switch syncGuestFilesystem()", 1)[0]
+    assert "case .unrecorded" in identity and "case .changed" in identity
+    assert "return" not in identity, "disk identity check must not abort stop"
+    assert "refusing shutdown" not in stop
+
+
 def main() -> None:
     test_cross_process_control_lock()
     test_state_failures_are_not_clean_stop()
     test_restart_is_atomic_and_stop_failure_blocks_start()
     test_sync_and_disk_identity_guards_exist()
+    test_disk_identity_never_blocks_stop()
     print("LIFECYCLE_SAFETY_OFFLINE_PASS")
 
 
