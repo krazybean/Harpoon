@@ -1,13 +1,16 @@
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
 import { CaretDown, CaretUp, Command, Warning, X } from "@phosphor-icons/react";
-import { isQuakeTargetSafe, type QuakeTarget } from "../lib/quakeShellPrototype";
+import { isQuakeTargetSafe, resolveQuakeTarget, type QuakeTarget } from "../lib/quakeShellPrototype";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
 import { ContainerTechnologyIcon } from "./ContainerTechnologyIcon";
 const ShellTab = lazy(() => import("../views/ShellTab").then((module) => ({ default: module.ShellTab })));
 
 export function QuakeShellPrototype({ containers = [] }: { containers?: any[] }) {
   const [open, setOpen] = useState(false);
-  const [targetIndex, setTargetIndex] = useState(0);
+  // Track the target by container ID, not list position: a refresh that reorders
+  // or drops containers must never silently retarget the shell.
+  const [targetId, setTargetId] = useState<string | null>(null);
+  const [shellState, setShellState] = useState<string>("disconnected");
   const [panelHeight, setPanelHeight] = useState(420);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -15,11 +18,7 @@ export function QuakeShellPrototype({ containers = [] }: { containers?: any[] })
     engine: "docker" as const, context: "harpoon", containerId: container.ID || container.Id || "", name: String(container.Names || container.Name || container.ID || "container").replace(/^\//, ""), executable: "/bin/sh", user: container.Config?.User || "default", state: (String(container.State || "").toLowerCase() === "running" ? "ready" : "stale") as QuakeTarget["state"],
     technology: inferContainerTechnology(container),
   })).filter((target) => target.containerId && target.state === "ready");
-  const target: QuakeTarget | null = liveTargets[targetIndex] ?? null;
-
-  useEffect(() => {
-    if (targetIndex >= liveTargets.length && liveTargets.length > 0) setTargetIndex(0);
-  }, [liveTargets.length, targetIndex]);
+  const { target, gone: targetGone } = resolveQuakeTarget(liveTargets, targetId);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -77,18 +76,19 @@ export function QuakeShellPrototype({ containers = [] }: { containers?: any[] })
             <label htmlFor="quake-target">Target</label>
             <div className="quake-prototype__target-control">
               {target && <span className="quake-prototype__target-icon" role="img" aria-label={`${target.technology.label} technology`} title={`${target.technology.label} image`}><ContainerTechnologyIcon technology={target.technology} size={17} /></span>}
-              <select id="quake-target" value={targetIndex} onChange={(event) => setTargetIndex(Number(event.target.value))} aria-label="Quake Shell target">
-                {liveTargets.map((candidate, index) => <option key={candidate.containerId} value={index}>{candidate.name} · {candidate.technology.label} · {candidate.context}</option>)}
+              <select id="quake-target" value={target?.containerId ?? ""} onChange={(event) => setTargetId(event.target.value)} aria-label="Quake Shell target">
+                {!target && <option value="" disabled>Choose a running container</option>}
+                {liveTargets.map((candidate) => <option key={candidate.containerId} value={candidate.containerId}>{candidate.name} · {candidate.technology.label} · {candidate.context}</option>)}
               </select>
             </div>
           </div>
           {target && <dl className="quake-prototype__metadata"><div><dt>Engine</dt><dd>{target.engine} / {target.context}</dd></div><div><dt>Container</dt><dd title={target.containerId}>{target.name} · {target.containerId.slice(0, 12)}</dd></div><div><dt>Exec</dt><dd>{target.executable}</dd></div><div><dt>User</dt><dd>{target.user}</dd></div></dl>}
         </div>
         <div className="quake-prototype__session-bar">
-          <span className="quake-prototype__session-label" role={safe ? "status" : undefined}><span className="quake-prototype__session-dot" aria-hidden="true" /> {safe ? "Connected" : "Session"}</span>
-          {!safe && <span className="quake-prototype__stale" role="alert"><Warning size={15} aria-hidden="true" /><span><strong>Target is stale.</strong> Re-select the current container before native input is enabled.</span></span>}
+          <span className="quake-prototype__session-label" role="status"><span className="quake-prototype__session-dot" aria-hidden="true" /> {safe ? shellState[0].toUpperCase() + shellState.slice(1) : "No session"}</span>
+          {targetGone && <span className="quake-prototype__stale" role="alert"><Warning size={15} aria-hidden="true" /><span><strong>The selected container stopped or was removed.</strong> Choose a running container to keep typing.</span></span>}
         </div>
-        {safe && target && <div className="quake-prototype__terminal quake-prototype__terminal--live"><Suspense fallback={<div className="quake-prototype__terminal-loading" role="status">Opening terminal…</div>}><ShellTab context={target.context} containerId={target.containerId} executable={target.executable} user={target.user} running connectRequest={1} /></Suspense></div>}
+        {safe && target && <div className="quake-prototype__terminal quake-prototype__terminal--live"><Suspense fallback={<div className="quake-prototype__terminal-loading" role="status">Opening terminal…</div>}><ShellTab context={target.context} containerId={target.containerId} executable={target.executable} user={target.user} running connectRequest={1} onStateChange={setShellState} /></Suspense></div>}
       </>}
       <div className="quake-prototype__resize">
         <label htmlFor="quake-height">Panel height</label>

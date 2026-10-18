@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { QUAKE_TARGET_FIXTURES, isQuakeTargetSafe, quakeFixtureOutput } from "./quakeShellPrototype.ts";
+import { QUAKE_TARGET_FIXTURES, isQuakeTargetSafe, quakeFixtureOutput, resolveQuakeTarget } from "./quakeShellPrototype.ts";
 
 test("fixture targets carry explicit identity and stale targets are rejected", () => {
   const [api, worker, stale] = QUAKE_TARGET_FIXTURES;
@@ -55,4 +55,12 @@ test("Quake dismisses only on pointerdown outside the panel and launcher", () =>
   assert.match(componentSource, /trigger && path\.includes\(trigger\)/);
   assert.match(componentSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
   assert.match(componentSource, /setOpen\(false\);\s*triggerRef\.current\?\.focus\(\);/);
+});
+
+test("the selected target follows its container ID across refreshes", () => {
+  const [api, worker] = QUAKE_TARGET_FIXTURES;
+  assert.equal(resolveQuakeTarget([api, worker], null).target, api);
+  assert.equal(resolveQuakeTarget([worker, api], worker.containerId).target, worker);
+  // api stopped: input must not fall through to whichever container is now first
+  assert.deepEqual(resolveQuakeTarget([worker], api.containerId), { target: null, gone: true });
 });
