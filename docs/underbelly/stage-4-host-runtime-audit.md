@@ -22,7 +22,7 @@ QMD historical retrieval was attempted with the repository-local `.qmd/index.sql
 | Docker and management Unix endpoints | `BridgeSet` extensions | `Bridges.swift:4-104`, `UnixBridge.swift:7-36`, `MgmtBridge.swift:6-36` | `GOOD_BOUNDARY_KEEP` with ownership bookkeeping |
 | Published host ports | `PortForwardManager` | `PortForwardManager.swift:43-65,188-323` | `POLLING_RECONCILIATION_MEASURE` |
 
-The machine-readable form is [stage-4-host-runtime-ownership.json](/Users/juancastro/Documents/Github/Harpoon/docs/underbelly/stage-4-host-runtime-ownership.json).
+The machine-readable form is [stage-4-host-runtime-ownership.json](stage-4-host-runtime-ownership.json).
 
 ## State transitions and readiness
 

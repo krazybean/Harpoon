@@ -7,7 +7,7 @@ Date: 2026-10-13 (America/Chicago)
 
 ## Scope and evidence
 
-The canonical checkout is `/Users/juancastro/Documents/Github/Harpoon`.
+The canonical checkout is the repository root containing this document.
 The project mirror attached to this chat contains only `AGENTS.md`, so the
 actual checkout was located and its existing Stage 0–4 working-tree changes
 were preserved. Stage 0–4 artifacts and source are the evidence of record.

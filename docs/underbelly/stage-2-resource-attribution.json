@@ -18,11 +18,11 @@
         "host": {
           "status": {
             "cpus": 2,
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "dockerReady": true,
             "lockHeld": true,
             "lockPath": "/tmp/harpoon.lock",
-            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "logPath": "~/Library/Application Support/Harpoon/harpoon.log",
             "memoryMiB": 4096,
             "mgmtReady": false,
             "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
@@ -38,7 +38,7 @@
               "state": "S",
               "rssKiB": "20688",
               "threads": "2.8",
-              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "cpuPercent": "<repo-root>/harpoon/build/harpoon",
               "command": "run\n"
             }
           ],
@@ -47,7 +47,7 @@
             "candidatePids": [
               "79743"
             ],
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "source": "lsof -n -t <runtime disk> -> ps",
             "processes": [
               "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
@@ -532,11 +532,11 @@
         "host": {
           "status": {
             "cpus": 2,
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "dockerReady": true,
             "lockHeld": true,
             "lockPath": "/tmp/harpoon.lock",
-            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "logPath": "~/Library/Application Support/Harpoon/harpoon.log",
             "memoryMiB": 4096,
             "mgmtReady": true,
             "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
@@ -552,7 +552,7 @@
               "state": "S",
               "rssKiB": "20832",
               "threads": "1.7",
-              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "cpuPercent": "<repo-root>/harpoon/build/harpoon",
               "command": "run\n"
             }
           ],
@@ -561,7 +561,7 @@
             "candidatePids": [
               "79743"
             ],
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "source": "lsof -n -t <runtime disk> -> ps",
             "processes": [
               "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
@@ -1446,11 +1446,11 @@
         "host": {
           "status": {
             "cpus": 2,
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "dockerReady": true,
             "lockHeld": true,
             "lockPath": "/tmp/harpoon.lock",
-            "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+            "logPath": "~/Library/Application Support/Harpoon/harpoon.log",
             "memoryMiB": 4096,
             "mgmtReady": true,
             "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
@@ -1466,7 +1466,7 @@
               "state": "S",
               "rssKiB": "21152",
               "threads": "3.9",
-              "cpuPercent": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+              "cpuPercent": "<repo-root>/harpoon/build/harpoon",
               "command": "run\n"
             }
           ],
@@ -1475,7 +1475,7 @@
             "candidatePids": [
               "79743"
             ],
-            "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+            "diskPath": "~/Library/Application Support/Harpoon/data/harpoon-root.img",
             "source": "lsof -n -t <runtime disk> -> ps",
             "processes": [
               "79743     1 /System/Library/ /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"

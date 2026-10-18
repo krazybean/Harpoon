@@ -6,7 +6,7 @@ This log records the Stage 0–1 execution, including failed attempts, retries, 
 |---:|---|---|---|
 | 1 | Read the referenced “Continue Harpoon Maintenance” conversation | Confirmed prior plan: observe first; preserve Docker ownership; execute Stages 0–6 before refactoring; keep an empirical log | Use as context only; current checkout remains authoritative |
 | 2 | Checked the ChatGPT project mirror | Mirror contained only `AGENTS.md` and an empty `sources/`; no Git checkout | Locate the actual checkout instead of inventing a baseline |
-| 3 | Checked `/Users/juancastro/Documents/Github/Harpoon` | Clean `main`, `HEAD=642d91d`, tracking `origin/main` | Use this checkout as the working repository |
+| 3 | Checked the verified local Harpoon checkout | Clean `main`, `HEAD=642d91d`, tracking `origin/main` | Use this checkout as the working repository |
 | 4 | Inspected available artifacts/worktrees | No attached managed worktree existed | Work in the verified local checkout with explicit approval for outside-mirror access |
 | 5 | Started three parallel read-only reviews | Inventory, documentation drift, and runtime anatomy reviews launched | Keep write scope local to the parent; no agent edits accepted |
 | 6 | Read current Swift, guest init, management, builder, acceptance, and architecture sources | Found current `/tmp` sockets, Swift foreground VM owner, `socat`/Python management, and stale `harpoond`/`~/.harpoon` docs | Record observed-vs-inferred distinctions in the canonical anatomy |
@@ -35,7 +35,7 @@ This log records the Stage 0–1 execution, including failed attempts, retries, 
 Stage 0–1 and Stage 2 are complete in this scoped change. Stage 3, boot audit,
 host audit, and any production refactor remain explicitly out of scope.
 
-| 17 | Started Stage 3 from the Stage 2 PASS precondition | Initial project mirror was empty; actual checkout was located at `/Users/juancastro/Documents/Github/Harpoon`; existing Stage 0–2 working-tree artifacts were preserved | Audit the actual checkout; do not invent a new baseline or overwrite prior evidence |
+| 17 | Started Stage 3 from the Stage 2 PASS precondition | Initial project mirror was empty; the actual checkout was located and existing Stage 0–2 working-tree artifacts were preserved | Audit the actual checkout; do not invent a new baseline or overwrite prior evidence |
 | 18 | Read-only boot trace and source correlation | Traced `tools/guest-builder/src/init` lines 1–944, builder/release closure checks, management wrapper/handler, and `VMManager` serial readiness polling | Split initramfs and post-`switch_root`; classify mixed phases instead of forcing one label |
 | 19 | First live Stage 0–1 attempt | Sandbox blocked Swift linker output and production Application Support state; gate returned FAIL for environment permissions, not product behavior | Retry once with host permissions; do not change runtime paths |
 | 20 | Host-permitted Stage 0–1 live run | Node `v20.20.2`, `HARPOON_VALIDATION_PASS`, VM running, Docker API/run, management exec and PTY shell all passed; final `STAGE_0_1_GATE_PASS` | Capture fresh serial and host log evidence before closing Stage 3 |
@@ -52,7 +52,7 @@ Stage 0–1, Stage 2, and Stage 3 are complete in this scoped change. Stage 4,
 host audit, Harpoon 2 UI work, and any production refactor remain explicitly
 out of scope.
 
-| 27 | Started Stage 4 host-runtime audit from Stage 0–1, Stage 2, and Stage 3 PASS preconditions | Project mirror again contained no checkout; actual `/Users/juancastro/Documents/Github/Harpoon` was verified at `642d91d` with prior working-tree artifacts preserved | Audit only; do not edit `sources/`, Swift production behavior, Docker Engine/containerd/runc, Stage 5, or UI |
+| 27 | Started Stage 4 host-runtime audit from Stage 0–1, Stage 2, and Stage 3 PASS preconditions | Project mirror again contained no checkout; the actual checkout was verified at `642d91d` with prior working-tree artifacts preserved | Audit only; do not edit `sources/`, Swift production behavior, Docker Engine/containerd/runc, Stage 5, or UI |
 | 28 | Attempted local QMD historical retrieval | Repository-local `.qmd/index.sqlite` returned `SQLITE_CANTOPEN` under the available sandbox | Record the limitation; rely on current source and existing gate evidence, do not invent history |
 | 29 | Parallel read-only runtime reviews plus parent source trace | Mapped Lifecycle, VMManager, BridgeSet, Unix/Mgmt/Balloon bridges, port reconciliation, CLI process model, timers, queues, blocking calls, and recovery paths | Preserve current boundaries; classify duplicated/implicit authority rather than refactor |
 | 30 | Added Stage 4 audit, JSON ownership map, and gate | Documentation and gate only; no production source changed | Run prior barriers and Stage 4 barrier; stop at Stage 4 |
@@ -69,7 +69,7 @@ out of scope.
 Stage 4 is formally closed: `STAGE_4_GATE_PASS`. No Stage 5, UI work, daemon
 implementation, or production behavior refactor is authorized by this audit.
 
-| 38 | Started Stage 5 Bash/tooling audit from the Stage 0–4 PASS precondition | The attached project mirror was empty; actual `/Users/juancastro/Documents/Github/Harpoon` was located and existing working-tree artifacts were preserved | Audit only; no production, guest image, Docker Engine/containerd/runc, Swift, or UI changes |
+| 38 | Started Stage 5 Bash/tooling audit from the Stage 0–4 PASS precondition | The attached project mirror was empty; the actual checkout was located and existing working-tree artifacts were preserved | Audit only; no production, guest image, Docker Engine/containerd/runc, Swift, or UI changes |
 | 39 | Read-only parallel reviews plus parent inventory | Counted 63 extension-based shell/Python files (9,392 LOC) and three extensionless guest runtime files (1,279 LOC); traced guest init, Python management, socat listeners, builder/release, gates, regressions, milestone scripts, and host/Tauri shell-outs | Classify mixed responsibilities by section; do not force `src/init` or `harpoon-mgmt` into a tooling-only label |
 | 40 | Security and duplication pass | Found manifest parsing/repair, `pkill -f` socat cleanup, unowned background socat listeners, interpolated `bash -c` release checks, unquoted Docker-ID expansions, and duplicated build/runtime closure checks | Record findings without fixing them; preserve current implementation and stack |
 | 41 | Added Stage 5 audit, inventory JSON, and tooling gate | Documentation, machine-readable classification, syntax/static checks, and prior-barrier wrapper only; no runtime source changed | Run deterministic barrier first, then host-permitted prior barriers if available |
@@ -85,7 +85,7 @@ current production behavior but is a transitional guest-runtime boundary.
 Future Rust `harpoon-guest` work is deferred; no Stage 6, UI work, daemon
 implementation, or production refactor is authorized by this audit.
 
-| 45 | Started Stage 6 Docker Boundary Audit from the Stage 0–5 PASS precondition | Actual checkout `/Users/juancastro/Documents/Github/Harpoon` verified; project mirror was empty; existing dirty artifacts preserved | Audit Docker ownership only; no refactor, UI work, or stack change |
+| 45 | Started Stage 6 Docker Boundary Audit from the Stage 0–5 PASS precondition | Actual checkout verified; project mirror was empty; existing dirty artifacts preserved | Audit Docker ownership only; no refactor, UI work, or stack change |
 | 46 | Two parallel read-only evidence passes plus parent source trace | Mapped Docker socket/API transport, CLI/UI invocations, context setup, PortForwardManager, host-path translation, guest dockerd/readiness, volumes, networks, Compose/BuildKit, logs/exec/shell, and resource attribution | Record Docker as authority and classify boundary state separately from Docker metadata |
 | 47 | Static Stage 6 artifacts added | Added audit, machine-readable boundary matrix, gate, and narrow runtime-anatomy invariant; no production source changed | Run syntax, schema, diff, prior barriers, and one owned Docker lifecycle probe |
 | 48 | Source challenge pass | Found stale guest-IP/duplicate-port forwarding keys, duplicated Swift/Tauri context setup including a foreign-context fallback, UI error-to-zero counts, and a UI config-path projection mismatch | Record as `DUPLICATED_SEMANTICS_REVIEW`; do not fix during Stage 6 |

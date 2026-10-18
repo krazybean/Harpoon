@@ -23,7 +23,7 @@ Worker-sandbox QMD repair/fallback:
 - Do not point workers at the global QMD index. When the canonical `.qmd/index.sqlite` is inaccessible, copy the project-local config and index into a directory that the worker is allowed to write, then run QMD from that staging directory so the repo-local config is not rediscovered:
 
   ```sh
-  HARPOON_ROOT="/Users/juancastro/Documents/Github/Harpoon"
+  HARPOON_ROOT="$(git rev-parse --show-toplevel)"
   QMD_WORK="/path/to/worker-writable/qmd-harpoon"
   mkdir -p "$QMD_WORK/config"
   cp "$HARPOON_ROOT/.qmd/index.yml" "$QMD_WORK/config/index.yml"
