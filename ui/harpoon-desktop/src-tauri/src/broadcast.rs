@@ -457,6 +457,16 @@ fi
     #[cfg(unix)]
     #[test]
     fn timed_out_commands_are_stopped_inside_the_container() {
+        // The fake container is the host, so this needs a host `timeout` (absent
+        // on stock macOS, where the wrapper correctly falls back to plain sh).
+        let has_timeout = Command::new("sh")
+            .args(["-c", "command -v timeout"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !has_timeout {
+            return;
+        }
         let docker = fake_docker();
         let marker = std::env::temp_dir().join(format!(
             "harpoon-broadcast-marker-{}",

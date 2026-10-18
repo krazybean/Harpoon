@@ -41,6 +41,9 @@ bash harpoon/build.sh
 say "Run CLI parity regression suite"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/cli-parity-test.sh
 
+say "Run lifecycle safety regression suite"
+python3 harpoon/regression-lifecycle-safety.py
+
 say "Run host path translation regression suite"
 sh harpoon/regression-host-path.sh
 
@@ -74,5 +77,8 @@ say "Build frontend"
 
 say "Check Tauri Rust backend"
 cargo check --locked --manifest-path "$UI_DIR/src-tauri/Cargo.toml"
+
+say "Run Tauri Rust backend tests"
+cargo test --locked --manifest-path "$UI_DIR/src-tauri/Cargo.toml"
 
 printf '\nHARPOON_VALIDATION_PASS\n'
