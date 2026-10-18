@@ -90,3 +90,29 @@ test("A to B to A keeps output and ownership isolated", async () => {
   await secondA.close();
   await b.close();
 });
+
+test("output and exit emitted before open resolves are delivered, and reconnect opens a fresh session", async () => {
+  let eventListener;
+  let opens = 0;
+  const store = new ShellSessionStore({
+    invokeFn: async (command) => {
+      if (command !== "open_shell_session") return undefined;
+      const sessionId = `session-early-${++opens}`;
+      if (opens === 1) {
+        eventListener({ payload: { sessionId: "someone-else", kind: "output", data: "not mine" } });
+        eventListener({ payload: { sessionId, kind: "output", data: "prompt$ " } });
+        eventListener({ payload: { sessionId, kind: "error", code: 127, error: "Shell is not available in this container." } });
+        eventListener({ payload: { sessionId, kind: "exit", code: 127 } });
+      }
+      return { sessionId };
+    },
+    listenFn: async (_event, callback) => { eventListener = callback; return () => { eventListener = undefined; }; },
+  });
+  const seen = [];
+  await assert.rejects(store.attach(target, 80, 24, (event) => seen.push([event.kind, event.data ?? event.code])), /not available/);
+  assert.deepEqual(seen, [["output", "prompt$ "], ["error", 127], ["exit", 127]]);
+  const reconnected = await store.attach(target, 80, 24, () => undefined);
+  assert.equal(reconnected.sessionId, "session-early-2");
+  assert.equal(opens, 2);
+  await reconnected.close();
+});
