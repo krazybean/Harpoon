@@ -597,10 +597,28 @@ fn enrich_container_attachments(value: &mut serde_json::Value, inspect: &serde_j
     });
 }
 
-#[tauri::command(async)]
-fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
+/// Inspects containers for enrichment. `docker inspect a b` exits 1 when any one
+/// container vanished since it was listed but still prints the rest, so partial
+/// output is used rather than dropping enrichment for every row.
+fn inspect_containers(ids: &[&str]) -> Vec<serde_json::Value> {
+    if ids.is_empty() { return Vec::new(); }
+    let mut args = vec!["--context", "harpoon", "inspect", "--format", "{{json .}}"];
+    args.extend(ids.iter().copied());
+    run_docker(&args).map(|(stdout, _, _)| docker_json_lines(&stdout)).unwrap_or_default()
+}
+
+fn attach_inspected(containers: &mut [serde_json::Value], inspected: &[serde_json::Value]) {
+    for container in containers {
+        let id = container.get("ID").or_else(|| container.get("Id")).and_then(|v| v.as_str());
+        if let Some(details) = id.and_then(|wanted| inspected.iter().find(|item| item.get("Id").and_then(|v| v.as_str()).map(|actual| actual == wanted || actual.starts_with(wanted)).unwrap_or(false))) {
+            enrich_container_attachments(container, details);
+        }
+    }
+}
+
+fn list_containers_basic(all: bool) -> Result<Vec<serde_json::Value>, String> {
     let mut args = vec!["--context", "harpoon", "ps"];
-    if all.unwrap_or(true) { args.push("-a"); }
+    if all { args.push("-a"); }
     args.extend(["--format", "{{json .}}", "--no-trunc"]);
     let (stdout, stderr, code) = run_docker(&args)?;
     if code != 0 && !stdout.contains("{") {
@@ -610,26 +628,19 @@ fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> 
     for c in &mut containers {
         enrich_compose_fields(c);
     }
+    Ok(containers)
+}
+
+#[tauri::command(async)]
+fn list_containers(all: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
+    let mut containers = list_containers_basic(all.unwrap_or(true))?;
     let ids: Vec<&str> = containers.iter()
         .filter_map(|container| container.get("ID").or_else(|| container.get("Id")))
         .filter_map(|id| id.as_str())
         .filter(|id| !id.is_empty())
         .collect();
-    if !ids.is_empty() {
-        let mut inspect_args = vec!["--context", "harpoon", "inspect", "--format", "{{json .}}"];
-        inspect_args.extend(ids.iter().copied());
-        if let Ok((inspect_stdout, _, inspect_code)) = run_docker(&inspect_args) {
-            if inspect_code == 0 {
-                let inspected = docker_json_lines(&inspect_stdout);
-                for container in &mut containers {
-                    let id = container.get("ID").or_else(|| container.get("Id")).and_then(|v| v.as_str());
-                    if let Some(details) = id.and_then(|wanted| inspected.iter().find(|item| item.get("Id").and_then(|v| v.as_str()).map(|actual| actual == wanted || actual.starts_with(wanted)).unwrap_or(false))) {
-                        enrich_container_attachments(container, details);
-                    }
-                }
-            }
-        }
-    }
+    let inspected = inspect_containers(&ids);
+    attach_inspected(&mut containers, &inspected);
     Ok(containers)
 }
 
@@ -743,40 +754,41 @@ fn remove_image(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
-#[tauri::command(async)]
-fn list_volumes() -> Result<Vec<serde_json::Value>, String> {
+fn list_volumes_basic() -> Result<Vec<serde_json::Value>, String> {
     let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "volume", "ls", "--format", "{{json .}}"])?;
     if code != 0 && !stdout.contains("{") { return Err(stderr.trim().to_string()); }
-    let mut volumes = docker_json_lines(&stdout);
-    let (ids, _, ids_code) = run_docker(&["--context", "harpoon", "ps", "-aq"])?;
-    if ids_code == 0 {
-        let ids: Vec<&str> = ids.lines().map(str::trim).filter(|id| !id.is_empty()).collect();
-        if !ids.is_empty() {
-            let mut args = vec!["--context", "harpoon", "inspect", "--format", "{{json .}}"];
-            args.extend(ids);
-            if let Ok((inspect_stdout, _, inspect_code)) = run_docker(&args) {
-                if inspect_code == 0 {
-                    let mut attachments: HashMap<String, Vec<String>> = HashMap::new();
-                    for container in docker_json_lines(&inspect_stdout) {
-                        let name = container.get("Name").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches('/').to_string();
-                        if name.is_empty() { continue; }
-                        if let Some(mounts) = container.get("Mounts").and_then(|v| v.as_array()) {
-                            for mount in mounts {
-                                if mount.get("Type").and_then(|v| v.as_str()) != Some("volume") { continue; }
-                                if let Some(volume) = mount.get("Name").and_then(|v| v.as_str()) {
-                                    attachments.entry(volume.to_string()).or_default().push(name.clone());
-                                }
-                            }
-                        }
-                    }
-                    for volume in &mut volumes {
-                        let name = volume.get("Name").and_then(|v| v.as_str()).unwrap_or("");
-                        let users = attachments.remove(name).unwrap_or_default();
-                        volume["UsedBy"] = serde_json::Value::Array(users.into_iter().map(serde_json::Value::String).collect());
-                    }
+    Ok(docker_json_lines(&stdout))
+}
+
+fn attach_volume_users(volumes: &mut [serde_json::Value], inspected: &[serde_json::Value]) {
+    let mut attachments: HashMap<String, Vec<String>> = HashMap::new();
+    for container in inspected {
+        let name = container.get("Name").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches('/').to_string();
+        if name.is_empty() { continue; }
+        if let Some(mounts) = container.get("Mounts").and_then(|v| v.as_array()) {
+            for mount in mounts {
+                if mount.get("Type").and_then(|v| v.as_str()) != Some("volume") { continue; }
+                if let Some(volume) = mount.get("Name").and_then(|v| v.as_str()) {
+                    attachments.entry(volume.to_string()).or_default().push(name.clone());
                 }
             }
         }
+    }
+    for volume in volumes {
+        let name = volume.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+        let users = attachments.remove(name).unwrap_or_default();
+        volume["UsedBy"] = serde_json::Value::Array(users.into_iter().map(serde_json::Value::String).collect());
+    }
+}
+
+#[tauri::command(async)]
+fn list_volumes() -> Result<Vec<serde_json::Value>, String> {
+    let mut volumes = list_volumes_basic()?;
+    let (ids, _, ids_code) = run_docker(&["--context", "harpoon", "ps", "-aq", "--no-trunc"])?;
+    if ids_code == 0 {
+        let ids: Vec<&str> = ids.lines().map(str::trim).filter(|id| !id.is_empty()).collect();
+        let inspected = inspect_containers(&ids);
+        attach_volume_users(&mut volumes, &inspected);
     }
     Ok(volumes)
 }
@@ -848,9 +860,10 @@ fn get_counts() -> Result<serde_json::Value, String> {
             }
         }
     }
-    let containers = list_containers(Some(true))?.len();
+    // Counting needs no per-container inspection.
+    let containers = list_containers_basic(true)?.len();
     let images = list_images()?.len();
-    let volumes = list_volumes()?.len();
+    let volumes = list_volumes_basic()?.len();
     let networks = list_networks()?.len();
     let (running_stdout, running_stderr, running_code) = run_docker(&["--context", "harpoon", "ps", "--format", "{{json .}}"])?;
     let running2 = count_docker_json_response(&running_stdout, &running_stderr, running_code, "running containers")?;
@@ -1144,6 +1157,21 @@ mod tests {
         assert!(!is_runnable_docker(&script("hung", "sleep 10")));
         assert!(started.elapsed() < Duration::from_secs(5));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_inspect_output_still_enriches_surviving_rows() {
+        // `docker inspect live gone` prints live's JSON and exits 1 for gone.
+        let inspect_stdout = r#"{"Id":"live-full","Name":"/web","Mounts":[{"Type":"volume","Name":"data","Destination":"/data","RW":true}],"NetworkSettings":{"Networks":{"edge":{}}}}"#;
+        let inspected = docker_json_lines(inspect_stdout);
+        let mut containers = vec![serde_json::json!({"ID":"live"}), serde_json::json!({"ID":"gone"})];
+        attach_inspected(&mut containers, &inspected);
+        assert_eq!(containers[0]["NetworkNames"][0], "edge");
+        assert!(containers[1].get("NetworkNames").is_none());
+        let mut volumes = vec![serde_json::json!({"Name":"data"}), serde_json::json!({"Name":"idle"})];
+        attach_volume_users(&mut volumes, &inspected);
+        assert_eq!(volumes[0]["UsedBy"][0], "web");
+        assert_eq!(volumes[1]["UsedBy"].as_array().unwrap().len(), 0);
     }
 
     #[test]
