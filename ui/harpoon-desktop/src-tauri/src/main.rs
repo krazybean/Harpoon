@@ -192,12 +192,32 @@ fn resolve_harpoon_binary() -> Result<PathBuf, String> {
 
 // --- Canonical Docker CLI discovery (Finder-safe) ---
 fn resolve_docker_binary() -> Result<PathBuf, String> {
+    // Every docker call goes through here, so the probe result is cached; a cached
+    // path is re-resolved only once it stops being executable.
+    static RESOLVED: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    let cache = RESOLVED.get_or_init(|| Mutex::new(None));
+    if let Ok(cached) = cache.lock() {
+        if let Some(path) = cached.as_ref().filter(|path| is_executable(path)) {
+            return Ok(path.clone());
+        }
+    }
+    let path = find_docker_binary()?;
+    if let Ok(mut cached) = cache.lock() {
+        *cached = Some(path.clone());
+    }
+    Ok(path)
+}
+
+fn find_docker_binary() -> Result<PathBuf, String> {
     // ponytail: explicit, no `zsh -l -c`, no sourcing startup files.
     // Finder-launched apps have minimal PATH (e.g. /usr/bin:/bin:/usr/sbin:/sbin).
-    // We safely consider PATH first, then Apple Silicon Homebrew and other
-    // standard locations. Every candidate must launch successfully.
+    // We safely consider PATH first, then Apple Silicon Homebrew, the
+    // /usr/local/bin symlink that Docker Desktop and OrbStack install, and other
+    // standard locations. Every candidate must launch successfully, which also
+    // rejects stale Intel binaries.
     let candidates = [
         PathBuf::from("/opt/homebrew/bin/docker"),
+        PathBuf::from("/usr/local/bin/docker"),
         PathBuf::from("/usr/bin/docker"),
         PathBuf::from("/run/current-system/sw/bin/docker"),
     ];
@@ -209,28 +229,23 @@ fn resolve_docker_binary() -> Result<PathBuf, String> {
             if is_runnable_docker(&p) { return Ok(p); }
         }
     }
-    // 2-4) Check standard locations regardless of PATH (Finder fallback)
+    // 2) Check standard locations regardless of PATH (Finder fallback)
     for p in &candidates {
         if is_runnable_docker(p) { return Ok(p.clone()); }
     }
-    // Also try `which` with extended PATH that includes homebrew locations (still no shell sourcing)
-    let extended = format!("/opt/homebrew/bin:/usr/bin:/bin:{}", std::env::var("PATH").unwrap_or_default());
-    for dir in extended.split(':') {
-        if dir.is_empty() { continue; }
-        let p = PathBuf::from(dir).join("docker");
-        if is_runnable_docker(&p) { return Ok(p); }
-    }
-    Err("Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker)".to_string())
+    Err("Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)".to_string())
 }
 
 fn is_runnable_docker(path: &PathBuf) -> bool {
-    is_executable(path)
-        && Command::new(path)
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+    if !is_executable(path) { return false; }
+    let mut command = Command::new(path);
+    command.arg("--version").stdin(Stdio::null());
+    run_command_bounded(&mut command, DOCKER_PROBE_TIMEOUT)
+        .map(|(_, _, code)| code == 0)
+        .unwrap_or(false)
 }
+
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn docker_command(args: &[&str]) -> Result<Command, String> {
     let bin = resolve_docker_binary()?;
@@ -451,7 +466,7 @@ fn run_command_bounded(cmd: &mut Command, timeout: Duration) -> Result<(String, 
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("Docker stats timed out after {} ms", timeout.as_millis()));
+                return Err(format!("timed out after {} ms", timeout.as_millis()));
             }
             Err(e) => return Err(format!("failed waiting for docker: {e}")),
         }
@@ -1109,6 +1124,26 @@ mod tests {
         command.arg("1");
         let error = run_command_bounded(&mut command, Duration::from_millis(10)).unwrap_err();
         assert!(error.contains("timed out after 10 ms"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_probe_rejects_broken_and_hung_binaries() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("harpoon-docker-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        assert!(is_runnable_docker(&script("good", "echo 'Docker version 28'")));
+        assert!(!is_runnable_docker(&script("broken", "exit 1")));
+        let started = Instant::now();
+        assert!(!is_runnable_docker(&script("hung", "sleep 10")));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

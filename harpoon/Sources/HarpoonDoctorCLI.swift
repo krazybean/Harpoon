@@ -106,7 +106,7 @@ func handleDoctor() -> Int32 {
             check(true, "Docker credential helper ... PASS")
         }
     } else {
-        check(false, "Docker CLI ................. FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker) — Install Docker CLI; Docker Desktop NOT required", warn:false)
+        check(false, "Docker CLI ................. FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker) — Install Docker CLI; Docker Desktop NOT required", warn:false)
         check(false, "Docker Compose plugin ...... FAIL — Docker CLI not found", warn:true)
         check(false, "Harpoon context ............ FAIL — Docker CLI not found", warn:true)
         cliPrint("INFO  Harpoon socket ............. skipped — Docker CLI not found")

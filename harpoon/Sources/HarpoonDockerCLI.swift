@@ -6,17 +6,27 @@ import Darwin
 let harpoonContextName = "harpoon"
 let harpoonSocketEndpoint = "unix:///tmp/harpoon-docker.sock"
 
+private let dockerResolutionLock = NSLock()
+private var resolvedDocker: String?
+
+/// Resolves the Docker CLI once per process; a cached path is re-resolved only
+/// after it stops being executable. Every runDocker call goes through here.
 func findDocker() -> String? {
+    dockerResolutionLock.lock()
+    defer { dockerResolutionLock.unlock() }
+    if let cached = resolvedDocker, FileManager.default.isExecutableFile(atPath: cached) { return cached }
     var candidates: [String] = []
     if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
         candidates += pathEnv.split(separator: ":").map { dir in
             URL(fileURLWithPath: String(dir)).appendingPathComponent("docker").path
         }
     }
-    // Finder-launched apps may have a minimal PATH. Keep only current, known-safe
-    // fallbacks; every candidate still has to launch successfully below.
-    candidates += ["/opt/homebrew/bin/docker", "/usr/bin/docker", "/run/current-system/sw/bin/docker"]
-    return candidates.first(where: isRunnableDocker)
+    // Finder-launched apps may have a minimal PATH. /usr/local/bin/docker is the
+    // symlink Docker Desktop and OrbStack install; every candidate still has to
+    // launch successfully below, which rejects stale Intel binaries.
+    candidates += ["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker", "/run/current-system/sw/bin/docker"]
+    resolvedDocker = candidates.first(where: isRunnableDocker)
+    return resolvedDocker
 }
 
 private func isRunnableDocker(_ path: String) -> Bool {
@@ -24,16 +34,24 @@ private func isRunnableDocker(_ path: String) -> Bool {
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: path)
     proc.arguments = ["--version"]
-    proc.standardOutput = Pipe()
-    proc.standardError = Pipe()
+    proc.standardInput = FileHandle.nullDevice
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
     do {
         try proc.run()
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
     } catch {
         // Includes macOS's exec-format error for stale Intel binaries.
         return false
     }
+    // A hung shim must not hang every Docker call behind it.
+    let deadline = Date().addingTimeInterval(2)
+    while proc.isRunning && Date() < deadline { usleep(20_000) }
+    if proc.isRunning {
+        proc.terminate()
+        proc.waitUntilExit()
+        return false
+    }
+    return proc.terminationStatus == 0
 }
 
 struct DockerContextInspection {
@@ -147,7 +165,7 @@ func credsStoreStatus() -> (store: String?, status: String, warning: String?) {
 
 func handleDockerSetup() -> Int32 {
     guard let docker = findDocker() else {
-        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker)")
+        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)")
         cliError("Install Docker CLI (https://docs.docker.com/engine/install/) — Docker Desktop NOT required")
         return 1
     }
