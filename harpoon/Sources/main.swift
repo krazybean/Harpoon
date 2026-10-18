@@ -6,6 +6,51 @@ func log(_ m: String) {
     fputs("[\(ts)] \(m)\n", stderr)
 }
 
+private let vmStartDiagnosticMaxDepth = 4
+private let vmStartDiagnosticMaxEntries = 24
+private let vmStartDiagnosticMaxText = 240
+
+private func boundedDiagnosticText(_ value: String) -> String {
+    let singleLine = value.replacingOccurrences(of: "\n", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+    return String(singleLine.prefix(vmStartDiagnosticMaxText))
+}
+
+private func diagnosticKeyIsSensitive(_ key: String) -> Bool {
+    let key = key.lowercased()
+    return ["password", "secret", "token", "credential", "private", "authorization", "cookie"].contains { key.contains($0) }
+}
+
+private func boundedNSErrorDetails(_ error: NSError, depth: Int = 0) -> String {
+    guard depth < vmStartDiagnosticMaxDepth else { return "<max-depth>" }
+    let fields = error.userInfo.keys.sorted().prefix(vmStartDiagnosticMaxEntries).map { key -> String in
+        let value = error.userInfo[key]
+        if key == NSUnderlyingErrorKey, let underlying = value as? NSError {
+            return "\(boundedDiagnosticText(key))=\(boundedNSErrorDetails(underlying, depth: depth + 1))"
+        }
+        if diagnosticKeyIsSensitive(key) { return "\(boundedDiagnosticText(key))=<redacted>" }
+        if let string = value as? String { return "\(boundedDiagnosticText(key))=\(boundedDiagnosticText(string))" }
+        if let number = value as? NSNumber { return "\(boundedDiagnosticText(key))=\(number)" }
+        if let nested = value as? NSError { return "\(boundedDiagnosticText(key))=\(boundedNSErrorDetails(nested, depth: depth + 1))" }
+        return "\(boundedDiagnosticText(key))=<\(String(describing: type(of: value)))>"
+    }
+    return "domain=\(boundedDiagnosticText(error.domain)) code=\(error.code) description=\(boundedDiagnosticText(error.localizedDescription)) userInfo={\(fields.joined(separator: ","))}"
+}
+
+private func assetDiagnostic(_ role: String, url: URL) -> String {
+    let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .fileResourceIdentifierKey])
+    let identity = values?.fileResourceIdentifier.map { boundedDiagnosticText(String(describing: $0)) } ?? "unavailable"
+    return "role=\(role) path=\(boundedDiagnosticText(url.path)) exists=\(FileManager.default.fileExists(atPath: url.path)) regular=\(values?.isRegularFile ?? false) bytes=\(values?.fileSize ?? 0) identity=\(identity)"
+}
+
+private func vmStartDiagnostics(error: NSError, vm: VZVirtualMachine, manager: VMManager, config: RuntimeConfig) {
+    log("HARPOON_VZ_START_DIAGNOSTICS state=\(vm.state.rawValue) configuration={\(manager.configurationSummary)}")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("kernel", url: config.kernelURL))")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("initramfs", url: config.initramfsURL))")
+    log("HARPOON_VZ_START_ASSET \(assetDiagnostic("disk", url: config.diskURL))")
+    log("HARPOON_VZ_START_ERROR \(boundedNSErrorDetails(error))")
+}
+
 func printUsage() {
     fputs("usage: harpoon [--cpus 1|2] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr)
     fputs("defaults: --cpus 2 --memory 4096  (HARPOON_CPUS/HARPOON_MEMORY_MIB env fallback, CLI wins)\n", stderr)
@@ -207,7 +252,23 @@ func resourceOrigin(cliFlag: String, environment: String) -> String {
 }
 log("HARPOON_ASSETS_SELECTED kernelOrigin=\(resourceOrigin(cliFlag: "--kernel", environment: "HARPOON_KERNEL")) initramfsOrigin=\(resourceOrigin(cliFlag: "--initramfs", environment: "HARPOON_INITRAMFS"))")
 
+var shuttingDown = false
 let manager = VMManager(config: config, lifecycle: lifecycle)
+manager.unexpectedStopHandler = { vm, error in
+    DispatchQueue.main.async {
+        guard !shuttingDown, !manager.unexpectedStopHandled else { return }
+        manager.unexpectedStopHandled = true
+        let detail = error == nil ? "guest stopped the virtual machine" : VMManager.safeErrorDetails(error)
+        recordRuntimeFailure(RuntimeFailure(category: "vm_terminated", message: "The virtual machine stopped unexpectedly.", source: "Virtualization.framework", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: error == nil ? nil : detail))
+        lifecycle.fail("unexpected VM termination: \(detail)")
+        log("HARPOON_VM_UNEXPECTED_STOP state=\(vm.state.rawValue) dockerReady=false mgmtReady=false detail=\(detail)")
+        manager.serialPoll?.cancel()
+        manager.stopBridges()
+        manager.cleanupEphemeral()
+        log("HARPOON_RUNTIME_UNAVAILABLE reason=unexpected-vm-termination restart=disabled")
+        exit(9)
+    }
+}
 
 lifecycle.transition(to: .starting)
 let vm: VZVirtualMachine
@@ -227,10 +288,10 @@ log("starting VM kernel=\(config.kernelURL.lastPathComponent) initramfs=\(config
 signal(SIGPIPE, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
-var shuttingDown = false
-func initiateShutdown(reason: String) {
+func initiateShutdown(reason: String, failureCode: Int32 = 0) {
     if shuttingDown { return }
     shuttingDown = true
+    manager.markExplicitStop()
     lifecycle.transition(to: .stopping)
     log("SHUTDOWN_INITIATED reason=\(reason) HARPOON_SIGNAL_RECEIVED \(reason)")
     manager.serialPoll?.cancel()
@@ -238,26 +299,43 @@ func initiateShutdown(reason: String) {
     if let vm = manager.vm {
         if vm.canStop {
             vm.stop { err in
-                if let err = err { log("stop error: \(err)") }
+                if let err = err {
+                    lifecycle.fail("VM stop failure \(err)")
+                    log("SHUTDOWN_FAILED stop error=\(err)")
+                    manager.cleanupEphemeral()
+                    exit(failureCode == 0 ? 8 : failureCode)
+                }
+                guard vm.state == .stopped else {
+                    lifecycle.fail("VM stop completed without STOPPED state")
+                    log("SHUTDOWN_FAILED state=\(vm.state.rawValue)")
+                    manager.cleanupEphemeral()
+                    exit(failureCode == 0 ? 8 : failureCode)
+                }
                 manager.cleanupEphemeral()
                 lifecycle.transition(to: .stopped)
                 log("SHUTDOWN_OK")
-                exit(0)
+                exit(failureCode)
             }
             DispatchQueue.main.asyncAfter(deadline: .now()+8) {
-                log("SHUTDOWN_TIMEOUT force exit")
+                lifecycle.fail("VM stop timeout")
+                log("SHUTDOWN_TIMEOUT VM termination unconfirmed")
                 manager.cleanupEphemeral()
-                exit(0)
+                exit(failureCode == 0 ? 8 : failureCode)
             }
         } else {
+            guard vm.state == .stopped else {
+                lifecycle.fail("VM cannot stop and termination is unconfirmed")
+                manager.cleanupEphemeral()
+                exit(failureCode == 0 ? 8 : failureCode)
+            }
             manager.cleanupEphemeral()
             lifecycle.transition(to: .stopped)
-            exit(0)
+            exit(failureCode)
         }
     } else {
         manager.cleanupEphemeral()
         lifecycle.transition(to: .stopped)
-        exit(0)
+        exit(failureCode)
     }
 }
 
@@ -287,6 +365,7 @@ readyPoll.setEventHandler {
     if let r = manager.bootFailedReason, !readyPollCancelled {
         readyPollCancelled = true
         readyPoll.cancel()
+        recordRuntimeFailure(RuntimeFailure(category: "docker_unavailable", message: "Docker did not become available inside the virtual machine.", source: "Harpoon guest", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: String(r.prefix(400))))
         lifecycle.fail("guest HARPOON_DOCKER_FAILED \(r)")
         log("GUEST_INIT_FAILURE HARPOON_DOCKER_FAILED \(r)")
         initiateShutdown(reason: "DOCKER_FAILED")
@@ -317,8 +396,7 @@ DispatchQueue.main.asyncAfter(deadline: .now()+config.bootTimeout) {
         let reason = "guest readiness timeout after \(config.bootTimeout)s"
         lifecycle.fail(reason)
         log("GUEST_INIT_FAILURE no HARPOON_DOCKER_READY after \(config.bootTimeout)s tail=\(tail)")
-        initiateShutdown(reason: "BOOT_TIMEOUT")
-        DispatchQueue.main.asyncAfter(deadline: .now()+3) { exit(6) }
+        initiateShutdown(reason: "BOOT_TIMEOUT", failureCode: 6)
     }
 }
 
@@ -326,8 +404,10 @@ vm.start { result in
     if case .failure(let e) = result {
         let ne = e as NSError
         let reason = "VM start failure \(ne.domain) \(ne.code) \(ne.localizedDescription)"
+        recordRuntimeFailure(RuntimeFailure(category: "vm_start_failed", message: "The virtual machine failed to start.", source: "Virtualization.framework", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: boundedNSErrorDetails(ne)))
         lifecycle.fail(reason)
-        fputs("start FAIL \(ne.domain) \(ne.code) \(ne.userInfo)\n", stderr)
+        vmStartDiagnostics(error: ne, vm: vm, manager: manager, config: config)
+        fputs("start FAIL \(ne.domain) \(ne.code)\n", stderr)
         log("HOST_VZ_START_FAILURE")
         manager.cleanupEphemeral()
         exit(7)

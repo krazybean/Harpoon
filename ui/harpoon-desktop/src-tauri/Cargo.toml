@@ -1,6 +1,6 @@
 [package]
 name = "harpoon-desktop"
-version = "0.1.1"
+version = "2.0.0-rc.1"
 description = "Harpoon desktop UI — client of Harpoon runtime"
 authors = ["Harpoon"]
 edition = "2021"
@@ -13,6 +13,7 @@ tauri-build = { version = "=2.7.1", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+libc = "0.2"
 tauri = { version = "=2.12.1", features = [] }
 
 [features]

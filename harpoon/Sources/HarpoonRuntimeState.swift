@@ -59,6 +59,25 @@ enum HarpoonPaths {
     static var dockerSocketPath: String { "/tmp/harpoon-docker.sock" }
     static var controlSocketPath: String { "/tmp/harpoon-control" }
     static var mgmtSocketPath: String { "/tmp/harpoon-mgmt.sock" }
+    static var lifecycleLockPath: String { "/tmp/harpoon-lifecycle.lock" }
+}
+
+final class LifecycleControlLock {
+    private let fd: Int32
+
+    init?() {
+        let opened = open(HarpoonPaths.lifecycleLockPath, O_CREAT | O_RDWR, 0o600)
+        guard opened >= 0, flock(opened, LOCK_EX | LOCK_NB) == 0 else {
+            if opened >= 0 { close(opened) }
+            return nil
+        }
+        fd = opened
+    }
+
+    deinit {
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
 }
 
 struct HarpoonUserConfig: Codable {
@@ -117,6 +136,24 @@ struct RuntimeMetadata: Codable {
     let socketPath: String
     let uuid: String
     let binary: String
+    let diskIdentity: String?
+    let diskResolvedPath: String?
+    var failure: RuntimeFailure?
+}
+
+struct RuntimeFailure: Codable {
+    let category: String
+    let message: String
+    let source: String
+    let occurredAt: String
+    let underlyingError: String?
+}
+
+func recordRuntimeFailure(_ failure: RuntimeFailure) {
+    guard var metadata = readMetadata() else { return }
+    metadata.failure = failure
+    guard let data = try? JSONEncoder().encode(metadata) else { return }
+    try? data.write(to: HarpoonPaths.jsonFile, options: .atomic)
 }
 
 // MARK: - Process checks
@@ -262,6 +299,19 @@ func readMetadata() -> RuntimeMetadata? {
     return nil
 }
 
+func diskIdentity(at path: String) -> String? {
+    var st = stat()
+    guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+    return "\(st.st_dev):\(st.st_ino)"
+}
+
+func sameDiskIdentity(_ metadata: RuntimeMetadata) -> Bool {
+    let currentPath = URL(fileURLWithPath: metadata.diskPath).standardized.resolvingSymlinksInPath().path
+    guard let recordedPath = metadata.diskResolvedPath, currentPath == recordedPath,
+          let expected = metadata.diskIdentity else { return false }
+    return diskIdentity(at: currentPath) == expected
+}
+
 func ensureAppSupport() -> String? {
     let dir = HarpoonPaths.appSupportDir
     do {
@@ -334,7 +384,7 @@ func resolveConfigFromArgs(_ args: [String]) -> RuntimeConfig {
     return c
 }
 
-func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?) {
+func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?) {
     let pid = readPIDFile()
     let meta = readMetadata()
     let alive: Bool
@@ -370,6 +420,8 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     let state: String
     if activeRuntime {
         state = sockExists && effectiveReady ? "running" : "starting"
+    } else if meta?.failure != nil {
+        state = "failed"
     } else if pid != nil {
         state = "stale"
     } else if sockExists {
@@ -377,5 +429,5 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     } else {
         state = "stopped"
     }
-    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta)
+    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta, meta?.failure)
 }

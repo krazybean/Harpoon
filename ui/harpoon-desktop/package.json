@@ -1,12 +1,12 @@
 {
   "name": "harpoon-desktop",
   "private": true,
-  "version": "0.1.1",
+  "version": "2.0.0-rc.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test src/lib/resourceBatch.test.mjs",
+    "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:runtime": "bash ../../harpoon/build.sh",
@@ -26,14 +26,19 @@
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
     "@tauri-apps/api": "2.12.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1",
+    "@types/dagre": "^0.7.54",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.3",
+    "@xyflow/react": "^12.12.0",
+    "dagre": "^0.8.5",
     "typescript": "^5.6.0",
     "vite": "^6.4.3"
   }

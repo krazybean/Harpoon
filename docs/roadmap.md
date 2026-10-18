@@ -4,7 +4,195 @@
 
 ## Current Position
 
-### Stage 8 performance investigation — IN PROGRESS (2026-10-14 America/Chicago)
+### Harpoon 2 stabilization transition — FEATURE COMPLETE / RELEASE NOT READY (2026-10-17 America/Chicago)
+
+The planned Harpoon 2 redesign surfaces are implemented: container and stack
+workspace, technology icons, Container and Network Topology, Shell, CSSH,
+Quake Shell, Context & Engine Discovery, header resource meters/sparklines,
+and the read-only per-container Stats tab. This is feature complete, not a
+release claim. Release remains deferred until the native acceptance matrix,
+the prioritized polish backlog, and the reliability/distribution gates below
+are closed.
+
+Evidence classes are deliberately separate:
+
+- **Native visually accepted:** per-container Stats after the shared
+  snake_case → camelCase Tauri contract fix; Docker-reported values render
+  correctly, including explicit zero values. Empty Logs remains an honest
+  quiet-container state; validation against a known log-producing app is still
+  pending.
+- **Implemented / native acceptance pending:** Context & Engine Discovery,
+  Container Topology, Network Topology, header resource meters/sparklines,
+  Shell, CSSH, and Quake Shell. Native acceptance means the real Tauri
+  WebView at the required sizes plus the live Docker/Podman/socket cases where
+  applicable; offline fixtures, browser review, and production builds do not
+  substitute for it.
+- **Acceptance pending:** the native multi-size Shell/CSSH/Quake/Topology/
+  Context matrix; Docker Desktop, Harpoon, Podman/rootless, stale-socket,
+  duplicate-endpoint, and authentication-required Context cases; and the
+  dedicated WKWebView CPU/input measurements.
+- **Defects / polish:** compact Compose
+  network labels with full tooltips, network-attachment hover metadata,
+  Network Topology stale handling and overview preservation, and the other
+  validated UX issues listed below.
+- **Deferred:** the AP-controlled container-operations backend, automatic
+  broad pruning, and release distribution work (Developer ID/notarization and
+  related packaging gates) until feature and reliability acceptance are both
+  complete.
+- **Candidate preparation:** the local `2.0.0-rc.1` plan, second-Mac gate,
+  portability matrix, and redacted diagnostic collection procedure are recorded
+  in [`docs/releases/v2.0.0-rc.md`](releases/v2.0.0-rc.md). No version bump,
+  tag, signing, notarization, push, or publication has occurred.
+
+#### Stabilization and polish backlog
+
+- Runtime inventory failure semantics — **FIXED / NATIVE ACCEPTANCE PENDING
+  (2026-10-17):** `get_counts` now propagates Docker inventory failures instead
+  of converting them to zero counts. The existing shelf keeps the last good
+  snapshot or presents unavailable data; native reproduction of the socket
+  failure remains pending.
+- Startup status messaging — **BOUNDED STOP / VISUAL ACCEPTANCE NOT ACHIEVED
+  (2026-10-17):** retain the cleaner single-message bootstrap presentation and
+  the stable default startup path. The intended 20 px / 360 ms replacement
+  animation was not visually accepted, so this roadmap makes no success claim.
+  The development-only `?bootstrap-events` / `&bootstrap-trace` experiment is
+  disabled by default and remains only as reversible, unaccepted code; do not
+  spend further time on it unless a materially simpler path appears. Do not
+  alter the Rust-owned refresh worker for this polish item.
+- Use short Compose network labels in graph nodes and retain the full network
+  name in a tooltip and accessible name.
+- Replace repeated generic network-edge labels with hover/focus metadata for
+  the specific Docker-reported attachment; keep the details-list fallback.
+- Add the Network Topology 30-second stale-warning policy without turning stale
+  data into fresh data, and preserve the user’s preferred zoomed-out overview
+  when refreshing or returning to the view.
+- Retain the landed Quake discoverability and UI refinements, then verify them
+  at native sizes; record remaining keyboard, focus, reduced-motion, or
+  target-staleness issues as concrete defects.
+- Recheck populated gallery/detail states, partial failures, narrow-width
+  fallbacks, accessible full identifiers, and honest empty/loading/stale/error
+  states during native review.
+
+#### Stabilization and reliability gates
+
+- Keep the rare instrumented `VZErrorDomain 1` host-side startup failure open;
+  instrumentation is evidence, not a fix, and no retry policy or VM topology
+  change is justified by the current data.
+- Complete the ext4 journal follow-up read-only on a stopped/copied image;
+  the false resize warning is fixed, but this is not live-runtime acceptance.
+- Finish guest asset provenance/build verification while the working tree is
+  dirty; do not silently treat generated guest assets as clean release inputs.
+- Run the native multi-size acceptance matrix without changing Docker/VM state
+  during documentation-only reconciliation.
+- Keep the stale Intel Docker CLI discovery issue fixed by the current
+  runnable-`PATH`-first resolver, with regression coverage for stale and
+  incompatible candidates.
+- Keep distribution packaging/notarization deferred. A healthy prior package
+  is evidence of packaging, not proof of current release readiness.
+
+### Harpoon 2 Context & Engine Discovery — IMPLEMENTED / NATIVE ACCEPTANCE PENDING (2026-10-17 America/Chicago)
+
+The bounded Rust `discover_contexts` prototype and Settings → Contexts view
+are implemented. Discovery reads Docker context metadata/current selection,
+relevant environment and conventional Unix socket candidates, plus Podman
+system connections. Probes are shell-free and capped at two seconds; endpoint
+identities are deduplicated; missing executables, dead sockets,
+authentication-required responses, and partial data retain honest states and
+unknown capabilities. The view cannot switch contexts, start runtimes,
+modify sockets/configuration, request credentials, or perform container
+operations. Offline Rust fixtures and the frontend build pass. Native visual,
+live CLI/socket matrix, and zero-side-effect acceptance remain pending. See
+`docs/context-discovery.md`.
+
+The proposed AP-controlled authorized container-operations backend is
+explicitly deferred as separate high-risk work requiring authz, permissions,
+auditability, and cancellation policy; no AP or runtime-operation layer was
+added. Per-container Stats is implemented and native-visually accepted;
+stabilization/polish and the remaining acceptance matrix follow. Release is
+not an immediate gate.
+
+### Harpoon 2 Per-container Stats — IMPLEMENTED / NATIVE VISUALLY ACCEPTED (2026-10-17 America/Chicago)
+
+The selected-container Stats tab is backed by one bounded
+Docker-authoritative `stats --no-stream` sample. It may expose Docker's own
+CPU, memory, network I/O, block I/O, and PIDs fields with source and unit
+provenance intact; it must not relabel host, VM, guest, or cgroup values. The
+tab has explicit initial, running, unavailable/disconnected, and stale-cache
+states, with manual refresh only and no JavaScript polling. Native sampling
+must remain separately bounded and off the UI thread; lifecycle subscriptions
+remain limited to the existing refresh architecture. Native visual acceptance
+passed after the shared payload contract was corrected from Rust snake_case to
+the React camelCase fields. Offline regression
+evidence covers Docker's `CPUPerc`, `MemUsage`, `MemPerc`, `NetIO`, `BlockIO`,
+and `PIDs` fields, including missing and explicit-zero values, plus the two-
+second timeout. The initial visual defect was a Rust/Tauri payload naming
+mismatch: Rust emitted snake_case fields while the React view consumed
+camelCase; the shared payload now declares the camelCase contract. Empty
+Docker logs remain an honest quiet-container state, not fabricated output;
+validation against a known log-producing application remains pending.
+
+### R1 Virtualization.framework startup diagnostics — CODE-ONLY INSTRUMENTATION / LIVE REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The existing native `vm.start` failure boundary now records bounded NSError
+details, nested underlying errors, VM state, configuration component counts,
+and safe kernel/initramfs/root-disk identity metadata. No retry or lifecycle
+policy changed. Offline validation and native compilation pass; paired live
+startup tests remain separately unauthorized. See
+`docs/results/R1-INSTRUMENTATION.md`.
+
+### Topology renderer — REACT FLOW + DAGRE PROMOTED / PASSIVE CONNECTIVITY ANIMATION (2026-10-16 America/Chicago)
+
+Two isolated, switchable topology renderers now share the same normalized
+Docker-authoritative fixtures: native SVG + Dagre and React Flow + Dagre. The
+development harness covers 2/5/10/25 nodes, pathological Compose names,
+multi-network membership, explicit Docker links, and empty/unknown states with
+accessible full identifiers and fit-to-view controls. The selected Container
+Details > Topology > Diagram now uses React Flow + Dagre
+with the accessible Details fallback preserved. Running-container attachment
+edges animate subtly with CSS; stopped edges are static muted lines and unknown
+edges are neutral. The legend states: “Animated = running container attached to
+network · Not measured traffic”. No timers, traffic capture, Docker polling,
+peer fabrication, or graph editing was added. Dedicated 760px/1000×700 and
+Tauri WKWebView CPU/input measurements remain incomplete.
+See `docs/topology-renderer-prototype.md`.
+
+### Stage 8 performance investigation — ARCHIVED (2026-10-16 America/Chicago)
+
+Stage 8 is closed. Rust / separate is the product refresh scheduler; the
+temporary isolation sidebar, alternate polling modes, direct Docker observer,
+verbose trace/telemetry collectors, and native debug heartbeats were removed.
+The historical notes below remain evidence of the investigation, not current
+runtime configuration. The JavaScript scheduler remains only as an emergency
+startup fallback.
+
+#### Resource sparklines prototype — IMPLEMENTED / LIVE MACOS ACCEPTANCE PENDING (2026-10-16)
+
+The desktop now exposes the same bounded Rust-owned sampler through a shared
+external store: compact HOST CPU/RAM and IMAGE disk meters persist in the global
+header across routes. Overview keeps the runtime envelope and operational
+signals without duplicating those meters. Native publication remains
+coalesced; there is no second sampler or JS polling path. It presents only
+macOS host CPU, macOS host physical-memory usage, and Harpoon disk-image
+allocation (logical versus filesystem-allocated bytes). Disk activity, guest VM
+metrics, guest filesystem usage, and container metrics remain explicitly
+unavailable; no configured capacity, peak RSS, or host value is relabeled as a
+guest/container signal. Offline frontend checks pass. Live Tauri/WebView
+visibility and native-value acceptance remains pending. See
+`docs/resource-sparklines-prototype.md`.
+
+#### Cycle 1B telemetry — IMPLEMENTED / LIVE SCROLL REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The canonical desktop now has a bounded, timestamped observational metrics
+buffer with one-second PTY/system sampling and event-driven xterm wheel,
+actual-scroll, wheel-to-scroll latency, animation-frame gap, and PTY
+throughput observations. macOS host CPU utilization, physical memory totals,
+pressure/pageouts, compression, and swap use native sysctl counters with
+explicit source/unit/availability semantics; aggregate disk I/O and VM/guest
+metrics remain unavailable. The collector is StrictMode-safe, has focused
+offline bounds/cleanup/clock/boundary/unavailable tests, and emits opt-in
+scroll-latency and input-correlation anomalies through the existing diagnostic trace. No graphs,
+scroll behavior change, shell timeout, Docker/VM operation, or UI redesign was added.
+See `docs/telemetry-cycle-1.md`.
 
 Stage 8B is validated by self-hosted run 38632009299 on commit
 `ad9626cb632eb6d667045182cf05eace490fdc1b`: deleting the test-owned image
@@ -15,6 +203,207 @@ implemented: broad Docker image or BuildKit prune commands are not safely scoped
 to this probe's temporary data. Stage 8C remains deferred; 8D focused
 regression validation passes via `tools/regression-stage8-disk-reclamation.sh`.
 See `docs/results/STAGE8.md`.
+
+#### Cycle 1B root input correlation — IMPLEMENTED / LIVE CONTEXT-SWITCH REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The existing bounded frontend collector now mounts one development-only
+application-root listener seam. It records semantic focus/window transitions,
+throttled pointer activity, captured wheel delivery, actual scroll events, and
+next-animation-frame wheel outcomes for CSSH terminal/workspace, master
+Containers, stack gallery, and surrounding workspace owners. The collector
+exposes `window.__HARPOON_DIAGNOSTICS__.snapshot()` so listener connectedness
+is provable before reproduction. Opt-in root events are forwarded through the
+existing bounded native trace sink with semantic-only details; no text,
+commands, output, credentials, IDs, or environment values are recorded.
+
+The native forwarding policy is now noise-reduced: granular wheel/pointer/
+scroll events remain in the bounded frontend ring, while native output emits
+one compact per-owner summary per 500 ms window. Focus and owner changes,
+meaningful RAF/scroll-latency gaps, errors, and confirmed non-boundary
+no-scroll windows remain individual events. Cumulative scroll movement marks
+per-wheel `moved=0` observations inconclusive rather than stalled, and anomaly
+details include timestamp source plus available-or-unavailable host CPU and
+pressure context.
+
+Frontend tests and production build pass. Rust tests compile but remain
+CONDITIONAL: 21/22 pass, with the pre-existing mocked broadcast timeout test
+failing in unrelated command-execution code. macOS/Tauri/WebView live context
+switch validation remains pending; no focus or scroll behavior was changed.
+
+The development-only Containers isolation sidebar's scroll-lock regression was
+fixed by giving the main Containers content an explicit bounded grid cell and
+keeping the gallery/table as the sole vertical scroll surface. Focused
+presentation assertions, the frontend test suite, and the production build
+pass; live macOS/Tauri/WebView validation remains pending. This does not claim
+the original intermittent scroll stutter is solved.
+
+#### Cycle 1B Deep Trace — IMPLEMENTED / LIVE REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The development-only Deep Trace cycle now requires the existing diagnostic
+switch plus `harpoon.deepTrace` and reload. It adds bounded monotonic timer and
+RAF heartbeats, focus/visibility suppression, supported-only long-task
+observation, a five-second pre/post context ring, and
+`window.__HARPOON_DEEP_TRACE__.snapshot()`. Rust emits an asynchronous native
+heartbeat with wall/monotonic timestamps, process CPU deltas, and the nearest
+available host counters. Timer-only versus RAF-only versus both-delay output
+remains classificatory evidence, not proof of causation. Frontend unit checks
+cover discriminants, suppression, and bounds; macOS/Tauri/WebView live
+reproduction remains pending. No CSSH execution, scroll, focus, timeout,
+Docker, VM, or guest behavior was changed.
+
+#### Cycle 1B isolation controls — IMPLEMENTED / LIVE A-B REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The development-only Containers isolation sidebar now exposes independent seams
+for the Overview/runtime polling master plus individual `get_status`,
+`get_docker_info`, `get_counts`, and `get_config` calls, Containers polling, Compose metadata grouping,
+container motion, stack choreography, CSSH mounting, PTY output batching, and
+CSSH scroll telemetry. Polling switches stop only their owning periodic effect
+and Tauri invocation; cached data remains visible with stale labeling, and the manual Refresh action
+remains available. Disabling CSSH unmounts xterm and closes its PTY sessions;
+no Docker, VM, guest, or container operation is performed by the controls.
+
+The clean development baseline no longer starts the frontend telemetry
+collector, root interaction listeners, CSSH scroll listeners, or verbose log
+tail fetches unless the existing opt-in diagnostic trace switch is enabled.
+Reusable instrumentation remains available for explicit trace runs. Focused
+frontend tests and the production build pass; live macOS/Tauri/WebView A/B
+reproduction remains pending.
+
+#### Cycle 1C Docker transport A/B proof of concept — LIFECYCLE CORRECTIONS IMPLEMENTED / LIVE REPRODUCTION PENDING (2026-10-16 America/Chicago)
+
+The debug desktop now has an opt-in **Direct Docker observer (B)** path beside
+the unchanged CLI-backed control path (A). Rust owns a bounded Unix-socket HTTP
+snapshot/cache, Docker `/events` dirty invalidation with reconnect, and a
+30-second reconciliation ceiling. B supplies Containers rows, counts, and
+Docker version; Harpoon status/config remain CLI-backed and are explicitly
+unmatched. The lifecycle audit corrected transport-toggle bootstrap reruns,
+observer teardown leakage, and duplicate in-progress B snapshots. Offline
+parser, response-bound, normalization, event-coalescing, and frontend tests
+pass; live Docker/VM validation and the documented A/B/A performance result
+remain pending in `docs/results/STAGE8-DOCKER-AB.md`.
+
+#### Cycle 1D Rust-owned refresh worker — STAGE 2 BOUNDARY HARDENED / LIVE ACCEPTANCE PENDING (2026-10-16 America/Chicago)
+
+The desktop now uses a Rust-owned single-flight worker as the production
+scheduler boundary, with the same four refresh implementations and existing
+CLI transport. Production policy is explicit Rust / separate with all four
+gates enabled; the development-only isolation sidebar can still select Rust /
+consolidated or the JavaScript schedules for comparison. Worker replacement is
+serialized and joined, and generation-tagged publications prevent stale
+workers from updating shelves. A failed worker start falls back to JS.
+Visibility, unmount, mode changes, individual development gates, cached/stale
+shelf semantics, and publication timestamps remain explicit. Frontend
+tests/build and focused/full Rust tests pass. Live macOS/Tauri/WebView A-B-A,
+long-run responsiveness, and on-device freshness/lifecycle acceptance remain
+pending; see
+`docs/results/STAGE8-RUST-REFRESH-WORKER.md`.
+The durable investigation chronology, evidence boundaries, candidate decision,
+and reusable checklist are recorded in
+[`STAGE8-POLLING-RESPONSIVENESS-CASE-STUDY.md`](results/STAGE8-POLLING-RESPONSIVENESS-CASE-STUDY.md).
+
+### Harpoon 2 shell transport — BACKEND IMPLEMENTED / WEBVIEW VALIDATION PENDING (2026-10-15 America/Chicago)
+
+The narrow Tauri backend seam is implemented in `ui/harpoon-desktop/src-tauri/src/shell.rs`:
+per-session macOS PTY, direct absolute Docker CLI execution with explicit
+context and full container ID validation, bounded input/output, resize,
+close, concurrent session tracking, and app-exit cleanup. Offline Rust tests
+and `cargo check` pass. No Harpoon runtime or user container was modified;
+full Tauri/WebView round-trip validation remains pending. See
+`docs/shell-transport.md`.
+
+### Harpoon 2 Container Detail Shell tab — IMPLEMENTED / LIVE VALIDATION PENDING (2026-10-15 America/Chicago)
+
+The Container Detail workspace now has an explicit-connect Shell tab backed by
+the PTY transport and xterm.js, with container/context identity, scoped output,
+bounded client buffering, explicit named column/row forwarding, clipboard
+controls, scrollback, keyboard focus, honest lifecycle/error states, and
+cleanup on tab/container change. Frontend build and focused tests pass,
+including the PTY axis regression; real Tauri/WebView interaction and
+terminal resize acceptance remain pending.
+
+### Harpoon 2 CSSH stack workspace — STAGE 1 IMPLEMENTED / LIVE VALIDATION PENDING (2026-10-15 America/Chicago)
+
+The expanded Compose Stack Workspace now provides Stage 1 live shell tiles at
+`ui/harpoon-desktop/src/views/CsshWorkspace.tsx`: each eligible running container
+with a full Docker ID mounts its own existing `ShellTab` PTY session using Docker
+context `harpoon`; stopped, exited, and unsupported-ID members remain visible with
+honest non-connected states. Header checkboxes remain recipient selection only,
+selection survives metadata refreshes, and the universal command composer remains
+preview-only. Frontend tests/build and Rust tests pass; real Tauri/WebView PTY
+round-trip, resize, and visual acceptance remain pending. Stage 2 broadcast is
+implemented below; live validation remains pending.
+
+### Harpoon 2 Quake Shell — BOUNDED FUNCTIONAL INTEGRATION / LIVE ACCEPTANCE PENDING (2026-10-17 America/Chicago)
+
+The development-only `?quake-shell-prototype` validates the global graphite/yellow
+slide-down interaction, `Ctrl+\`` toggle, Escape focus restoration, explicit
+engine/context/container/executable/user identity, stale-target rejection,
+responsive layout, keyboard-adjustable bounded height, and reduced-motion
+behavior. The default panel is 420px and caps below the viewport; its terminal
+row is the flexible region. With live container metadata, it attaches to the
+shared PTY owner used by Container Shell and CSSH; hiding the overlay detaches
+xterm without closing the session, and reopening replays bounded output.
+Production has no fixture shell fallback and only running containers are
+selectable. Native 1000×700/760px visual and live Tauri/WebView acceptance
+remain pending.
+
+The React-level owner is implemented in `shellSessionStore.ts`, keyed by
+context, full container ID, executable, and user. It scopes events by native
+session ID, bounds replay to 512 KiB, and exposes explicit close separately
+from detach. The prototype evidence and exact seam are recorded in
+`docs/ui/harpoon-2-quake-shell-prototype.md`.
+
+### Harpoon 2 CSSH universal commands — IMPLEMENTED / LIVE VALIDATION PENDING (2026-10-15 America/Chicago)
+
+Universal commands now use a separate command-scoped Docker execution path in
+`ui/harpoon-desktop/src-tauri/src/broadcast.rs`. Dispatch snapshots selected
+full container IDs and the `harpoon` context, validates exact identity and
+running state immediately before each execution, uses explicit argument-based
+`docker exec <full-id> /bin/sh -c <command>` semantics, bounds command size,
+output, duration, and target count, and returns per-target success, failure,
+skip, timeout, output, and exit code without writing to interactive PTYs.
+The composer clears immediately after validation and restores its entry on
+dispatch failure; completed tiles foreground a provenance-labeled command
+result with an explicit Shell/Command result switch while keeping each PTY
+mounted and independently interactive.
+Frontend tests, Vite build, Rust tests, and `cargo check` pass. Live Docker,
+Tauri/WebView, cancellation, and visual acceptance remain pending; no live
+container operation was performed.
+
+An opt-in debug-only diagnostic trace now spans React dispatch/settlement,
+Tauri entry/completion, per-target preflight/exec/timeout/cleanup, and
+watchdog heartbeats. It is disabled in production builds, excludes command
+text/output/credentials/environment/container IDs, and uses bounded rotating
+local storage. Live reproduction is still required to classify a backend
+stall versus a frontend-only freeze; activation is documented in
+`docs/cssh-diagnostic-trace.md`.
+
+The Oct 16 hang investigation found two unbounded backend waits: Docker
+preflight used `Command::output()` without a timeout, and timed-out execs could
+wait indefinitely while joining inherited output pipes. The broadcast runner
+now bounds both preflight and exec, terminates the child process group on
+timeout, preserves honest per-target timeout/skip/failure rows, and runs the
+validated target set concurrently while retaining input order. Offline mocked
+multi-target, rejection, output-bound, and preflight-timeout regressions pass;
+live Docker/Tauri/WebView validation remains pending.
+
+The same investigation also found a frontend-only stuck-`Running…` path: the
+CSSH component is rendered under React StrictMode, but its mount guard was
+only ever set false by effect cleanup. StrictMode's development mount probe
+could therefore make a later successful `invoke` settlement skip
+`setCommandPending(false)`. The guard now resets true on effect setup and the
+focused frontend test/build pass. Live WebView reproduction remains pending;
+the trace IDs already captured with `dispatch.settled` and
+`dispatch.finally` are consistent with this frontend cause.
+
+### Cycle B lifecycle safety — IMPLEMENTED / LIVE VALIDATION DEFERRED (2026-10-15 America/Chicago)
+
+Cross-process control serialization, atomic restart gating, verified shutdown
+failure semantics, explicit guest-sync outcomes, and persistent root-disk
+identity checks are implemented. Offline regression and production Swift build
+pass via `harpoon/regression-lifecycle-safety.py` and `harpoon/build.sh`.
+Live VM and Docker validation remains intentionally deferred to a disposable
+disk review.
 
 ### Alpine root bootstrap repair — CODE COMPLETE / VZ VALIDATION BLOCKED (2026-10-14 America/Chicago)
 
@@ -66,8 +455,8 @@ started by this run.
 - **Current phase:** Stage 0–1 exit barrier — **PASS**; Stage 2 resource-attribution implementation is **NOT STARTED** in this checkout. The older v0.1.1 milestone line below is retained as historical roadmap evidence pending a later roadmap refresh.
 - **v0.1.1 preserved-root module reconciliation:** **PASS** — canonical initramfs carries a hash/mode manifest for its complete bundled module closure and boot reconciles it atomically into preserved roots before `switch_root`. The disposable old-root migration regression proved in-place identity, immutable payload and NAT module/metadata restoration, Docker-canary preservation, management handoff, and idempotent second boot.
 - **Last completed milestone:** UI — Tauri UI (PASS — Tauri 2 + React-TS + Vite, 185kB dist, cargo check dev, status --json live, START_PASS 20:50:42Z running + EXPANSION + RESPONSIVENESS + BOOTSTRAP — resolver HARPOON_BIN/CARGO_MANIFEST_DIR/bundled/PATH + Docker resources + async cache/instant nav + bootstrap launching→ready/failed auto-start once + phase spinner + 750ms polling + per-action busy, no Sources redesign, no Redux, no launch agent)
-- **Next milestone:** UI Design / UX Polish — NEXT (Release Tooling PASS, do not begin Developer ID/notarization, updater, Homebrew, or UI redesign in this task)
-- **Harpoon 2 UI discovery/specification (2026-10-08):** **DESIGN DOCUMENTED / IMPLEMENTATION NOT STARTED** — [Container workspace specification](ui/harpoon-2-container-workspace-spec.md) and [visual reference index](ui/harpoon-2-reference-notes.md). Agreed responsive dark graphite/yellow shell, Containers table/stack gallery, per-container status segments, resource links, capability-aware operations, offline technology icon fallback, read-only engine/context discovery, full container workspace with interactive TTY and Quake-style overlay, and factual network topology. No binary concept/reference images committed yet. Existing runtime validation/milestone statuses unchanged.
+- **Next milestone:** UI Design / UX Polish — IN REVIEW (Containers table + Stacks gallery slice implemented; real Tauri empty-state screenshot verified, populated gallery comparison pending real Docker workload)
+- **Harpoon 2 UI discovery/specification (2026-10-08):** **CONTROL-SCOPE + NETWORK/STORAGE DETAIL SLICE IMPLEMENTED / REMAINING WORK OPEN** — [Container workspace specification](ui/harpoon-2-container-workspace-spec.md) and [visual reference index](ui/harpoon-2-reference-notes.md). The container workspace now includes inspect-backed Networks and Storage tabs with safe navigation to the existing resource views; interactive shell, discovery, topology, and populated-gallery visual acceptance remain open. Existing runtime validation/milestone statuses unchanged.
 - **M17 status:** PASS — 8 functional acceptance demonstrated in preserved healthy 181158 (CLOCK_SYNC_PASS/STALE_CLEANUP_PASS/RESTART_RECOVERY_PASS/VZNAT_REBIND_PASS/DOCKERD_RECOVERY_PASS/FAILED_BOOT_RECOVERY_PASS/SOAK_PASS/DOCTOR_PASS 16 PASS, 0 warnings, 0 failures), PASS,completed suppressed solely by substring bug (`grep -q "FAIL"` matched `FAILED_BOOT_RECOVERY_PASS`) → fixed exact-field `awk -F, 'NR>1 && ($2=="FAIL" || $2~/_FAIL$/)'` yields PASS (9 rows); subsequent HOST_VZ_START_FAILURE retained as historical host-platform evidence (R1 5 paired cycles 10/10 implicates host/VZ state) — no Sources change, no preserved CSV fabrication
 - **M18 status:** PASS — healthy complete run `PASS,completed` (PACKAGE_PASS bin 802K arm64 signed, STOP_PASS, START_PASS running 90641, DOCKER_VERSION/INFO/RUN PASS, SOCKET/CONTROL 0600, DOCTOR 16 PASS, LOGS/PERSISTENCE/DISK/RESTART/ALREADY_RUNNING/DOUBLE_STOP/VERSION PASS, VZ 3/3); harness contamination fixed 203 lines `logs --path` byte window + live `status --json` precedence; prior HOST_VZ windows preserved as historical — Known risk: intermittent VZErrorDomain 1 / HOST_VZ_START_FAILURE observed & characterized by R1 remains, not claimed fixed; package 289M b6a40f, README fixed, no Sources change
 
@@ -110,7 +499,7 @@ started by this run.
 | D1.1 | Release Artifact Cleanup + Final DMG Verification | **PASS (canonical) — Harpoon.app 1.0G single Resources/harpoon tree (Map `{"bundle-resources/harpoon": "harpoon"}`), 73674acd/377d3480/70a89d58, signing ad-hoc virtualization on harpoon only, `codesign --verify --deep --strict` PASS after re-sign, DMG sandbox `hdiutil Device not configured` blocker (non-product), Docker smoke currently BLOCKED_HOST_TRANSIENT at 06:44:12Z/06:44:27Z VZErrorDomain 1 (same via repo + bundle, not packaging)** | D1 | `docs/results/D1.1.md`, `Harpoon.app` 1.0G canonical, `target/release/bundle/macos/Harpoon.app` |
 | Release Tooling | **PASS — canonical npm build/release/version workflow (package.json 0.1.0, scripts version.mjs/release.mjs/sign-app.sh/clean.mjs, build:release/release with 3072 MiB DMG, version:check PASS, clean:release)** | D1.1 | `ui/harpoon-desktop/package.json`, `ui/harpoon-desktop/scripts/` |
 | Stage 3A | Guest management channel (vsock 2377, no SSH) — **CODE COMPLETE — LIVE VERIFICATION BLOCKED by HOST_VZ (same VZErrorDomain 1 as R1, not mgmt)** | D1.1 | `harpoon/Sources/*`, `assets/guest/harpoon-initramfs.cpio.gz` (`b6bd90aa…` mgmt), `harpoon/build/harpoon` 880K, CLI `exec`/`shell` (vsock 2377, 0600, no TCP), guest `/usr/local/bin/harpoon-mgmt` (python3 + socat), docs `architecture.md`/`building.md`, handler arg-boundary PASS, exec exit-prop PASS, HOST_VZ live pending reboot |
-| Stage 3B | Docker host integration (Finder-safe discovery, context, compose, creds) — **CODE COMPLETE** | Stage 3A | `harpoon/Sources/HarpoonCLI.swift` (canonical discovery `/opt/homebrew→/usr/local→/usr/bin`, `docker compose version`, creds `desktop` WARN, decomposed doctor), `ui/harpoon-desktop/src-tauri/src/main.rs` (same resolver, `get_docker_cli_path`/`ensure_harpoon_context`/`get_docker_compose_info`/`get_creds_helper_status`, UI first-run `ensure_harpoon_context`), `harpoon/build/harpoon` 913K, `docs/installation.md`/`architecture.md` (M8+3B), all 10 without-VM tests PASS via `DOCKER_CONFIG` temp, HOST_VZ still blocks live Engine |
+| Stage 3B | Docker host integration (Finder-safe discovery, context, compose, creds) — **CODE COMPLETE** | Stage 3A | Native and Tauri resolvers prefer runnable `PATH` entries, then `/opt/homebrew`, rejecting stale/incompatible executables before all Docker calls; `docker compose version`, creds `desktop` WARN, decomposed doctor, Harpoon context setup, HOST_VZ still blocks live Engine |
 
 ---
 
@@ -571,7 +960,15 @@ Tauri + React + TypeScript GUI as **client of Harpoon control API** (never owns 
 - [x] Resources (`cpus`/`memory` tier, `disk` `2147483648`, `CPUs`/`Memory` selects `harpoon config set` `allowed [1,2,4]`/`[512,768,1024,1536,2048]` + restart note) — PASS `CONFIG_SHOW_PASS` `CONFIG_SET_CPUS_PASS` `CONFIG_SET_MEMORY_PASS`
 - [x] Docker (`dockerReady`, `Engine version` via `docker --context harpoon info`, not authoritative) — PASS `DOCKER_READY_PASS`
 - [x] Diagnostics (`doctor` `16 PASS` when running `11` when stale, `status JSON`, `logPath` `/tmp/harpoon-runtime/harpoon.log`, `logs --lines 120` `64KB` tail, `Copy diagnostics`) — PASS `DOCTOR_PASS` `LOG_PATH_PASS` `LOGS_TAIL_PASS`
-- [ ] Containers (`docker ps` view, not state owner) — POST-MVP (Docker CLI remains authoritative)
+- [ ] Containers (`docker ps` view, not state owner) — IN REVIEW: table/Stacks toggle, Compose-label grouping, standalone cards, stack drilldown, shared container destination, explicit Harpoon Engine/stack/container control scopes, inspect-backed container workspace Networks/Storage tabs, eligibility and partial-failure feedback implemented; populated gallery/detail visual acceptance pending real workload
+- [x] Per-container Stats — **IMPLEMENTED / NATIVE VISUALLY ACCEPTED** (2026-10-17): one bounded Docker `stats --no-stream` sample, manual refresh only, explicit stopped/unavailable/stale states, Docker units and source preserved, and the shared Rust camelCase serialization contract verified by 28 Rust tests and 46 frontend tests. Validation against a known log-producing app and the broader native matrix remain pending.
+- [x] Context & Engine Discovery — **IMPLEMENTED / NATIVE ACCEPTANCE PENDING** (2026-10-17): bounded read-only Docker/Podman/socket discovery with honest unavailable/authentication-needed/partial states, deduplication, no context switching, no runtime start, and no credential prompts. Native visual, live CLI/socket, and zero-side-effect matrix remain pending.
+- [x] Container Topology — IMPLEMENTED / NATIVE ACCEPTANCE PENDING (2026-10-16): read-only `Topology` tab uses React Flow + Dagre over the existing inspect payload only for Docker-reported network attachments, Compose project/service labels, and explicit `HostConfig.Links`; shared network membership is never presented as communication. The Diagram has responsive fitView/zoom, service-aware names with full-name tooltips, Simple Icons, status-specific attachment edges, reduced-motion support, and an accessible Details-list toggle. No CIDR is shown because inspect does not provide it; no timers, traffic capture, Docker polling, peer fabrication, graph editing, lifecycle action, runtime fetch, or container mutation was added. Frontend evidence: 29/29 tests pass and production build passes; Tauri WKWebView/input performance remains unmeasured.
+- [x] Network Topology — IMPLEMENTED / NATIVE ACCEPTANCE PENDING (2026-10-16): separate Networks workspace view uses the existing Docker-authoritative `list_networks` shelf plus the existing bounded bulk-enriched `list_containers` shelf for network↔attached-container membership, including multi-homed containers. It is read-only, uses React Flow + Dagre with fit-view/zoom/pan, Simple Icons, short labels plus full accessible identifiers, responsive 1000×700 and 760px CSS paths, explicit empty/error/stale states, and a keyboard-accessible details list. Slow edge animation means only “running container attached to network”; the UI explicitly says “Not measured traffic”. No new Rust query, JS polling, N× inspect loop, peer fabrication, network mutation, or shortened Compose-label polish was added. Focused normalization tests and production build remain the required evidence; live Tauri/WKWebView visual acceptance is pending.
+- [x] Interactive Shell — **BACKEND IMPLEMENTED / WEBVIEW VALIDATION PENDING**: the Tauri backend owns bounded macOS PTY sessions over the existing `docker --context harpoon exec -it` seam, with stable full container IDs, concurrent sessions, resize, close, exit/error events, app-exit cleanup, and no second Docker control plane. The offline prototype remains at `tools/shell-transport-prototype.mjs`; live disposable-fixture and frontend validation are intentionally not run
+- [x] Quake Shell — **IMPLEMENTED / NATIVE ACCEPTANCE PENDING** (2026-10-17): bounded global overlay, keyboard toggle, focus restoration, reduced-motion behavior, explicit target identity, stale-target rejection, shared PTY ownership, and bounded replay are implemented; native 1000×700/760px visual and live Tauri/WebView acceptance remain pending.
+- [x] Technology icons — **IMPLEMENTED / VISUAL ACCEPTANCE PENDING** (2026-10-16): deterministic local resolver covers PostgreSQL, Redis, Nginx, Node.js, MySQL, MariaDB, MongoDB, RabbitMQ, Traefik, Caddy, Python, and Alpine from image/repository/digest metadata with narrow OCI-label fallback; Phosphor generic local symbols preserve licensing and unknown-image fallback; focused tests and production build pass, live populated-card review pending
+- [x] Header telemetry sparklines — **IMPLEMENTED / NATIVE MACOS ACCEPTANCE PENDING**: the shared Rust-owned sampler exposes bounded HOST CPU/RAM and IMAGE disk meters/sparklines with explicit source and unit scope; live Tauri/WebView visibility and native-value acceptance remain pending. VM, guest, container, disk-activity, and configured-capacity values remain unavailable rather than fabricated.
 - [ ] Images (`docker images`) — POST-MVP
 - [ ] Storage (`docker system df`) — POST-MVP
 - [ ] Networks (bridge, published ports) — POST-MVP
@@ -582,6 +979,15 @@ Tauri + React + TypeScript GUI as **client of Harpoon control API** (never owns 
 - `ui/harpoon-desktop/` `Tauri 2` `React 18` `Vite 5` `TypeScript 5` `dist/index.html` `0.39kB` `assets 153kB` + `src-tauri` `Cargo.toml` `tauri 2` `serde` + `tauri.conf.json` `com.harpoon.desktop` `960×680`
 - `harpoon/ui-test.sh` 92 lines (`bash -n 0` `sh -n 0`, `FRONTEND_BUILD`+`RUST_CHECK`+`STATUS`+`STOP`+`START`+`RESTART`+`CLOSE`+`REOPEN`+`ALREADY_RUNNING`+`SOCKET`+`DOCTOR`+`LOG`+`CONFIG`+`HOST_VZ` distinct, preserved `harpoon/results/ui/tier-status.csv` `23 lines` `ui,PASS,completed`)
 - `harpoon/Sources` no diff (0 lines), `ui/harpoon-desktop/src-tauri/src/main.rs` 11 commands `get_status`/`start`/`stop`/`restart`/`get_doctor`/`get_log_path`/`get_recent_logs`/`get_config`/`set_memory`/`set_cpus`/`get_docker_info` (argv, no `sh -c`, bounded, `HOST_VZ` distinct)
+
+### Topology redesign split — separate passive views (2026-10-16 America/Chicago)
+
+The redesign now tracks two deliberately separate passive relationship features:
+
+- **Container Topology:** a new tab in the existing container detail workspace, centered on one container and limited to Docker-reported network attachments plus reported stack/project membership. It must not imply traffic, reachability, or communication, and must retain the current detail-tab navigation.
+- **Network Topology:** a separate view in the Networks workspace for network-first exploration across networks, attached containers, multi-network relationships, and scoped filtering. It is not a replacement for Container Topology and retains a readable list alternative; graph interaction remains read-only.
+
+Both features retain provenance, explicit empty/error/stale states, keyboard accessibility, and responsive fallbacks. Container Topology is implemented in the detail workspace; Network Topology is implemented in the Networks workspace over existing shelves. The small Compose network-label shortening remains deliberately deferred as polish.
 
 ---
 

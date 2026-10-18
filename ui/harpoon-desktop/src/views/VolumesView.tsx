@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MagnifyingGlass, Trash } from "@phosphor-icons/react";
+import { Database, MagnifyingGlass, Trash } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
 
 export const VolumesView = memo(function VolumesView({
@@ -17,8 +17,10 @@ export const VolumesView = memo(function VolumesView({
 }) {
   const [detail,setDetail]=useState<string>("");
   const [confirmVolume,setConfirmVolume]=useState<any>(null);
+  const [query,setQuery]=useState("");
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(()=>{ if(confirmVolume) cancelRef.current?.focus(); }, [confirmVolume]);
+  const visibleVolumes = volumes.filter((v:any)=>`${v.Name || ""} ${v.Driver || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   if (error && !hasCache) return <div className="panel" style={{ padding: 12, background: "var(--error-bg)", borderColor: "#7F1D1D", color: "var(--error-fg)" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>;
   if (!hasCache && refreshing) {
@@ -40,14 +42,19 @@ export const VolumesView = memo(function VolumesView({
         <span className="text-panel-title">Volumes ({volumes.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
         <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
       </div>
+      <div className="resource-toolbar">
+        <label className="resource-search"><MagnifyingGlass size={15} aria-hidden="true" /><span className="sr-only">Search volumes</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search volumes…" /></label>
+        <span className="resource-note"><Database size={14} aria-hidden="true" /> Named volumes from Docker Engine · bind mounts are not volumes</span>
+      </div>
       {error && hasCache && <div style={{ padding: "8px 12px", background: "var(--error-bg)", color: "var(--error-fg)", fontSize: 12, borderBottom: "1px solid #7F1D1D" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>}
       <div style={{ overflowX: "auto" }}>
         <table>
-          <thead className="table-head"><tr><th scope="col" className="col-vol-name">Name</th><th scope="col" className="col-vol-driver">Driver</th><th scope="col" className="col-vol-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
-          <tbody>{volumes.map((v:any)=>(
+          <thead className="table-head"><tr><th scope="col" className="col-vol-name">Name</th><th scope="col" className="col-vol-driver">Driver</th><th scope="col" className="col-vol-used">Used by</th><th scope="col" className="col-vol-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
+          <tbody>{visibleVolumes.map((v:any)=>(
             <tr key={v.Name} className="table-row">
-              <td className="col-vol-name" title={v.Name} aria-label={v.Name}><span className="cell-inner">{v.Name}</span></td>
+              <td className="col-vol-name" title={v.Name} aria-label={v.Name}><span className="resource-name"><Database size={16} aria-hidden="true" /><span className="cell-inner">{v.Name}</span></span></td>
               <td className="col-vol-driver" title={v.Driver} aria-label={v.Driver}><span className="cell-inner">{v.Driver}</span></td>
+              <td className="col-vol-used" title={v.UsedBy?.join(", ") || "No attached containers reported"}><span className="cell-inner">{v.UsedBy?.length ? v.UsedBy.join(", ") : "—"}</span></td>
               <td className="col-vol-actions"><div className="table-actions">
                 <button onClick={async ()=>{ const j=await invoke<any>("inspect_volume", { name: v.Name }); setDetail(JSON.stringify(j,null,2)); }} className="btn btn--icon btn--secondary" aria-label={`Inspect volume ${v.Name}`} data-tooltip="Inspect" title={`Inspect ${v.Name}`}><MagnifyingGlass size={16} weight="regular" /></button>
                 <button disabled={actionInProgress===`rmvol-${v.Name}`} onClick={()=>setConfirmVolume(v)} className="btn btn--icon btn--destructive" aria-label={`Remove volume ${v.Name}`} data-tooltip="Remove" title={`Remove ${v.Name}`}><Trash size={16} weight="regular" /></button>
@@ -55,6 +62,7 @@ export const VolumesView = memo(function VolumesView({
             </tr>
           ))}</tbody>
         </table>
+        {!visibleVolumes.length && <div className="resource-no-results">No volumes match “{query}”.</div>}
       </div>
       {confirmVolume && (
         <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmVolume(null)}>

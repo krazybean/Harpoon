@@ -1,0 +1,1 @@
+[{"id":"docker-cli","name":"Docker CLI","engine":"docker","endpoint":null,"source":"executable probe","state":"unavailable","current":false,"harpoon":false,"detail":"Docker CLI not installed/found","capabilities":{"inspect":"unknown","containers":"unknown","images":"unknown","volumes":"unknown","networks":"unknown","mutations":"unsupported"}}]

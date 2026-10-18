@@ -2,7 +2,27 @@ import Foundation
 import Virtualization
 import Darwin
 
-func handleStart(args: [String]) -> Int32 {
+enum GuestSyncOutcome {
+    case completed
+    case unavailable(String)
+    case failed(Int32)
+    case alreadyStopping
+}
+
+func syncGuestFilesystem() -> GuestSyncOutcome {
+    if let log = try? String(contentsOf: HarpoonPaths.logFile, encoding: .utf8),
+       log.contains("SHUTDOWN_INITIATED") { return .alreadyStopping }
+    guard isMgmtServiceReachable() else { return .unavailable("guest management service unavailable") }
+    let result = mgmtExec(argv: ["sync"])
+    return result == 0 ? .completed : .failed(result)
+}
+
+func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> Int32 {
+    let ownedLock = controlLock ?? LifecycleControlLock()
+    guard ownedLock != nil else {
+        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        return 11
+    }
     // duplicate check via lock probe
     if isLockHeld() {
         cliError("HARPOON_ALREADY_RUNNING")
@@ -88,6 +108,11 @@ func handleStart(args: [String]) -> Int32 {
     }
 
     let cfg = resolveConfigFromArgs(args)
+    guard FileManager.default.fileExists(atPath: cfg.diskURL.path),
+          diskIdentity(at: cfg.diskURL.path) != nil else {
+        cliError("persistent Docker root disk missing or identity invalid: \(cfg.diskURL.path)")
+        return 1
+    }
     // parse passthrough for child
     let parsed = parseResourceArgs(args)
     let passthrough = parsed.passthrough
@@ -151,7 +176,8 @@ func handleStart(args: [String]) -> Int32 {
     // write metadata immediately (so status can find it)
     let uuid = UUID().uuidString
     let iso = ISO8601DateFormatter().string(from: Date())
-    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path)
+    let resolvedDiskPath = cfg.diskURL.standardized.resolvingSymlinksInPath().path
+    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil)
     if let data = try? JSONEncoder().encode(meta) {
         try? data.write(to: HarpoonPaths.jsonFile)
     }
@@ -178,7 +204,7 @@ func handleStart(args: [String]) -> Int32 {
                 }
                 // cleanup stale files (no socket, no lock should remain; pid/json removed)
                 try? FileManager.default.removeItem(at: HarpoonPaths.pidFile)
-                try? FileManager.default.removeItem(at: HarpoonPaths.jsonFile)
+                if readMetadata()?.failure == nil { try? FileManager.default.removeItem(at: HarpoonPaths.jsonFile) }
                 // ensure sockets not leaked (they shouldn't exist since start failed pre-bridges) but check
                 try? fh.close()
                 return Int32(status != 0 ? status : 1)
@@ -266,7 +292,12 @@ func handleStart(args: [String]) -> Int32 {
     }
 }
 
-func handleStop() -> Int32 {
+func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
+    let ownedLock = controlLock ?? LifecycleControlLock()
+    guard ownedLock != nil else {
+        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        return 11
+    }
     guard let pid = readPIDFile() else {
         if isLockHeld() || FileManager.default.fileExists(atPath: HarpoonPaths.dockerSocketPath) {
             cliError("no runtime.pid but Harpoon appears running (lock/socket present)")
@@ -289,11 +320,19 @@ func handleStop() -> Int32 {
         // leave lock/socket check to status
         return 1
     }
-    let syncResult = mgmtExec(argv: ["sync"])
-    if syncResult == 0 {
+    if let metadata = readMetadata(), !sameDiskIdentity(metadata) {
+        cliError("persistent Docker root disk identity missing or changed; refusing shutdown")
+        return 1
+    }
+    switch syncGuestFilesystem() {
+    case .completed:
         cliPrint("Guest filesystem synced")
-    } else {
-        cliError("warning: guest filesystem sync failed (exit \(syncResult)); continuing shutdown")
+    case .unavailable(let reason):
+        cliError("Guest filesystem sync unavailable (\(reason)); continuing shutdown")
+    case .failed(let code):
+        cliError("Guest filesystem sync failed (exit \(code)); continuing shutdown")
+    case .alreadyStopping:
+        cliPrint("Guest filesystem sync skipped: already stopping")
     }
     cliPrint("Stopping Harpoon (PID \(pid))...")
     // Try SIGTERM (production path)
@@ -326,6 +365,10 @@ func handleStop() -> Int32 {
 }
 
 func handleRestart(args: [String]) -> Int32 {
+    guard let controlLock = LifecycleControlLock() else {
+        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        return 11
+    }
     var startArgs = args
     if startArgs.isEmpty {
         // preserve config: use user config or last metadata, but do not require metadata
@@ -342,10 +385,11 @@ func handleRestart(args: [String]) -> Int32 {
             startArgs = []
         }
     }
-    let stopCode = handleStop()
-    // if stop found no runtime, it's okay to proceed
-    // small delay to let lock release
+    let stopCode = handleStop(controlLock: controlLock)
+    if stopCode != 0 {
+        cliError("restart aborted: Harpoon was not stopped cleanly")
+        return stopCode
+    }
     Thread.sleep(forTimeInterval: 0.5)
-    let startCode = handleStart(args: startArgs)
-    return startCode != 0 ? startCode : stopCode
+    return handleStart(args: startArgs, controlLock: controlLock)
 }

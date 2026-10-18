@@ -16,8 +16,9 @@ fn main() {
   let kernel = repo_root.join("assets/guest/Image-virt");
   let initramfs = repo_root.join("assets/guest/harpoon-initramfs.cpio.gz");
   let rootimg = repo_root.join("assets/guest/harpoon-root.img");
+  let asset_manifest = repo_root.join("assets/guest/guest-assets.manifest");
 
-  for asset in [&harpoon_bin, &kernel, &initramfs, &rootimg] {
+  for asset in [&harpoon_bin, &kernel, &initramfs, &rootimg, &asset_manifest] {
     println!("cargo:rerun-if-changed={}", asset.display());
   }
 
@@ -34,7 +35,7 @@ fn main() {
       .status();
   }
 
-  let required_assets = [&harpoon_bin, &kernel, &initramfs, &rootimg];
+  let required_assets = [&harpoon_bin, &kernel, &initramfs, &rootimg, &asset_manifest];
   let missing_assets: Vec<_> = required_assets
     .iter()
     .filter(|asset| !asset.exists())
@@ -49,6 +50,8 @@ fn main() {
       .expect("failed to stage guest kernel");
     std::fs::copy(&initramfs, lib_dir.join("harpoon-initramfs.cpio.gz"))
       .expect("failed to stage guest initramfs");
+    std::fs::copy(&asset_manifest, lib_dir.join("guest-assets.manifest"))
+      .expect("failed to stage guest asset manifest");
 
     // Clone-aware for sparse root: try cp -c, then ditto, then ordinary copy.
     let dest = lib_dir.join("harpoon-root.img");

@@ -1,9 +1,14 @@
 import { memo, useEffect, useRef, useState, Fragment } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Play, Stop, ArrowClockwise, TerminalWindow, MagnifyingGlass, Trash, CaretDown, CaretRight, StackSimple } from "@phosphor-icons/react";
+import { Play, Stop, ArrowClockwise, TerminalWindow, MagnifyingGlass, Trash, CaretDown, CaretRight, CaretLeft, StackSimple, SquaresFour, Table, DotsThree, Cube, ShareNetwork, Database, FolderSimple } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
 import { deletePrompt, resourceId, runSequential } from "../lib/resourceBatch";
 import { useResourceSelection } from "../hooks/useResourceSelection";
+import { actionSummary, containerLifecycleState } from "../lib/controlScope";
+import { CsshWorkspace } from "./CsshWorkspace";
+import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
+import { inferContainerTechnology } from "../lib/containerTechnology.js";
 
 export const ContainersView = memo(function ContainersView({
   containers,
@@ -15,6 +20,7 @@ export const ContainersView = memo(function ContainersView({
   actionInProgress,
   doAction,
   refresh,
+  onOpenContainer,
 }: {
   containers: any[];
   refreshing: boolean;
@@ -25,19 +31,39 @@ export const ContainersView = memo(function ContainersView({
   actionInProgress: string | null;
   doAction: (name: string, fn: () => Promise<any>) => Promise<void>;
   refresh: () => Promise<any>;
+  onOpenContainer: (containerId: string) => void;
 }) {
   const [detail, setDetail] = useState<string>("");
   const [confirmContainer, setConfirmContainer] = useState<any>(null);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ ids: string[]; title: string; names: string[] } | null>(null);
   const [batchResult, setBatchResult] = useState<{ message: string; failed: number } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(()=> new Set<string>());
+  const [view, setView] = useState<"table" | "stacks">("stacks");
+  const [selectedStack, setSelectedStack] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [openContainerMenu, setOpenContainerMenu] = useState<string | null>(null);
+  const galleryRef = useRef<HTMLDivElement>(null);
+  const galleryScrollTop = useRef(0);
+  const stackCardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const containerMenuTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const firstTileRef = useRef<HTMLButtonElement>(null);
+  const transitionTimer = useRef<number | null>(null);
+  const [stackTransition, setStackTransition] = useState<"idle" | "opening" | "closing">("idle");
   const cancelRef = useRef<HTMLButtonElement>(null);
   const selection = useResourceSelection(containers);
   useEffect(()=>{ if(confirmContainer || confirmBulkDelete) cancelRef.current?.focus(); }, [confirmContainer, confirmBulkDelete]);
   const isRunning = status?.state==="running";
   const hasRows = containers.length>0;
   const selectedContainers = containers.filter((c)=>selection.selected.has(resourceId(c)));
+  const confirmLifecycle = (verb: string, names: string[], scope: string) => verb === "start" || window.confirm(`${verb === "stop" ? "Stop" : "Restart"} ${scope}? This affects ${names.length} container${names.length === 1 ? "" : "s"}: ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}.`);
+  const runContainerAction = (container: any, verb: "start" | "stop" | "restart") => {
+    const id = resourceId(container);
+    const name = container.Names || container.Name || id;
+    if (!confirmLifecycle(verb, [name], `container ${name}`)) return;
+    doAction(`${verb}-${id}`, () => invoke(`${verb}_container`, { id }));
+  };
   const runBatch = (command: string, verb: string, ids = [...selection.selected]) => {
+    if (verb !== "started" && !confirmLifecycle(verb === "stopped" ? "stop" : "restart", selectedContainers.map((c)=>c.Names || c.Name || resourceId(c)), `${ids.length} selected containers`)) return;
     doAction("batch-containers", async ()=>{
       const result = await runSequential(ids, (id)=>invoke(command, { id }));
       selection.remove(result.succeeded);
@@ -95,8 +121,9 @@ export const ContainersView = memo(function ContainersView({
     if(v.includes("dead")||v.includes("error")) return "badge badge--error badge--sm";
     return "badge badge--info badge--sm";
   };
+  const stateKind = containerLifecycleState;
 
-  // Compose grouping derived every render (presentation-only, no persisted state)
+  // Compose grouping keeps stack metadata and summaries in one place.
   const getComposeProject = (c:any): string | null => {
     const v = c.ComposeProject;
     if (typeof v === "string" && v.trim() !== "") return v.trim();
@@ -119,28 +146,176 @@ export const ContainersView = memo(function ContainersView({
     if (next.has(project)) next.delete(project); else next.add(project);
     return next;
   });
+  const stackAction = (project: string, command: string, verb: string, stack: any[]) => {
+    setOpenMenu(null);
+    const summary = actionSummary(command, stack);
+    if (!summary.eligibleCount) {
+      setBatchResult({ message: `No eligible containers for ${verb} in ${project} (0/${summary.total} targeted).`, failed: 0 });
+      return;
+    }
+    if (verb !== "started" && !confirmLifecycle(verb === "stopped" ? "stop" : "restart", summary.eligible.map((c) => c.Names || c.Name || resourceId(c)), `${project} stack (${summary.eligibleCount} eligible containers)`)) return;
+    doAction(`stack-${command}-${project}`, async () => {
+      const result = await runSequential(summary.eligible.map(resourceId), (id) => invoke(command, { id }));
+      const skipped = summary.skippedCount ? ` ${summary.skippedCount} skipped as ineligible.` : "";
+      setBatchResult({ message: result.failed.length ? `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}; ${result.failed.length} failed.${skipped}` : `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}.${skipped}`, failed: result.failed.length });
+    });
+  };
+  const runContainerMenuAction = (container: any, verb: "start" | "stop" | "restart") => {
+    const id = resourceId(container);
+    const name = container.Names || container.Name || id;
+    setOpenContainerMenu(null);
+    if (verb !== "start" && !confirmLifecycle(verb, [name], `container ${name}`)) return;
+    doAction(`${verb}-${id}`, () => invoke(`${verb}_container`, { id }));
+  };
+  const reducedMotion = () => typeof window === "undefined" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  const focusWithoutScroll = (target: HTMLElement | null) => target?.focus({ preventScroll: true });
+  const selectStack = (project: string) => {
+    galleryScrollTop.current = galleryRef.current?.scrollTop ?? 0;
+    setOpenMenu(null);
+    setOpenContainerMenu(null);
+    if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    setStackTransition("opening");
+    setSelectedStack(project);
+    if (reducedMotion()) {
+      requestAnimationFrame(() => focusWithoutScroll(firstTileRef.current));
+      return;
+    }
+    transitionTimer.current = window.setTimeout(() => {
+      focusWithoutScroll(firstTileRef.current);
+      setStackTransition("idle");
+    }, 440);
+  };
+  const returnToGallery = () => {
+    if (!selectedStack) return;
+    if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    setOpenContainerMenu(null);
+    const card = stackCardRefs.current[selectedStack];
+    if (reducedMotion()) {
+      setSelectedStack(null);
+      requestAnimationFrame(() => focusWithoutScroll(card));
+      return;
+    }
+    setStackTransition("closing");
+    transitionTimer.current = window.setTimeout(() => {
+      setSelectedStack(null);
+      setStackTransition("idle");
+      requestAnimationFrame(() => focusWithoutScroll(card));
+    }, 440);
+  };
+  useEffect(() => () => { if (transitionTimer.current) window.clearTimeout(transitionTimer.current); }, []);
+  useEffect(() => {
+    if (!selectedStack) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); returnToGallery(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [selectedStack]);
+  useEffect(() => {
+    if (!openContainerMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".container-tile__actions")) setOpenContainerMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const trigger = containerMenuTriggerRefs.current[openContainerMenu];
+      setOpenContainerMenu(null);
+      requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(".container-tile__menu-popover [role=menuitem]:not(:disabled)")?.focus());
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openContainerMenu]);
+  useEffect(() => {
+    if (!selectedStack) requestAnimationFrame(() => { if (galleryRef.current) galleryRef.current.scrollTop = galleryScrollTop.current; });
+  }, [selectedStack]);
 
   const renderRow = (c:any) => (
     <tr key={c.ID||c.Id} className="table-row">
       <td className="col-select"><input type="checkbox" checked={selection.selected.has(resourceId(c))} onChange={()=>selection.toggle(resourceId(c))} aria-label={`Select container ${c.Names||c.Name}`} /></td>
-      <td className="col-name" title={c.Names||c.Name} aria-label={c.Names||c.Name}><span className="cell-inner">{c.Names||c.Name}</span></td>
+      <td className="col-name" title={c.Names||c.Name} aria-label={c.Names||c.Name}><button onClick={()=>onOpenContainer(c.ID||c.Id)} className="btn btn--ghost btn--sm cell-inner" style={{ padding: 0, maxWidth: "100%", textAlign: "left" }}>{c.Names||c.Name}</button></td>
       <td className="mono col-id" title={c.ID||c.Id} aria-label={c.ID||c.Id}><span className="cell-inner">{(c.ID||c.Id||"").slice(0,12)}</span></td>
       <td className="col-image" title={c.Image} aria-label={c.Image}><span className="cell-inner">{c.Image}</span></td>
       <td className="col-state"><span className={stateCls(c.State||c.Status)}>{c.State||c.Status}</span></td>
       <td className="col-ports text-meta" title={c.Ports||""} aria-label={c.Ports||""}><span className="cell-inner">{c.Ports||"—"}</span></td>
       <td className="col-actions"><div className="table-actions">
-        <button disabled={actionInProgress===`start-${c.ID||c.Id}`} onClick={()=>doAction(`start-${c.ID||c.Id}`, ()=>invoke("start_container", { id: c.ID||c.Id }))} className="btn btn--icon btn--secondary" aria-label={`Start container ${c.Names||c.Name}`} data-tooltip="Start" title={`Start ${c.Names||c.Name}`}><Play size={16} weight="regular" /></button>
-        <button disabled={actionInProgress===`stop-${c.ID||c.Id}`} onClick={()=>doAction(`stop-${c.ID||c.Id}`, ()=>invoke("stop_container", { id: c.ID||c.Id }))} className="btn btn--icon btn--secondary" aria-label={`Stop container ${c.Names||c.Name}`} data-tooltip="Stop" title={`Stop ${c.Names||c.Name}`}><Stop size={16} weight="regular" /></button>
-        <button disabled={actionInProgress===`restart-${c.ID||c.Id}`} onClick={()=>doAction(`restart-${c.ID||c.Id}`, ()=>invoke("restart_container", { id: c.ID||c.Id }))} className="btn btn--icon btn--secondary" aria-label={`Restart container ${c.Names||c.Name}`} data-tooltip="Restart" title={`Restart ${c.Names||c.Name}`}><ArrowClockwise size={16} weight="regular" /></button>
+        <button disabled={actionInProgress===`start-${c.ID||c.Id}`} onClick={()=>runContainerAction(c, "start")} className="btn btn--icon btn--secondary" aria-label={`Start container ${c.Names||c.Name}`} data-tooltip="Start" title={`Start ${c.Names||c.Name}`}><Play size={16} weight="regular" /></button>
+        <button disabled={actionInProgress===`stop-${c.ID||c.Id}`} onClick={()=>runContainerAction(c, "stop")} className="btn btn--icon btn--secondary" aria-label={`Stop container ${c.Names||c.Name}`} data-tooltip="Stop" title={`Stop ${c.Names||c.Name}`}><Stop size={16} weight="regular" /></button>
+        <button disabled={actionInProgress===`restart-${c.ID||c.Id}`} onClick={()=>runContainerAction(c, "restart")} className="btn btn--icon btn--secondary" aria-label={`Restart container ${c.Names||c.Name}`} data-tooltip="Restart" title={`Restart ${c.Names||c.Name}`}><ArrowClockwise size={16} weight="regular" /></button>
         <button onClick={async ()=>{ const l=await invoke<string>("logs_container", { id: c.ID||c.Id, tail:100 }); setDetail(`logs for ${c.Names||c.Name}:\n`+l); }} className="btn btn--icon btn--secondary" aria-label={`View logs for ${c.Names||c.Name}`} data-tooltip="Logs" title={`Logs ${c.Names||c.Name}`}><TerminalWindow size={16} weight="regular" /></button>
-        <button onClick={async ()=>{ const j=await invoke<any>("inspect_container", { id: c.ID||c.Id }); setDetail(JSON.stringify(j,null,2)); }} className="btn btn--icon btn--secondary" aria-label={`Inspect container ${c.Names||c.Name}`} data-tooltip="Inspect" title={`Inspect ${c.Names||c.Name}`}><MagnifyingGlass size={16} weight="regular" /></button>
+        <button onClick={()=>onOpenContainer(c.ID||c.Id)} className="btn btn--icon btn--secondary" aria-label={`Inspect container ${c.Names||c.Name}`} data-tooltip="Inspect" title={`Inspect ${c.Names||c.Name}`}><MagnifyingGlass size={16} weight="regular" /></button>
         <button disabled={actionInProgress===`rm-${c.ID||c.Id}`} onClick={()=>setConfirmContainer(c)} className="btn btn--icon btn--destructive" aria-label={`Remove container ${c.Names||c.Name}`} data-tooltip="Remove" title={`Remove ${c.Names||c.Name}`}><Trash size={16} weight="regular" /></button>
       </div></td>
     </tr>
   );
 
+  const stackCards = groups.map((group) => ({
+    ...group,
+    running: group.containers.filter((c) => stateKind(c) === "running").length,
+    warning: group.containers.filter((c) => stateKind(c) === "warning").length,
+    networks: [...new Set(group.containers.flatMap((c) => Array.isArray(c.NetworkNames) ? c.NetworkNames : []))],
+    volumes: [...new Set(group.containers.flatMap((c) => Array.isArray(c.NamedVolumes) ? c.NamedVolumes.map((v:any) => v.name).filter(Boolean) : []))],
+  }));
+  const activeStack = selectedStack ? stackCards.find((stack) => stack.project === selectedStack) : null;
+
   return (
-    <div className="table-wrap" aria-busy={refreshing ? "true" : undefined}>
+    <div className="containers-view" aria-busy={refreshing ? "true" : undefined}>
+      <div className="containers-toolbar">
+        <div>
+          <div className="overview-eyebrow">Containers</div>
+          <h1 className="containers-title">{activeStack ? activeStack.project : view === "stacks" ? "Stacks" : "Table"}</h1>
+          <div className="text-meta">{activeStack ? "Compose project · Docker metadata" : "Docker containers from the active Harpoon context."}</div>
+        </div>
+        <div className="containers-toolbar__actions">
+          {activeStack && <button className="btn btn--secondary" onClick={returnToGallery}><CaretLeft size={15} aria-hidden="true" /> Back to stacks</button>}
+          <button onClick={refresh} disabled={refreshing} className="btn btn--secondary"><ArrowClockwise size={15} aria-hidden="true" /> Refresh</button>
+        </div>
+      </div>
+      <div className="containers-view__content">
+        {!activeStack && <div className="containers-view-switch" role="tablist" aria-label="Container view">
+          <button role="tab" aria-selected={view === "table"} className={view === "table" ? "containers-view-switch__item is-active" : "containers-view-switch__item"} onClick={() => setView("table")}><Table size={15} aria-hidden="true" /> Table</button>
+          <button role="tab" aria-selected={view === "stacks"} className={view === "stacks" ? "containers-view-switch__item is-active" : "containers-view-switch__item"} onClick={() => setView("stacks")}><SquaresFour size={15} aria-hidden="true" /> Stacks</button>
+          <span className="containers-view-switch__note">Compose groups use engine metadata · no inferred stacks</span>
+        </div>}
+        {view === "stacks" ? (
+        <div ref={galleryRef} className={`stack-gallery stack-gallery--${stackTransition}`} tabIndex={-1} onScroll={() => { galleryScrollTop.current = galleryRef.current?.scrollTop ?? 0; }}>
+          <div className="stack-gallery__grid">
+            {stackCards.map((group) => { const isOpen = selectedStack === group.project; return <article key={group.project} className={`stack-card${isOpen ? " is-open" : ""}`}>
+              <button className="stack-card__menu" aria-label={`Actions for ${group.project}`} aria-expanded={openMenu === group.project} onClick={(event) => { event.stopPropagation(); setOpenMenu(openMenu === group.project ? null : group.project); }}><DotsThree size={18} aria-hidden="true" /></button>
+              {openMenu === group.project && <div className="stack-card__menu-popover" role="menu" aria-label={`${group.project} per-container actions`} onClick={(event) => event.stopPropagation()}>
+                <span className="stack-card__menu-note">Docker context: harpoon · Compose lifecycle unavailable. Actions target individual containers only.</span>
+                <button role="menuitem" disabled={actionSummary("start_container", group.containers).eligibleCount === 0} onClick={() => stackAction(group.project, "start_container", "started", group.containers)}><Play size={14} aria-hidden="true" /> Start {actionSummary("start_container", group.containers).eligibleCount} eligible</button>
+                <button role="menuitem" disabled={actionSummary("stop_container", group.containers).eligibleCount === 0} onClick={() => stackAction(group.project, "stop_container", "stopped", group.containers)}><Stop size={14} aria-hidden="true" /> Stop {actionSummary("stop_container", group.containers).eligibleCount} running</button>
+                <button role="menuitem" disabled={actionSummary("restart_container", group.containers).eligibleCount === 0} onClick={() => stackAction(group.project, "restart_container", "restarted", group.containers)}><ArrowClockwise size={14} aria-hidden="true" /> Restart {actionSummary("restart_container", group.containers).eligibleCount} running</button>
+              </div>}
+              <button ref={(node) => { stackCardRefs.current[group.project] = node; }} className="stack-card__body" aria-expanded={isOpen} aria-controls={`stack-workspace-${group.project}`} onClick={() => isOpen ? undefined : selectStack(group.project)}>
+                <span className="stack-card__heading"><span className="stack-card__icon"><StackSimple size={18} aria-hidden="true" /></span><span><strong>{group.project}</strong><span className="text-meta">Compose project · {group.containers.length} containers</span></span></span>
+                <span className="stack-card__summary"><span className="badge badge--running">{group.running} running</span>{group.warning > 0 && <span className="badge badge--warning">{group.warning} restarting</span>}</span>
+                <span className="stack-status-strip" aria-label={`${group.project}: ${group.containers.map((c) => `${c.Names || c.Name || resourceId(c)} ${stateKind(c)}`).join(", ")}`}>{group.containers.map((c) => <span key={resourceId(c)} data-state={stateKind(c)} title={`${c.Names || c.Name || resourceId(c)} · ${c.State || c.Status || "unknown"}`} />)}</span>
+                <span className="stack-services">{group.containers.map((c) => <span key={resourceId(c)}><i data-state={stateKind(c)} />{c.ComposeService || c.Names || c.Name || resourceId(c)}</span>)}</span>
+                <span className="stack-resources">{group.networks.map((network) => <span key={`network-${network}`}><ShareNetwork size={12} aria-hidden="true" />{network}</span>)}{group.volumes.map((volume) => <span key={`volume-${volume}`}><Database size={12} aria-hidden="true" />{volume}</span>)}{group.containers.some((c) => (c.BindMounts || []).length > 0) && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={12} aria-hidden="true" />bind mounts</span>}</span>
+              </button>
+              {isOpen && <div id={`stack-workspace-${group.project}`} className="stack-workspace" aria-label={`${group.project} containers`}>
+                <div className="stack-workspace__header"><div><div className="overview-eyebrow">Compose stack · main workspace</div><h2>{group.project}</h2><p>{group.containers.length} containers · Docker engine metadata</p></div><button className="btn btn--secondary" onClick={returnToGallery}>Back to stacks <span aria-hidden="true">×</span></button></div>
+                {(group.networks.length > 0 || group.volumes.length > 0) && <div className="stack-resource-row">{group.networks.map((network) => <span className="resource-chip" key={`network-${network}`}><ShareNetwork size={13} aria-hidden="true" />{network}</span>)}{group.volumes.map((volume) => <span className="resource-chip" key={`volume-${volume}`}><Database size={13} aria-hidden="true" />{volume}</span>)}</div>}
+                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}</div>}</div></article>; })}</div>
+                <CsshWorkspace project={group.project} containers={group.containers} />
+              </div>}
+            </article>; })}
+            {standalone.map((c) => { const id = resourceId(c); const name = c.Names || c.Name || id; return <article key={id} className="stack-card stack-card--standalone">
+              <button className="stack-card__menu" aria-label={`Actions for ${name}`} aria-expanded={openMenu === id} onClick={(event) => { event.stopPropagation(); setOpenMenu(openMenu === id ? null : id); }}><DotsThree size={18} aria-hidden="true" /></button>
+              {openMenu === id && <div className="stack-card__menu-popover" role="menu" aria-label={`${name} actions`} onClick={(event) => event.stopPropagation()}><span className="stack-card__menu-note">Docker context: harpoon · container scope</span><button role="menuitem" disabled={stateKind(c) === "running"} onClick={() => stackAction(name, "start_container", "started", [c])}><Play size={14} aria-hidden="true" /> Start</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "stop_container", "stopped", [c])}><Stop size={14} aria-hidden="true" /> Stop</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "restart_container", "restarted", [c])}><ArrowClockwise size={14} aria-hidden="true" /> Restart</button></div>}
+              <button className="stack-card__body" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="stack-card__heading"><span className="stack-card__icon"><span className="container-technology-icon" role="img" aria-label={`${inferContainerTechnology(c).label} image`} title={`${inferContainerTechnology(c).label} image`}><ContainerTechnologyIcon technology={inferContainerTechnology(c)} size={18} /></span></span><span><strong>{name}</strong><span className="text-meta">Standalone container · {c.Image || "Image unavailable"}</span></span></span><span className="stack-card__summary"><span className="badge badge--info">{stateKind(c)}</span></span><span className="stack-services"><span><i data-state={stateKind(c)} />{c.Ports || "No published ports"}</span></span></button>
+            </article>; })}
+          </div>
+        </div>
+        ) : (
+      <div className="table-wrap" aria-busy={refreshing ? "true" : undefined}>
       <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span className="text-panel-title">Containers ({containers.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
         <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
@@ -204,6 +379,10 @@ export const ContainersView = memo(function ContainersView({
         </div>
       )}
       {detail && <pre className="text-code" style={{ margin: 12, background: "var(--panel-header)", color: "var(--text-primary)", padding: 10, borderRadius: 8, maxHeight: 300, overflow: "auto", border: "1px solid var(--border)" }}>{detail}<button onClick={()=>setDetail("")} className="btn btn--ghost btn--sm" style={{ float: "right" }}>Close</button></pre>}
+      </div>
+        )}
+        {batchResult && (view !== "table" || activeStack) && <div className="containers-action-status" role="status" aria-live="polite">{batchResult.message}</div>}
+      </div>
     </div>
   );
 });

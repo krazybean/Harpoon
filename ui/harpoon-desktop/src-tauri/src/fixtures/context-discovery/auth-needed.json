@@ -1,0 +1,1 @@
+[{"id":"desktop","name":"desktop","engine":"docker","endpoint":"unix:///var/run/docker.sock","source":"docker context","state":"authentication_needed","current":true,"harpoon":false,"detail":"unauthorized: authentication required","capabilities":{"inspect":"unknown","containers":"unknown","images":"unknown","volumes":"unknown","networks":"unknown","mutations":"unsupported"}}]

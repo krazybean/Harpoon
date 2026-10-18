@@ -1,5 +1,6 @@
 import Foundation
 import Virtualization
+import CryptoKit
 
 struct SharedRoot {
     let hostPath: String
@@ -282,7 +283,43 @@ struct RuntimeConfig {
         if let error = Self.memoryValidationError(memoryMIB) { return error }
         if !FileManager.default.fileExists(atPath: kernelURL.path) { return "kernel not found: \(kernelURL.path)" }
         if !FileManager.default.fileExists(atPath: initramfsURL.path) { return "initramfs not found: \(initramfsURL.path)" }
+        if let mismatch = Self.guestAssetValidationError(kernelURL: kernelURL, initramfsURL: initramfsURL) { return mismatch }
+        if FileManager.default.fileExists(atPath: diskURL.path),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: diskURL.path),
+           let type = attrs[.type] as? FileAttributeType,
+           type != .typeRegular {
+            return "persistent disk identity invalid: not a regular file \(diskURL.path)"
+        }
         // disk is optional for validation — ramdisk fallback exists but production expects block
+        return nil
+    }
+
+    static func guestAssetValidationError(kernelURL: URL, initramfsURL: URL) -> String? {
+        let manifestURL = kernelURL.deletingLastPathComponent().appendingPathComponent("guest-assets.manifest")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let text = String(data: data, encoding: .utf8) else {
+            return "GUEST_ASSET_MISMATCH manifest missing: \(manifestURL.path)"
+        }
+        guard text.split(separator: "\n").first == "harpoon-guest-assets-v1" else {
+            return "GUEST_ASSET_MISMATCH invalid manifest: \(manifestURL.path)"
+        }
+        let fields = Dictionary(text.split(separator: "\n").dropFirst().compactMap { line -> (String, String)? in
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            return parts.count == 2 ? (parts[0], parts[1]) : nil
+        }, uniquingKeysWith: { _, last in last })
+        guard let expectedKernel = fields["kernel_sha256"],
+              let expectedInitramfs = fields["initramfs_sha256"] else {
+            return "GUEST_ASSET_MISMATCH invalid manifest: \(manifestURL.path)"
+        }
+        func sha256(_ url: URL) -> String? {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        let actualKernel = sha256(kernelURL) ?? "missing"
+        let actualInitramfs = sha256(initramfsURL) ?? "missing"
+        guard actualKernel == expectedKernel, actualInitramfs == expectedInitramfs else {
+            return "GUEST_ASSET_MISMATCH kernel=\(kernelURL.path) expected=\(expectedKernel) actual=\(actualKernel); initramfs=\(initramfsURL.path) expected=\(expectedInitramfs) actual=\(actualInitramfs); rebuild the matching guest pair"
+        }
         return nil
     }
 

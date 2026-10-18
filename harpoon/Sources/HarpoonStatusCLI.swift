@@ -28,6 +28,11 @@ func handleStatus(args: [String]=[]) -> Int32 {
             json["memoryMiB"] = cfg.memoryMIB
             json["diskPath"] = cfg.diskURL.path
         }
+        if let failure = snap.failure,
+           let data = try? JSONEncoder().encode(failure),
+           let value = try? JSONSerialization.jsonObject(with: data) {
+            json["failure"] = value
+        }
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .prettyPrinted]),
            let s = String(data: data, encoding: .utf8) {
             print(s)
@@ -52,6 +57,15 @@ func handleStatus(args: [String]=[]) -> Int32 {
         }
     }
     switch snap.state {
+    case "failed":
+        cliPrint("Harpoon: failed")
+        if let failure = snap.failure {
+            cliPrint("Failure: \(failure.message)")
+            cliPrint("Source: \(failure.source)")
+            cliPrint("Occurred: \(failure.occurredAt)")
+            if let underlying = failure.underlyingError { cliPrint("Underlying: \(underlying)") }
+        }
+        cliPrint("Action: inspect diagnostics, then start Harpoon again when ready")
     case "running":
         cliPrint("Harpoon: running")
         if let pid = snap.pid { cliPrint("PID: \(pid)") }

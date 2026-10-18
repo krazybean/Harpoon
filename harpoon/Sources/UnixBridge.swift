@@ -14,7 +14,11 @@ func startUnixBridge() {
         try? FileManager.default.removeItem(atPath: config.dockerSocketPath)
     }
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { log("socket failed \(String(cString:strerror(errno)))"); return }
+    guard fd >= 0 else {
+        let error = String(cString: strerror(errno))
+        recordRuntimeFailure(RuntimeFailure(category: "bridge_unavailable", message: "The Docker bridge could not be created.", source: "Harpoon host bridge", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: error))
+        log("HARPOON_BRIDGE_FAILURE category=bridge_unavailable stage=socket error=\(error)"); return
+    }
     listenerFd = fd
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -26,12 +30,18 @@ func startUnixBridge() {
         if errno == EADDRINUSE {
             log("HARPOON_ALREADY_RUNNING bind failed \(config.dockerSocketPath) \(String(cString:strerror(errno)))")
         } else {
-            log("bind failed \(String(cString:strerror(errno)))")
+            let error = String(cString: strerror(errno))
+            recordRuntimeFailure(RuntimeFailure(category: "bridge_unavailable", message: "The Docker bridge could not bind its Unix socket.", source: "Harpoon host bridge", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: error))
+            log("HARPOON_BRIDGE_FAILURE category=bridge_unavailable stage=bind error=\(error)")
         }
         close(fd); listenerFd = -1; return
     }
     chmod(config.dockerSocketPath, 0o600)
-    guard listen(fd, 16) == 0 else { log("listen failed \(String(cString:strerror(errno)))"); close(fd); listenerFd = -1; return }
+    guard listen(fd, 16) == 0 else {
+        let error = String(cString: strerror(errno))
+        recordRuntimeFailure(RuntimeFailure(category: "bridge_unavailable", message: "The Docker bridge could not start listening.", source: "Harpoon host bridge", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: error))
+        log("HARPOON_BRIDGE_FAILURE category=bridge_unavailable stage=listen error=\(error)"); close(fd); listenerFd = -1; return
+    }
     ownsDockerSocket = true
     log("UNIX socket listening at \(config.dockerSocketPath) 0600")
     let flags = fcntl(fd, F_GETFL, 0)

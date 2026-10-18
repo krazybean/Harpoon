@@ -29,6 +29,13 @@ check_not() {
 
 echo "[verify-guest] verifying canonical guest..." >&2
 
+if bash "$SCRIPT_DIR/guest-assets-manifest.sh" --verify; then
+  echo "[verify-guest] PASS: kernel/initramfs compatibility manifest" >&2
+else
+  echo "[verify-guest] FAIL: kernel/initramfs compatibility manifest" >&2
+  FAIL=1
+fi
+
 # 1. Files exist
 check "initramfs exists" test -f "$INITRAMFS"
 check "root template exists" test -f "$ROOT_IMG"

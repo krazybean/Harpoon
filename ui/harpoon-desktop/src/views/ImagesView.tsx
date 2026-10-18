@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MagnifyingGlass, Trash } from "@phosphor-icons/react";
+import { ImageSquare, MagnifyingGlass, Trash } from "@phosphor-icons/react";
 import { fmtTs } from "../components/ShelfPrimitives";
 import { deletePrompt, resourceId, runSequential } from "../lib/resourceBatch";
 import { useResourceSelection } from "../hooks/useResourceSelection";
@@ -21,10 +21,18 @@ export const ImagesView = memo(function ImagesView({
   const [confirmImage,setConfirmImage]=useState<any>(null);
   const [confirmBulkDelete,setConfirmBulkDelete]=useState<{ ids: string[]; title: string; names: string[] } | null>(null);
   const [batchResult,setBatchResult]=useState<{ message: string; failed: number } | null>(null);
+  const [query,setQuery]=useState("");
+  const [filter,setFilter]=useState<"all"|"dangling">("all");
   const cancelRef = useRef<HTMLButtonElement>(null);
   const selection = useResourceSelection(images);
   useEffect(()=>{ if(confirmImage || confirmBulkDelete) cancelRef.current?.focus(); }, [confirmImage, confirmBulkDelete]);
   const selectedImages = images.filter((im)=>selection.selected.has(resourceId(im)));
+  const visibleImages = images.filter((im)=>{
+    const name = `${im.Repository || ""}:${im.Tag || ""}`.toLowerCase();
+    const matchesQuery = !query.trim() || `${name} ${im.ID || ""}`.toLowerCase().includes(query.trim().toLowerCase());
+    const dangling = im.Repository === "<none>" || im.Tag === "<none>";
+    return matchesQuery && (filter === "all" || dangling);
+  });
   const runBatch = (ids = [...selection.selected]) => {
     doAction("batch-images", async ()=>{
       const result = await runSequential(ids, (id)=>invoke("remove_image", { id }));
@@ -53,6 +61,13 @@ export const ImagesView = memo(function ImagesView({
         <span className="text-panel-title">Images ({images.length}) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> {refreshing && <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span>}{error && hasCache && <span className="text-meta" style={{ marginLeft: 6, color: "var(--error-fg)" }}>• error</span>}</span>
         <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
       </div>
+      <div className="resource-toolbar">
+        <label className="resource-search"><MagnifyingGlass size={15} aria-hidden="true" /><span className="sr-only">Search images</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search images…" /></label>
+        <div className="resource-filters" role="group" aria-label="Image filters">
+          <button className={filter === "all" ? "resource-filter is-active" : "resource-filter"} aria-pressed={filter === "all"} onClick={()=>setFilter("all")}>All images <span>{images.length}</span></button>
+          <button className={filter === "dangling" ? "resource-filter is-active" : "resource-filter"} aria-pressed={filter === "dangling"} onClick={()=>setFilter("dangling")}>Dangling <span>{images.filter(im=>im.Repository === "<none>" || im.Tag === "<none>").length}</span></button>
+        </div>
+      </div>
       <div className="selection-bar">
         <span className="text-meta">{selection.selected.size} selected</span>
         <button onClick={selection.selectAll} disabled={!images.length || Boolean(actionInProgress)} className="btn btn--secondary">Select all</button>
@@ -64,10 +79,10 @@ export const ImagesView = memo(function ImagesView({
       <div style={{ overflowX: "auto" }}>
         <table>
           <thead className="table-head"><tr><th scope="col" className="col-select"><input type="checkbox" checked={images.length>0 && selection.selected.size===images.length} onChange={(e)=>e.target.checked ? selection.selectAll() : selection.clear()} aria-label="Select all images" /></th><th scope="col" className="col-repo">Repository:Tag</th><th scope="col" className="col-img-id">ID</th><th scope="col" className="col-size">Size</th><th scope="col" className="col-created">Created</th><th scope="col" className="col-img-actions" style={{ textAlign: "right" }}>Actions</th></tr></thead>
-          <tbody>{images.map((im:any)=>(
+          <tbody>{visibleImages.map((im:any)=>(
             <tr key={im.ID} className="table-row">
               <td className="col-select"><input type="checkbox" checked={selection.selected.has(resourceId(im))} onChange={()=>selection.toggle(resourceId(im))} aria-label={`Select image ${im.Repository}:${im.Tag}`} /></td>
-              <td className="col-repo" title={`${im.Repository}:${im.Tag}`} aria-label={`${im.Repository}:${im.Tag}`}><span className="cell-inner">{im.Repository}:{im.Tag}</span></td>
+              <td className="col-repo" title={`${im.Repository}:${im.Tag}`} aria-label={`${im.Repository}:${im.Tag}`}><span className="resource-name"><ImageSquare size={16} aria-hidden="true" /><span className="cell-inner">{im.Repository}:{im.Tag}</span></span></td>
               <td className="mono col-img-id" title={im.ID||""} aria-label={im.ID||""}><span className="cell-inner">{(im.ID||"").slice(0,12)}</span></td>
               <td className="col-size" title={im.Size||""}><span className="cell-inner">{im.Size||"—"}</span></td>
               <td className="col-created" title={im.CreatedAt||im.CreatedSince||""}><span className="cell-inner">{im.CreatedAt||im.CreatedSince||"—"}</span></td>
@@ -78,6 +93,7 @@ export const ImagesView = memo(function ImagesView({
             </tr>
           ))}</tbody>
         </table>
+        {!visibleImages.length && <div className="resource-no-results">No images match “{query || filter === "dangling" ? query || "Dangling" : "your filters"}”.</div>}
       </div>
       {confirmImage && (
         <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmImage(null)}>

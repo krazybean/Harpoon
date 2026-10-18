@@ -16,7 +16,7 @@ Harpoon runs ordinary Docker development workloads on macOS without requiring Do
 
 [![Watch the Harpoon 2.0 teaser](docs/media/Harpoon-2.0-teaser-v2-thumbnail.jpg)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
 
-Watch or download the approved 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1). GitHub README pages use a linked thumbnail here so the video remains a reliable release download rather than relying on unsupported embedded-video behavior.
+Watch or download the approved 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1). This release candidate is for testing only and is not a stable 2.0.0 release. GitHub README pages use a linked thumbnail so the video remains a reliable release download.
 
 ## Why Harpoon?
 
@@ -42,6 +42,9 @@ Install safely:
 4. Test with disposable containers and preserve existing development VM data.
 
 The [v0.1.1 release](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) remains the latest stable desktop release. Standalone CLI/runtime archives remain available from [v0.1.0](https://github.com/krazybean/Harpoon/releases/tag/v0.1.0).
+- **Latest desktop release:** `Harpoon-0.1.1-arm64.dmg` + `SHA256SUMS`.
+- **Harpoon 2.0 release candidate:** [v2.0.0-rc.1](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) includes the arm64 DMG and the [15-second desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4). It is for testing only, not a stable release.
+- **Standalone CLI/runtime archive:** `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` remains available from the v0.1.0 release. A standalone v0.1.1 CLI tarball is not currently published.
 
 Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). Use the Releases page above as the authoritative list of published artifacts.
 
@@ -99,7 +102,7 @@ For component boundaries and transport details, see [Architecture](docs/architec
 ## Requirements
 
 - macOS on Apple Silicon, Xcode Command Line Tools, Rust stable (for building)
-- **Docker CLI required**, Docker Desktop **NOT required**. Docker Compose v2 plugin (`docker compose version`) required only for `compose` workflows. Harpoon discovers Docker via `PATH` → `/opt/homebrew/bin/docker` → `/usr/local/bin/docker` (Finder-safe) and creates/repairs context `harpoon` → `unix:///tmp/harpoon-docker.sock` without changing your default context (`harpoon docker setup`; desktop ensures on first use). If `~/.docker/config.json` contains `"credsStore":"desktop"` without `docker-credential-desktop`, `harpoon doctor` warns (Harpoon never deletes `credsStore`).
+- **Docker CLI required**, Docker Desktop **NOT required**. Docker Compose v2 plugin (`docker compose version`) required only for `compose` workflows. Harpoon discovers a runnable Docker CLI via `PATH` → `/opt/homebrew/bin/docker` (Finder-safe), rejecting stale or incompatible executables, and creates/repairs context `harpoon` → `unix:///tmp/harpoon-docker.sock` without changing your default context (`harpoon docker setup`; desktop ensures on first use). If `~/.docker/config.json` contains `"credsStore":"desktop"` without `docker-credential-desktop`, `harpoon doctor` warns (Harpoon never deletes `credsStore`).
 - **Persistent storage**: immutable `assets/guest/harpoon-root.img` template (`2 GiB` sparse, `0/0/0`) → mutable `~/Library/.../harpoon-root.img` (grow-only sparse, never silently replaced). First provision **32 GiB** logical sparse (`azure-sql-edge` exhausted 2G) via `harpoon start --disk-size 16G` or `harpoon config set disk-size`; grow via `harpoon disk resize 16G` (VM stopped, `truncate` + guest `resize2fs`, atomic, `backing>FS` retry).
 
 ## Quick Start

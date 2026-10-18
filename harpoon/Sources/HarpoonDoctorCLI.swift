@@ -65,24 +65,29 @@ func handleDoctor() -> Int32 {
         if compInstalled {
             check(true, "Docker Compose plugin ...... PASS \(compVer)")
         } else {
-            check(false, "Docker Compose plugin ...... FAIL — not installed (checked: docker compose version) — Install Docker Compose v2 plugin", warn:true)
+            check(false, "Docker Compose plugin ...... FAIL — unavailable via \(docker) (checked: docker compose version) — \(compVer.isEmpty ? "no output" : compVer)", warn:true)
         }
-        if dockerContextExists(harpoonContextName) {
-            if let ep = dockerContextEndpoint(harpoonContextName) {
-                check(ep==harpoonSocketEndpoint, "Harpoon context ............ PASS \(ep)")
-                if ep != harpoonSocketEndpoint { cliPrint("INFO  expected \(harpoonSocketEndpoint) — run: harpoon docker setup") }
-            }
+        let context = inspectDockerContext(harpoonContextName)
+        if let ep = context.endpoint {
+            check(ep==harpoonSocketEndpoint, "Harpoon context ............ PASS \(ep)")
+            if ep != harpoonSocketEndpoint { cliPrint("INFO  expected \(harpoonSocketEndpoint) — run: harpoon docker setup") }
         } else {
-            check(false, "Harpoon context ............ FAIL — not installed (run harpoon docker setup) — endpoint \(harpoonSocketEndpoint)", warn:true)
+            let detail = context.error?.isEmpty == false ? context.error! : "not found"
+            let missing = detail.lowercased().contains("not found") || detail.lowercased().contains("no such context")
+            check(false, "Harpoon context ............ FAIL — \(missing ? "not installed" : "unavailable") via \(docker): \(detail) — endpoint \(harpoonSocketEndpoint)", warn:true)
         }
         if let cur = currentDockerContext() { cliPrint("INFO  active context \(cur) (default unchanged after setup)") }
+        let env = ProcessInfo.processInfo.environment
+        cliPrint("INFO  Docker config ............. \(dockerConfigPath())")
+        cliPrint("INFO  Docker environment ......... DOCKER_HOST=\(env["DOCKER_HOST"] ?? "<unset>") DOCKER_CONTEXT=\(env["DOCKER_CONTEXT"] ?? "<unset>")")
         if snap.state=="running" && sockExists {
-            let (c, vOut, _) = runDocker(["--context", "harpoon", "version"])
+            let (c, vOut, vErr) = runDocker(["--context", "harpoon", "version"])
             if c==0 {
                 let verLine = vOut.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
                 check(true, "Docker Engine .............. PASS \(verLine)")
             } else {
-                check(false, "Docker Engine .............. FAIL — not reachable via harpoon context")
+                let detail = vErr.trimmingCharacters(in: .whitespacesAndNewlines)
+                check(false, "Docker Engine .............. FAIL — unreachable via harpoon context using \(docker)\(detail.isEmpty ? "" : ": \(detail)")")
             }
         } else if snap.state=="running" {
             check(false, "Harpoon socket ............. FAIL — socket not found (expected \(HarpoonPaths.dockerSocketPath))")
@@ -101,7 +106,7 @@ func handleDoctor() -> Int32 {
             check(true, "Docker credential helper ... PASS")
         }
     } else {
-        check(false, "Docker CLI ................. FAIL — Docker CLI not installed/found (checked PATH, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker) — Install Docker CLI; Docker Desktop NOT required", warn:false)
+        check(false, "Docker CLI ................. FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/bin/docker) — Install Docker CLI; Docker Desktop NOT required", warn:false)
         check(false, "Docker Compose plugin ...... FAIL — Docker CLI not found", warn:true)
         check(false, "Harpoon context ............ FAIL — Docker CLI not found", warn:true)
         cliPrint("INFO  Harpoon socket ............. skipped — Docker CLI not found")
@@ -155,10 +160,12 @@ func handleDoctor() -> Int32 {
         if let info = guestFilesystemInfoViaMgmt(), let cap = info.capacity {
             cliPrint("INFO  Filesystem capacity ........ \(RuntimeConfig.formatBytes(cap))")
             if let free = info.free { cliPrint("INFO  Filesystem free ............ \(RuntimeConfig.formatBytes(free))") }
-            if logical > cap {
-                check(false, "Persistent disk backing \(RuntimeConfig.formatBytes(logical)) > filesystem \(RuntimeConfig.formatBytes(cap)) — pending resize (interrupted)", warn:true)
+            // df reports usable ext4 capacity, not the raw filesystem geometry.
+            // ponytail: retain the existing 2% ceiling; replace with guest geometry over mgmt when available.
+            if logical > cap && logical - cap > logical / 50 {
+                check(false, "Persistent disk backing \(RuntimeConfig.formatBytes(logical)) exceeds filesystem usable capacity \(RuntimeConfig.formatBytes(cap)) by more than ext4 overhead — inspect resize state", warn:true)
             } else {
-                check(true, "Filesystem capacity matches backing")
+                check(true, "Filesystem capacity consistent with backing (ext4 overhead allowed)")
             }
             if let free = info.free, free < 512 * 1024 * 1024 {
                 check(false, "Filesystem low free space \(RuntimeConfig.formatBytes(free))", warn:true)

@@ -5,6 +5,7 @@ set -euo pipefail
 APP="${1:-ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CANONICAL_INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+CANONICAL_ASSET_MANIFEST="$REPO_ROOT/assets/guest/guest-assets.manifest"
 if [ ! -d "$APP" ]; then
   echo "[verify-bundle] FAIL: Harpoon.app not found at $APP" >&2
   exit 1
@@ -36,8 +37,11 @@ check "Contents/MacOS/harpoon-desktop exists" test -f "$APP/Contents/MacOS/harpo
 check "nested Harpoon runtime exists" test -f "$APP/Contents/Resources/harpoon/bin/harpoon"
 check "kernel exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/Image-virt"
 check "initramfs exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
+check "guest asset manifest exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/guest-assets.manifest"
 check "canonical initramfs exists" test -f "$CANONICAL_INITRAMFS"
+check "canonical guest asset manifest exists" test -f "$CANONICAL_ASSET_MANIFEST"
 check "initramfs matches canonical" cmp -s "$CANONICAL_INITRAMFS" "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
+check "guest asset manifest matches canonical" cmp -s "$CANONICAL_ASSET_MANIFEST" "$APP/Contents/Resources/harpoon/lib/harpoon/guest-assets.manifest"
 check "root template exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-root.img"
 
 # 2. Arch

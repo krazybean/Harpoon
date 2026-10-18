@@ -7,6 +7,7 @@ BUILD="$REPO_ROOT/harpoon/build/harpoon"
 KERNEL="$REPO_ROOT/assets/guest/Image-virt"
 INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
 ROOTIMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+ASSET_MANIFEST="$REPO_ROOT/assets/guest/guest-assets.manifest"
 
 # ponytail: ensure runtime built before bundling
 if [ ! -f "$BUILD" ]; then
@@ -27,6 +28,7 @@ chmod +x "$HARPOON_BIN_DIR/harpoon"
 echo "[prepare-bundle] copying kernel/initramfs/root..." >&2
 cp -p "$KERNEL" "$HARPOON_LIB_DIR/Image-virt"
 cp -p "$INITRAMFS" "$HARPOON_LIB_DIR/harpoon-initramfs.cpio.gz"
+cp -p "$ASSET_MANIFEST" "$HARPOON_LIB_DIR/guest-assets.manifest"
 # APFS clone-aware for sparse root image
 if cp -c "$ROOTIMG" "$HARPOON_LIB_DIR/harpoon-root.img" 2>/dev/null; then :;
 elif ditto "$ROOTIMG" "$HARPOON_LIB_DIR/harpoon-root.img" 2>/dev/null; then :;
