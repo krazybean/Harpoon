@@ -13,6 +13,12 @@ for cmd in gh docker shasum; do
 done
 [ "$(uname -m)" = "arm64" ] || { echo "[publish-guest-assets] FAIL: needs an Apple Silicon Mac (VZ builder + Rosetta)" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "[publish-guest-assets] FAIL: run 'gh auth login' first" >&2; exit 1; }
+if [ "${1:-}" != "--skip-build" ]; then
+  # The initramfs rebuilds run in alpine containers (x86_64 via --platform linux/amd64);
+  # unsquashfs keeps the root builder from needing Docker to unpack modloop.
+  docker info >/dev/null 2>&1 || { echo "[publish-guest-assets] FAIL: Docker is not running (start Docker Desktop, or another engine that can run linux/amd64)" >&2; exit 1; }
+  command -v unsquashfs >/dev/null 2>&1 || { echo "[publish-guest-assets] FAIL: unsquashfs not found (brew install squashfs)" >&2; exit 1; }
+fi
 
 if [ "${1:-}" != "--skip-build" ]; then
   echo "[publish-guest-assets] building aarch64 guest..." >&2
