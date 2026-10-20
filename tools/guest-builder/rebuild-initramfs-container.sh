@@ -77,11 +77,17 @@ copy_module() {
   mkdir -p "$(dirname "$STAGING/lib/modules/$KVER/$path")"
   cp -a "$MODULES_DIR/$KVER/$path" "$STAGING/lib/modules/$KVER/$path"
 }
+# Built-in modules (e.g. crc32c on the x86_64 kernel) need no .ko in the initramfs.
+module_builtin() {
+  grep -q "/$1\\.ko$" "$MODULES_DIR/$KVER/modules.builtin" 2>/dev/null && return 0
+  tr '\000' '\n' < "$MODULES_DIR/$KVER/modules.builtin.modinfo" 2>/dev/null | grep -q "\\.alias=$1$"
+}
 feature_module() {
   awk -v feature="$1" "\$1==feature {print \$2; exit}" "$FEATURE_MODULES"
 }
 while IFS= read -r mod; do
   case "$mod" in ""|"#"*) continue ;; esac
+  if module_builtin "$mod"; then echo "[rebuild] required module $mod=y" >&2; continue; fi
   path=$(resolve_module "$mod") || exit 1
   copy_module "$path"
 done < "$REQUIRED_MODULES"

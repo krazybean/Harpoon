@@ -112,8 +112,13 @@ if [ -f "$INITRAMFS" ]; then
     [ -n "$path" ] || return 1
     echo "$path"
   }
+  module_builtin() {
+    grep -q "/$1\\.ko$" "$MODULE_DIR/modules.builtin" 2>/dev/null && return 0
+    tr '\000' '\n' < "$MODULE_DIR/modules.builtin.modinfo" 2>/dev/null | grep -q "\\.alias=$1$"
+  }
   verify_module() {
     local path
+    module_builtin "$1" && return
     path=$(resolve_module "$1") || { echo "[verify-guest] FAIL: unresolved module $1" >&2; FAIL=1; return; }
     verify_path "$path"
   }
