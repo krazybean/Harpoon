@@ -57,58 +57,60 @@ jobs:
         run: |
           brew install squashfs e2fsprogs
           echo "$(brew --prefix e2fsprogs)/sbin" >> "$GITHUB_PATH"
-          softwareupdate --install-rosetta --agree-to-license || true
 
-      # TEMPORARY: record the x86_64 Alpine pins for tools/guest-builder/guest-arch.sh.
-      - name: Print x86_64 guest pins
+      # Both guest kernels come from pinned Alpine downloads. The root images and the
+      # x86_64 initramfs need Virtualization.framework (plus Rosetta and Docker), which
+      # GitHub's macOS runners do not provide, so they come from the tarball made by
+      # tools/guest-builder/pack-assets.sh, named by the repository variables
+      # HARPOON_GUEST_ASSETS_URL and HARPOON_GUEST_ASSETS_SHA256. Without it, the job
+      # stops after checking that both kernels fetch and the x86_64 app compiles.
+      - name: Fetch guest kernels
         run: |
-          base=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64
-          for f in netboot/vmlinuz-virt netboot/initramfs-virt netboot/modloop-virt alpine-minirootfs-3.22.1-x86_64.tar.gz; do
-            curl -sSL --fail -o "$RUNNER_TEMP/pin" "$base/$f"
-            echo "PIN $f $(shasum -a 256 "$RUNNER_TEMP/pin" | cut -d' ' -f1)"
-            [ "$f" = netboot/vmlinuz-virt ] && echo "PIN kernel $(file -b "$RUNNER_TEMP/pin")"
-            [ "$f" = netboot/modloop-virt ] && echo "PIN modloop $(unsquashfs -l "$RUNNER_TEMP/pin" | grep -m1 -o 'modules/[^/]*-virt')"
-            true
-          done
+          bash tools/guest-builder/fetch-kernel.sh
+          HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/fetch-kernel.sh
 
-      # Kernel, initramfs and root images for both guests (aarch64 in assets/guest,
-      # x86_64 in assets/guest/x86_64). Roots and the x86_64 initramfs need
-      # Virtualization.framework, Rosetta and Docker, so when the repository variables
-      # HARPOON_GUEST_ASSETS_URL and HARPOON_GUEST_ASSETS_SHA256 are set, the tarball
-      # from tools/guest-builder/pack-assets.sh is used instead of building them here.
       - name: Obtain guest assets
+        id: guest
         env:
           ASSETS_URL: ${{ vars.HARPOON_GUEST_ASSETS_URL }}
           ASSETS_SHA256: ${{ vars.HARPOON_GUEST_ASSETS_SHA256 }}
         run: |
-          if [ -n "$ASSETS_URL" ]; then
-            curl -L --fail -o "$RUNNER_TEMP/guest-assets.tar.gz" "$ASSETS_URL"
-            echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
-            tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
-          else
-            bash tools/guest-builder/fetch-kernel.sh
-            bash tools/guest-builder/guest-assets-manifest.sh --write
-            bash tools/guest-builder/build-root.sh --builder vz --force
-            HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/build.sh
+          if [ -z "$ASSETS_URL" ]; then
+            echo "::notice::HARPOON_GUEST_ASSETS_URL is not set; building the .dmg needs prebuilt guest assets (tools/guest-builder/pack-assets.sh)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          curl -L --fail -o "$RUNNER_TEMP/guest-assets.tar.gz" "$ASSETS_URL"
+          echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
           for arch in aarch64 x86_64; do
             HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/guest-assets-manifest.sh --verify
             HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/verify-root.sh "$(HARPOON_GUEST_ARCH=$arch sh -c '. tools/guest-builder/guest-arch.sh; guest_asset_dir assets/guest')/harpoon-root.img"
           done
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compile x86_64 desktop app
+        if: steps.guest.outputs.available != 'true'
+        run: |
+          npm --prefix ui/harpoon-desktop run build
+          cargo build --manifest-path ui/harpoon-desktop/src-tauri/Cargo.toml --target x86_64-apple-darwin
 
       - name: Build universal Harpoon.app
+        if: steps.guest.outputs.available == 'true'
         run: |
           bash ui/harpoon-desktop/src-tauri/prepare-bundle.sh
           node ui/harpoon-desktop/scripts/version.mjs --check
           npm --prefix ui/harpoon-desktop run tauri -- build --bundles app --target universal-apple-darwin
 
       - name: Ad-hoc sign and verify bundle
+        if: steps.guest.outputs.available == 'true'
         run: |
           APP=ui/harpoon-desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Harpoon.app
           sh ui/harpoon-desktop/scripts/sign-app.sh "$APP"
           bash tools/verify-bundle.sh "$APP"
 
       - name: Build DMG
+        if: steps.guest.outputs.available == 'true'
         run: |
           VERSION="$(node -p "require('./ui/harpoon-desktop/package.json').version")"
           bash tools/release/macos/build-dmg.sh "$VERSION"
@@ -116,6 +118,7 @@ jobs:
           echo "DMG_PATH=dist/v$VERSION/Harpoon-$VERSION-universal.dmg" >> "$GITHUB_ENV"
 
       - name: Upload DMG
+        if: steps.guest.outputs.available == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: harpoon-universal-dmg

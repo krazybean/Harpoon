@@ -10,7 +10,7 @@ BUILDER="$ROOT/tools/guest-builder/build-initramfs.sh"
 
 fail() { echo "initramfs-builder FAIL: $*" >&2; exit 1; }
 mkdir -p "$ROOT/tools/guest-builder/src" "$ROOT/assets/guest"
-for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/rebuild-initramfs-container.sh tools/guest-builder/build-engine.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
+for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/rebuild-initramfs-container.sh tools/guest-builder/build-engine.sh tools/guest-builder/guest-arch.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
   mkdir -p "$ROOT/$(dirname "$path")"
   cp "$REPO_ROOT/$path" "$ROOT/$path"
 done
@@ -111,6 +111,7 @@ done
 # The module selector must ignore a firmware sibling and enforce the pinned KVER.
 {
   printf 'MODLOOP_TMP="%s"\n' "$TMP"
+  printf 'GUEST_KERNEL_VERSION=6.12.110-0-virt\n'
   sed -n '/^# Find the one kernel version dir with module metadata;/,/^echo "\[rebuild\] kernel \$KVER"/p' "$ROOT/tools/guest-builder/rebuild-initramfs-container.sh"
 } > "$TMP/select-kver.sh"
 mkdir -p "$TMP/modloop/modules/firmware" "$TMP/modloop/modules/6.12.110-0-virt"

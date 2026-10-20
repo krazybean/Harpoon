@@ -27,7 +27,7 @@ write_repositories "$TMP/repositories" "$REPO_MAIN" "$REPO_COMMUNITY"
 ! grep -Fq "$REPO_MAIN $REPO_COMMUNITY" "$TMP/repositories" || fail "APK repositories collapsed onto one line"
 [ "$(tr '\n' ' ' < "$TMP/repositories")" = "$REPO_MAIN $REPO_COMMUNITY " ] || fail "APK repository set changed"
 
-apk_line=$(grep -n '/sbin/apk --root .* add' "$INIT" | cut -d: -f1)
+apk_line=$(grep -n '/sbin/apk --root "$ROOT" .* add' "$INIT" | cut -d: -f1)
 prep_line=$(grep -n 'bb cp -a /etc/apk/keys' "$INIT" | cut -d: -f1)
 [ "$prep_line" -lt "$apk_line" ] || fail "target APK keys are copied too late"
 
