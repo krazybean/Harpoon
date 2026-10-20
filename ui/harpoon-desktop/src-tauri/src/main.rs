@@ -13,6 +13,7 @@ mod broadcast;
 mod runtime_refresh;
 mod resource_sampler;
 mod context_discovery;
+mod cli_path;
 mod bootstrap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1287,6 +1288,13 @@ fn main() {
     let shell_manager = std::sync::Arc::new(shell::ShellManager::new());
     let builder = tauri::Builder::default()
         .manage(shell_manager.clone())
+        .setup(|app| {
+            use tauri::Manager;
+            if let Ok(dir) = app.path().app_data_dir() {
+                cli_path::ensure_on_launch(dir);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
