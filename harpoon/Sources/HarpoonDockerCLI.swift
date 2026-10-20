@@ -25,6 +25,8 @@ func findDocker() -> String? {
     // symlink Docker Desktop and OrbStack install; every candidate still has to
     // launch successfully below, which rejects stale Intel binaries.
     candidates += ["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker", "/run/current-system/sw/bin/docker"]
+    // Last resort: the Docker CLI bundled beside this binary in Harpoon.app.
+    candidates += RuntimeConfig.executableURLs().map { $0.deletingLastPathComponent().appendingPathComponent("docker").path }
     resolvedDocker = candidates.first(where: isRunnableDocker)
     return resolvedDocker
 }
@@ -165,7 +167,7 @@ func credsStoreStatus() -> (store: String?, status: String, warning: String?) {
 
 func handleDockerSetup() -> Int32 {
     guard let docker = findDocker() else {
-        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)")
+        cliError("Docker CLI: FAIL — Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker, bundled docker beside harpoon)")
         cliError("Install Docker CLI (https://docs.docker.com/engine/install/) — Docker Desktop NOT required")
         return 1
     }

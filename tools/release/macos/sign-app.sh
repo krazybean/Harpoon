@@ -25,6 +25,13 @@ echo "[sign-app] app: $APP" >&2
 echo "[sign-app] signing nested harpoon with virtualization entitlement..." >&2
 codesign --force --sign "$IDENTITY" --entitlements "$ENTITLEMENTS" --options runtime --timestamp --verbose "$INNER"
 if [ $? -ne 0 ]; then echo "[sign-app] FAIL: nested sign failed" >&2; exit 1; fi
+# 1b. Bundled Docker CLI: hardened runtime + timestamp, no entitlements
+DOCKER_CLI="$APP/Contents/Resources/harpoon/bin/docker"
+if [ -f "$DOCKER_CLI" ]; then
+  echo "[sign-app] signing bundled Docker CLI..." >&2
+  codesign --force --sign "$IDENTITY" --options runtime --timestamp --verbose "$DOCKER_CLI"
+  if [ $? -ne 0 ]; then echo "[sign-app] FAIL: Docker CLI sign failed" >&2; exit 1; fi
+fi
 # 2. Frameworks if present (Swift libs, etc)
 if [ -d "$APP/Contents/Frameworks" ]; then
   for fw in "$APP/Contents/Frameworks"/*; do

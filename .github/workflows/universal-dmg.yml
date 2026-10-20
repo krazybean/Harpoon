@@ -12,6 +12,7 @@ on:
     paths:
       - .github/workflows/universal-dmg.yml
       - harpoon/build.sh
+      - harpoon/fetch-docker-cli.sh
       - harpoon/Sources/**
       - tools/guest-builder/**
       - tools/release/**

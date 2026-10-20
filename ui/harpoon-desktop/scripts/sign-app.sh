@@ -30,6 +30,12 @@ fi
 echo "[sign] signing nested harpoon with virtualization entitlement..." >&2
 codesign --force --sign - --entitlements "$ENTITLEMENTS" "$INNER" 2>&1 | tail -n 5
 
+DOCKER_CLI="$APP/Contents/Resources/harpoon/bin/docker"
+if [ -f "$DOCKER_CLI" ]; then
+  echo "[sign] signing bundled Docker CLI..." >&2
+  codesign --force --sign - "$DOCKER_CLI" 2>&1 | tail -n 5
+fi
+
 echo "[sign] signing outer Harpoon.app (LAST)..." >&2
 codesign --force --deep --sign - "$APP" 2>&1 | tail -n 5
 
