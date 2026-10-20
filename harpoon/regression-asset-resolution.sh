@@ -11,7 +11,7 @@ pass() { echo "asset-resolution $1 PASS"; }
 fail() { echo "asset-resolution $1 FAIL" >&2; exit 1; }
 check() { "$@" || fail "$1"; }
 
-xcrun swiftc -target arm64-apple-macosx15.1 \
+xcrun swiftc -target "arm64-apple-macosx$(cat "$(dirname "$0")/MIN_MACOS")" \
   "$ROOT/harpoon/Sources/RuntimeConfig.swift" "$ROOT/harpoon/Sources/HostPathTranslator.swift" "$ROOT/harpoon/Sources/Lifecycle.swift" "$ROOT/harpoon/Sources/VMManager.swift" "$ROOT/harpoon/Sources/Bridges.swift" "$ROOT/harpoon/Sources/PortForwardManager.swift" "$ROOT/harpoon/Sources/HarpoonCLI.swift" "$ROOT/harpoon/Sources/main.swift" \
   -framework Virtualization -o "$BIN" -module-cache-path /tmp/harpoon-mcache >/dev/null
 
