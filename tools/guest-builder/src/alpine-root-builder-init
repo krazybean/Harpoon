@@ -65,6 +65,9 @@ if [ "$TARGET_ARCH" != aarch64 ]; then
   bb mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
   bb printf '%s' ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/mnt/rosetta/rosetta:F' > /proc/sys/fs/binfmt_misc/register || fail rosetta-binfmt
   # The builder only trusts its own arch's signing keys; take the target's from alpine-keys.
+  bb mkdir -p /tmp/alpine-keys/etc/apk/keys
+  bb cp -a /etc/apk/keys/. /tmp/alpine-keys/etc/apk/keys/
+  bb cp /etc/apk/repositories /tmp/alpine-keys/etc/apk/repositories
   /sbin/apk --root /tmp/alpine-keys --initdb --no-cache add alpine-keys > /tmp/apk-keys.log 2>&1 || { bb cat /tmp/apk-keys.log > "$MARKER"; fail apk-keys; }
   APK_ARCH_ARGS="--arch $TARGET_ARCH"
 fi

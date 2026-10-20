@@ -28,7 +28,7 @@ write_repositories "$TMP/repositories" "$REPO_MAIN" "$REPO_COMMUNITY"
 [ "$(tr '\n' ' ' < "$TMP/repositories")" = "$REPO_MAIN $REPO_COMMUNITY " ] || fail "APK repository set changed"
 
 apk_line=$(grep -n '/sbin/apk --root "$ROOT" .* add' "$INIT" | cut -d: -f1)
-prep_line=$(grep -n 'bb cp -a /etc/apk/keys' "$INIT" | cut -d: -f1)
+prep_line=$(grep -n 'bb cp -a /etc/apk/keys/. "$ROOT' "$INIT" | cut -d: -f1)
 [ "$prep_line" -lt "$apk_line" ] || fail "target APK keys are copied too late"
 
 # Execute the exact target-side verification body with a fake target PATH. This
