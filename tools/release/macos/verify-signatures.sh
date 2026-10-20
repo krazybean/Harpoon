@@ -12,6 +12,7 @@ check "Harpoon nested runtime valid" bash -c "codesign --verify --verbose \"$APP
 check "Harpoon virtualization entitlement" bash -c "codesign -d --entitlements :- \"$APP/Contents/Resources/harpoon/bin/harpoon\" 2>&1 | grep -q com.apple.security.virtualization"
 # Timestamp checks — require secure timestamp for Developer ID release (capture to avoid pipefail+SIGPIPE)
 check "Harpoon nested has secure timestamp" bash -c "OUT=\$(codesign -dv --verbose=4 \"$APP/Contents/Resources/harpoon/bin/harpoon\" 2>&1); echo \"\$OUT\" | grep -q \"Timestamp=\""
+check "Bundled Docker CLI has secure timestamp" bash -c "OUT=\$(codesign -dv --verbose=4 \"$APP/Contents/Resources/harpoon/bin/docker\" 2>&1); echo \"\$OUT\" | grep -q \"Timestamp=\""
 check "Harpoon outer executable has secure timestamp" bash -c "OUT=\$(codesign -dv --verbose=4 \"$APP/Contents/MacOS/harpoon-desktop\" 2>&1); echo \"\$OUT\" | grep -q \"Timestamp=\""
 check "Harpoon.app bundle has secure timestamp" bash -c "OUT=\$(codesign -dv --verbose=4 \"$APP\" 2>&1); echo \"\$OUT\" | grep -q \"Timestamp=\""
 # Ad-hoc check — must NOT be ad-hoc (flags should not contain adhoc) — capture to avoid pipefail SIGPIPE

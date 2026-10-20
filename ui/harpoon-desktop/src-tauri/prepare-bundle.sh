@@ -25,6 +25,11 @@ echo "[prepare-bundle] copying harpoon binary..." >&2
 cp -p "$BUILD" "$HARPOON_BIN_DIR/harpoon"
 chmod +x "$HARPOON_BIN_DIR/harpoon"
 
+# Docker's official CLI, used when the Mac has no runnable `docker` of its own.
+echo "[prepare-bundle] staging bundled Docker CLI..." >&2
+sh "$REPO_ROOT/harpoon/fetch-docker-cli.sh"
+cp -p "$REPO_ROOT/harpoon/build/docker" "$HARPOON_BIN_DIR/docker"
+
 echo "[prepare-bundle] copying kernel/initramfs/root..." >&2
 cp -p "$KERNEL" "$HARPOON_LIB_DIR/Image-virt"
 cp -p "$INITRAMFS" "$HARPOON_LIB_DIR/harpoon-initramfs.cpio.gz"
@@ -52,7 +57,7 @@ if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
 fi
 
 # verify
-ls -lh "$HARPOON_BIN_DIR/harpoon" "$HARPOON_LIB_DIR/"* 2>&1 | tail -n 10 >&2
+ls -lh "$HARPOON_BIN_DIR/harpoon" "$HARPOON_BIN_DIR/docker" "$HARPOON_LIB_DIR/"* 2>&1 | tail -n 10 >&2
 echo "[prepare-bundle] bundle-resources ready at $BUNDLE_RES" >&2
 # hashes
 shasum -a 256 "$HARPOON_BIN_DIR/harpoon" | head -c 12 | xargs echo "[prepare-bundle] harpoon" >&2 || true

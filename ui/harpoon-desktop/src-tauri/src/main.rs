@@ -213,8 +213,8 @@ fn find_docker_binary() -> Result<PathBuf, String> {
     // Finder-launched apps have minimal PATH (e.g. /usr/bin:/bin:/usr/sbin:/sbin).
     // We safely consider PATH first, then Apple Silicon Homebrew, the
     // /usr/local/bin symlink that Docker Desktop and OrbStack install, and other
-    // standard locations. Every candidate must launch successfully, which also
-    // rejects stale Intel binaries.
+    // standard locations, and finally the CLI bundled in Harpoon.app. Every
+    // candidate must launch successfully, which also rejects stale binaries.
     let candidates = [
         PathBuf::from("/opt/homebrew/bin/docker"),
         PathBuf::from("/usr/local/bin/docker"),
@@ -233,7 +233,11 @@ fn find_docker_binary() -> Result<PathBuf, String> {
     for p in &candidates {
         if is_runnable_docker(p) { return Ok(p.clone()); }
     }
-    Err("Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker)".to_string())
+    // 3) The Docker CLI bundled beside the runtime, for Macs without their own.
+    if let Some(bundled) = bundled_harpoon_path().map(|harpoon| harpoon.with_file_name("docker")) {
+        if is_runnable_docker(&bundled) { return Ok(bundled); }
+    }
+    Err("Docker CLI not installed/found (checked runnable PATH entries, /opt/homebrew/bin/docker, /usr/local/bin/docker, /usr/bin/docker, bundled Resources/harpoon/bin/docker)".to_string())
 }
 
 fn is_runnable_docker(path: &PathBuf) -> bool {

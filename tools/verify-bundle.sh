@@ -35,6 +35,7 @@ check_fail() {
 # 1. Layout
 check "Contents/MacOS/harpoon-desktop exists" test -f "$APP/Contents/MacOS/harpoon-desktop"
 check "nested Harpoon runtime exists" test -f "$APP/Contents/Resources/harpoon/bin/harpoon"
+check "bundled Docker CLI exists" test -x "$APP/Contents/Resources/harpoon/bin/docker"
 check "kernel exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/Image-virt"
 check "initramfs exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
 check "guest asset manifest exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/guest-assets.manifest"
@@ -47,9 +48,11 @@ check "root template exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoo
 # 2. Arch
 check "Tauri arm64" bash -c "file \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q arm64"
 check "Harpoon arm64" bash -c "file \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q arm64"
+check "Docker CLI arm64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/docker\" | grep -q arm64"
 if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
   check "Tauri x86_64" bash -c "lipo -archs \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q x86_64"
   check "Harpoon x86_64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q x86_64"
+  check "Docker CLI x86_64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/docker\" | grep -q x86_64"
   X86_LIB="$APP/Contents/Resources/harpoon/lib/harpoon/x86_64"
   for f in Image-virt harpoon-initramfs.cpio.gz guest-assets.manifest harpoon-root.img; do
     check "x86_64 guest $f exists" test -f "$X86_LIB/$f"

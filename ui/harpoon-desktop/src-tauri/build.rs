@@ -17,8 +17,9 @@ fn main() {
   let initramfs = repo_root.join("assets/guest/harpoon-initramfs.cpio.gz");
   let rootimg = repo_root.join("assets/guest/harpoon-root.img");
   let asset_manifest = repo_root.join("assets/guest/guest-assets.manifest");
+  let docker_cli = repo_root.join("harpoon/build/docker");
 
-  for asset in [&harpoon_bin, &kernel, &initramfs, &rootimg, &asset_manifest] {
+  for asset in [&harpoon_bin, &docker_cli, &kernel, &initramfs, &rootimg, &asset_manifest] {
     println!("cargo:rerun-if-changed={}", asset.display());
   }
 
@@ -35,7 +36,14 @@ fn main() {
       .status();
   }
 
-  let required_assets = [&harpoon_bin, &kernel, &initramfs, &rootimg, &asset_manifest];
+  // Docker's official CLI ships beside the runtime for Macs without their own.
+  if !docker_cli.exists() {
+    let _ = Command::new("sh")
+      .arg(repo_root.join("harpoon/fetch-docker-cli.sh"))
+      .status();
+  }
+
+  let required_assets = [&harpoon_bin, &docker_cli, &kernel, &initramfs, &rootimg, &asset_manifest];
   let missing_assets: Vec<_> = required_assets
     .iter()
     .filter(|asset| !asset.exists())
@@ -46,6 +54,8 @@ fn main() {
     std::fs::create_dir_all(&lib_dir).expect("failed to create bundle lib directory");
     std::fs::copy(&harpoon_bin, bin_dir.join("harpoon"))
       .expect("failed to stage Harpoon runtime binary");
+    std::fs::copy(&docker_cli, bin_dir.join("docker"))
+      .expect("failed to stage bundled Docker CLI");
     std::fs::copy(&kernel, lib_dir.join("Image-virt"))
       .expect("failed to stage guest kernel");
     std::fs::copy(&initramfs, lib_dir.join("harpoon-initramfs.cpio.gz"))
@@ -68,7 +78,7 @@ fn main() {
     }
 
     let _ = Command::new("chmod")
-      .args(["+x", bin_dir.join("harpoon").to_str().unwrap()])
+      .args(["+x", bin_dir.join("harpoon").to_str().unwrap(), bin_dir.join("docker").to_str().unwrap()])
       .status();
   } else if env::var("PROFILE").as_deref() == Ok("release") {
     let missing = missing_assets
