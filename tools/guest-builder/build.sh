@@ -3,7 +3,8 @@ set -euo pipefail
 # ponytail: canonical production guest build — authoritative for assets/guest/
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT_DIR="$REPO_ROOT/assets/guest"
+source "$SCRIPT_DIR/guest-arch.sh"
+OUT_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
 mkdir -p "$OUT_DIR"
 source "$SCRIPT_DIR/build-engine.sh"
 
@@ -35,7 +36,7 @@ for f in "$OUT_DIR/Image-virt" "$OUT_DIR/harpoon-initramfs.cpio.gz" "$OUT_DIR/ha
 done
 
 # Emit the pair contract only after an explicit complete guest build.
-bash "$SCRIPT_DIR/guest-assets-manifest.sh" --write
+bash "$SCRIPT_DIR/guest-assets-manifest.sh" --write "$OUT_DIR"
 
 # Canonical size check for root
 SZ=$(stat -f%z "$OUT_DIR/harpoon-root.img" 2>/dev/null || stat -c%s "$OUT_DIR/harpoon-root.img")

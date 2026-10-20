@@ -89,6 +89,16 @@ do {
     config.serialPorts = [serial]
     let storage = try VZDiskImageStorageDeviceAttachment(url: disk, readOnly: false)
     config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: storage)]
+    // Populating an x86_64 root from this arm64 builder runs package scripts under Rosetta.
+    if ProcessInfo.processInfo.environment["HARPOON_ROOT_BUILDER_ROSETTA"] == "1" {
+        guard VZLinuxRosettaDirectoryShare.availability == .installed else {
+            fputs("[alpine-root-builder] Rosetta is not installed (softwareupdate --install-rosetta)\n", stderr)
+            exit(1)
+        }
+        let rosetta = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+        rosetta.share = try VZLinuxRosettaDirectoryShare()
+        config.directorySharingDevices = [rosetta]
+    }
     try config.validate()
 } catch {
     fputs("[alpine-root-builder] configuration failed: \(error)\n", stderr)

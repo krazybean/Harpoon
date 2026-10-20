@@ -37,6 +37,14 @@ if ! bash "$REPO_ROOT/tools/release/verify-runtime-closure.sh" 2>&1 | tee /tmp/c
   cat /tmp/closure.log >&2
   exit 1
 fi
+if [ "$HARPOON_ARCH" = "universal" ]; then
+  echo "[release] x86_64 guest assets + runtime closure..." >&2
+  HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
+  if ! HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/release/verify-runtime-closure.sh" 2>&1 | tee /tmp/closure-x86_64.log; then
+    echo "[release] FAIL: x86_64 verify-runtime-closure.sh failed — release blocked, see /tmp/closure-x86_64.log" >&2
+    exit 1
+  fi
+fi
 # Version flow — immutable: requested VERSION must already be committed
 echo "[release] version $VERSION flow (immutable)..." >&2
 PKG_VER=$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version")

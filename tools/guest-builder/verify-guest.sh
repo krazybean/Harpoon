@@ -8,9 +8,11 @@ set -euo pipefail
 # 4. bundled root template size is exactly 2G sparse
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+. "$SCRIPT_DIR/guest-arch.sh"
+ASSET_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
+INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
-ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+ROOT_IMG="$ASSET_DIR/harpoon-root.img"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 HARPOON_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
@@ -29,7 +31,7 @@ check_not() {
 
 echo "[verify-guest] verifying canonical guest..." >&2
 
-if bash "$SCRIPT_DIR/guest-assets-manifest.sh" --verify; then
+if bash "$SCRIPT_DIR/guest-assets-manifest.sh" --verify "$ASSET_DIR"; then
   echo "[verify-guest] PASS: kernel/initramfs compatibility manifest" >&2
 else
   echo "[verify-guest] FAIL: kernel/initramfs compatibility manifest" >&2
@@ -70,7 +72,7 @@ if [ -f "$INITRAMFS" ]; then
     done < "$RUNTIME_MANIFEST"
     [ "$RUNTIME_OK" -eq 1 ] && echo "[verify-guest] PASS: Python runtime manifest matches initramfs" >&2 || { echo "[verify-guest] FAIL: Python runtime manifest mismatch" >&2; FAIL=1; }
     [ "$(readlink "$GUEST_TMPDIR/usr/bin/python3" 2>/dev/null)" = "python3.12" ] && echo "[verify-guest] PASS: Python symlink target" >&2 || { echo "[verify-guest] FAIL: Python symlink target" >&2; FAIL=1; }
-    file "$GUEST_TMPDIR/usr/bin/python3.12" 2>/dev/null | grep -q aarch64 && echo "[verify-guest] PASS: initramfs Python aarch64 ELF" >&2 || { echo "[verify-guest] FAIL: initramfs Python is not aarch64 ELF" >&2; FAIL=1; }
+    file "$GUEST_TMPDIR/usr/bin/python3.12" 2>/dev/null | grep -q "$GUEST_ELF_PATTERN" && echo "[verify-guest] PASS: initramfs Python $HARPOON_GUEST_ARCH ELF" >&2 || { echo "[verify-guest] FAIL: initramfs Python is not $HARPOON_GUEST_ARCH ELF" >&2; FAIL=1; }
   else
     echo "[verify-guest] FAIL: Python runtime manifest missing in initramfs" >&2; FAIL=1
   fi

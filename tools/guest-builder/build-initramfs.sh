@@ -8,27 +8,26 @@ set -euo pipefail
 #   4. BOOTSTRAP only if HARPOON_ALLOW_BOOTSTRAP=1 (development-only, not release)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="${HARPOON_INITRAMFS_OUT:-$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz}"
+. "$SCRIPT_DIR/guest-arch.sh"
+ASSET_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
+OUT="${HARPOON_INITRAMFS_OUT:-$ASSET_DIR/harpoon-initramfs.cpio.gz}"
 FINGERPRINT="$OUT.inputs"
 BOOTSTRAP="$REPO_ROOT/assets/guest/.bootstrap/harpoon-initramfs.cpio.gz"
-CACHE_DIR="$REPO_ROOT/assets/guest/.cache"
+CACHE_DIR="$ASSET_DIR/.cache"
 SRC_INIT="$REPO_ROOT/tools/guest-builder/src/init"
 SRC_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 SRC_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
-ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+ROOT_IMG="$ASSET_DIR/harpoon-root.img"
 source "$SCRIPT_DIR/build-engine.sh"
-mkdir -p "$REPO_ROOT/assets/guest" "$CACHE_DIR"
+mkdir -p "$ASSET_DIR" "$CACHE_DIR"
 
-# Pinned production inputs — mismatch FAILs
-EXPECTED_VMLINUZ_SHA="dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332"
-EXPECTED_INITRAMFS_VIRT_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c"
-EXPECTED_MODLOOP_SHA="da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218"
-EXPECTED_MINIROOTFS_SHA="188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c"
-EXPECTED_KERNEL="6.12.110-0-virt"
+# Pinned production inputs (per guest arch in guest-arch.sh) — mismatch FAILs
+EXPECTED_KERNEL="$GUEST_KERNEL_VERSION"
 
 input_manifest() {
   local file rel
   printf 'harpoon-initramfs-inputs-v1\n'
+  [ "$HARPOON_GUEST_ARCH" = "aarch64" ] || printf 'pin %s %s\n' arch "$HARPOON_GUEST_ARCH"
   printf 'pin %s %s\n' kernel "$EXPECTED_KERNEL"
   printf 'pin %s %s\n' vmlinuz "$EXPECTED_VMLINUZ_SHA"
   printf 'pin %s %s\n' initramfs-virt "$EXPECTED_INITRAMFS_VIRT_SHA"
@@ -65,7 +64,7 @@ write_fingerprint() {
 }
 
 # Verify pinned cache inputs if present (mismatch FAIL, not just print)
-for _f in "$CACHE_DIR/vmlinuz-virt" "$CACHE_DIR/initramfs-virt" "$CACHE_DIR/modloop-virt" "$CACHE_DIR/alpine-minirootfs-3.22.1-aarch64.tar.gz"; do
+for _f in "$CACHE_DIR/vmlinuz-virt" "$CACHE_DIR/initramfs-virt" "$CACHE_DIR/modloop-virt" "$CACHE_DIR/$GUEST_MINIROOTFS"; do
   if [ -f "$_f" ]; then
     case "$_f" in
       *vmlinuz-virt) _exp="$EXPECTED_VMLINUZ_SHA" ;;
@@ -119,7 +118,7 @@ fi
 if [ -f "$OUT" ]; then echo "[build-initramfs] STALE: input manifest missing, malformed, or changed; rebuilding" >&2; fi
 
 # 3. deterministic REBUILD via Docker Linux (Alpine 3.22)
-# Pinned inputs (Alpine 3.22 aarch64, kernel 6.12.110-0-virt):
+# Pinned inputs (Alpine 3.22, kernel 6.12.110-0-virt; aarch64 shown, every arch pinned in guest-arch.sh):
 #   Kernel: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt (6.12.110-0-virt)
 #   Initramfs-virt: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/initramfs-virt
 #   Modloop: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/modloop-virt
@@ -139,7 +138,8 @@ if harpoon_detect_build_engine; then
   if [ ! -f "$SRC_INIT" ]; then echo "[build-initramfs] FAIL: missing $SRC_INIT (committed init source)" >&2; exit 1; fi
   if [ ! -f "$SRC_MGMT" ]; then echo "[build-initramfs] FAIL: missing $SRC_MGMT" >&2; exit 1; fi
   # Run rebuild inside Alpine container
-  harpoon_build_engine run --rm -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 \
+  harpoon_build_engine run --rm --platform "$GUEST_CONTAINER_PLATFORM" -e HARPOON_GUEST_ARCH="$HARPOON_GUEST_ARCH" \
+    -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 \
     sh /repo/tools/guest-builder/rebuild-initramfs-container.sh
   if [ -f "$OUT" ]; then
     write_fingerprint

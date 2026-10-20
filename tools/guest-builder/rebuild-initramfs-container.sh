@@ -1,27 +1,31 @@
 
 set -euo pipefail
 apk add --no-cache cpio gzip squashfs-tools curl e2fsprogs e2fsprogs-extra > /dev/null
-BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64"
+. /repo/tools/guest-builder/guest-arch.sh
+BASE="$GUEST_ALPINE_BASE"
 CACHE="/cache"
 REPO="/repo"
-OUT="/repo/assets/guest/harpoon-initramfs.cpio.gz"
+ASSET_DIR="$(guest_asset_dir /repo/assets/guest)"
+OUT="$ASSET_DIR/harpoon-initramfs.cpio.gz"
+MINIROOTFS="$GUEST_MINIROOTFS"
+LOADER="$GUEST_MUSL_LOADER"
 # Fetch modloop and minirootfs to cache if missing
 if [ ! -f "$CACHE/modloop-virt" ]; then
   echo "[rebuild] fetching modloop-virt..." >&2
   curl -L --fail -o "$CACHE/modloop-virt" "$BASE/netboot/modloop-virt"
   echo "[rebuild] modloop sha256 $(sha256sum "$CACHE/modloop-virt" | cut -d" " -f1)" >&2
 fi
-if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218" ]; then echo "[rebuild] FAIL modloop sha mismatch expected da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218" >&2; exit 1; fi
-if [ ! -f "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" ]; then
+if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "$EXPECTED_MODLOOP_SHA" ]; then echo "[rebuild] FAIL modloop sha mismatch expected $EXPECTED_MODLOOP_SHA" >&2; exit 1; fi
+if [ ! -f "$CACHE/$MINIROOTFS" ]; then
   echo "[rebuild] fetching alpine-minirootfs-3.22.1..." >&2
-  curl -L --fail -o "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" "$BASE/alpine-minirootfs-3.22.1-aarch64.tar.gz"
-  echo "[rebuild] minirootfs sha256 $(sha256sum "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" | cut -d" " -f1)" >&2
+  curl -L --fail -o "$CACHE/$MINIROOTFS" "$BASE/$MINIROOTFS"
+  echo "[rebuild] minirootfs sha256 $(sha256sum "$CACHE/$MINIROOTFS" | cut -d" " -f1)" >&2
 fi
-if [ "$(sha256sum "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" | awk "{print \$1}")" != "188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" ]; then echo "[rebuild] FAIL minirootfs sha mismatch expected 188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c" >&2; exit 1; fi
+if [ "$(sha256sum "$CACHE/$MINIROOTFS" | awk "{print \$1}")" != "$EXPECTED_MINIROOTFS_SHA" ]; then echo "[rebuild] FAIL minirootfs sha mismatch expected $EXPECTED_MINIROOTFS_SHA" >&2; exit 1; fi
 # Prepare staging
 STAGING=$(mktemp -d)
 echo "[rebuild] staging at $STAGING" >&2
-tar -xzf "$CACHE/alpine-minirootfs-3.22.1-aarch64.tar.gz" -C "$STAGING"
+tar -xzf "$CACHE/$MINIROOTFS" -C "$STAGING"
 # Extract modloop squashfs
 MODLOOP_TMP=$(mktemp -d)
 unsquashfs -f -d "$MODLOOP_TMP/modloop" "$CACHE/modloop-virt" > /dev/null
@@ -42,7 +46,7 @@ if [ "$(printf '%s\n' "$KVER_CANDIDATES" | wc -l)" -ne 1 ]; then
   exit 1
 fi
 KVER="$KVER_CANDIDATES"
-[ "$KVER" = "6.12.110-0-virt" ] || { echo "[rebuild] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
+[ "$KVER" = "$GUEST_KERNEL_VERSION" ] || { echo "[rebuild] FAIL: unexpected modloop kernel $KVER" >&2; exit 1; }
 echo "[rebuild] kernel $KVER" >&2
 # Create modules dir in staging
 mkdir -p "$STAGING/lib/modules/$KVER"
@@ -115,7 +119,7 @@ chmod +x "$STAGING/usr/local/bin/harpoon-mgmt"
 cp -a "/repo/tools/guest-builder/src/harpoon-mgmt-wrapper" "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
 chmod +x "$STAGING/usr/local/bin/harpoon-mgmt-wrapper"
 # Carry the offline Python closure from the canonical persistent root.
-ROOT_IMG="/repo/assets/guest/harpoon-root.img"
+ROOT_IMG="$ASSET_DIR/harpoon-root.img"
 [ -f "$ROOT_IMG" ] || { echo "[rebuild] FAIL missing canonical root image" >&2; exit 1; }
 mkdir -p "$STAGING/usr/bin" "$STAGING/usr/lib" "$STAGING/lib" "$STAGING/usr/local/share/harpoon-runtime"
 debugfs_extract_file() {
@@ -166,12 +170,12 @@ debugfs_extract_tree() {
 debugfs_extract_file /usr/bin/python3.12 "$STAGING/usr/bin/python3.12"
 ln -s python3.12 "$STAGING/usr/bin/python3"
 debugfs_extract_file /usr/lib/libpython3.12.so.1.0 "$STAGING/usr/lib/libpython3.12.so.1.0"
-debugfs_extract_file /lib/ld-musl-aarch64.so.1 "$STAGING/lib/ld-musl-aarch64.so.1"
+debugfs_extract_file /lib/$LOADER "$STAGING/lib/$LOADER"
 debugfs_extract_tree /usr/lib/python3.12 "$STAGING/usr/lib" "$STAGING/usr/lib/python3.12"
-chmod 0755 "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1"
+chmod 0755 "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/$LOADER"
 RUNTIME_MANIFEST="$STAGING/usr/local/share/harpoon-runtime/python.manifest"
 {
-  find "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/ld-musl-aarch64.so.1" "$STAGING/usr/lib/python3.12" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+  find "$STAGING/usr/bin/python3.12" "$STAGING/usr/lib/libpython3.12.so.1.0" "$STAGING/lib/$LOADER" "$STAGING/usr/lib/python3.12" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
     printf "F %s %s %s\\n" "$(sha256sum "$path" | cut -d" " -f1)" "$(stat -c %a "$path")" "${path#$STAGING/}"
   done
   find "$STAGING/usr/bin/python3" "$STAGING/usr/lib/python3.12" -type l -print | LC_ALL=C sort | while IFS= read -r path; do

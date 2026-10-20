@@ -16,8 +16,10 @@ func handleDoctor() -> Int32 {
     check(true, "macOS \(ver)")
     #if arch(arm64)
     check(true, "architecture arm64")
+    #elseif arch(x86_64)
+    check(true, "architecture x86_64 (Intel guest)")
     #else
-    check(false, "architecture not arm64", warn:true)
+    check(false, "architecture unsupported", warn:true)
     #endif
     check(VZVirtualMachine.isSupported, "Virtualization.framework available")
     // HARPOON

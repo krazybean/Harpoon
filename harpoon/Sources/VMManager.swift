@@ -110,9 +110,6 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     }
 
     func buildVM() throws -> VZVirtualMachine {
-        #if !arch(arm64)
-        throw NSError(domain: "HarpoonUnsupportedArch", code: 1, userInfo: [NSLocalizedDescriptionKey: "Harpoon's Linux guest needs an Apple Silicon Mac"])
-        #endif
         let cfg = VZVirtualMachineConfiguration()
         cfg.cpuCount = config.cpuCount
         cfg.memorySize = config.memorySizeBytes

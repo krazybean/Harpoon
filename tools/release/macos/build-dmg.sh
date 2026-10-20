@@ -21,10 +21,13 @@ DIST_DIR="$REPO_ROOT/dist/v$VERSION"
 mkdir -p "$DIST_DIR"
 DMG_NAME="Harpoon-${VERSION}-${HARPOON_ARCH}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
-# Explicit 3072 MB working image (sparse root is 2G logical, HFS+ needs overhead)
+# Each guest root is 2G logical; universal bundles carry two.
+DMG_SIZE_MB=3072
+[ "$HARPOON_ARCH" = "universal" ] && DMG_SIZE_MB=5632
+# Explicit working image size (sparse roots are 2G logical each, HFS+ needs overhead)
 # Do not rebuild app during DMG creation — use exact signed app
 TMP_SRC=$(mktemp -d)
-echo "[build-dmg] staging $TMP_SRC -> $DMG_PATH (3072M)" >&2
+echo "[build-dmg] staging $TMP_SRC -> $DMG_PATH (${DMG_SIZE_MB}M)" >&2
 cp -R "$APP" "$TMP_SRC/"
 ln -s /Applications "$TMP_SRC/Applications"
 ICON="$REPO_ROOT/ui/harpoon-desktop/src-tauri/icons/icon.icns"
@@ -32,24 +35,24 @@ BUNDLE_DMG_SH="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/$TAURI_TARGET_DIR/
 # Prefer create-dmg if available, else hdiutil
 DMG_CREATED=0
 if [ -f "$BUNDLE_DMG_SH" ]; then
-  echo "[build-dmg] via bundle_dmg.sh --disk-image-size 3072" >&2
-  ARGS=(--volname Harpoon --window-pos 10 60 --window-size 500 350 --icon-size 128 --icon "Harpoon.app" 100 100 --app-drop-link 400 100 --disk-image-size 3072 --format UDZO "$DMG_PATH" "$TMP_SRC")
+  echo "[build-dmg] via bundle_dmg.sh --disk-image-size $DMG_SIZE_MB" >&2
+  ARGS=(--volname Harpoon --window-pos 10 60 --window-size 500 350 --icon-size 128 --icon "Harpoon.app" 100 100 --app-drop-link 400 100 --disk-image-size $DMG_SIZE_MB --format UDZO "$DMG_PATH" "$TMP_SRC")
   if [ -f "$ICON" ]; then ARGS=(--volicon "$ICON" "${ARGS[@]}"); fi
   if bash "$BUNDLE_DMG_SH" "${ARGS[@]}" 2>&1 | tail -n 20; then
     if [ -f "$DMG_PATH" ]; then DMG_CREATED=1; fi
   fi
 fi
 if [ $DMG_CREATED -eq 0 ]; then
-  echo "[build-dmg] fallback hdiutil create -size 3072m" >&2
+  echo "[build-dmg] fallback hdiutil create -size ${DMG_SIZE_MB}m" >&2
   rm -f "$DMG_PATH"
-  hdiutil create -size 3072m -fs HFS+ -volname Harpoon -srcfolder "$TMP_SRC" -ov -format UDZO "$DMG_PATH" 2>&1 | tail -n 20
+  hdiutil create -size ${DMG_SIZE_MB}m -fs HFS+ -volname Harpoon -srcfolder "$TMP_SRC" -ov -format UDZO "$DMG_PATH" 2>&1 | tail -n 20
   if [ -f "$DMG_PATH" ]; then DMG_CREATED=1; fi
 fi
 rm -rf "$TMP_SRC"
 if [ $DMG_CREATED -eq 0 ] || [ ! -f "$DMG_PATH" ]; then
   echo "[build-dmg] FAIL: DMG not created at $DMG_PATH" >&2
   # Sandbox may block hdiutil Device not configured — capture to avoid pipefail SIGPIPE
-  HDIUTIL_OUT=$(hdiutil create -size 3072m -fs HFS+ -volname Harpoon -srcfolder "$APP" -ov -format UDZO "$DMG_PATH" 2>&1 || true)
+  HDIUTIL_OUT=$(hdiutil create -size ${DMG_SIZE_MB}m -fs HFS+ -volname Harpoon -srcfolder "$APP" -ov -format UDZO "$DMG_PATH" 2>&1 || true)
   if echo "$HDIUTIL_OUT" | grep -q "Device not configured"; then
     echo "[build-dmg] BLOCKED: hdiutil Device not configured (sandbox)" >&2
     exit 0

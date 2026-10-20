@@ -50,6 +50,12 @@ check "Harpoon arm64" bash -c "file \"$APP/Contents/Resources/harpoon/bin/harpoo
 if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
   check "Tauri x86_64" bash -c "lipo -archs \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q x86_64"
   check "Harpoon x86_64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q x86_64"
+  X86_LIB="$APP/Contents/Resources/harpoon/lib/harpoon/x86_64"
+  for f in Image-virt harpoon-initramfs.cpio.gz guest-assets.manifest harpoon-root.img; do
+    check "x86_64 guest $f exists" test -f "$X86_LIB/$f"
+  done
+  check "x86_64 initramfs matches canonical" cmp -s "$REPO_ROOT/assets/guest/x86_64/harpoon-initramfs.cpio.gz" "$X86_LIB/harpoon-initramfs.cpio.gz"
+  check "x86_64 guest asset manifest matches canonical" cmp -s "$REPO_ROOT/assets/guest/x86_64/guest-assets.manifest" "$X86_LIB/guest-assets.manifest"
 fi
 
 # 3. Deployment target — Harpoon must be <= 15.1, not 26.0

@@ -28,6 +28,11 @@ LOG=$(mktemp)
 if ! bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tee "$LOG"; then echo "[build] FAIL: guest-builder build failed (see $LOG)" >&2; cat "$LOG" >&2; exit 1; fi
 # 3. verify pristine root
 if ! bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: verify-root failed" >&2; exit 1; fi
+# 3b. universal bundles also carry the x86_64 guest for Intel Macs (root populated under Rosetta)
+if [ "$HARPOON_ARCH" = "universal" ]; then
+  echo "[build] x86_64 guest assets..." >&2
+  if ! HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: x86_64 guest-builder build failed" >&2; exit 1; fi
+fi
 # 4. build Swift runtime
 echo "[build] Swift runtime..." >&2
 if ! bash "$REPO_ROOT/harpoon/build.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: harpoon/build.sh failed" >&2; exit 1; fi

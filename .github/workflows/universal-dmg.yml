@@ -13,7 +13,8 @@ on:
       - .github/workflows/universal-dmg.yml
       - harpoon/build.sh
       - harpoon/Sources/**
-      - tools/release/macos/**
+      - tools/guest-builder/**
+      - tools/release/**
       - tools/verify-bundle.sh
       - ui/harpoon-desktop/src-tauri/**
 
@@ -52,29 +53,48 @@ jobs:
           sh harpoon/build.sh
           lipo harpoon/build/harpoon -verify_arch arm64 x86_64
 
-      - name: Fetch guest kernel
+      - name: Install guest tooling
         run: |
-          bash tools/guest-builder/fetch-kernel.sh
-          bash tools/guest-builder/guest-assets-manifest.sh --write
+          brew install squashfs e2fsprogs
+          echo "$(brew --prefix e2fsprogs)/sbin" >> "$GITHUB_PATH"
+          softwareupdate --install-rosetta --agree-to-license || true
 
-      # The root image is normally built by the disposable VZ builder, which needs
-      # Virtualization.framework inside the runner. When the repository variables
-      # HARPOON_ROOT_IMG_URL and HARPOON_ROOT_IMG_SHA256 are set, a prebuilt
-      # tar.gz holding harpoon-root.img and harpoon-root.img.manifest is used instead
-      # (create it with: tar -czf harpoon-root.tar.gz -C assets/guest harpoon-root.img harpoon-root.img.manifest).
-      - name: Obtain guest root image
-        env:
-          ROOT_URL: ${{ vars.HARPOON_ROOT_IMG_URL }}
-          ROOT_SHA256: ${{ vars.HARPOON_ROOT_IMG_SHA256 }}
+      # TEMPORARY: record the x86_64 Alpine pins for tools/guest-builder/guest-arch.sh.
+      - name: Print x86_64 guest pins
         run: |
-          if [ -n "$ROOT_URL" ]; then
-            curl -L --fail -o "$RUNNER_TEMP/harpoon-root.tar.gz" "$ROOT_URL"
-            echo "$ROOT_SHA256  $RUNNER_TEMP/harpoon-root.tar.gz" | shasum -a 256 -c -
-            tar -xzf "$RUNNER_TEMP/harpoon-root.tar.gz" -C assets/guest harpoon-root.img harpoon-root.img.manifest
-            bash tools/guest-builder/verify-root.sh assets/guest/harpoon-root.img
+          base=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64
+          for f in netboot/vmlinuz-virt netboot/initramfs-virt netboot/modloop-virt alpine-minirootfs-3.22.1-x86_64.tar.gz; do
+            curl -sSL --fail -o "$RUNNER_TEMP/pin" "$base/$f"
+            echo "PIN $f $(shasum -a 256 "$RUNNER_TEMP/pin" | cut -d' ' -f1)"
+            [ "$f" = netboot/vmlinuz-virt ] && echo "PIN kernel $(file -b "$RUNNER_TEMP/pin")"
+            [ "$f" = netboot/modloop-virt ] && echo "PIN modloop $(unsquashfs -l "$RUNNER_TEMP/pin" | grep -m1 -o 'modules/[^/]*-virt')"
+            true
+          done
+
+      # Kernel, initramfs and root images for both guests (aarch64 in assets/guest,
+      # x86_64 in assets/guest/x86_64). Roots and the x86_64 initramfs need
+      # Virtualization.framework, Rosetta and Docker, so when the repository variables
+      # HARPOON_GUEST_ASSETS_URL and HARPOON_GUEST_ASSETS_SHA256 are set, the tarball
+      # from tools/guest-builder/pack-assets.sh is used instead of building them here.
+      - name: Obtain guest assets
+        env:
+          ASSETS_URL: ${{ vars.HARPOON_GUEST_ASSETS_URL }}
+          ASSETS_SHA256: ${{ vars.HARPOON_GUEST_ASSETS_SHA256 }}
+        run: |
+          if [ -n "$ASSETS_URL" ]; then
+            curl -L --fail -o "$RUNNER_TEMP/guest-assets.tar.gz" "$ASSETS_URL"
+            echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
+            tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
           else
+            bash tools/guest-builder/fetch-kernel.sh
+            bash tools/guest-builder/guest-assets-manifest.sh --write
             bash tools/guest-builder/build-root.sh --builder vz --force
+            HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/build.sh
           fi
+          for arch in aarch64 x86_64; do
+            HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/guest-assets-manifest.sh --verify
+            HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/verify-root.sh "$(HARPOON_GUEST_ARCH=$arch sh -c '. tools/guest-builder/guest-arch.sh; guest_asset_dir assets/guest')/harpoon-root.img"
+          done
 
       - name: Build universal Harpoon.app
         run: |

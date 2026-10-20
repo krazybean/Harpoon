@@ -18,12 +18,6 @@ func syncGuestFilesystem() -> GuestSyncOutcome {
 }
 
 func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> Int32 {
-    #if !arch(arm64)
-    // Universal builds launch on Intel, but the bundled guest is arm64 and
-    // Virtualization.framework on Intel only boots x86_64 Linux.
-    cliError("HARPOON_UNSUPPORTED_ARCH: Harpoon's Linux guest needs an Apple Silicon Mac")
-    return 12
-    #endif
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
         cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
