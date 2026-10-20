@@ -3,7 +3,8 @@ set -euo pipefail
 # ponytail: canonical root always comes from the disposable Alpine VZ builder.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="${HARPOON_ROOT_OUT:-$REPO_ROOT/assets/guest/harpoon-root.img}"
+. "$SCRIPT_DIR/guest-arch.sh"
+OUT="${HARPOON_ROOT_OUT:-$(guest_asset_dir "$REPO_ROOT/assets/guest")/harpoon-root.img}"
 
 BUILDER=""
 FORCE=0

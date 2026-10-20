@@ -8,9 +8,9 @@ BUSYBOX=/bin/busybox
 REPO_MAIN=https://dl-cdn.alpinelinux.org/alpine/v3.22/main
 REPO_COMMUNITY=https://dl-cdn.alpinelinux.org/alpine/v3.22/community
 PACKAGES="docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod"
-TARGET_ARCH=$(cat /builder-payload/target-arch 2>/dev/null || echo aarch64)
 
 bb() { "$BUSYBOX" "$@"; }
+TARGET_ARCH=$(bb cat /builder-payload/target-arch 2>/dev/null || echo aarch64)
 log() { bb printf 'HARPOON_ROOT_BUILDER_%s\n' "$*" > "$MARKER"; }
 fail() { log "FAIL $*"; while :; do bb sleep 5; done; }
 write_repositories() {
