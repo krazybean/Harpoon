@@ -107,14 +107,18 @@ if [ -f "$INITRAMFS" ]; then
     path=$(find "$MODULE_DIR" -type f -name "$name.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     if [ -z "$path" ]; then
       alias=$(awk -v name="$name" '$1=="alias" && $2==name {print $3; exit}' "$MODULE_DIR/modules.alias")
-      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f -name "$alias.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f \( -name "$alias.ko" -o -name "$(printf %s "$alias" | tr _ -).ko" \) | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     fi
     [ -n "$path" ] || return 1
     echo "$path"
   }
   module_builtin() {
-    grep -q "/$1\\.ko$" "$MODULE_DIR/modules.builtin" 2>/dev/null && return 0
-    tr '\000' '\n' < "$MODULE_DIR/modules.builtin.modinfo" 2>/dev/null | grep -q "\\.alias=$1$"
+    local name candidate
+    for candidate in "$1" "${1}_generic" "lib$1" $(awk -v name="$1" '$1=="alias" && $2==name {print $3}' "$MODULE_DIR/modules.alias" 2>/dev/null); do
+      name=$(printf '%s' "$candidate" | sed 's/[-_]/[-_]/g')
+      grep -q "/$name\\.ko$" "$MODULE_DIR/modules.builtin" 2>/dev/null && return 0
+    done
+    [ -f "$MODULE_DIR/modules.builtin.modinfo" ] && tr '\000' '\n' < "$MODULE_DIR/modules.builtin.modinfo" | grep -q "\\.alias=$1$"
   }
   verify_module() {
     local path

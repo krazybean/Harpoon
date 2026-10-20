@@ -61,9 +61,14 @@ resolve_module() {
   path=$(find "$MODULES_DIR/$KVER" -type f -name "$name.ko" | sed "s#^$MODULES_DIR/$KVER/##" | LC_ALL=C sort | head -n1)
   if [ -z "$path" ]; then
     alias=$(awk -v name="$name" "\$1==\"alias\" && \$2==name {print \$3; exit}" "$MODULES_DIR/$KVER/modules.alias")
-    [ -n "$alias" ] && path=$(find "$MODULES_DIR/$KVER" -type f -name "$alias.ko" | sed "s#^$MODULES_DIR/$KVER/##" | LC_ALL=C sort | head -n1)
+    [ -n "$alias" ] && path=$(find "$MODULES_DIR/$KVER" -type f \( -name "$alias.ko" -o -name "$(printf %s "$alias" | tr _ -).ko" \) | sed "s#^$MODULES_DIR/$KVER/##" | LC_ALL=C sort | head -n1)
   fi
-  [ -n "$path" ] || { echo "[rebuild] FAIL unresolved required module: $name" >&2; return 1; }
+  [ -n "$path" ] || {
+    echo "[rebuild] FAIL unresolved required module: $name" >&2
+    grep -h "$name" "$MODULES_DIR/$KVER/modules.builtin" "$MODULES_DIR/$KVER/modules.alias" 2>/dev/null | head -n 10 >&2
+    find "$MODULES_DIR/$KVER" -name "*$name*" | head -n 10 >&2
+    return 1
+  }
   echo "$path"
 }
 copy_module() {
@@ -79,8 +84,12 @@ copy_module() {
 }
 # Built-in modules (e.g. crc32c on the x86_64 kernel) need no .ko in the initramfs.
 module_builtin() {
-  grep -q "/$1\\.ko$" "$MODULES_DIR/$KVER/modules.builtin" 2>/dev/null && return 0
-  tr '\000' '\n' < "$MODULES_DIR/$KVER/modules.builtin.modinfo" 2>/dev/null | grep -q "\\.alias=$1$"
+  local name candidate
+  for candidate in "$1" "${1}_generic" "lib$1" $(awk -v name="$1" '$1=="alias" && $2==name {print $3}' "$MODULES_DIR/$KVER/modules.alias" 2>/dev/null); do
+    name=$(printf '%s' "$candidate" | sed 's/[-_]/[-_]/g')
+    grep -q "/$name\\.ko$" "$MODULES_DIR/$KVER/modules.builtin" 2>/dev/null && return 0
+  done
+  [ -f "$MODULES_DIR/$KVER/modules.builtin.modinfo" ] && tr '\000' '\n' < "$MODULES_DIR/$KVER/modules.builtin.modinfo" | grep -q "\\.alias=$1$"
 }
 feature_module() {
   awk -v feature="$1" "\$1==feature {print \$2; exit}" "$FEATURE_MODULES"
