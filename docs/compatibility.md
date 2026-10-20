@@ -24,7 +24,7 @@
 
 ## Host Requirements
 
-- macOS 13+ (Ventura) minimum for `VZGenericPlatformConfiguration`; test on macOS 26.5 host in Spike.
+- macOS 12+ (Monterey) minimum (`harpoon/MIN_MACOS`), set by `VZGenericPlatformConfiguration`; test on macOS 26.5 host in Spike.
 - Apple Silicon (arm64 guest). Universal builds also run on Intel Macs with an x86_64 guest from `tools/guest-builder` (`HARPOON_GUEST_ARCH=x86_64`).
 - Entitlement `com.apple.security.virtualization` required; binary must be ad-hoc or Developer-ID signed with entitlement.
 

@@ -494,31 +494,31 @@ Building Harpoon from source does not require Developer ID or notarization; thos
 
 ## 15. Minimum macOS and standalone bundle contract (v0.1.1 Stage 2)
 
-**Minimum:** `HARPOON_MIN_MACOS=15.1` — single source `harpoon/MIN_MACOS`.
+**Minimum:** `HARPOON_MIN_MACOS=12.0` — single source `harpoon/MIN_MACOS`.
 
-- Tauri `bundle.macOS.minimumSystemVersion` = `15.1` (`tauri.conf.json`) → `LSMinimumSystemVersion` in `Info.plist`.
-- Swift `harpoon/build/harpoon` built with `MACOSX_DEPLOYMENT_TARGET=15.1` and `xcrun swiftc -target arm64-apple-macosx15.1`, `LC_BUILD_VERSION` `minos 15.1` `sdk 26.5`. RPATHs: `/usr/lib/swift`, `@executable_path/../../../Frameworks`, `@loader_path/../../../Frameworks`.
-- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since 11–13; 15.1 safely covers them. Tauri 2 requires 10.15+, so 15.1 is the binding floor. The acceptance machine on 15.1 is explicitly supported.
+- Tauri `bundle.macOS.minimumSystemVersion` = `12.0` (`tauri.conf.json`) → `LSMinimumSystemVersion` in `Info.plist`.
+- Swift `harpoon/build/harpoon` built with `MACOSX_DEPLOYMENT_TARGET=12.0` and `xcrun swiftc -target <arch>-apple-macosx12.0`, `LC_BUILD_VERSION` `minos 12.0` `sdk 26.5`. RPATHs: `/usr/lib/swift`, `@executable_path/../../../Frameworks`, `@loader_path/../../../Frameworks`.
+- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. 12.0 (Monterey) keeps older Intel Macs, which stop at Monterey or Sonoma, able to open the universal build; the compiler enforces API availability against this target.
 
 **Self-containment:**
 
 ```
 Harpoon.app/Contents/
-  MacOS/harpoon-desktop          # 15.1, arm64, no Swift deps
-  Resources/harpoon/bin/harpoon  # 15.1, arm64, Swift, @rpath to Frameworks, entitlement virtualization
+  MacOS/harpoon-desktop          # 12.0, arm64 (+ x86_64 universal), no Swift deps
+  Resources/harpoon/bin/harpoon  # 12.0, arm64 (+ x86_64 universal), Swift, @rpath to Frameworks, entitlement virtualization
   Resources/harpoon/lib/harpoon/ # Image-virt, harpoon-initramfs.cpio.gz, harpoon-root.img (via assets/guest)
-  Frameworks/                    # Swift runtime if embedding needed (via swift-stdlib-tool); currently OS-provided for 15.1
+  Frameworks/                    # Swift runtime if embedding needed (via swift-stdlib-tool); currently OS-provided
 ```
 
 The nested `harpoon` is production executable code, not opaque data. Its location `Resources/harpoon/bin/harpoon` is explicit and resolved first by `RuntimeConfig.installedLibDir` (bundle `Resources/harpoon/lib/harpoon` before `~/Library` or `CWD`). No hard-coded Xcode paths, no `DYLD_LIBRARY_PATH`.
 
-**Swift embedding:** For `15.1`, Swift stdlib is expected in OS `/usr/lib/swift` (Swift 6.0 runtime on 15.1). `harpoon/build.sh` adds Frameworks RPATH; if a future Swift version requires libs not in OS, `xcrun swift-stdlib-tool --copy --platform macosx --scan-executable harpoon/build/harpoon --destination Harpoon.app/Contents/Frameworks` will embed them (requires Xcode, not just CLT; CLT's `swift-5.0` lacks Swift 6 dylibs). No unnecessary libs are bundled.
+**Swift embedding:** The Swift stdlib is expected in OS `/usr/lib/swift`; newer language runtime pieces back-deploy through the compatibility libraries swiftc links statically. `harpoon/build.sh` adds Frameworks RPATH; if a future Swift version requires libs not in OS, `xcrun swift-stdlib-tool --copy --platform macosx --scan-executable harpoon/build/harpoon --destination Harpoon.app/Contents/Frameworks` will embed them (requires Xcode, not just CLT; CLT's `swift-5.0` lacks Swift 6 dylibs). No unnecessary libs are bundled.
 
 **Verification:**
 
 ```sh
 bash tools/verify-bundle.sh [Harpoon.app]
-# checks: nested runtime, guest assets, arm64, minos 15.1 (not 26), dylibs system/@rpath, no DarwinFoundation1, RPATH Frameworks, entitlements, no spike/repo paths, Info.plist LSMinimumSystemVersion
+# checks: nested runtime, guest assets, arm64, minos from harpoon/MIN_MACOS (not 26), dylibs system/@rpath, no DarwinFoundation1, RPATH Frameworks, entitlements, no spike/repo paths, Info.plist LSMinimumSystemVersion
 ```
 
 Outside-repo proof:

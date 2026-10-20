@@ -58,10 +58,12 @@ if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
   check "x86_64 guest asset manifest matches canonical" cmp -s "$REPO_ROOT/assets/guest/x86_64/guest-assets.manifest" "$X86_LIB/guest-assets.manifest"
 fi
 
-# 3. Deployment target — Harpoon must be <= 15.1, not 26.0
-check "Harpoon minos 15.1" bash -c "otool -l \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos 15\.1'"
+# 3. Deployment target — both binaries must target harpoon/MIN_MACOS, not 26.0
+MIN_MACOS="$(cat "$REPO_ROOT/harpoon/MIN_MACOS")"
+MIN_MACOS_RE="${MIN_MACOS//./\\.}"
+check "Harpoon minos $MIN_MACOS" bash -c "otool -l \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos $MIN_MACOS_RE\$'"
 check_fail "Harpoon minos not 26.0" bash -c "otool -l \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos 26\.0'"
-check "Tauri minos 15.1" bash -c "otool -l \"$APP/Contents/MacOS/harpoon-desktop\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos 15\.1'"
+check "Tauri minos $MIN_MACOS" bash -c "otool -l \"$APP/Contents/MacOS/harpoon-desktop\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos $MIN_MACOS_RE\$'"
 
 # 4. SDK version (just info, not fail)
 echo "[verify-bundle] SDK check (info):" >&2
@@ -74,7 +76,7 @@ echo "[verify-bundle] checking dylibs for Harpoon..." >&2
 OTOOL_HARPOON=$(otool -L "$APP/Contents/Resources/harpoon/bin/harpoon" | grep -v ':$')
 echo "$OTOOL_HARPOON" | head -n 30 >&2
 # Must NOT have DarwinFoundation1/2/3 (would indicate 26.0 build)
-check_fail "Harpoon should not link DarwinFoundation1 (15.1 target)" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation1"
+check_fail "Harpoon should not link DarwinFoundation1 ($MIN_MACOS target)" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation1"
 check_fail "Harpoon should not link DarwinFoundation2" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation2"
 check_fail "Harpoon should not link DarwinFoundation3" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation3"
 # Check for non-system dylibs — parse dependencies only (slice headers dropped above)
@@ -187,7 +189,7 @@ else
 fi
 
 # 10. Info.plist
-check "LSMinimumSystemVersion 15.1" bash -c "plutil -p \"$APP/Contents/Info.plist\" 2>&1 | grep -q '\"LSMinimumSystemVersion\" => \"15.1\"'"
+check "LSMinimumSystemVersion $MIN_MACOS" bash -c "plutil -p \"$APP/Contents/Info.plist\" 2>&1 | grep -q '\"LSMinimumSystemVersion\" => \"$MIN_MACOS\"'"
 
 if [ $FAIL -ne 0 ]; then
   echo "[verify-bundle] FAIL: bundle verification failed" >&2

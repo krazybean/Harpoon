@@ -5,7 +5,7 @@ TMP="$(mktemp -d /tmp/harpoon-guest-assets.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 BIN="$TMP/check"
-xcrun swiftc -target arm64-apple-macosx15.1 \
+xcrun swiftc -target "arm64-apple-macosx$(cat "$(dirname "$0")/MIN_MACOS")" \
   "$ROOT/harpoon/Sources/RuntimeConfig.swift" "$ROOT/harpoon/GuestAssetFixtureMain.swift" \
   -framework Virtualization -o "$BIN" -module-cache-path "$TMP/module-cache"
 

@@ -6,7 +6,7 @@ BUILD="$SCRIPT_DIR/build"
 mkdir -p "$BUILD"
 OUT="$BUILD/harpoon"
 # Single source of truth for minimum macOS — must match tauri.conf.json bundle.macOS.minimumSystemVersion
-HARPOON_MIN_MACOS="$(cat "$SCRIPT_DIR/MIN_MACOS" 2>/dev/null || echo "15.1")"
+HARPOON_MIN_MACOS="$(cat "$SCRIPT_DIR/MIN_MACOS" 2>/dev/null || echo "12.0")"
 export MACOSX_DEPLOYMENT_TARGET="$HARPOON_MIN_MACOS"
 # HARPOON_ARCH=arm64 (default) or universal (arm64 + x86_64 slices joined with lipo)
 HARPOON_ARCH="${HARPOON_ARCH:-arm64}"

@@ -125,7 +125,7 @@ if ! bash "$REPO_ROOT/tools/verify-bundle.sh" "$DIST_DIR/Harpoon.app" 2>&1 | tee
   exit 1
 fi
 rm -f "$VERIFY_LOG"
-# Dependency check (minos 15.1, no DarwinFoundation, etc) — part of verify-bundle, but also explicit
+# Dependency check (minos from harpoon/MIN_MACOS, no DarwinFoundation, etc) — part of verify-bundle, but also explicit
 echo "[release] dependency check..." >&2
 for bin in "$DIST_DIR/Harpoon.app/Contents/MacOS/harpoon-desktop" "$DIST_DIR/Harpoon.app/Contents/Resources/harpoon/bin/harpoon"; do
   echo "[release] otool $bin" >&2
@@ -181,7 +181,7 @@ dirty:
 $GIT_DIRTY
 build $TIMESTAMP
 arch $ARCH (bundle $HARPOON_ARCH)
-minos 15.1
+minos $(cat "$REPO_ROOT/harpoon/MIN_MACOS")
 kernel $(shasum -a 256 "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null | cut -d' ' -f1 || echo unknown) $(stat -f%z "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null || stat -c%s "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null)
 initramfs $(shasum -a 256 "$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz" 2>/dev/null | cut -d' ' -f1)
 root $(shasum -a 256 "$REPO_ROOT/assets/guest/harpoon-root.img" 2>/dev/null | cut -d' ' -f1)
