@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ponytail: pack the built guests (aarch64 + x86_64) into one tarball for CI
-# (HARPOON_GUEST_ASSETS_URL / HARPOON_GUEST_ASSETS_SHA256 in .github/workflows/universal-dmg.yml).
+# (published by tools/release/macos/publish-guest-assets.sh for .github/workflows/universal-dmg.yml).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ASSETS="$REPO_ROOT/assets/guest"

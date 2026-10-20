@@ -55,15 +55,16 @@ jobs:
 
       - name: Install guest tooling
         run: |
-          brew install squashfs e2fsprogs
+          brew install e2fsprogs
           echo "$(brew --prefix e2fsprogs)/sbin" >> "$GITHUB_PATH"
 
       # Both guest kernels come from pinned Alpine downloads. The root images and the
       # x86_64 initramfs need Virtualization.framework (plus Rosetta and Docker), which
       # GitHub's macOS runners do not provide, so they come from the tarball made by
-      # tools/guest-builder/pack-assets.sh, named by the repository variables
-      # HARPOON_GUEST_ASSETS_URL and HARPOON_GUEST_ASSETS_SHA256. Without it, the job
-      # stops after checking that both kernels fetch and the x86_64 app compiles.
+      # tools/guest-builder/pack-assets.sh, published as a GitHub release asset by
+      # tools/release/macos/publish-guest-assets.sh, which also sets the repository
+      # variables HARPOON_GUEST_ASSETS_TAG and HARPOON_GUEST_ASSETS_SHA256. Without them,
+      # the job stops after checking that both kernels fetch and the x86_64 app compiles.
       - name: Fetch guest kernels
         run: |
           bash tools/guest-builder/fetch-kernel.sh
@@ -72,15 +73,16 @@ jobs:
       - name: Obtain guest assets
         id: guest
         env:
-          ASSETS_URL: ${{ vars.HARPOON_GUEST_ASSETS_URL }}
+          ASSETS_TAG: ${{ vars.HARPOON_GUEST_ASSETS_TAG }}
           ASSETS_SHA256: ${{ vars.HARPOON_GUEST_ASSETS_SHA256 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$ASSETS_URL" ]; then
-            echo "::notice::HARPOON_GUEST_ASSETS_URL is not set; building the .dmg needs prebuilt guest assets (tools/guest-builder/pack-assets.sh)"
+          if [ -z "$ASSETS_TAG" ]; then
+            echo "::notice::HARPOON_GUEST_ASSETS_TAG is not set; building the .dmg needs prebuilt guest assets (tools/release/macos/publish-guest-assets.sh)"
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          curl -L --fail -o "$RUNNER_TEMP/guest-assets.tar.gz" "$ASSETS_URL"
+          gh release download "$ASSETS_TAG" --repo "$GITHUB_REPOSITORY" --pattern harpoon-guest-assets.tar.gz --output "$RUNNER_TEMP/guest-assets.tar.gz"
           echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
           for arch in aarch64 x86_64; do

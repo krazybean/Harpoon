@@ -49,6 +49,11 @@ HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/build.sh
   and runs package scripts under Rosetta (`VZLinuxRosettaDirectoryShare` + binfmt_misc).
 - initramfs: rebuilt in an `alpine:3.22` container with `--platform linux/amd64`.
 
+GitHub's macOS runners cannot run Virtualization.framework, so CI's universal DMG
+uses guests built on a Mac: `tools/release/macos/publish-guest-assets.sh` builds both,
+uploads them as a pre-release asset, sets the workflow's repository variables and
+re-runs the Universal macOS DMG workflow.
+
 ## Provenance
 
 - Kernel: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt`
