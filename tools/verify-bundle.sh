@@ -47,6 +47,10 @@ check "root template exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoo
 # 2. Arch
 check "Tauri arm64" bash -c "file \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q arm64"
 check "Harpoon arm64" bash -c "file \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q arm64"
+if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
+  check "Tauri x86_64" bash -c "lipo -archs \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q x86_64"
+  check "Harpoon x86_64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q x86_64"
+fi
 
 # 3. Deployment target — Harpoon must be <= 15.1, not 26.0
 check "Harpoon minos 15.1" bash -c "otool -l \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos 15\.1'"
