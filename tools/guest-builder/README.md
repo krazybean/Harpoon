@@ -32,6 +32,28 @@ bash tools/guest-builder/sanitize-root.sh     # deterministic clean to 0/0/0
 bash tools/guest-builder/guest-assets-manifest.sh --write
 ```
 
+## x86_64 guest (Intel Macs, universal builds)
+
+Every script honors `HARPOON_GUEST_ARCH` (`aarch64` default, or `x86_64`); the
+per-arch pins live in `guest-arch.sh`. x86_64 assets go to `assets/guest/x86_64/`,
+which the runtime uses on Intel hosts and universal app bundles carry in
+`lib/harpoon/x86_64/`.
+
+```sh
+# on an Apple Silicon Mac with Rosetta and Docker; aarch64 assets must exist first
+HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/build.sh
+```
+
+- Kernel: the x86_64 `vmlinuz-virt` bzImage is used as shipped.
+- root: the pinned aarch64 builder VM populates the x86_64 root with `apk --arch x86_64`
+  and runs package scripts under Rosetta (`VZLinuxRosettaDirectoryShare` + binfmt_misc).
+- initramfs: rebuilt in an `alpine:3.22` container with `--platform linux/amd64`.
+
+GitHub's macOS runners cannot run Virtualization.framework, so CI's universal DMG
+uses guests built on a Mac: `tools/release/macos/publish-guest-assets.sh` builds both,
+uploads them as a pre-release asset, sets the workflow's repository variables and
+re-runs the Universal macOS DMG workflow.
+
 ## Provenance
 
 - Kernel: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt`

@@ -47,6 +47,16 @@ check "root template exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoo
 # 2. Arch
 check "Tauri arm64" bash -c "file \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q arm64"
 check "Harpoon arm64" bash -c "file \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q arm64"
+if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
+  check "Tauri x86_64" bash -c "lipo -archs \"$APP/Contents/MacOS/harpoon-desktop\" | grep -q x86_64"
+  check "Harpoon x86_64" bash -c "lipo -archs \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -q x86_64"
+  X86_LIB="$APP/Contents/Resources/harpoon/lib/harpoon/x86_64"
+  for f in Image-virt harpoon-initramfs.cpio.gz guest-assets.manifest harpoon-root.img; do
+    check "x86_64 guest $f exists" test -f "$X86_LIB/$f"
+  done
+  check "x86_64 initramfs matches canonical" cmp -s "$REPO_ROOT/assets/guest/x86_64/harpoon-initramfs.cpio.gz" "$X86_LIB/harpoon-initramfs.cpio.gz"
+  check "x86_64 guest asset manifest matches canonical" cmp -s "$REPO_ROOT/assets/guest/x86_64/guest-assets.manifest" "$X86_LIB/guest-assets.manifest"
+fi
 
 # 3. Deployment target — Harpoon must be <= 15.1, not 26.0
 check "Harpoon minos 15.1" bash -c "otool -l \"$APP/Contents/Resources/harpoon/bin/harpoon\" | grep -A5 LC_BUILD_VERSION | grep -q 'minos 15\.1'"
@@ -60,13 +70,14 @@ otool -l "$APP/Contents/MacOS/harpoon-desktop" | grep -A5 LC_BUILD_VERSION | gre
 
 # 5. otool -L checks
 echo "[verify-bundle] checking dylibs for Harpoon..." >&2
-OTOOL_HARPOON=$(otool -L "$APP/Contents/Resources/harpoon/bin/harpoon" | tail -n +2)
+# Universal binaries print one "<path> (architecture <arch>):" header per slice; keep dependency lines only.
+OTOOL_HARPOON=$(otool -L "$APP/Contents/Resources/harpoon/bin/harpoon" | grep -v ':$')
 echo "$OTOOL_HARPOON" | head -n 30 >&2
 # Must NOT have DarwinFoundation1/2/3 (would indicate 26.0 build)
 check_fail "Harpoon should not link DarwinFoundation1 (15.1 target)" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation1"
 check_fail "Harpoon should not link DarwinFoundation2" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation2"
 check_fail "Harpoon should not link DarwinFoundation3" bash -c "echo \"$OTOOL_HARPOON\" | grep -q libswift_DarwinFoundation3"
-# Check for non-system dylibs — parse dependencies only (header skipped via tail -n +2)
+# Check for non-system dylibs — parse dependencies only (slice headers dropped above)
 # Allow: /System/Library/*, /usr/lib/* (covers /usr/lib/swift/*), @rpath/*, @executable_path/*, @loader_path/*
 # Reject: arbitrary absolute, /Users/*, /opt/homebrew/*, Xcode/toolchain (/Library/Developer/*), DarwinFoundation*
 if echo "$OTOOL_HARPOON" | grep -E "/Users/|/opt/homebrew|/Library/Developer" | grep -v "^[[:space:]]*@"; then
@@ -96,7 +107,7 @@ check "Harpoon has Frameworks RPATH" bash -c "otool -l \"$APP/Contents/Resources
 
 # Tauri dylibs
 echo "[verify-bundle] checking dylibs for Tauri..." >&2
-OTOOL_TAURI=$(otool -L "$APP/Contents/MacOS/harpoon-desktop" | tail -n +2)
+OTOOL_TAURI=$(otool -L "$APP/Contents/MacOS/harpoon-desktop" | grep -v ':$')
 echo "$OTOOL_TAURI" | head -n 30 >&2
 if echo "$OTOOL_TAURI" | grep -E "/Users/|/opt/homebrew|/Library/Developer" | grep -v "/System/Library" | grep -v "/usr/lib"; then
   echo "[verify-bundle] FAIL: Tauri has non-system dylib" >&2

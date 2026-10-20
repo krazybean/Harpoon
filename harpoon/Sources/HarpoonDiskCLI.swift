@@ -80,7 +80,7 @@ func handleDiskStatus() -> Int32 {
     // inode
     var st = stat()
     if stat(backing, &st) == 0 { cliPrint("Inode:             \(st.st_ino) dev=\(st.st_dev)") }
-    if let tmpl = RuntimeConfig.installedLibDir()?.appendingPathComponent("harpoon-root.img").path, FileManager.default.fileExists(atPath: tmpl) {
+    if let tmpl = RuntimeConfig.installedLibDir().map(RuntimeConfig.guestAssetDir)?.appendingPathComponent("harpoon-root.img").path, FileManager.default.fileExists(atPath: tmpl) {
         let (tLog, _) = RuntimeConfig.backingFileInfo(at: tmpl)
         cliPrint("Template:          \(tmpl) (\(RuntimeConfig.formatBytes(tLog))) — immutable")
     }

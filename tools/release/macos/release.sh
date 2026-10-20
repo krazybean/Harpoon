@@ -12,6 +12,13 @@ if [ -z "$VERSION" ]; then
 fi
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "[release] FAIL: invalid version $VERSION" >&2; exit 1; fi
 export HARPOON_VERSION="$VERSION"
+# HARPOON_ARCH=arm64 (default) or universal (Tauri universal-apple-darwin + lipo'd Swift runtime)
+export HARPOON_ARCH="${HARPOON_ARCH:-arm64}"
+case "$HARPOON_ARCH" in
+  arm64) TAURI_TARGET_ARGS=(); TAURI_TARGET_DIR="release" ;;
+  universal) TAURI_TARGET_ARGS=(--target universal-apple-darwin); TAURI_TARGET_DIR="universal-apple-darwin/release" ;;
+  *) echo "[release] FAIL: unsupported HARPOON_ARCH $HARPOON_ARCH (arm64|universal)" >&2; exit 1 ;;
+esac
 echo "[release] Harpoon v$VERSION release candidate" >&2
 # Prereqs
 for cmd in swiftc codesign cargo node npm docker xcrun; do
@@ -29,6 +36,14 @@ if ! bash "$REPO_ROOT/tools/release/verify-runtime-closure.sh" 2>&1 | tee /tmp/c
   echo "[release] FAIL: verify-runtime-closure.sh failed — release blocked, see /tmp/closure.log" >&2
   cat /tmp/closure.log >&2
   exit 1
+fi
+if [ "$HARPOON_ARCH" = "universal" ]; then
+  echo "[release] x86_64 guest assets + runtime closure..." >&2
+  HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
+  if ! HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/release/verify-runtime-closure.sh" 2>&1 | tee /tmp/closure-x86_64.log; then
+    echo "[release] FAIL: x86_64 verify-runtime-closure.sh failed — release blocked, see /tmp/closure-x86_64.log" >&2
+    exit 1
+  fi
 fi
 # Version flow — immutable: requested VERSION must already be committed
 echo "[release] version $VERSION flow (immutable)..." >&2
@@ -60,7 +75,7 @@ if ! bash "$SCRIPT_DIR/build.sh" 2>&1 | tee "$BUILD_LOG"; then
   exit 1
 fi
 rm -f "$BUILD_LOG"
-APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app"
+APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/$TAURI_TARGET_DIR/bundle/macos/Harpoon.app"
 if [ ! -d "$APP" ]; then echo "[release] FAIL: Harpoon.app not found at $APP" >&2; exit 1; fi
 # Copy to dist/v$VERSION
 DIST_DIR="$REPO_ROOT/dist/v$VERSION"
@@ -120,7 +135,7 @@ done
 # Build DMG from signed dist app (not stale bundle)
 echo "[release] DMG..." >&2
 bash "$SCRIPT_DIR/build-dmg.sh" "$VERSION" "$DIST_DIR/Harpoon.app" 2>&1 | tail -n 30
-DMG="$DIST_DIR/Harpoon-${VERSION}-arm64.dmg"
+DMG="$DIST_DIR/Harpoon-${VERSION}-${HARPOON_ARCH}.dmg"
 if [ ! -f "$DMG" ]; then echo "[release] FAIL: DMG not found at $DMG" >&2; exit 1; fi
 # Sign DMG
 echo "[release] signing DMG..." >&2
@@ -165,7 +180,7 @@ git $GIT_SHA
 dirty:
 $GIT_DIRTY
 build $TIMESTAMP
-arch $ARCH
+arch $ARCH (bundle $HARPOON_ARCH)
 minos 15.1
 kernel $(shasum -a 256 "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null | cut -d' ' -f1 || echo unknown) $(stat -f%z "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null || stat -c%s "$REPO_ROOT/assets/guest/Image-virt" 2>/dev/null)
 initramfs $(shasum -a 256 "$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz" 2>/dev/null | cut -d' ' -f1)

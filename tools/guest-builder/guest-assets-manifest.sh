@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ASSET_DIR="${1:-$REPO_ROOT/assets/guest}"
+. "$SCRIPT_DIR/guest-arch.sh"
+DEFAULT_ASSET_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
+ASSET_DIR="$DEFAULT_ASSET_DIR"
 KERNEL="$ASSET_DIR/Image-virt"
 INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"
 MANIFEST="$ASSET_DIR/guest-assets.manifest"
-KERNEL_VERSION="6.12.110-0-virt"
+KERNEL_VERSION="$GUEST_KERNEL_VERSION"
 
 sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
@@ -35,7 +37,7 @@ verify_manifest() {
 }
 
 case "${1:-}" in
-  --verify) ASSET_DIR="${2:-$REPO_ROOT/assets/guest}"; KERNEL="$ASSET_DIR/Image-virt"; INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"; MANIFEST="$ASSET_DIR/guest-assets.manifest"; verify_manifest ;;
-  --write) ASSET_DIR="${2:-$REPO_ROOT/assets/guest}"; KERNEL="$ASSET_DIR/Image-virt"; INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"; MANIFEST="$ASSET_DIR/guest-assets.manifest"; write_manifest ;;
+  --verify) ASSET_DIR="${2:-$DEFAULT_ASSET_DIR}"; KERNEL="$ASSET_DIR/Image-virt"; INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"; MANIFEST="$ASSET_DIR/guest-assets.manifest"; verify_manifest ;;
+  --write) ASSET_DIR="${2:-$DEFAULT_ASSET_DIR}"; KERNEL="$ASSET_DIR/Image-virt"; INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"; MANIFEST="$ASSET_DIR/guest-assets.manifest"; write_manifest ;;
   *) echo "usage: $0 --write [asset-dir] | --verify [asset-dir]" >&2; exit 2 ;;
 esac

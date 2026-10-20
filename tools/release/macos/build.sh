@@ -6,7 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VERSION="${HARPOON_VERSION:-$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version" 2>/dev/null || echo "0.1.1")}"
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "[build] FAIL: invalid version $VERSION" >&2; exit 1; fi
-echo "[build] Harpoon v$VERSION clean build" >&2
+# HARPOON_ARCH=arm64 (default) or universal (Tauri universal-apple-darwin + lipo'd Swift runtime)
+export HARPOON_ARCH="${HARPOON_ARCH:-arm64}"
+case "$HARPOON_ARCH" in
+  arm64) TAURI_TARGET_ARGS=(); TAURI_TARGET_DIR="release" ;;
+  universal) TAURI_TARGET_ARGS=(--target universal-apple-darwin); TAURI_TARGET_DIR="universal-apple-darwin/release" ;;
+  *) echo "[build] FAIL: unsupported HARPOON_ARCH $HARPOON_ARCH (arm64|universal)" >&2; exit 1 ;;
+esac
+echo "[build] Harpoon v$VERSION clean build ($HARPOON_ARCH)" >&2
 # 1. verify prerequisites
 for cmd in swiftc codesign cargo node npm docker; do
   if ! command -v "$cmd" >/dev/null 2>&1; then echo "[build] FAIL: $cmd not found" >&2; exit 1; fi
@@ -21,6 +28,11 @@ LOG=$(mktemp)
 if ! bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tee "$LOG"; then echo "[build] FAIL: guest-builder build failed (see $LOG)" >&2; cat "$LOG" >&2; exit 1; fi
 # 3. verify pristine root
 if ! bash "$REPO_ROOT/tools/guest-builder/verify-root.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: verify-root failed" >&2; exit 1; fi
+# 3b. universal bundles also carry the x86_64 guest for Intel Macs (root populated under Rosetta)
+if [ "$HARPOON_ARCH" = "universal" ]; then
+  echo "[build] x86_64 guest assets..." >&2
+  if ! HARPOON_GUEST_ARCH=x86_64 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: x86_64 guest-builder build failed" >&2; exit 1; fi
+fi
 # 4. build Swift runtime
 echo "[build] Swift runtime..." >&2
 if ! bash "$REPO_ROOT/harpoon/build.sh" 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: harpoon/build.sh failed" >&2; exit 1; fi
@@ -35,8 +47,8 @@ echo "[build] Tauri bundle..." >&2
 # Ensure version consistency before build
 if ! node "$REPO_ROOT/ui/harpoon-desktop/scripts/version.mjs" --check 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: version check failed" >&2; exit 1; fi
 # Build release bundle
-if ! npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run tauri -- build --bundles app 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: Tauri build failed" >&2; exit 1; fi
-APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/release/bundle/macos/Harpoon.app"
+if ! npm --prefix "$REPO_ROOT/ui/harpoon-desktop" run tauri -- build --bundles app ${TAURI_TARGET_ARGS[@]+"${TAURI_TARGET_ARGS[@]}"} 2>&1 | tee -a "$LOG"; then echo "[build] FAIL: Tauri build failed" >&2; exit 1; fi
+APP="$REPO_ROOT/ui/harpoon-desktop/src-tauri/target/$TAURI_TARGET_DIR/bundle/macos/Harpoon.app"
 if [ ! -d "$APP" ]; then echo "[build] FAIL: Harpoon.app not found at $APP" >&2; exit 1; fi
 # 8. structural verify (pre-signing, ad-hoc is ok) — preserve true exit status, no tail truncation
 echo "[build] structural verify..." >&2

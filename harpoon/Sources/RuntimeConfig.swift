@@ -128,29 +128,39 @@ struct RuntimeConfig {
         for exec in executableURLs() {
             let root = exec.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let assets = root.appendingPathComponent("assets/guest")
-            if fm.fileExists(atPath: assets.appendingPathComponent("Image-virt").path),
-               fm.fileExists(atPath: assets.appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
+            if fm.fileExists(atPath: guestAssetDir(assets).appendingPathComponent("Image-virt").path),
+               fm.fileExists(atPath: guestAssetDir(assets).appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
         }
         let assets = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("assets/guest")
-        if fm.fileExists(atPath: assets.appendingPathComponent("Image-virt").path),
-           fm.fileExists(atPath: assets.appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
+        if fm.fileExists(atPath: guestAssetDir(assets).appendingPathComponent("Image-virt").path),
+           fm.fileExists(atPath: guestAssetDir(assets).appendingPathComponent("harpoon-initramfs.cpio.gz").path) { return assets }
         return nil
+    }
+
+    // Guest assets for the host architecture: the arm64 guest sits at the asset
+    // root and the x86_64 guest in an x86_64/ subdirectory (universal builds ship both).
+    static func guestAssetDir(_ base: URL) -> URL {
+        #if arch(x86_64)
+        return base.appendingPathComponent("x86_64")
+        #else
+        return base
+        #endif
     }
 
     static func resolveResource(named: String, fallback: String) -> URL {
         // Explicit overrides are applied in fromEnvironment. An installed resource root wins over CWD.
         if let lib = installedLibDir() {
-            return lib.appendingPathComponent(named)
+            return guestAssetDir(lib).appendingPathComponent(named)
         }
-        if let assets = sourceAssetRoot() { return assets.appendingPathComponent(named) }
-        return URL(fileURLWithPath: fallback)
+        if let assets = sourceAssetRoot() { return guestAssetDir(assets).appendingPathComponent(named) }
+        return guestAssetDir(URL(fileURLWithPath: fallback).deletingLastPathComponent()).appendingPathComponent(named)
     }
 
     static func rootTemplateURL() -> URL {
         if let path = ProcessInfo.processInfo.environment["HARPOON_TEST_ROOT"], !path.isEmpty { return URL(fileURLWithPath: path) }
-        if let lib = installedLibDir() { return lib.appendingPathComponent("harpoon-root.img") }
-        if let assets = sourceAssetRoot() { return assets.appendingPathComponent("harpoon-root.img") }
-        return URL(fileURLWithPath: "assets/guest/harpoon-root.img")
+        if let lib = installedLibDir() { return guestAssetDir(lib).appendingPathComponent("harpoon-root.img") }
+        if let assets = sourceAssetRoot() { return guestAssetDir(assets).appendingPathComponent("harpoon-root.img") }
+        return guestAssetDir(URL(fileURLWithPath: "assets/guest")).appendingPathComponent("harpoon-root.img")
     }
 
     static func resolveRootDisk() -> URL {

@@ -4,9 +4,11 @@ set -euo pipefail
 # INITRAMFS, ROOT, BOOT ORDER. Host signing is verified post-sign in verify-signatures.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+. "$REPO_ROOT/tools/guest-builder/guest-arch.sh"
+ASSET_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
+INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
-ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+ROOT_IMG="$ASSET_DIR/harpoon-root.img"
 REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
 REQUIRED_FEATURES="$REPO_ROOT/tools/guest-builder/required-kernel-features.txt"
 FEATURE_MODULES="$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt"
@@ -80,7 +82,7 @@ if [ -f "$INITRAMFS" ]; then
     else
       fail "resize2fs ELF closure skipped — no readelf available"
     fi
-    if file "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -q "aarch64"; then pass "resize2fs aarch64"; else fail "resize2fs not aarch64"; fi
+    if file "$RESIZE_DIR/usr/sbin/resize2fs" 2>&1 | grep -q "$GUEST_ELF_PATTERN"; then pass "resize2fs $HARPOON_GUEST_ARCH"; else fail "resize2fs not $HARPOON_GUEST_ARCH"; fi
   else
     fail "resize2fs not in initramfs for ELF check"
   fi
@@ -107,13 +109,22 @@ if [ -f "$INITRAMFS" ]; then
     path=$(find "$MODULE_DIR" -type f -name "$name.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     if [ -z "$path" ]; then
       alias=$(awk -v name="$name" '$1=="alias" && $2==name {print $3; exit}' "$MODULE_DIR/modules.alias")
-      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f -name "$alias.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f \( -name "$alias.ko" -o -name "$(printf %s "$alias" | tr _ -).ko" \) | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     fi
     [ -n "$path" ] || return 1
     echo "$path"
   }
+  module_builtin() {
+    local name candidate
+    for candidate in "$1" "${1}_generic" "lib$1" $(awk -v name="$1" '$1=="alias" && $2==name {print $3}' "$MODULE_DIR/modules.alias" 2>/dev/null); do
+      name=$(printf '%s' "$candidate" | sed 's/[-_]/[-_]/g')
+      grep -q "/$name\\.ko$" "$MODULE_DIR/modules.builtin" 2>/dev/null && return 0
+    done
+    [ -f "$MODULE_DIR/modules.builtin.modinfo" ] && tr '\000' '\n' < "$MODULE_DIR/modules.builtin.modinfo" | grep -q "\\.alias=$1$"
+  }
   verify_required_module() {
     local path
+    module_builtin "$1" && return
     path=$(resolve_module "$1") || { fail "initramfs required module unresolved $1"; return; }
     verify_module_path "$path"
   }
@@ -146,8 +157,8 @@ if [ -f "$INITRAMFS" ]; then
     done < "$RUNTIME_MANIFEST"
     [ "$RUNTIME_OK" -eq 1 ] && pass "initramfs Python runtime manifest" || fail "initramfs Python runtime manifest"
     [ "$(readlink "$INIT_DIR/usr/bin/python3" 2>/dev/null)" = "python3.12" ] && pass "initramfs python3 symlink" || fail "initramfs python3 symlink"
-    [ -s "$INIT_DIR/usr/bin/python3.12" ] && file "$INIT_DIR/usr/bin/python3.12" | grep -q aarch64 && pass "initramfs python3 aarch64" || fail "initramfs python3 invalid"
-    [ -f "$INIT_DIR/usr/lib/libpython3.12.so.1.0" ] && [ -f "$INIT_DIR/lib/ld-musl-aarch64.so.1" ] && pass "initramfs Python loader closure" || fail "initramfs Python loader closure"
+    [ -s "$INIT_DIR/usr/bin/python3.12" ] && file "$INIT_DIR/usr/bin/python3.12" | grep -q "$GUEST_ELF_PATTERN" && pass "initramfs python3 $HARPOON_GUEST_ARCH" || fail "initramfs python3 invalid"
+    [ -f "$INIT_DIR/usr/lib/libpython3.12.so.1.0" ] && [ -f "$INIT_DIR/lib/$GUEST_MUSL_LOADER" ] && pass "initramfs Python loader closure" || fail "initramfs Python loader closure"
   else
     fail "initramfs Python runtime manifest missing"
   fi
@@ -217,13 +228,13 @@ if [ -f "$ROOT_IMG" ]; then
     fi
     if [ -f "$PYTHON_DIR/python3.12" ]; then
       if $READELF --dynamic "$PYTHON_DIR/python3.12" 2>&1 | grep -q "libpython3.12.so.1.0"; then pass "python3 DT_NEEDED libpython"; else fail "python3 missing libpython DT_NEEDED"; fi
-      if file "$PYTHON_DIR/python3.12" 2>&1 | grep -q "aarch64"; then pass "python3 aarch64"; else fail "python3 not aarch64"; fi
+      if file "$PYTHON_DIR/python3.12" 2>&1 | grep -q "$GUEST_ELF_PATTERN"; then pass "python3 $HARPOON_GUEST_ARCH"; else fail "python3 not $HARPOON_GUEST_ARCH"; fi
       INTERP_PY=$($READELF -l "$PYTHON_DIR/python3.12" 2>&1 | grep -o "/[^ ]*ld-musl[^ ]*" | head -n1 | tr -d ']' || true)
       if [ -z "$INTERP_PY" ]; then INTERP_PY=$($READELF -l "$PYTHON_DIR/python3.12" 2>&1 | grep "Requesting program interpreter" | sed -n 's/.*: \([^]]*\)].*/\1/p' | head -n1 | tr -d ']' || true); fi
       if [ -n "$INTERP_PY" ]; then
         # Check that loader exists in root image via debugfs (use stat for file, not ls -l dir)
         if grep -q "Inode:" <<< "$($DF -R "stat $INTERP_PY" "$ROOT_IMG" 2>&1)"; then pass "python3 loader $INTERP_PY present in root"; else
-          if grep -q "Inode:" <<< "$($DF -R "stat /lib/ld-musl-aarch64.so.1" "$ROOT_IMG" 2>&1)"; then pass "python3 loader via /lib/ld-musl-aarch64.so.1"; else fail "python3 loader missing $INTERP_PY in root"; fi
+          if grep -q "Inode:" <<< "$($DF -R "stat /lib/$GUEST_MUSL_LOADER" "$ROOT_IMG" 2>&1)"; then pass "python3 loader via /lib/$GUEST_MUSL_LOADER"; else fail "python3 loader missing $INTERP_PY in root"; fi
         fi
       else
         fail "python3 could not determine PT_INTERP"
@@ -233,7 +244,7 @@ if [ -f "$ROOT_IMG" ]; then
       mkdir -p "$LIBPYTHON_DIR"
       $DF -R "dump /usr/lib/libpython3.12.so.1.0 $LIBPYTHON_DIR/libpython.so" "$ROOT_IMG" 2>&1 >/dev/null || true
       if [ -f "$LIBPYTHON_DIR/libpython.so" ]; then
-        if file "$LIBPYTHON_DIR/libpython.so" 2>&1 | grep -q "aarch64\|ELF"; then pass "libpython3.12 ELF present"; else fail "libpython3.12 not ELF"; fi
+        if file "$LIBPYTHON_DIR/libpython.so" 2>&1 | grep -q "$GUEST_ELF_PATTERN\|ELF"; then pass "libpython3.12 ELF present"; else fail "libpython3.12 not ELF"; fi
       else
         fail "could not extract libpython3.12.so.1.0 for inspection"
       fi

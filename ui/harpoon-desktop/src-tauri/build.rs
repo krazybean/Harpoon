@@ -83,5 +83,19 @@ fn main() {
     );
   }
 
+  // Universal bundles also ship the x86_64 guest, staged by prepare-bundle.sh.
+  println!("cargo:rerun-if-env-changed=HARPOON_ARCH");
+  if env::var("HARPOON_ARCH").as_deref() == Ok("universal") && env::var("PROFILE").as_deref() == Ok("release") {
+    let x86_dir = lib_dir.join("x86_64");
+    let missing = ["Image-virt", "harpoon-initramfs.cpio.gz", "guest-assets.manifest", "harpoon-root.img"]
+      .iter()
+      .filter(|name| !x86_dir.join(name).exists())
+      .map(|name| x86_dir.join(name).display().to_string())
+      .collect::<Vec<_>>();
+    if !missing.is_empty() {
+      panic!("universal release bundle is missing x86_64 guest assets: {}", missing.join(", "));
+    }
+  }
+
   tauri_build::build()
 }

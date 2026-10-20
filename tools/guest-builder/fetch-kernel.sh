@@ -1,19 +1,19 @@
 #!/bin/bash
 set -euo pipefail
-# ponytail: fetch Alpine 3.22 virt kernel and produce uncompressed Image-virt
+# ponytail: fetch Alpine 3.22 virt kernel and produce Image-virt for HARPOON_GUEST_ARCH
+# (aarch64: uncompressed Image; x86_64: the bzImage as shipped).
 # Fixes historical prototype relative CACHE bug by using REPO_ROOT absolute.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT_DIR="$REPO_ROOT/assets/guest"
+. "$SCRIPT_DIR/guest-arch.sh"
+OUT_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
 CACHE_DIR="$OUT_DIR/.cache"
 mkdir -p "$OUT_DIR" "$CACHE_DIR"
 
-BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot"
+BASE="$GUEST_ALPINE_BASE/netboot"
 KERNEL_CACHE="$CACHE_DIR/vmlinuz-virt"
 INITRAMFS_CACHE="$CACHE_DIR/initramfs-virt"
 OUT_IMAGE="$OUT_DIR/Image-virt"
-EXPECTED_VMLINUZ_SHA="dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332"
-EXPECTED_INITRAMFS_VIRT_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c"
 
 sha256_file() {
   shasum -a 256 "$1" | cut -d' ' -f1
@@ -51,6 +51,17 @@ if command -v shasum >/dev/null; then
   echo "[fetch-kernel] sha256 vmlinuz: $(shasum -a 256 "$KERNEL_CACHE" | cut -d' ' -f1)" >&2
 fi
 echo "[fetch-kernel] source: $BASE (Alpine 3.22 virt 6.12.x)" >&2
+
+if [ "$HARPOON_GUEST_ARCH" = "x86_64" ]; then
+  # Virtualization.framework on Intel boots the x86_64 bzImage directly.
+  if [ ! -f "$OUT_IMAGE" ] || [ "$KERNEL_CACHE" -nt "$OUT_IMAGE" ]; then
+    cp "$KERNEL_CACHE" "$OUT_IMAGE.tmp.$$"
+    mv "$OUT_IMAGE.tmp.$$" "$OUT_IMAGE"
+  fi
+  echo "[fetch-kernel] sha256 Image-virt: $(shasum -a 256 "$OUT_IMAGE" | cut -d' ' -f1)" >&2
+  echo "[fetch-kernel] done -> $OUT_IMAGE" >&2
+  exit 0
+fi
 
 # Decompress PE+gz wrapper to uncompressed Image
 if [ ! -f "$OUT_IMAGE" ] || [ "$KERNEL_CACHE" -nt "$OUT_IMAGE" ]; then

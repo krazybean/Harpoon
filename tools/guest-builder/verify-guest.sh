@@ -8,9 +8,11 @@ set -euo pipefail
 # 4. bundled root template size is exactly 2G sparse
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-INITRAMFS="$REPO_ROOT/assets/guest/harpoon-initramfs.cpio.gz"
+. "$SCRIPT_DIR/guest-arch.sh"
+ASSET_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
+INITRAMFS="$ASSET_DIR/harpoon-initramfs.cpio.gz"
 INIT_SRC="$REPO_ROOT/tools/guest-builder/src/init"
-ROOT_IMG="$REPO_ROOT/assets/guest/harpoon-root.img"
+ROOT_IMG="$ASSET_DIR/harpoon-root.img"
 HARPOON_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 HARPOON_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 REQUIRED_MODULES="$REPO_ROOT/tools/guest-builder/required-modules.txt"
@@ -29,7 +31,7 @@ check_not() {
 
 echo "[verify-guest] verifying canonical guest..." >&2
 
-if bash "$SCRIPT_DIR/guest-assets-manifest.sh" --verify; then
+if bash "$SCRIPT_DIR/guest-assets-manifest.sh" --verify "$ASSET_DIR"; then
   echo "[verify-guest] PASS: kernel/initramfs compatibility manifest" >&2
 else
   echo "[verify-guest] FAIL: kernel/initramfs compatibility manifest" >&2
@@ -70,7 +72,7 @@ if [ -f "$INITRAMFS" ]; then
     done < "$RUNTIME_MANIFEST"
     [ "$RUNTIME_OK" -eq 1 ] && echo "[verify-guest] PASS: Python runtime manifest matches initramfs" >&2 || { echo "[verify-guest] FAIL: Python runtime manifest mismatch" >&2; FAIL=1; }
     [ "$(readlink "$GUEST_TMPDIR/usr/bin/python3" 2>/dev/null)" = "python3.12" ] && echo "[verify-guest] PASS: Python symlink target" >&2 || { echo "[verify-guest] FAIL: Python symlink target" >&2; FAIL=1; }
-    file "$GUEST_TMPDIR/usr/bin/python3.12" 2>/dev/null | grep -q aarch64 && echo "[verify-guest] PASS: initramfs Python aarch64 ELF" >&2 || { echo "[verify-guest] FAIL: initramfs Python is not aarch64 ELF" >&2; FAIL=1; }
+    file "$GUEST_TMPDIR/usr/bin/python3.12" 2>/dev/null | grep -q "$GUEST_ELF_PATTERN" && echo "[verify-guest] PASS: initramfs Python $HARPOON_GUEST_ARCH ELF" >&2 || { echo "[verify-guest] FAIL: initramfs Python is not $HARPOON_GUEST_ARCH ELF" >&2; FAIL=1; }
   else
     echo "[verify-guest] FAIL: Python runtime manifest missing in initramfs" >&2; FAIL=1
   fi
@@ -105,13 +107,22 @@ if [ -f "$INITRAMFS" ]; then
     path=$(find "$MODULE_DIR" -type f -name "$name.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     if [ -z "$path" ]; then
       alias=$(awk -v name="$name" '$1=="alias" && $2==name {print $3; exit}' "$MODULE_DIR/modules.alias")
-      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f -name "$alias.ko" | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
+      [ -n "$alias" ] && path=$(find "$MODULE_DIR" -type f \( -name "$alias.ko" -o -name "$(printf %s "$alias" | tr _ -).ko" \) | sed "s#^$MODULE_DIR/##" | LC_ALL=C sort | head -n1)
     fi
     [ -n "$path" ] || return 1
     echo "$path"
   }
+  module_builtin() {
+    local name candidate
+    for candidate in "$1" "${1}_generic" "lib$1" $(awk -v name="$1" '$1=="alias" && $2==name {print $3}' "$MODULE_DIR/modules.alias" 2>/dev/null); do
+      name=$(printf '%s' "$candidate" | sed 's/[-_]/[-_]/g')
+      grep -q "/$name\\.ko$" "$MODULE_DIR/modules.builtin" 2>/dev/null && return 0
+    done
+    [ -f "$MODULE_DIR/modules.builtin.modinfo" ] && tr '\000' '\n' < "$MODULE_DIR/modules.builtin.modinfo" | grep -q "\\.alias=$1$"
+  }
   verify_module() {
     local path
+    module_builtin "$1" && return
     path=$(resolve_module "$1") || { echo "[verify-guest] FAIL: unresolved module $1" >&2; FAIL=1; return; }
     verify_path "$path"
   }

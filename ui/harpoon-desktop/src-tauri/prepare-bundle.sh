@@ -35,6 +35,22 @@ elif ditto "$ROOTIMG" "$HARPOON_LIB_DIR/harpoon-root.img" 2>/dev/null; then :;
 else cp -p "$ROOTIMG" "$HARPOON_LIB_DIR/harpoon-root.img"
 fi
 
+# Universal bundles also carry the x86_64 guest for Intel Macs in lib/harpoon/x86_64.
+if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
+  X86_SRC="$REPO_ROOT/assets/guest/x86_64"
+  X86_DST="$HARPOON_LIB_DIR/x86_64"
+  for f in Image-virt harpoon-initramfs.cpio.gz guest-assets.manifest harpoon-root.img; do
+    [ -f "$X86_SRC/$f" ] || { echo "[prepare-bundle] FAIL: missing x86_64 guest asset $X86_SRC/$f (HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/build.sh)" >&2; exit 1; }
+  done
+  mkdir -p "$X86_DST"
+  echo "[prepare-bundle] copying x86_64 kernel/initramfs/root..." >&2
+  cp -p "$X86_SRC/Image-virt" "$X86_SRC/harpoon-initramfs.cpio.gz" "$X86_SRC/guest-assets.manifest" "$X86_DST/"
+  if cp -c "$X86_SRC/harpoon-root.img" "$X86_DST/harpoon-root.img" 2>/dev/null; then :;
+  elif ditto "$X86_SRC/harpoon-root.img" "$X86_DST/harpoon-root.img" 2>/dev/null; then :;
+  else cp -p "$X86_SRC/harpoon-root.img" "$X86_DST/harpoon-root.img"
+  fi
+fi
+
 # verify
 ls -lh "$HARPOON_BIN_DIR/harpoon" "$HARPOON_LIB_DIR/"* 2>&1 | tail -n 10 >&2
 echo "[prepare-bundle] bundle-resources ready at $BUNDLE_RES" >&2

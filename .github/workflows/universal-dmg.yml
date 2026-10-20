@@ -1,0 +1,129 @@
+name: Universal macOS DMG
+
+# Builds an unsigned (ad-hoc) universal Harpoon.app (arm64 + x86_64) and
+# uploads Harpoon-<version>-universal.dmg as a workflow artifact.
+# Developer ID signing and notarization stay with tools/release/macos/release.sh.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/universal-dmg.yml
+      - harpoon/build.sh
+      - harpoon/Sources/**
+      - tools/guest-builder/**
+      - tools/release/**
+      - tools/verify-bundle.sh
+      - ui/harpoon-desktop/src-tauri/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  universal-dmg:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      HARPOON_ARCH: universal
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/harpoon-desktop/package-lock.json
+
+      - name: Add Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install desktop dependencies
+        run: npm --prefix ui/harpoon-desktop ci
+
+      - name: Build universal Swift runtime
+        run: |
+          sh harpoon/build.sh
+          lipo harpoon/build/harpoon -verify_arch arm64 x86_64
+
+      - name: Install guest tooling
+        run: |
+          brew install e2fsprogs
+          echo "$(brew --prefix e2fsprogs)/sbin" >> "$GITHUB_PATH"
+
+      # Both guest kernels come from pinned Alpine downloads. The root images and the
+      # x86_64 initramfs need Virtualization.framework (plus Rosetta and Docker), which
+      # GitHub's macOS runners do not provide, so they come from the tarball made by
+      # tools/guest-builder/pack-assets.sh, published as a GitHub release asset by
+      # tools/release/macos/publish-guest-assets.sh, which also sets the repository
+      # variables HARPOON_GUEST_ASSETS_TAG and HARPOON_GUEST_ASSETS_SHA256. Without them,
+      # the job stops after checking that both kernels fetch and the x86_64 app compiles.
+      - name: Fetch guest kernels
+        run: |
+          bash tools/guest-builder/fetch-kernel.sh
+          HARPOON_GUEST_ARCH=x86_64 bash tools/guest-builder/fetch-kernel.sh
+
+      - name: Obtain guest assets
+        id: guest
+        env:
+          ASSETS_TAG: ${{ vars.HARPOON_GUEST_ASSETS_TAG }}
+          ASSETS_SHA256: ${{ vars.HARPOON_GUEST_ASSETS_SHA256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$ASSETS_TAG" ]; then
+            echo "::notice::HARPOON_GUEST_ASSETS_TAG is not set; building the .dmg needs prebuilt guest assets (tools/release/macos/publish-guest-assets.sh)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download "$ASSETS_TAG" --repo "$GITHUB_REPOSITORY" --pattern harpoon-guest-assets.tar.gz --output "$RUNNER_TEMP/guest-assets.tar.gz"
+          echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
+          for arch in aarch64 x86_64; do
+            HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/guest-assets-manifest.sh --verify
+            HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/verify-root.sh "$(HARPOON_GUEST_ARCH=$arch sh -c '. tools/guest-builder/guest-arch.sh; guest_asset_dir assets/guest')/harpoon-root.img"
+          done
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compile x86_64 desktop app
+        if: steps.guest.outputs.available != 'true'
+        run: |
+          npm --prefix ui/harpoon-desktop run build
+          cargo build --manifest-path ui/harpoon-desktop/src-tauri/Cargo.toml --target x86_64-apple-darwin
+
+      - name: Build universal Harpoon.app
+        if: steps.guest.outputs.available == 'true'
+        run: |
+          bash ui/harpoon-desktop/src-tauri/prepare-bundle.sh
+          node ui/harpoon-desktop/scripts/version.mjs --check
+          npm --prefix ui/harpoon-desktop run tauri -- build --bundles app --target universal-apple-darwin
+
+      - name: Ad-hoc sign and verify bundle
+        if: steps.guest.outputs.available == 'true'
+        run: |
+          APP=ui/harpoon-desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Harpoon.app
+          sh ui/harpoon-desktop/scripts/sign-app.sh "$APP"
+          bash tools/verify-bundle.sh "$APP"
+
+      - name: Build DMG
+        if: steps.guest.outputs.available == 'true'
+        run: |
+          VERSION="$(node -p "require('./ui/harpoon-desktop/package.json').version")"
+          bash tools/release/macos/build-dmg.sh "$VERSION"
+          ls -lh dist/v"$VERSION"/Harpoon-"$VERSION"-universal.dmg
+          echo "DMG_PATH=dist/v$VERSION/Harpoon-$VERSION-universal.dmg" >> "$GITHUB_ENV"
+
+      - name: Upload DMG
+        if: steps.guest.outputs.available == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harpoon-universal-dmg
+          path: ${{ env.DMG_PATH }}
+          if-no-files-found: error
+          retention-days: 14

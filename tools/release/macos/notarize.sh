@@ -8,7 +8,7 @@ if [ -n "${1:-}" ]; then
   # allow version or DMG path
   if [[ "$1" == *.dmg ]]; then DMG="$1"; else VERSION="$1"; DMG="${2:-}"; fi
 fi
-DMG="${DMG:-$REPO_ROOT/dist/v$VERSION/Harpoon-${VERSION}-arm64.dmg}"
+DMG="${DMG:-$REPO_ROOT/dist/v$VERSION/Harpoon-${VERSION}-${HARPOON_ARCH:-arm64}.dmg}"
 if [ ! -f "$DMG" ]; then echo "[notarize] FAIL: DMG not found at $DMG" >&2; exit 1; fi
 # Check keychain profile exists (do not create)
 if ! xcrun notarytool history --keychain-profile "loom-notary" 2>&1 | head -n 5 | grep -q .; then

@@ -7,6 +7,7 @@ trap 'rm -rf "$TMP"' EXIT
 ROOT="$TMP/repo"
 mkdir -p "$ROOT/tools/guest-builder" "$ROOT/assets/guest/.cache" "$TMP/bin"
 cp "$REPO_ROOT/tools/guest-builder/fetch-kernel.sh" "$ROOT/tools/guest-builder/fetch-kernel.sh"
+cp "$REPO_ROOT/tools/guest-builder/guest-arch.sh" "$ROOT/tools/guest-builder/guest-arch.sh"
 printf stale > "$ROOT/assets/guest/.cache/vmlinuz-virt"
 printf stale > "$ROOT/assets/guest/.cache/initramfs-virt"
 rm -f "$ROOT/assets/guest/Image-virt"

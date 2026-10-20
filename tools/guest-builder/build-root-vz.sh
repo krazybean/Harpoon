@@ -3,7 +3,11 @@ set -euo pipefail
 # ponytail: one disposable VZ builder; real apk runs in Alpine, not macOS or Docker.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="${HARPOON_ROOT_OUT:-$REPO_ROOT/assets/guest/harpoon-root.img}"
+# The builder VM is always the pinned aarch64 Alpine; HARPOON_GUEST_ARCH picks the
+# architecture of the root it populates (x86_64 runs package scripts under Rosetta).
+. "$SCRIPT_DIR/guest-arch.sh"
+TARGET_ARCH="$HARPOON_GUEST_ARCH"
+OUT="${HARPOON_ROOT_OUT:-$(guest_asset_dir "$REPO_ROOT/assets/guest")/harpoon-root.img}"
 CACHE="$REPO_ROOT/assets/guest/.cache"
 WORK="$(mktemp -d /tmp/harpoon-root-builder.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -66,11 +70,12 @@ rm -rf "$STAGE/lib/modules"
 mkdir -p "$STAGE/lib"
 cp -a "$MODLOOP_ROOT/modules" "$STAGE/lib/modules"
 mkdir -p "$STAGE/builder-payload"
+printf '%s\n' "$TARGET_ARCH" > "$STAGE/builder-payload/target-arch"
 cp "$SCRIPT_DIR/src/alpine-root-builder-init" "$STAGE/init"
 cp "$SCRIPT_DIR/src/init" "$STAGE/builder-payload/init"
 cp "$SCRIPT_DIR/src/harpoon-mgmt" "$STAGE/builder-payload/harpoon-mgmt"
 cp "$SCRIPT_DIR/src/harpoon-mgmt-wrapper" "$STAGE/builder-payload/harpoon-mgmt-wrapper"
-chmod 0755 "$STAGE/init" "$STAGE/builder-payload"/*
+chmod 0755 "$STAGE/init" "$STAGE/builder-payload"/init "$STAGE/builder-payload"/harpoon-mgmt "$STAGE/builder-payload"/harpoon-mgmt-wrapper
 find "$STAGE" -exec touch -h -d '2025-01-01 00:00:00' {} +
 (cd "$STAGE" && find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --quiet | gzip -n -9 > "$WORK/builder-initramfs.cpio.gz")
 
@@ -101,11 +106,14 @@ if ! grep -q 'com.apple.security.virtualization' "$ENTITLEMENT_DUMP"; then
   cat "$ENTITLEMENT_DUMP" >&2
   exit 1
 fi
-"$WORK/AlpineRootBuilder" "$REPO_ROOT/assets/guest/Image-virt" "$WORK/builder-initramfs.cpio.gz" "$WORK/harpoon-root.img" "$WORK/serial.log"
+ROSETTA=0
+[ "$TARGET_ARCH" = "aarch64" ] || ROSETTA=1
+HARPOON_ROOT_BUILDER_ROSETTA="$ROSETTA" "$WORK/AlpineRootBuilder" "$REPO_ROOT/assets/guest/Image-virt" "$WORK/builder-initramfs.cpio.gz" "$WORK/harpoon-root.img" "$WORK/serial.log"
 mv "$WORK/harpoon-root.img" "$OUT"
 cat > "$OUT.manifest" <<EOF
 alpine-root-builder-v1
 alpine-branch v3.22
+arch $TARGET_ARCH
 repositories https://dl-cdn.alpinelinux.org/alpine/v3.22/main https://dl-cdn.alpinelinux.org/alpine/v3.22/community
 packages docker-engine docker-cli containerd runc socat python3 ca-certificates alpine-release e2fsprogs e2fsprogs-extra iproute2 iptables nftables kmod
 contract dockerd docker containerd runc socat python3 resize2fs ip iptables nft modprobe
