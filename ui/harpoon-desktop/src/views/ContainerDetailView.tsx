@@ -7,6 +7,7 @@ const ShellTab = lazy(() => import("./ShellTab").then((module) => ({ default: mo
 import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
 import { mapContainerTopology } from "../lib/containerTopology.js";
+import { confirmAction } from "../components/ConfirmDialog";
 import { ContainerTopologyDiagram as TopologyDiagram } from "../components/ContainerTopologyDiagram";
 
 type DetailTab = "overview" | "stats" | "shell" | "logs" | "inspect" | "networks" | "topology" | "storage";
@@ -82,8 +83,8 @@ export const ContainerDetailView = memo(function ContainerDetailView({ context, 
   useEffect(() => { if (tab === "stats" && lifecycleState === "running" && !statsShelf.hasCache) statsShelf.refresh(); }, [tab, lifecycleState, statsShelf.hasCache, statsShelf.refresh]);
   const actionKey = (verb: string) => `${verb}-${containerId}`;
   const busy = (verb: string) => actionInProgress === actionKey(verb);
-  const runLifecycle = (verb: "start" | "stop" | "restart") => {
-    if (verb !== "start" && !window.confirm(`${verb === "stop" ? "Stop" : "Restart"} container “${name}”? This affects only this container in Docker context ${context}.`)) return;
+  const runLifecycle = async (verb: "start" | "stop" | "restart") => {
+    if (verb !== "start" && !(await confirmAction(`${verb === "stop" ? "Stop" : "Restart"} container “${name}”? This affects only this container in Docker context ${context}.`, verb === "stop" ? "Stop container" : "Restart container"))) return;
     doAction?.(actionKey(verb), async () => {
       await invoke(`${verb}_container`, { id: containerId });
       await detailShelf.refresh();

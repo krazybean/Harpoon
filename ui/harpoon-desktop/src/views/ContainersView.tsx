@@ -9,6 +9,7 @@ import { actionSummary, containerLifecycleState } from "../lib/controlScope";
 import { CsshWorkspace } from "./CsshWorkspace";
 import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
+import { confirmAction } from "../components/ConfirmDialog";
 
 const SAMPLE_CONTAINER_COMMAND = "docker --context harpoon run -d --name hello nginx:alpine";
 
@@ -93,15 +94,15 @@ export const ContainersView = memo(function ContainersView({
   const isRunning = status?.state==="running";
   const hasRows = containers.length>0;
   const selectedContainers = containers.filter((c)=>selection.selected.has(resourceId(c)));
-  const confirmLifecycle = (verb: string, names: string[], scope: string) => verb === "start" || window.confirm(`${verb === "stop" ? "Stop" : "Restart"} ${scope}? This affects ${names.length} container${names.length === 1 ? "" : "s"}: ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}.`);
-  const runContainerAction = (container: any, verb: "start" | "stop" | "restart") => {
+  const confirmLifecycle = async (verb: string, names: string[], scope: string) => verb === "start" || confirmAction(`${verb === "stop" ? "Stop" : "Restart"} ${scope}? This affects ${names.length} container${names.length === 1 ? "" : "s"}: ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}.`, verb === "stop" ? "Stop" : "Restart");
+  const runContainerAction = async (container: any, verb: "start" | "stop" | "restart") => {
     const id = resourceId(container);
     const name = container.Names || container.Name || id;
-    if (!confirmLifecycle(verb, [name], `container ${name}`)) return;
+    if (!(await confirmLifecycle(verb, [name], `container ${name}`))) return;
     doAction(`${verb}-${id}`, () => invoke(`${verb}_container`, { id }));
   };
-  const runBatch = (command: string, verb: string, ids = [...selection.selected]) => {
-    if (verb !== "started" && !confirmLifecycle(verb === "stopped" ? "stop" : "restart", selectedContainers.map((c)=>c.Names || c.Name || resourceId(c)), `${ids.length} selected containers`)) return;
+  const runBatch = async (command: string, verb: string, ids = [...selection.selected]) => {
+    if (verb !== "started" && verb !== "deleted" && !(await confirmLifecycle(verb === "stopped" ? "stop" : "restart", selectedContainers.map((c)=>c.Names || c.Name || resourceId(c)), `${ids.length} selected containers`))) return;
     doAction("batch-containers", async ()=>{
       const result = await runSequential(ids, (id)=>invoke(command, { id }));
       selection.remove(result.succeeded);
@@ -140,6 +141,18 @@ export const ContainersView = memo(function ContainersView({
   // remounts it (which used to clear a text selection mid-copy).
   if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
 
+  const removeDialog = confirmContainer && (
+        <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmContainer(null)}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onClick={e=>e.stopPropagation()} onKeyDown={e=>{ if(e.key==="Escape") setConfirmContainer(null); }}>
+            <div id="confirm-title" className="dialog-title">Remove container?</div>
+            <div className="dialog-body">This will permanently remove <strong>{confirmContainer.Names||confirmContainer.Name}</strong>. This action cannot be undone.</div>
+            <div className="dialog-actions">
+              <button ref={cancelRef} onClick={()=>{ setConfirmContainer(null); }} className="btn btn--secondary">Cancel</button>
+              <button onClick={()=>{ const c=confirmContainer; setConfirmContainer(null); doAction(`rm-${c.ID||c.Id}`, ()=>invoke("remove_container", { id: c.ID||c.Id })); }} className="btn btn--destructive">Remove container</button>
+            </div>
+          </div>
+        </div>
+      );
   const stateCls = (s:string) => {
     const v=(s||"").toLowerCase();
     if(v.includes("running")||v.includes("up")) return "badge badge--running badge--sm";
@@ -173,25 +186,25 @@ export const ContainersView = memo(function ContainersView({
     if (next.has(project)) next.delete(project); else next.add(project);
     return next;
   });
-  const stackAction = (project: string, command: string, verb: string, stack: any[]) => {
+  const stackAction = async (project: string, command: string, verb: string, stack: any[]) => {
     setOpenMenu(null);
     const summary = actionSummary(command, stack);
     if (!summary.eligibleCount) {
       setBatchResult({ message: `No eligible containers for ${verb} in ${project} (0/${summary.total} targeted).`, failed: 0 });
       return;
     }
-    if (verb !== "started" && !confirmLifecycle(verb === "stopped" ? "stop" : "restart", summary.eligible.map((c) => c.Names || c.Name || resourceId(c)), `${project} stack (${summary.eligibleCount} eligible containers)`)) return;
+    if (verb !== "started" && !(await confirmLifecycle(verb === "stopped" ? "stop" : "restart", summary.eligible.map((c) => c.Names || c.Name || resourceId(c)), `${project} stack (${summary.eligibleCount} eligible containers)`))) return;
     doAction(`stack-${command}-${project}`, async () => {
       const result = await runSequential(summary.eligible.map(resourceId), (id) => invoke(command, { id }));
       const skipped = summary.skippedCount ? ` ${summary.skippedCount} skipped as ineligible.` : "";
       setBatchResult({ message: result.failed.length ? `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}; ${result.failed.length} failed.${skipped}` : `${result.succeeded.length}/${summary.eligibleCount} ${project} containers ${verb}.${skipped}`, failed: result.failed.length });
     });
   };
-  const runContainerMenuAction = (container: any, verb: "start" | "stop" | "restart") => {
+  const runContainerMenuAction = async (container: any, verb: "start" | "stop" | "restart") => {
     const id = resourceId(container);
     const name = container.Names || container.Name || id;
     setOpenContainerMenu(null);
-    if (verb !== "start" && !confirmLifecycle(verb, [name], `container ${name}`)) return;
+    if (verb !== "start" && !(await confirmLifecycle(verb, [name], `container ${name}`))) return;
     doAction(`${verb}-${id}`, () => invoke(`${verb}_container`, { id }));
   };
   const reducedMotion = () => typeof window === "undefined" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
@@ -330,16 +343,17 @@ export const ContainersView = memo(function ContainersView({
               {isOpen && <div id={`stack-workspace-${group.project}`} className="stack-workspace" aria-label={`${group.project} containers`}>
                 <div className="stack-workspace__header"><div><div className="overview-eyebrow">Compose stack · main workspace</div><h2>{group.project}</h2><p>{group.containers.length} containers · Docker engine metadata</p></div><button className="btn btn--secondary" onClick={returnToGallery}>Back to stacks <span aria-hidden="true">×</span></button></div>
                 {(group.networks.length > 0 || group.volumes.length > 0) && <div className="stack-resource-row">{group.networks.map((network) => <span className="resource-chip" key={`network-${network}`}><ShareNetwork size={13} aria-hidden="true" />{network}</span>)}{group.volumes.map((volume) => <span className="resource-chip" key={`volume-${volume}`}><Database size={13} aria-hidden="true" />{volume}</span>)}</div>}
-                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}</div>}</div></article>; })}</div>
+                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}<button role="menuitem" onClick={() => { setOpenContainerMenu(null); setConfirmContainer(c); }} disabled={actionInProgress === `rm-${id}`}><Trash size={14} aria-hidden="true" />Remove</button></div>}</div></article>; })}</div>
                 <CsshWorkspace project={group.project} containers={group.containers} />
               </div>}
             </article>; })}
             {standalone.map((c) => { const id = resourceId(c); const name = c.Names || c.Name || id; return <article key={id} className="stack-card stack-card--standalone">
               <button className="stack-card__menu" aria-label={`Actions for ${name}`} aria-expanded={openMenu === id} onClick={(event) => { event.stopPropagation(); setOpenMenu(openMenu === id ? null : id); }}><DotsThree size={18} aria-hidden="true" /></button>
-              {openMenu === id && <div className="stack-card__menu-popover" role="menu" aria-label={`${name} actions`} onClick={(event) => event.stopPropagation()}><span className="stack-card__menu-note">Docker context: harpoon · container scope</span><button role="menuitem" disabled={stateKind(c) === "running"} onClick={() => stackAction(name, "start_container", "started", [c])}><Play size={14} aria-hidden="true" /> Start</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "stop_container", "stopped", [c])}><Stop size={14} aria-hidden="true" /> Stop</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "restart_container", "restarted", [c])}><ArrowClockwise size={14} aria-hidden="true" /> Restart</button></div>}
+              {openMenu === id && <div className="stack-card__menu-popover" role="menu" aria-label={`${name} actions`} onClick={(event) => event.stopPropagation()}><span className="stack-card__menu-note">Docker context: harpoon · container scope</span><button role="menuitem" disabled={stateKind(c) === "running"} onClick={() => stackAction(name, "start_container", "started", [c])}><Play size={14} aria-hidden="true" /> Start</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "stop_container", "stopped", [c])}><Stop size={14} aria-hidden="true" /> Stop</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "restart_container", "restarted", [c])}><ArrowClockwise size={14} aria-hidden="true" /> Restart</button><button role="menuitem" disabled={actionInProgress === `rm-${id}`} onClick={() => { setOpenMenu(null); setConfirmContainer(c); }}><Trash size={14} aria-hidden="true" /> Remove</button></div>}
               <button className="stack-card__body" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="stack-card__heading"><span className="stack-card__icon"><span className="container-technology-icon" role="img" aria-label={`${inferContainerTechnology(c).label} image`} title={`${inferContainerTechnology(c).label} image`}><ContainerTechnologyIcon technology={inferContainerTechnology(c)} size={18} /></span></span><span><strong>{name}</strong><span className="text-meta">Standalone container · {c.Image || "Image unavailable"}</span></span></span><span className="stack-card__summary"><span className="badge badge--info">{stateKind(c)}</span></span><span className="stack-services"><span><i data-state={stateKind(c)} />{c.Ports || "No published ports"}</span></span></button>
             </article>; })}
           </div>
+          {removeDialog}
         </div>
         ) : (
       <div className="table-wrap" aria-busy={refreshing ? "true" : undefined}>
@@ -381,18 +395,7 @@ export const ContainersView = memo(function ContainersView({
           </tbody>
         </table>
       </div>
-      {confirmContainer && (
-        <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmContainer(null)}>
-          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onClick={e=>e.stopPropagation()} onKeyDown={e=>{ if(e.key==="Escape") setConfirmContainer(null); }}>
-            <div id="confirm-title" className="dialog-title">Remove container?</div>
-            <div className="dialog-body">This will permanently remove <strong>{confirmContainer.Names||confirmContainer.Name}</strong>. This action cannot be undone.</div>
-            <div className="dialog-actions">
-              <button ref={cancelRef} onClick={()=>{ setConfirmContainer(null); }} className="btn btn--secondary">Cancel</button>
-              <button onClick={()=>{ const c=confirmContainer; setConfirmContainer(null); doAction(`rm-${c.ID||c.Id}`, ()=>invoke("remove_container", { id: c.ID||c.Id })); }} className="btn btn--destructive">Remove container</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {removeDialog}
       {confirmBulkDelete && (
         <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmBulkDelete(null)}>
           <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-bulk-title" onClick={e=>e.stopPropagation()} onKeyDown={e=>{ if(e.key==="Escape") setConfirmBulkDelete(null); }}>
