@@ -21,6 +21,7 @@ import { QuakeShellPrototype } from "./components/QuakeShellPrototype";
 import { configureResourceSampler } from "./lib/resourceSamplerStore";
 import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
+import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 
 type HarpoonStatus = {
   state: string;
@@ -98,9 +99,9 @@ function EngineManageMenu({ state, disabled, onAction }: { state: string; disabl
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
   }, [open]);
   const running = state === "running" || state === "starting" || state === "booting";
-  const choose = (action: "start" | "stop" | "restart") => {
+  const choose = async (action: "start" | "stop" | "restart") => {
     setOpen(false);
-    if (action !== "start" && !window.confirm(`${action === "stop" ? "Stop" : "Restart"} Harpoon Engine? This affects the VM, Docker Engine, and workloads running in the Harpoon context.`)) return;
+    if (action !== "start" && !(await confirmAction(`${action === "stop" ? "Stop" : "Restart"} Harpoon Engine? This affects the VM, Docker Engine, and workloads running in the Harpoon context.`, action === "stop" ? "Stop engine" : "Restart engine"))) return;
     onAction(action);
   };
   return <div className="engine-manage" ref={menuRef}>
@@ -625,6 +626,7 @@ export default function App() {
 
   return (
     <div className="shell">
+      <ConfirmDialogHost />
       <ShellNav active={active} onNav={handleNav} binaryPath={binaryPath} statusAt={statusAt} />
       <div className={active === "containers" ? "shell-main shell-main--containers" : "shell-main"}>
         <header className="shell-header">
