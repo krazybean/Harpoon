@@ -660,6 +660,14 @@ fn start_container(id: String) -> Result<String, String> {
     Ok(combined.trim().to_string())
 }
 
+/// Starts the sample shown on the empty Containers screen (pulls nginx:alpine if needed).
+#[tauri::command(async)]
+fn run_sample_container() -> Result<String, String> {
+    let (stdout, stderr, code) = run_docker(&["--context", "harpoon", "run", "-d", "--name", "hello", "nginx:alpine"])?;
+    if code != 0 { return Err(stderr.trim().to_string()); }
+    Ok(stdout.trim().to_string())
+}
+
 #[tauri::command(async)]
 fn stop_container(id: String) -> Result<String, String> {
     if id.trim().is_empty() { return Err("invalid container id".to_string()); }
@@ -1299,7 +1307,7 @@ fn main() {
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
             get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
-            list_containers, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
+            list_containers, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,

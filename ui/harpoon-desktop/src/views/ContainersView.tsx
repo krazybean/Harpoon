@@ -10,6 +10,44 @@ import { CsshWorkspace } from "./CsshWorkspace";
 import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
 
+const SAMPLE_CONTAINER_COMMAND = "docker --context harpoon run -d --name hello nginx:alpine";
+
+function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doAction }: {
+  refreshing: boolean;
+  updatedAt: number | null;
+  refresh: () => Promise<any>;
+  actionInProgress: string | null;
+  doAction: (name: string, fn: () => Promise<any>) => Promise<void>;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(SAMPLE_CONTAINER_COMMAND).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  };
+  const starting = actionInProgress === "start-sample";
+  return (
+    <div className="table-wrap" aria-busy={refreshing}>
+      <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span className="text-panel-title">Containers (0) {updatedAt && <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span>} <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)", visibility: refreshing ? "visible" : "hidden" }}>• refreshing…</span></span>
+        <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
+      </div>
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="text-body">No containers yet.</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => doAction("start-sample", () => invoke("run_sample_container"))} disabled={!!actionInProgress} className="btn btn--primary btn--sm">
+            <Play size={14} /> {starting ? "Starting sample…" : "Run a sample container"}
+          </button>
+          <span className="text-meta" style={{ color: "var(--text-secondary)" }}>or run it yourself:</span>
+          <code style={{ userSelect: "text" }}>{SAMPLE_CONTAINER_COMMAND}</code>
+          <button onClick={copy} className="btn btn--ghost btn--sm">{copied ? "Copied" : "Copy"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const ContainersView = memo(function ContainersView({
   containers,
   refreshing,
@@ -98,20 +136,9 @@ export const ContainersView = memo(function ContainersView({
       </div>
     );
   }
-  if (!hasCache && !refreshing) return <div className="panel" style={{ padding: 16 }}>No containers. <span className="text-meta" style={{ color: "var(--text-secondary)" }}>Try: <code>docker --context harpoon run -d --name hello nginx:alpine</code></span> <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Refresh</button></div>;
-  if (hasCache && !hasRows && !refreshing) return <div className="panel" style={{ padding: 16 }}>No containers. <span className="text-meta" style={{ color: "var(--text-secondary)" }}>Try: <code>docker --context harpoon run -d --name hello nginx:alpine</code></span> <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Refresh</button></div>;
-  if (hasCache && !hasRows && refreshing) {
-    // keep empty state visible with subtle refreshing indicator, not skeleton
-    return (
-      <div className="table-wrap" aria-busy="true">
-        <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span className="text-panel-title">Containers (0) <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-secondary)", textTransform: "none", letterSpacing: 0 }}>updated {fmtTs(updatedAt)}</span> <span className="text-meta" style={{ marginLeft: 6, color: "var(--accent-cyan)" }}>• refreshing…</span></span>
-          <button onClick={refresh} disabled={refreshing} className="btn btn--ghost btn--sm">Refresh</button>
-        </div>
-        <div style={{ padding: 16 }} className="text-meta">No containers. <span style={{ color: "var(--text-secondary)" }}>Try: <code>docker --context harpoon run -d --name hello nginx:alpine</code></span></div>
-      </div>
-    );
-  }
+  // One stable empty state for every refresh phase, so the periodic refresh never
+  // remounts it (which used to clear a text selection mid-copy).
+  if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
 
   const stateCls = (s:string) => {
     const v=(s||"").toLowerCase();
