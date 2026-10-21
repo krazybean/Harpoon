@@ -18,6 +18,11 @@ on:
       - tools/release/**
       - tools/verify-bundle.sh
       - ui/harpoon-desktop/src-tauri/**
+      - ui/harpoon-desktop/src/**
+      - ui/harpoon-desktop/index.html
+      - ui/harpoon-desktop/package.json
+      - ui/harpoon-desktop/package-lock.json
+      - ui/harpoon-desktop/vite.config.ts
 
 permissions:
   contents: read
