@@ -110,36 +110,42 @@ export const ContainersView = memo(function ContainersView({
     });
   };
 
-  if (!isRunning) {
-    return (
-      <div className="panel" style={{ padding: 16 }}>
-        <div className="text-body">Harpoon not running — containers unavailable. State: {status?.state ?? "—"}</div>
-        <div className="text-meta" style={{ color: "var(--text-secondary)", marginTop: 4 }}>Start Harpoon from Overview {hasCache ? `• cached ${containers.length} rows stale` : ""}</div>
-        {hasCache && <div className="text-meta" style={{ marginTop: 8, opacity: 0.6 }}>Cached (stale) — will refresh when Harpoon running</div>}
-        <button onClick={refresh} className="btn btn--secondary" style={{ marginTop: 8 }}>Refresh</button>
-      </div>
-    );
-  }
-  // Error with cache: keep data visible, inline error
-  if (error && !hasCache) {
-    return <div className="panel" style={{ padding: 12, background: "var(--error-bg)", borderColor: "#7F1D1D", color: "var(--error-fg)" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>;
-  }
-  if (!hasCache && refreshing) {
-    return (
-      <div className="table-wrap">
-        <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span className="text-panel-title">Containers</span>
-          <span className="text-meta" style={{ color: "var(--accent-cyan)" }}>• refreshing…</span>
+  // The non-list states are chosen here but returned only after every hook below runs:
+  // an early return before those hooks made React throw error #310 when the first
+  // container appeared.
+  const earlyView = (() => {
+    if (!isRunning) {
+      return (
+        <div className="panel" style={{ padding: 16 }}>
+          <div className="text-body">Harpoon not running — containers unavailable. State: {status?.state ?? "—"}</div>
+          <div className="text-meta" style={{ color: "var(--text-secondary)", marginTop: 4 }}>Start Harpoon from Overview {hasCache ? `• cached ${containers.length} rows stale` : ""}</div>
+          {hasCache && <div className="text-meta" style={{ marginTop: 8, opacity: 0.6 }}>Cached (stale) — will refresh when Harpoon running</div>}
+          <button onClick={refresh} className="btn btn--secondary" style={{ marginTop: 8 }}>Refresh</button>
         </div>
-        <div style={{ padding: 16 }}>
-          <div aria-busy="true" style={{ display: "flex", flexDirection: "column", gap: 8 }}>{Array.from({length: 3}).map((_,i)=><div key={i} style={{ height: 12, background: "var(--panel-header)", borderRadius: 6, opacity: 0.6+ i*0.1, animation: "pulse 1.5s ease-in-out infinite" }} />)}<style>{`@keyframes pulse{0%,100%{opacity:0.6}50%{opacity:1}}`}</style></div>
+      );
+    }
+    // Error with cache: keep data visible, inline error
+    if (error && !hasCache) {
+      return <div className="panel" style={{ padding: 12, background: "var(--error-bg)", borderColor: "#7F1D1D", color: "var(--error-fg)" }}>Error: {error} <button onClick={refresh} className="btn btn--secondary btn--sm" style={{ marginLeft: 8 }}>Retry</button></div>;
+    }
+    if (!hasCache && refreshing) {
+      return (
+        <div className="table-wrap">
+          <div className="panel-header" style={{ padding: "0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span className="text-panel-title">Containers</span>
+            <span className="text-meta" style={{ color: "var(--accent-cyan)" }}>• refreshing…</span>
+          </div>
+          <div style={{ padding: 16 }}>
+            <div aria-busy="true" style={{ display: "flex", flexDirection: "column", gap: 8 }}>{Array.from({length: 3}).map((_,i)=><div key={i} style={{ height: 12, background: "var(--panel-header)", borderRadius: 6, opacity: 0.6+ i*0.1, animation: "pulse 1.5s ease-in-out infinite" }} />)}<style>{`@keyframes pulse{0%,100%{opacity:0.6}50%{opacity:1}}`}</style></div>
+          </div>
         </div>
-      </div>
-    );
-  }
-  // One stable empty state for every refresh phase, so the periodic refresh never
-  // remounts it (which used to clear a text selection mid-copy).
-  if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
+      );
+    }
+    // One stable empty state for every refresh phase, so the periodic refresh never
+    // remounts it (which used to clear a text selection mid-copy).
+    if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
+    return null;
+  })();
 
   const removeDialog = confirmContainer && (
         <div className="dialog-scrim" role="presentation" onClick={()=>setConfirmContainer(null)}>
@@ -274,6 +280,7 @@ export const ContainersView = memo(function ContainersView({
   useEffect(() => {
     if (!selectedStack) requestAnimationFrame(() => { if (galleryRef.current) galleryRef.current.scrollTop = galleryScrollTop.current; });
   }, [selectedStack]);
+  if (earlyView) return earlyView;
 
   const renderRow = (c:any) => (
     <tr key={c.ID||c.Id} className="table-row">
