@@ -32,7 +32,7 @@ jobs:
 
       - name: Upload consistency logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: stage-7-consistency-logs
           path: /tmp/harpoon-stage7-consistency/
