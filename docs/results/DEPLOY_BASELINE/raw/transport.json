@@ -1,0 +1,73 @@
+{
+  "host_docker_cli_version_s": {
+    "n": 30,
+    "min": 0.015189541969448328,
+    "median": 0.016546791477594525,
+    "p95": 0.029871204309165476,
+    "max": 0.038018166087567806,
+    "mean": 0.018385125002047666,
+    "stdev": 0.005182247954870717
+  },
+  "host_raw_api_ping_ms": {
+    "n": 30,
+    "min": 0.7757089333608747,
+    "median": 0.8093335200101137,
+    "p95": 0.9117687528487294,
+    "max": 1.188291935250163,
+    "mean": 0.833434727974236,
+    "stdev": 0.07696327406528804
+  },
+  "guest_exec_true_s": {
+    "n": 30,
+    "min": 0.06504483404569328,
+    "median": 0.06714881252264604,
+    "p95": 0.077069591806503,
+    "max": 0.08550620905589312,
+    "mean": 0.06871746258887773,
+    "stdev": 0.004456235807376699
+  },
+  "guest_docker_cli_version_s": {
+    "n": 30,
+    "min": 0.07140045904088765,
+    "median": 0.07364722900092602,
+    "p95": 0.08281717469217255,
+    "max": 0.08423954201862216,
+    "mean": 0.0747607652330771,
+    "stdev": 0.003515429576394289
+  },
+  "note": "guest CLI has no buildx: BuildKit builds cannot be run in-guest for a like-for-like build comparison",
+  "_env": {
+    "date": "2026-10-30T02:31:08-0500",
+    "macos": "27.0.1",
+    "cpu": "Apple M3 Pro",
+    "harpoon_state": {
+      "cpus": 2,
+      "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+      "dockerReady": true,
+      "lockHeld": true,
+      "lockPath": "/tmp/harpoon.lock",
+      "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+      "memoryMiB": 4096,
+      "mgmtReady": true,
+      "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+      "pid": 67874,
+      "socketPath": "/tmp/harpoon-docker.sock",
+      "sockExists": true,
+      "state": "running"
+    },
+    "harpoon_bin": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+    "harpoon_bin_sha256": "33259856f6161ee4f85f60e8022baef518010bf07b157c84404e83aa4558f83a",
+    "docker_server": {
+      "Version": "28.3.3",
+      "Os": "linux",
+      "Arch": "arm64"
+    },
+    "guest": [
+      "MemTotal:        4013416 kB",
+      "MemAvailable:    3672984 kB",
+      "6.12.110-0-virt",
+      "2"
+    ],
+    "host_disk": "/dev/disk3s5   460Gi   396Gi    24Gi    95%    4.4M  257M    2%   /System/Volumes/Data"
+  }
+}
