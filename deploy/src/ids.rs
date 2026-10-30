@@ -355,7 +355,7 @@ mod tests {
         struct Broken;
         impl Entropy for Broken {
             fn fill(&mut self, _: &mut [u8]) -> io::Result<()> {
-                Err(io::Error::new(io::ErrorKind::Other, "no entropy"))
+                Err(io::Error::other("no entropy"))
             }
         }
         let mut g = IdGenerator::new(ManualClock::new(1), Broken);

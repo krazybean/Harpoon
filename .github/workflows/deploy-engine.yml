@@ -1,0 +1,64 @@
+name: Deploy engine foundation
+
+# Isolated from the desktop/DMG pipelines: runs only when the offline engine crate changes.
+# The crate has no dependencies and performs no Docker, VM, network or Keychain I/O.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy-engine.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy-engine.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: deploy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Foundation stays offline and dependency-free
+        run: |
+          # No [dependencies] entries and no I/O crates or APIs in the engine sources.
+          if awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml | grep -q .; then
+            echo "deploy/Cargo.toml must not declare dependencies yet" >&2; exit 1
+          fi
+          if grep -rnE 'std::net|std::process|tokio|reqwest|hyper|rusqlite|UnixStream' src; then
+            echo "network/process/async/db APIs are out of scope for the offline foundation" >&2; exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --offline
