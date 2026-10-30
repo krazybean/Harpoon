@@ -22,7 +22,7 @@ gating, rollback safety, and verified GitHub/GitLab webhook fixtures.
 
 The Apple Silicon target is the 2.0 release scope. Intel/universal packaging,
 Windows/Linux hosts, and the proposed deployment control plane remain post-2.0
-work. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` is a
+work. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` remains a
 testing prerelease with stale release documentation; the executable startup
 gate is drafted in `docs/releases/v2.0.0-startup-reliability.md`.
 
@@ -67,7 +67,7 @@ Evidence classes are deliberately separate:
   broad pruning, and release distribution work (Developer ID/notarization and
   related packaging gates) until feature and reliability acceptance are both
   complete.
-- **Candidate preparation:** the local `2.0.0-rc.1` plan, second-Mac gate,
+- **Candidate preparation:** the `2.0.0-rc.2` plan, second-Mac gate,
   portability matrix, and redacted diagnostic collection procedure are recorded
   in [`docs/releases/v2.0.0-rc.md`](releases/v2.0.0-rc.md). No version bump,
   tag, signing, notarization, push, or publication has occurred.

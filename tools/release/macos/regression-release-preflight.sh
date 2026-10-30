@@ -22,7 +22,7 @@ printf '  1) ABCD1234 "Developer ID Application: Test (TEAMID)"\n'
 EOF
 cat > "$TMP/bin/node" <<'EOF'
 #!/bin/sh
-printf '2.0.0-rc.1\n'
+printf '2.0.0-rc.2\n'
 EOF
 chmod +x "$TMP/bin/security" "$TMP/bin/node"
 cat > "$TMP/bin/git" <<'EOF'
