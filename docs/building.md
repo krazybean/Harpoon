@@ -114,7 +114,7 @@ You do not need to invoke this manually — `npm run build:release` / `npm run r
 
 ## 2. Platform requirements
 
-Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The current project targets Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). No Intel or cross-platform claim is made.
+Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The 2.0 target is Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). Intel/universal packaging is experimental post-2.0 work, and no Windows/Linux host claim is made.
 
 Build machine also needs the normal macOS command-line development tools for Swift, Rust, and Tauri:
 
@@ -186,7 +186,7 @@ cd ui/harpoon-desktop
 npm run tauri dev
 ```
 
-This starts Vite (`npm run dev` at `http://localhost:1420` per `tauri.conf.json`) and launches the Tauri window. The UI discovers the Harpoon runtime via its binary resolver (`HARPOON_BIN` → bundled `Harpoon.app` → `harpoon/build/harpoon` → `/usr/local/bin/harpoon` → `PATH`) and follows the current bootstrap state machine: on first launch it will automatically attempt `harpoon start` once and show phased progress (`Checking runtime…` → `Starting Harpoon…` → `Starting Linux VM…` → `Waiting for Docker Engine…` → `Ready`). No manual `harpoon start` is required in development, though the CLI remains available.
+This starts Vite (`npm run dev` at `http://localhost:1420` per `tauri.conf.json`) and launches the Tauri window. The UI discovers the Harpoon runtime via its binary resolver (`HARPOON_BIN` → bundled `Harpoon.app` → `harpoon/build/harpoon` → `/usr/local/bin/harpoon` → `PATH`) and follows the current bootstrap state machine: on first launch it will automatically attempt `harpoon start` once and show phased progress (`Checking runtime…` → `Starting Harpoon…` → `Starting Linux VM…` → `Waiting for Docker Engine…` → `Ready`). No manual `harpoon start` is required in development, though the CLI remains available. Podman/rootless is not required for the 2.0 path.
 
 ## 6. Build Harpoon guest assets (canonical)
 
@@ -498,14 +498,14 @@ Building Harpoon from source does not require Developer ID or notarization; thos
 
 - Tauri `bundle.macOS.minimumSystemVersion` = `12.0` (`tauri.conf.json`) → `LSMinimumSystemVersion` in `Info.plist`.
 - Swift `harpoon/build/harpoon` built with `MACOSX_DEPLOYMENT_TARGET=12.0` and `xcrun swiftc -target <arch>-apple-macosx12.0`, `LC_BUILD_VERSION` `minos 12.0` `sdk 26.5`. RPATHs: `/usr/lib/swift`, `@executable_path/../../../Frameworks`, `@loader_path/../../../Frameworks`.
-- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. 12.0 (Monterey) keeps older Intel Macs, which stop at Monterey or Sonoma, able to open the universal build; the compiler enforces API availability against this target.
+- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. The 2.0 release gate is Apple Silicon; the universal Intel path remains experimental post-2.0.
 
 **Self-containment:**
 
 ```
 Harpoon.app/Contents/
-  MacOS/harpoon-desktop          # 12.0, arm64 (+ x86_64 universal), no Swift deps
-  Resources/harpoon/bin/harpoon  # 12.0, arm64 (+ x86_64 universal), Swift, @rpath to Frameworks, entitlement virtualization
+  MacOS/harpoon-desktop          # 12.0, arm64 for the 2.0 target, no Swift deps
+  Resources/harpoon/bin/harpoon  # 12.0, arm64 for the 2.0 target, Swift, @rpath to Frameworks, entitlement virtualization
   Resources/harpoon/lib/harpoon/ # Image-virt, harpoon-initramfs.cpio.gz, harpoon-root.img (via assets/guest)
   Frameworks/                    # Swift runtime if embedding needed (via swift-stdlib-tool); currently OS-provided
 ```

@@ -48,6 +48,11 @@ runtime checks. Release tooling and the relocatable tarball are documented in
 `VZErrorDomain 1` startup failures remain a known host/Virtualization.framework
 risk; they were characterized, not fixed.
 
+**Release status:** `v2.0.0-rc.1` is published as a testing prerelease, but the
+release notes are stale and it is not a stable release. Step 1 is reconciling
+guest provenance, fail-closed macOS release gates, and the second-Mac startup
+specification.
+
 **Validated as release preparation, not as a clean-machine release:** the runtime
 closure work justifies another RC transfer to the work Mac, but the current
 checkout does not contain a named second-Mac acceptance result. The release app

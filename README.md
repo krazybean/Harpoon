@@ -186,7 +186,9 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Known Limitations / v0.1 Scope
 
-- **Platform:** macOS on Apple Silicon only; ARM64 Linux guests; no Intel or cross-platform claim.
+- **Platform:** macOS on Apple Silicon only; ARM64 Linux guests. Intel/universal
+  packaging is experimental post-2.0 work; Windows/Linux hosts and the proposed
+  deployment control plane are also post-2.0. Podman/rootless is not a 2.0 gate.
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
 - **Distribution signing:** local ad-hoc signing with `com.apple.security.virtualization` (`codesign --verify --deep --strict` passes). Developer ID signing and Apple notarization are not complete for public Gatekeeper distribution.
 - **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
@@ -210,7 +212,10 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Status
 
-Harpoon v2.0.0-rc.1 is a testing prerelease for Apple Silicon. Second-Mac acceptance, notarized distribution, and several follow-up validation items remain open. Harpoon v0.1.1 remains the latest stable desktop release.
+Harpoon v2.0.0-rc.1 is a published testing prerelease for Apple Silicon, but its
+release documentation is stale. Second-Mac acceptance, notarized distribution,
+and release-hardening validation remain open. Harpoon v0.1.1 remains the latest
+stable desktop release.
 
 Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 

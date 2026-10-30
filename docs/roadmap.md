@@ -18,6 +18,19 @@ gating, rollback safety, and verified GitHub/GitLab webhook fixtures.
 
 ## Current Position
 
+### Harpoon 2.0 Step 1 — release hardening IN PROGRESS (2026-10-29)
+
+The Apple Silicon target is the 2.0 release scope. Intel/universal packaging,
+Windows/Linux hosts, and the proposed deployment control plane remain post-2.0
+work. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` is a
+testing prerelease with stale release documentation; the executable startup
+gate is drafted in `docs/releases/v2.0.0-startup-reliability.md`.
+
+Step 1 evidence currently includes offline fail-closed release preflight and
+socket-permission regressions. Guest asset reconciliation remains blocked until
+the untracked kernel/root inputs and a safe external build engine are available;
+no tracked guest asset was overwritten.
+
 ### Harpoon 2 stabilization transition — FEATURE COMPLETE / RELEASE NOT READY (2026-10-17 America/Chicago)
 
 The planned Harpoon 2 redesign surfaces are implemented: container and stack
@@ -42,8 +55,9 @@ Evidence classes are deliberately separate:
   applicable; offline fixtures, browser review, and production builds do not
   substitute for it.
 - **Acceptance pending:** the native multi-size Shell/CSSH/Quake/Topology/
-  Context matrix; Docker Desktop, Harpoon, Podman/rootless, stale-socket,
-  duplicate-endpoint, and authentication-required Context cases; and the
+  Context matrix; Docker Desktop, Harpoon, stale-socket, duplicate-endpoint,
+  and authentication-required Context cases; Podman/rootless is experimental
+  and not a 2.0 gate; and the
   dedicated WKWebView CPU/input measurements.
 - **Defects / polish:** compact Compose
   network labels with full tooltips, network-attachment hover metadata,
