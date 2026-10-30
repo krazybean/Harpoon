@@ -71,6 +71,9 @@ pub struct ImageInfo {
     pub id: String,
     pub labels: Labels,
     pub tags: Vec<String>,
+    /// `Config.Volumes`: paths the image declares as volumes (including inherited ones). Docker
+    /// creates an anonymous volume for each when a container starts from the image.
+    pub volumes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +322,16 @@ impl DockerApi {
                         j.get("Config").and_then(|c| c.get("Labels")),
                         "image inspect",
                     )?,
+                    volumes: match j.get("Config").and_then(|c| c.get("Volumes")) {
+                        None | Some(Json::Null) => Vec::new(),
+                        Some(Json::Obj(m)) => m.iter().map(|(k, _)| k.clone()).collect(),
+                        Some(_) => {
+                            return Err(ApiError::Malformed {
+                                op: "image inspect",
+                                detail: "Config.Volumes is not an object".into(),
+                            })
+                        }
+                    },
                     tags: j
                         .get("RepoTags")
                         .and_then(Json::as_array)

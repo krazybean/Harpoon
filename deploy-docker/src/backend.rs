@@ -258,6 +258,20 @@ impl<T: HttpTransport> DockerBackend<T> {
             .clone()
             .ok_or_else(|| StepError::new("no image was built"))?;
         let lbl = all_labels(io.app(), io.deployment());
+        // Docker creates an anonymous volume per declared image volume (inherited ones included)
+        // even with no mounts in the request, and this ledger does not manage volumes. Refuse
+        // before recording any container intent, so nothing is created.
+        let img = self
+            .api
+            .image_inspect(&tag, b.left("checking the image's declared volumes")?)
+            .map_err(|e| api_err("checking the image's declared volumes", e))?
+            .ok_or_else(|| StepError::new(format!("image {tag} no longer exists")))?;
+        if !img.volumes.is_empty() {
+            return Err(StepError::new(format!(
+                "image {tag} declares volumes ({}); Harpoon's first slice does not manage volumes, so no container was created. Remove the VOLUME instruction (including any inherited from the base image).",
+                img.volumes.join(", ")
+            )));
+        }
         let intent = io.intend(ResourceKey::new(ResourceKind::Container, name), disposition)?;
         let spec = CreateSpec {
             image: &tag,
@@ -555,6 +569,26 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         let b = Budget::new(io.budget_ms);
         let tag = image_tag(io.app(), io.deployment());
         let lbl = all_labels(io.app(), io.deployment());
+        // Fail closed if the tag is taken. A build would move the tag to the new image and the old
+        // image would silently lose it — even a Harpoon-labelled one; replacing an image needs a
+        // separately approved recovery mechanism, so this slice never does it. Nothing is recorded
+        // for a tag this deployment does not own.
+        if let Some(existing) = self
+            .api
+            .image_inspect(&tag, b.left("checking the image tag is unused")?)
+            .map_err(|e| api_err("checking the image tag is unused", e))?
+        {
+            let owner = if has_labels(&existing.labels, io.app(), io.deployment()) {
+                "carrying this deployment's Harpoon labels"
+            } else if existing.labels.iter().any(|(k, _)| k == labels::MANAGED) {
+                "carrying Harpoon labels"
+            } else {
+                "that Harpoon did not create"
+            };
+            return Err(StepError::new(format!(
+                "image tag {tag} already exists ({owner}); it was not overwritten and no build was run"
+            )));
+        }
         // Intent first: the build is what creates the image.
         let intent = io.intend(
             ResourceKey::new(ResourceKind::Image, &tag),

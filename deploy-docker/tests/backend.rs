@@ -167,7 +167,8 @@ fn a_first_deployment_succeeds_and_records_intent_before_and_receipt_after_every
         .docker
         .requests()
         .into_iter()
-        .find(|r| r.path.starts_with("/images/harpoon/"))
+        .filter(|r| r.path.starts_with("/images/harpoon/"))
+        .nth(1) // the check after the build; the first is the pre-build tag check
         .unwrap();
     assert!(img_intent < img_inspect.seq);
     let e = r.ledger.find(&h.dep.id, &image_key).unwrap();
@@ -491,8 +492,8 @@ fn a_build_that_reports_success_but_produced_no_image_fails() {
 fn an_image_without_harpoons_labels_is_not_recorded_as_ours() {
     let mut h = Harness::new();
     let tag = image_tag(&h.dep.application_id, &h.dep.id);
-    h.docker
-        .with(|s| s.add_image(&tag, vec![("io.harpoon.managed".into(), "true".into())])); // missing app + deployment
+    // the build "produces" an image with only one of the three labels
+    h.seed_built_image_with(vec![("io.harpoon.managed".into(), "true".into())], vec![]);
     let mut b = backend_with(&h, ok200(), |_| {});
     let mut j = StampedJournal::new();
     let r = h.run(&mut b, &mut j);
@@ -1357,4 +1358,226 @@ fn tests_never_name_the_live_harpoon_socket() {
     assert!(support::fake_docker::FakeDocker::start()
         .path()
         .starts_with(std::env::temp_dir()));
+}
+
+// ---------------------------------------------------------------- image-tag isolation
+
+fn tag_collision_run(h: &mut Harness) -> (Report, StampedJournal) {
+    let mut b = backend_with(h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    (r, j)
+}
+
+fn image_id_of(h: &Harness, tag: &str) -> Option<String> {
+    h.docker.with(|s| {
+        s.images
+            .iter()
+            .find(|i| i.tags.contains(&tag.to_string()))
+            .map(|i| i.id.clone())
+    })
+}
+
+#[test]
+fn a_foreign_image_already_holding_the_tag_stops_the_build_before_buildx_runs() {
+    let mut h = Harness::new();
+    let tag = image_tag(&h.dep.application_id, &h.dep.id);
+    let foreign = h.preexisting_image(vec![]);
+    let (r, j) = tag_collision_run(&mut h);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    let f = h.dep.failure.as_ref().unwrap();
+    assert_eq!(f.step, Step::Build);
+    assert!(
+        f.message.contains("already exists") && f.message.contains("did not create"),
+        "{}",
+        f.message
+    );
+    assert!(
+        h.ws.buildx_record("args.txt").is_empty(),
+        "Buildx never ran"
+    );
+    assert_eq!(
+        image_id_of(&h, &tag),
+        Some(foreign),
+        "the existing image keeps its tag"
+    );
+    assert!(
+        !j.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Intent { key, .. } if key.kind == ResourceKind::Image)),
+        "no intent is recorded for an image this deployment will not create"
+    );
+    assert!(h.docker.with(|s| s.containers.is_empty()));
+    assert!(r.cleanup_problems().is_empty());
+    no_forbidden_requests(&h);
+}
+
+#[test]
+fn an_existing_harpoon_owned_tag_is_not_silently_overwritten() {
+    for (what, l) in [
+        ("this deployment's labels", None),
+        ("another deployment's labels", Some(())),
+        ("only the managed label", Some(())),
+    ] {
+        let mut h = Harness::new();
+        let tag = image_tag(&h.dep.application_id, &h.dep.id);
+        let existing_labels = match what {
+            "this deployment's labels" => labels(&h.dep.application_id, &h.dep.id),
+            "another deployment's labels" => {
+                let other = h.ids.gen.deployment().unwrap();
+                labels(&h.dep.application_id, &other)
+            }
+            _ => vec![("io.harpoon.managed".to_string(), "true".to_string())],
+        };
+        let _ = l;
+        let existing = h.preexisting_image(existing_labels);
+        let (r, j) = tag_collision_run(&mut h);
+        assert_eq!(r.status, DeploymentStatus::Failed, "{what}");
+        assert!(
+            h.dep
+                .failure
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("was not overwritten"),
+            "{what}"
+        );
+        assert!(
+            h.ws.buildx_record("args.txt").is_empty(),
+            "{what}: Buildx never ran"
+        );
+        assert_eq!(
+            image_id_of(&h, &tag),
+            Some(existing),
+            "{what}: image and tag untouched"
+        );
+        assert!(!j.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Intent { key, .. } if key.kind == ResourceKind::Image)), "{what}");
+        assert!(
+            !h.docker.requests().iter().any(|q| q.method == "DELETE"),
+            "{what}: nothing was removed"
+        );
+    }
+}
+
+#[test]
+fn the_tag_check_precedes_the_build_and_the_intent_precedes_the_build() {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let (r, j) = tag_collision_run(&mut h);
+    assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
+    let inspects: Vec<Req> = h
+        .docker
+        .requests()
+        .into_iter()
+        .filter(|q| q.path.starts_with("/images/harpoon/"))
+        .collect();
+    assert!(inspects.len() >= 2, "once before the build, once after");
+    let key = ResourceKey::new(
+        ResourceKind::Image,
+        image_tag(&h.dep.application_id, &h.dep.id),
+    );
+    let intent = j
+        .stamps
+        .iter()
+        .find(|(_, r)| matches!(r, LedgerRecord::Intent { key: k, .. } if *k == key))
+        .unwrap()
+        .0;
+    assert!(
+        inspects[0].seq < intent,
+        "the tag is checked before the intent is recorded"
+    );
+    assert!(
+        intent < inspects[1].seq,
+        "and the intent is durable before the build's result is looked at"
+    );
+}
+
+// ---------------------------------------------------------------- volumes
+
+#[test]
+fn an_image_that_declares_volumes_is_rejected_before_any_container_exists() {
+    for vols in [
+        vec!["/data".to_string()],
+        vec!["/var/lib/db".to_string(), "/cache".to_string()],
+    ] {
+        let mut h = Harness::new();
+        let existing_container = h
+            .docker
+            .with(|s| s.add_container("bystander", vec![], true));
+        h.seed_built_image_with(labels(&h.dep.application_id, &h.dep.id), vols.clone());
+        let mut b = backend_with(&h, ok200(), |_| {});
+        let mut j = StampedJournal::new();
+        let r = h.run(&mut b, &mut j);
+        assert_eq!(r.status, DeploymentStatus::Failed);
+        let f = h.dep.failure.as_ref().unwrap();
+        assert_eq!(f.step, Step::PreliminaryCheck);
+        assert!(
+            f.message.contains("declares volumes")
+                && f.message.contains(&vols[0])
+                && f.message.contains("no container was created"),
+            "{}",
+            f.message
+        );
+        assert!(
+            !h.docker
+                .requests()
+                .iter()
+                .any(|q| q.path.starts_with("/containers/create")),
+            "no container create was even attempted"
+        );
+        assert!(
+            !h.docker
+                .requests()
+                .iter()
+                .any(|q| q.path.contains("/volumes")),
+            "no volume was read or changed"
+        );
+        assert!(
+            !j.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Intent { key, .. } if key.kind == ResourceKind::Container)),
+            "no container intent either"
+        );
+        assert_eq!(h.docker.with(|s| s.containers.len()), 1);
+        assert_eq!(
+            h.docker.container("bystander").unwrap().id,
+            existing_container
+        );
+        assert!(r.cleanup_problems().is_empty());
+    }
+}
+
+#[test]
+fn an_image_without_volumes_still_deploys() {
+    let mut h = Harness::new();
+    h.seed_built_image_with(labels(&h.dep.application_id, &h.dep.id), vec![]);
+    let mut b = backend_with(&h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    assert_eq!(h.run(&mut b, &mut j).status, DeploymentStatus::Succeeded);
+}
+
+#[test]
+fn a_malformed_volumes_field_is_an_error_not_a_pass() {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    h.docker.fault_after(
+        Some("GET"),
+        "/images/harpoon/",
+        1,
+        1,
+        Action::Respond(
+            200,
+            "{\"Id\":\"sha256:aa\",\"Config\":{\"Labels\":null,\"Volumes\":[\"/data\"]}}".into(),
+        ),
+    );
+    let mut b = backend_with(&h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    assert!(
+        h.dep.failure.as_ref().unwrap().message.contains("Volumes"),
+        "{}",
+        h.dep.failure.as_ref().unwrap().message
+    );
+    assert!(!h
+        .docker
+        .requests()
+        .iter()
+        .any(|q| q.path.starts_with("/containers/create")));
 }

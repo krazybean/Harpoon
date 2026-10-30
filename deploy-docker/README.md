@@ -14,6 +14,7 @@ It lives in its own crate so `deploy/` (the engine) stays offline: all socket an
   re-reads the object by id and checks id, name and all three Harpoon labels first.
 - Health evidence comes from real HTTP observations of the published port (`probe::TcpHttp`); it
   is never `simulated`, and the engine refuses simulated evidence from a backend that doesn't accept it.
+- The intended image tag must be unused (never overwritten); images that declare volumes are refused (no volume management).
 - `stop_current` / `restore_previous` (release replacement) are deliberately not implemented.
 
 Tests use a test-owned socket with a fake Docker (`tests/support/fake_docker.rs`) and a fake Buildx

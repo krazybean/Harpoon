@@ -229,11 +229,34 @@ impl Harness {
         }
     }
 
-    /// What a successful `buildx build --load` leaves in the engine.
-    pub fn seed_built_image(&self) -> String {
-        let tag = image_tag(&self.dep.application_id, &self.dep.id);
+    /// What a successful `buildx build --load` leaves in the engine: the image appears when the
+    /// backend inspects the tag the *second* time (the first inspect, before the build, must find
+    /// nothing).
+    pub fn seed_built_image(&self) {
         let l = labels(&self.dep.application_id, &self.dep.id);
-        self.docker.with(|s| s.add_image(&tag, l))
+        self.seed_built_image_with(l, Vec::new());
+    }
+
+    pub fn seed_built_image_with(&self, image_labels: Vec<(String, String)>, volumes: Vec<String>) {
+        let tag = image_tag(&self.dep.application_id, &self.dep.id);
+        self.docker.fault_after(
+            Some("GET"),
+            "/images/harpoon/",
+            1,
+            1,
+            fake_docker::Action::Race(std::sync::Arc::new(move |s| {
+                let id = s.add_image(&tag, image_labels.clone());
+                if let Some(i) = s.images.iter_mut().find(|i| i.id == id) {
+                    i.volumes = volumes.clone();
+                }
+            })),
+        );
+    }
+
+    /// An image that already holds the deployment's tag before the backend runs.
+    pub fn preexisting_image(&self, image_labels: Vec<(String, String)>) -> String {
+        let tag = image_tag(&self.dep.application_id, &self.dep.id);
+        self.docker.with(|s| s.add_image(&tag, image_labels))
     }
 
     pub fn backend<T: HttpTransport>(&self, t: T) -> DockerBackend<T> {

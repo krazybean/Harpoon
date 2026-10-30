@@ -41,6 +41,7 @@ pub struct Img {
     pub id: String,
     pub tags: Vec<String>,
     pub labels: Labels,
+    pub volumes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +108,7 @@ impl St {
             id: id.clone(),
             tags: vec![tag.to_string()],
             labels,
+            volumes: Vec::new(),
         });
         id
     }
@@ -461,7 +463,25 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                             "RepoTags",
                             Json::Arr(i.tags.iter().map(|t| Json::Str(t.clone())).collect()),
                         ),
-                        ("Config", obj(vec![("Labels", labels_json(&i.labels))])),
+                        (
+                            "Config",
+                            obj(vec![
+                                ("Labels", labels_json(&i.labels)),
+                                (
+                                    "Volumes",
+                                    if i.volumes.is_empty() {
+                                        Json::Null
+                                    } else {
+                                        Json::Obj(
+                                            i.volumes
+                                                .iter()
+                                                .map(|v| (v.clone(), obj(vec![])))
+                                                .collect(),
+                                        )
+                                    },
+                                ),
+                            ]),
+                        ),
                     ])
                     .to_json(),
                 ),
