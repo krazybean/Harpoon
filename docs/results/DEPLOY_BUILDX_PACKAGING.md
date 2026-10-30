@@ -21,7 +21,7 @@ Upstream's signature is checked **before** repackaging and is then replaced by H
 `lipo` of the two verified slices keeps a valid signature (verified); arm64 output carries the same CDHash as upstream.
 
 ## Evidence
-- `harpoon/regression-buildx-packaging.sh`: 41 checks, 0 skipped (wrong checksum, tampered cache, signed-sums mismatch /
+- `harpoon/regression-buildx-packaging.sh`: 53 checks, 0 skipped (41 behavioural + 12 tracked-binary predicate and tree checks) (wrong checksum, tampered cache, signed-sums mismatch /
   missing entry, offline without sums, missing x86_64 slice, bad `HARPOON_ARCH`, exact architectures, universal signature,
   foreign/unsigned/tampered signature, missing/symlinked/non-executable/wrong-arch/ad-hoc/unsigned/no-license bundles,
   signing scripts refusing a bundle without Buildx, no binary tracked in git).
