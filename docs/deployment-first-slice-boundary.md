@@ -8,6 +8,30 @@ and the findings in `docs/results/DEPLOY_BUILDX_VALIDATION.md` and `COMPAT_BUILD
 (first deployment only), rollback/promote/resume, secrets/Keychain, SQLite (an append-only JSON-lines journal is enough
 for slice 1), the shipping UI. The UI stays on the mock until the slice is proven.
 
+## Approved decisions (2026-10-30)
+1. **JSON-lines journal** — approved *exclusively* for the first disposable deployment slice. Requirements: durable writes
+   (`write` + `fsync` of the file, and of the directory on creation), tolerant recovery of a **partial trailing record**
+   (truncate-or-skip, never panic, never misread), **resource intent and receipt records** (see B1), and crash-injection
+   tests. **SQLite remains the approved permanent metadata store and must replace this journal before any real release
+   replacement or rollback.**
+2. **Local base image only.** The first live test uses an image already present in Harpoon. No image pulls and no external
+   Dockerfile frontends (`# syntax=`). Guest DNS troubleshooting (gate G1) stays a separate task.
+3. **Port ranges:** applications **38000–38999**, disposable tests **39000–39099**. Before assigning a port check (a) real
+   host listeners on `127.0.0.1`, (b) existing Docker port mappings, (c) journaled leases.
+4. **First-test limits (initial test defaults, not universal application limits):** memory 256 MiB, 0.5 CPU, 64 PIDs, no
+   restart policy, build context ≤ 256 MB, startup health deadline 60 s, build deadline 10 min. A **disk-space preflight**
+   runs before the build. The engine **never prunes** anything automatically.
+5. **Port publishing** without `HostIp` (`-p PORT:CPORT`). Harpoon's host listener must stay loopback-only and the live test
+   must verify LAN isolation. Rewriting Docker API create requests is deferred.
+
+### Limitations that follow from the decisions
+- Publishing without `HostIp` binds the port on the guest NAT address as well as guest loopback; the host side is loopback-only,
+  but another local process on the Mac can reach the guest NAT address (compat doc B3). Documented, not hidden.
+- A user's own `-p 127.0.0.1:P:C` still fails through the forwarder; this slice does not change that.
+- JSON-lines gives no multi-record atomicity or indexed queries; it must not outlive the first slice.
+- Local-base-only means a Dockerfile whose `FROM` image is absent fails at build; that failure is reported truthfully, not worked around.
+- The limits above are conservative test values and say nothing about what real applications need.
+
 ## 0. Principles for this slice
 - **Host-side only.** The engine runs in the host process and talks to Docker through Harpoon's own socket
   (`/tmp/harpoon-docker.sock`) with the bundled `docker-buildx` and `docker` CLI. No Docker Desktop, no guest changes.
@@ -23,8 +47,8 @@ for slice 1), the shipping UI. The UI stays on the mock until the slice is prove
 | # | Operation | Implementation | Isolation rule |
 |---|---|---|---|
 | 1 | **Select folder** | UI/CLI passes an absolute path; engine canonicalises it (`realpath`), requires a directory with a `Dockerfile` (or a given relative path inside), rejects symlinks that escape the folder, honours `.dockerignore`. No copy: the context is streamed by buildx. | Read-only access to the folder. Never writes into it. Maximum context size guard (default 256 MB) with a clear failure. |
-| 2 | **Build image** | `docker-buildx build --load --progress=plain -t harpoon/<app>:<dep> --label io.harpoon.*` with an explicit env (`DOCKER_HOST`, empty `HOME`/`DOCKER_CONFIG` under Harpoon's dir). No secrets in slice 1. No `# syntax=`/external frontends (gate G1). | Image tag namespace `harpoon/…` only. Build is **not cancellable** mid-way (vsock/BuildKit): cancel = stop waiting, discard, clean up. Step deadline (default 10 min). |
-| 3 | **Create container** | `POST /containers/create` via the Docker API (not a shell string): name `hp-<app>-<dep>`, labels, `HostConfig.PortBindings` = `{<cport>/tcp: [{HostPort: "<lease>"}]}` **without `HostIp`** (compat doc B3/B5), restart policy `no`, no bind mounts, no privileged, memory/CPU limits from defaults. | Creates only containers named/labelled for this deployment; never reuses or modifies an existing container or volume. |
+| 2 | **Build image** | `docker-buildx build --load --progress=plain -t harpoon/<app>:<dep> --label io.harpoon.*` with an explicit env (`DOCKER_HOST`, empty `HOME`/`DOCKER_CONFIG` under Harpoon's dir). No secrets in slice 1. No `# syntax=`/external frontends (gate G1). | Image tag namespace `harpoon/…` only. Build is **not cancellable** mid-way (vsock/BuildKit): cancel = stop waiting, discard, clean up. Step deadline (default 10 min). Disk-space preflight first; never prunes. |
+| 3 | **Create container** | `POST /containers/create` via the Docker API (not a shell string): name `hp-<app>-<dep>`, labels, `HostConfig.PortBindings` = `{<cport>/tcp: [{HostPort: "<lease>"}]}` **without `HostIp`** (compat doc B3/B5), restart policy `no`, no bind mounts, no privileged, `Memory`=256 MiB, `NanoCpus`=0.5 CPU, `PidsLimit`=64 (first-test defaults). | Creates only containers named/labelled for this deployment; never reuses or modifies an existing container or volume. |
 | 4 | **Start on a loopback port** | `POST /containers/<id>/start`. Port lease from a configured range (default 38000–38999), chosen by probing `127.0.0.1` on the host **and** the existing mappings from `GET /containers/json`; recorded in the journal before create. Host exposure is loopback-only by construction (forwarder binds `127.0.0.1:<port>`); the guest NAT binding is documented, not hidden. | Lease released by cleanup. Port collision ⇒ pick the next free port once, then fail. |
 | 5 | **Health check** | Host-side probe of `http://127.0.0.1:<port><path>` (default `GET /`; configurable path, expected status class), polling every 500 ms until success or `startup_deadline` (default 60 s), with `N` consecutive successes (default 2). TCP-connect fallback only when the app declares no HTTP port. Container must also still be `running` (not restarting/exited). | The probe never follows redirects off-host. Evidence stored (see §2). |
 | 6 | **Capture logs** | Build: the buildx plain-progress stream. Runtime: `GET /containers/<id>/logs?stdout&stderr&timestamps` (bounded tail, default last 2 000 lines / 1 MB, captured at result time and on demand). Both go through the redaction sink; stored as files next to the journal, referenced from the step record. | Size caps with an explicit "truncated" marker. Redaction best-effort, no length floor (spec D8). |
@@ -93,6 +117,4 @@ and a deadline, return structured evidence for checks, and `Journal` gains `reco
 | B6 | CLI-only driver (`harpoon deploy --folder …`) behind a feature flag; **no UI wiring** | no |
 | B7 | First disposable deployment against the live VM, §4 isolation, with explicit authorization | **yes** |
 
-Decisions needed before B1: (1) accept the JSON-lines journal for slice 1 with SQLite as Milestone C; (2) accept
-"local base image only" for the first test until G1 is diagnosed; (3) approve the default port range and limits above;
-(4) approve publishing as `-p PORT:CPORT` (no host IP) and deferring the create-request `HostIp` rewrite.
+Decisions 1–5 above were approved; B1 may start. B2 onward needs its own go-ahead, B7 explicit written authorization.
