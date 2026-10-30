@@ -2,19 +2,36 @@
 
 > Harpoon is a lightweight Docker-compatible runtime for Apple Silicon macOS. Docker Engine remains authoritative for containers/images/volumes/networks/API/Compose/BuildKit. Harpoon owns only the macOS↔Linux boundary (VM lifecycle, socket bridge, networking, bind-mount transport, resources, memory reclamation, diagnostics).
 
-## Deployment control plane initiative — SPEC DRAFT / SPIKE COMPLETE (2026-10-29)
+## Deployment control plane initiative (Harpoon 2.1) — SPEC REVISED / AWAITING OWNER APPROVAL (2026-10-30)
 
-The project has started a separate Harpoon-native deployment control-plane initiative.
-The canonical status and direction index is
-`docs/harpoon-2-status-and-direction.md`; the proposed boundary is recorded in
-`docs/decisions/0004-deployment-control-plane-boundary.md`.
-The requirements draft is `docs/deployment-control-plane-requirements.md`; the
-Coolify investigation is `docs/results/SPIKE_COOLIFY_DEPLOYMENT.md`. This initiative
-must preserve Docker ownership and must not expand the runtime MVP into a second
-container engine, SSH-managed remote-server product, Kubernetes, or multi-server
-orchestration. The next step is a narrow single-runtime prototype: deploy-key-backed
-Git source, Dockerfile/Compose/image deployment, serialized deployment state, health
-gating, rollback safety, and verified GitHub/GitLab webhook fixtures.
+A separate, Harpoon-native deployment control-plane initiative is in specification. It
+is **proposed, not implemented**, and does not touch the runtime, guest assets, or the
+2.0 release work. The canonical index is `docs/harpoon-2-status-and-direction.md`; the
+boundary decision is `docs/decisions/0004-deployment-control-plane-boundary.md`; the
+requirements and milestones are `docs/deployment-control-plane-requirements.md`; the
+research is `docs/results/SPIKE_COOLIFY_DEPLOYMENT.md` (orchestration) and
+`docs/results/SPIKE_VERCEL_UX.md` (developer experience, documentation-only).
+
+Approved decisions: Rust engine (CLI first), SQLite, macOS Keychain for secret values,
+host-side execution over the existing Docker API/CLI, no mandatory Redis/PostgreSQL/
+Kubernetes, no new daemon until justified, brief documented interruptions acceptable.
+Deploying to Vercel or other providers is an open possibility, deliberately undecided.
+
+Milestones (each with prerequisites, acceptance tests, failure scenarios, stop
+conditions and exclusions in the requirements document):
+
+| Milestone | Scope | Status |
+|---|---|---|
+| A | Specification and UX discovery | In review |
+| B | Deployment engine and lifecycle (first slice: local Dockerfile deploy, health-gated replacement, bounded cutover recovery, explicit rollback) | Not started; needs baseline measurements |
+| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | Not started |
+| Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | Not started; must precede any "unattended" claim |
+| D | Git integration and automation (polling, signed-fixture webhooks); attended unless Gate U passed | Not started |
+| E | Desktop deployment experience and previews | Not started |
+
+Out of scope for this initiative's first release: inbound public webhooks on a laptop,
+Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,
+and Docker-state reconciliation beyond marking interrupted deployments.
 
 ## Current Position
 

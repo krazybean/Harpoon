@@ -128,10 +128,16 @@ deployment success.
 
 ## Harpoon-specific architecture consequence
 
-The control plane should run as a normal workload in the Harpoon guest or as a future
-host client, but it must use a Harpoon transport for privileged deployment operations.
-The current Harpoon Docker API bridge is sufficient for Docker objects, but the
-deployment control plane also needs bounded guest-local command and file operations.
+> **Superseded 2026-10-30.** This section originally proposed running the control plane
+> in the guest or as a host client, with a new Harpoon transport for bounded guest-local
+> command and file operations. The follow-up review decided otherwise (see
+> [ADR 0004](../decisions/0004-deployment-control-plane-boundary.md)): the control plane
+> runs **host-side** and uses the Docker API/CLI through the existing private socket
+> (the CLI uploads build contexts, so no separate file-transfer path is needed). It does
+> not use the guest management channel, which buffers output and lacks cancellation,
+> timeouts and file transfer. The Coolify findings above remain valid as a behavior
+> reference. For the developer-experience reference see
+> [SPIKE_VERCEL_UX](SPIKE_VERCEL_UX.md).
 
 Relevant current Harpoon evidence:
 
@@ -145,6 +151,13 @@ Relevant current Harpoon evidence:
   records that Harpoon must not become a second authority for Docker state.
 
 ## Follow-up prototype
+
+> **Reordered 2026-10-30.** The list below was the original sketch. The implementation
+> order is now the five milestones in the
+> [requirements](../deployment-control-plane-requirements.md): the first slice is a
+> local-directory Dockerfile deployment, and Git checkout and signed webhook fixtures
+> (steps 2, 3 and 7) arrive in Milestone D. Polling, not inbound webhooks, is the
+> primary trigger on a laptop.
 
 1. Implement no provider Apps yet.
 2. Define one normalized `repository push` event shape.
