@@ -4,6 +4,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d /tmp/harpoon-guest-assets.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
+if git -C "$ROOT" check-ignore -q assets/guest/guest-assets.manifest; then
+  echo "guest-assets manifest must not be ignored" >&2
+  exit 1
+fi
+
 BIN="$TMP/check"
 xcrun swiftc -target "arm64-apple-macosx$(cat "$(dirname "$0")/MIN_MACOS")" \
   "$ROOT/harpoon/Sources/RuntimeConfig.swift" "$ROOT/harpoon/GuestAssetFixtureMain.swift" \
