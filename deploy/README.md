@@ -2,7 +2,7 @@
 
 Milestone B, step 0 of the Harpoon 2.1 deployment control plane (see
 `docs/deployment-control-plane-requirements.md`, D4/D5/D10). Pure Rust, **no dependencies**,
-no I/O. 118 tests (47 foundation + 47 B1 + 18 B1 corrections + 6 B2).
+no I/O. 124 tests (47 foundation + 47 B1 + 18 B1 corrections + 6 B2 + 6 B3).
 
 ## In scope
 - `ids` — stable, typed, sortable identifiers (`prj_…`, `app_…`, `dep_…`, `rel_…`) and the three
@@ -64,3 +64,7 @@ cd deploy && cargo test --offline
 ## B2 (packaging support)
 - `buildx` — pure resolution of the bundled `Resources/harpoon/bin/docker-buildx` through a `FileProbe` (no I/O here), with explicit
   errors and **no fallback**, plus the isolated environment a buildx process may receive. See `docs/results/DEPLOY_BUILDX_PACKAGING.md`.
+
+## B3 (engine side)
+- The preliminary check's container and test port are removed before cutover; `StepIo::{cleanup_attempt, cleanup_result, release_lease}`;
+  `Backend::accepts_simulated_evidence()`. The Docker backend itself is in `../deploy-docker`; see `docs/results/DEPLOY_DOCKER_BACKEND.md`.

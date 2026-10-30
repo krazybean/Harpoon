@@ -140,17 +140,25 @@ fn a_failed_cleanup_stays_in_the_outcome_and_in_the_journal() {
     assert_eq!(replayed.needing_attention().len(), 1);
 }
 
+/// B3 changed this contract (it closes the B1 gap "preliminary container removed after the
+/// deployment ends"): the preliminary container is removed *before* cutover, so a removal that
+/// fails stops the deployment while the old release is untouched — and is still reported.
 #[test]
-fn a_failed_cleanup_after_a_successful_deployment_is_still_reported() {
+fn a_failed_removal_of_the_preliminary_container_stops_the_deployment_before_cutover() {
     let mut fx = Fx::new();
     let mut d = fx.deployment();
     let pre = format!("hp-{}-pre", d.id);
     let mut b = fx.backend().fail_remove(&pre);
     let mut j = MemoryJournal::new();
     let r = run(&fx, &mut d, &Fx::first(), &mut b, &mut j).unwrap();
-    assert_eq!(r.status, DeploymentStatus::Succeeded);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    let f = d.failure.as_ref().unwrap();
+    assert_eq!(f.step, Step::PreliminaryCheck);
+    assert!(f.message.contains("before cutover"), "{}", f.message);
+    assert!(!b.called(&Call::StartNew), "nothing was cut over");
     assert_eq!(r.cleanup_problems().len(), 1);
     assert_eq!(r.cleanup_problems()[0].key.name, pre);
+    assert!(fx.world.borrow().has(&pre), "and the object really is still there");
 }
 
 #[test]

@@ -139,6 +139,11 @@ pub trait Backend: ResourceOps {
     fn final_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError>;
     /// Stop a new release that started but failed, to free its address before restoring.
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
+    /// Whether passing evidence marked `simulated` may establish health. Only fakes say yes; a
+    /// real backend must keep the default of `false` for the engine to enforce.
+    fn accepts_simulated_evidence(&self) -> bool {
+        false
+    }
     /// One bounded attempt to bring the previous release back. `budget_ms` is a limit the
     /// backend must respect; it must not retry.
     fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult;
@@ -466,6 +471,9 @@ impl ResourceOps for FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    fn accepts_simulated_evidence(&self) -> bool {
+        true
+    }
     fn prepare_source(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.run(Call::PrepareSource, |b| b.source.clone())
     }
