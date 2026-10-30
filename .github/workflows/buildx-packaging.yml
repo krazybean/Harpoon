@@ -1,0 +1,41 @@
+name: Buildx packaging
+
+# Offline packaging checks for the bundled Docker Buildx: checksum/signature/architecture
+# fail-closed behaviour and the bundle checker. No VM, no Docker engine, no builds. Downloads the
+# two pinned upstream binaries (SHA-256 verified) into the runner's ignored build directory.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - harpoon/fetch-buildx.sh
+      - harpoon/regression-buildx-packaging.sh
+      - harpoon/third-party/**
+      - tools/check-bundled-buildx.sh
+      - tools/verify-buildx-build.sh
+      - .github/workflows/buildx-packaging.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  buildx-packaging:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Packaging regression
+        run: bash harpoon/regression-buildx-packaging.sh
+      - name: Live-VM test is guarded
+        run: |
+          bash tools/verify-buildx-build.sh --plan
+          if bash tools/verify-buildx-build.sh; then echo "live test ran without HARPOON_LIVE_VM_TESTS=1" >&2; exit 1; fi

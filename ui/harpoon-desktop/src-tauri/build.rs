@@ -18,8 +18,10 @@ fn main() {
   let rootimg = repo_root.join("assets/guest/harpoon-root.img");
   let asset_manifest = repo_root.join("assets/guest/guest-assets.manifest");
   let docker_cli = repo_root.join("harpoon/build/docker");
+  let docker_buildx = repo_root.join("harpoon/build/docker-buildx");
+  let buildx_license_dir = repo_root.join("harpoon/third-party/docker-buildx");
 
-  for asset in [&harpoon_bin, &docker_cli, &kernel, &initramfs, &rootimg, &asset_manifest] {
+  for asset in [&harpoon_bin, &docker_cli, &docker_buildx, &kernel, &initramfs, &rootimg, &asset_manifest] {
     println!("cargo:rerun-if-changed={}", asset.display());
   }
 
@@ -43,7 +45,15 @@ fn main() {
       .status();
   }
 
-  let required_assets = [&harpoon_bin, &docker_cli, &kernel, &initramfs, &rootimg, &asset_manifest];
+  // Pinned upstream Docker Buildx (verified by fetch-buildx.sh). The only builder Harpoon-managed
+  // builds may use, so release builds require it.
+  if !docker_buildx.exists() {
+    let _ = Command::new("sh")
+      .arg(repo_root.join("harpoon/fetch-buildx.sh"))
+      .status();
+  }
+
+  let required_assets = [&harpoon_bin, &docker_cli, &docker_buildx, &kernel, &initramfs, &rootimg, &asset_manifest];
   let missing_assets: Vec<_> = required_assets
     .iter()
     .filter(|asset| !asset.exists())
@@ -56,6 +66,14 @@ fn main() {
       .expect("failed to stage Harpoon runtime binary");
     std::fs::copy(&docker_cli, bin_dir.join("docker"))
       .expect("failed to stage bundled Docker CLI");
+    std::fs::copy(&docker_buildx, bin_dir.join("docker-buildx"))
+      .expect("failed to stage bundled Docker Buildx");
+    let license_dir = bundle_res.join("share/licenses/docker-buildx");
+    std::fs::create_dir_all(&license_dir).expect("failed to create Buildx license directory");
+    for name in ["LICENSE", "NOTICE.md"] {
+      std::fs::copy(buildx_license_dir.join(name), license_dir.join(name))
+        .expect("failed to stage Docker Buildx license notice");
+    }
     std::fs::copy(&kernel, lib_dir.join("Image-virt"))
       .expect("failed to stage guest kernel");
     std::fs::copy(&initramfs, lib_dir.join("harpoon-initramfs.cpio.gz"))
@@ -78,7 +96,7 @@ fn main() {
     }
 
     let _ = Command::new("chmod")
-      .args(["+x", bin_dir.join("harpoon").to_str().unwrap(), bin_dir.join("docker").to_str().unwrap()])
+      .args(["+x", bin_dir.join("harpoon").to_str().unwrap(), bin_dir.join("docker").to_str().unwrap(), bin_dir.join("docker-buildx").to_str().unwrap()])
       .status();
   } else if env::var("PROFILE").as_deref() == Ok("release") {
     let missing = missing_assets

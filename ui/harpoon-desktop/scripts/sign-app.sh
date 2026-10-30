@@ -36,6 +36,14 @@ if [ -f "$DOCKER_CLI" ]; then
   codesign --force --sign - "$DOCKER_CLI" 2>&1 | tail -n 5
 fi
 
+BUILDX="$APP/Contents/Resources/harpoon/bin/docker-buildx"
+if [ ! -f "$BUILDX" ]; then
+  echo "sign-app: bundled docker-buildx not found at $BUILDX (run harpoon/fetch-buildx.sh and prepare-bundle.sh)" >&2
+  exit 1
+fi
+echo "[sign] signing bundled Docker Buildx..." >&2
+codesign --force --sign - "$BUILDX" 2>&1 | tail -n 5
+
 echo "[sign] signing outer Harpoon.app (LAST)..." >&2
 codesign --force --deep --sign - "$APP" 2>&1 | tail -n 5
 
