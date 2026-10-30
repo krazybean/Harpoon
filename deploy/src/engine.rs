@@ -406,6 +406,18 @@ pub fn execute_actions(
     for a in actions {
         match a {
             Action::ReportOnly { observed, .. } => unaccounted.push(observed.clone()),
+            Action::Adopt { entry, observed } => {
+                write_record(
+                    ledger,
+                    journal,
+                    LedgerRecord::Receipt {
+                        key: entry.1.clone(),
+                        deployment: entry.0.clone(),
+                        id: observed.id.clone(),
+                        at_ms: clock.now_ms(),
+                    },
+                )?;
+            }
             Action::ReleaseLease { entry } => {
                 attempt(ledger, journal, clock, entry)?;
                 settle(ledger, journal, clock, entry, CleanupOutcome::Removed)?;

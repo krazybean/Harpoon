@@ -430,6 +430,12 @@ pub enum Action {
         observed: Observed,
         adopt: bool,
     },
+    /// Record the id of an object that exists and is ours but was never receipted, and keep
+    /// it (its disposition says Retain). Nothing is removed.
+    Adopt {
+        entry: (DeploymentId, ResourceKey),
+        observed: Observed,
+    },
     /// Release a port lease (ledger-only).
     ReleaseLease { entry: (DeploymentId, ResourceKey) },
     /// Nothing by that identity exists.
@@ -463,11 +469,19 @@ pub fn plan(ledger: &Ledger, observed: &[Observed], ended: &[(DeploymentId, EndS
         let Some((_, end)) = ended.iter().find(|(d, _)| d == &e.deployment) else {
             continue;
         };
-        if e.is_released() || matches!(e.state, EntryState::Refused(_)) || !should_clean(e.disposition, *end) {
+        if e.is_released() || matches!(e.state, EntryState::Refused(_)) {
+            continue;
+        }
+        let clean = should_clean(e.disposition, *end);
+        let unresolved_intent = e.id.is_none();
+        // A retained, receipted object is nothing to do; everything else needs a decision.
+        if !clean && !unresolved_intent {
             continue;
         }
         let entry = (e.deployment.clone(), e.key.clone());
         if e.key.kind == ResourceKind::PortLease {
+            // A lease is a ledger-only reservation. Release it when it is to be cleaned, or when
+            // its intent never got a receipt (nothing was reserved).
             actions.push(Action::ReleaseLease { entry });
             continue;
         }
@@ -475,18 +489,27 @@ pub fn plan(ledger: &Ledger, observed: &[Observed], ended: &[(DeploymentId, EndS
             e.id.as_ref()
                 .and_then(|id| observed.iter().find(|o| o.kind == e.key.kind && &o.id == id));
         let found = by_id.or_else(|| {
-            if e.id.is_none() {
+            if unresolved_intent {
                 observed.iter().find(|o| o.kind == e.key.kind && o.name == e.key.name)
             } else {
                 None
             }
         });
         match found {
-            Some(o) if o.labelled_for(&e.app, &e.deployment) => actions.push(Action::Remove {
-                entry,
-                observed: o.clone(),
-                adopt: e.id.is_none(),
-            }),
+            Some(o) if o.labelled_for(&e.app, &e.deployment) => {
+                if clean {
+                    actions.push(Action::Remove {
+                        entry,
+                        observed: o.clone(),
+                        adopt: unresolved_intent,
+                    });
+                } else {
+                    actions.push(Action::Adopt {
+                        entry,
+                        observed: o.clone(),
+                    });
+                }
+            }
             Some(_) => actions.push(Action::Refuse {
                 entry,
                 reason: format!(
