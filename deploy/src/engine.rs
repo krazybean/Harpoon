@@ -369,6 +369,36 @@ impl StepIo<'_> {
         })
     }
 
+    /// Record that a removal of `key` is about to be tried. Pair with [`StepIo::cleanup_result`];
+    /// without a result the attempt stays flagged as interrupted.
+    pub fn cleanup_attempt(&mut self, key: &ResourceKey) -> Result<(), StepError> {
+        let at_ms = self.now_ms();
+        self.write(LedgerRecord::CleanupAttempt {
+            key: key.clone(),
+            deployment: self.dep.clone(),
+            at_ms,
+        })
+    }
+
+    /// Record how the removal ended. One result per attempt (the ledger enforces it).
+    pub fn cleanup_result(&mut self, key: &ResourceKey, outcome: CleanupOutcome) -> Result<(), StepError> {
+        let at_ms = self.now_ms();
+        self.write(LedgerRecord::CleanupResult {
+            key: key.clone(),
+            deployment: self.dep.clone(),
+            outcome,
+            at_ms,
+        })
+    }
+
+    /// Give a reserved port back right away (for example after a collision replaced it): a cleanup
+    /// attempt and its result, so the ledger shows the lease was released rather than forgotten.
+    pub fn release_lease(&mut self, host_port: u16) -> Result<(), StepError> {
+        let key = ResourceKey::new(ResourceKind::PortLease, host_port.to_string());
+        self.cleanup_attempt(&key)?;
+        self.cleanup_result(&key, CleanupOutcome::Removed)
+    }
+
     /// Reserve a host port: intent and receipt in one call (a lease has no runtime id).
     pub fn lease_port(&mut self, lease: PortLease) -> Result<Intent, StepError> {
         let intent = self.intend(
@@ -611,8 +641,12 @@ impl Run<'_> {
     }
 
     /// A check that "passed" must say so in its evidence.
-    fn judge(res: Result<CheckEvidence, StepError>) -> StepOut {
+    fn judge(res: Result<CheckEvidence, StepError>, accepts_simulated: bool) -> StepOut {
         match res {
+            Ok(ev) if ev.simulated && !accepts_simulated => Err(StepError::new(
+                "the check returned simulated evidence; a real backend cannot establish health from it",
+            )
+            .with_evidence(ev)),
             Ok(ev) => match ev.validate() {
                 Ok(()) => Ok(Some(ev)),
                 Err(why) => Err(StepError::new(format!("the check did not establish health: {why}")).with_evidence(ev)),
@@ -647,7 +681,21 @@ impl Run<'_> {
         self.d.start_step(step, now)?;
         self.save()?; // before the side effect
         let budget = self.cfg.budgets.for_step(step);
+        let first_new = self.ledger.entries().len();
         let (res, elapsed) = self.exec(step, budget, f)?;
+        let res = if step == Step::PreliminaryCheck {
+            // The preliminary container and its test port must be gone before the cutover begins.
+            match (self.release_preliminary(first_new)?, res) {
+                (Some(problem), Ok(_)) => Err(StepError::new(problem)),
+                (Some(problem), Err(e)) => {
+                    self.warnings.push(problem);
+                    Err(e)
+                }
+                (None, res) => res,
+            }
+        } else {
+            res
+        };
         let now = self.now();
         match res {
             Ok(ev) => {
@@ -675,6 +723,85 @@ impl Run<'_> {
                 Ok(false)
             }
         }
+    }
+
+    /// Remove what the preliminary check created (entries added from `first_new` with
+    /// `RemoveAlways`) — through the same plan, labels and ledger records as any cleanup.
+    /// Returns a description of anything that could not be removed.
+    fn release_preliminary(&mut self, first_new: usize) -> R<Option<String>> {
+        let dep = self.d.id.clone();
+        let targets: Vec<ResourceKey> = self.ledger.entries()[first_new..]
+            .iter()
+            .filter(|e| e.deployment == dep && e.disposition == Disposition::RemoveAlways)
+            .map(|e| e.key.clone())
+            .collect();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let ended = [(dep.clone(), EndState::Succeeded)];
+        // If the runtime cannot be listed, nothing can be confirmed absent: every object target is
+        // recorded as a *failed* cleanup (never as "already absent"); leases are ledger-only.
+        let (observed, list_error) = match self.backend.list_resources() {
+            Ok(o) => (o, None),
+            Err(e) => (Vec::new(), Some(e.message)),
+        };
+        let planned = plan(&self.ledger, &observed, &ended);
+        let actions: Vec<Action> = planned
+            .into_iter()
+            .filter(|a| match a {
+                Action::ReportOnly { .. } => false,
+                Action::Adopt { entry, .. }
+                | Action::Remove { entry, .. }
+                | Action::ReleaseLease { entry }
+                | Action::MarkAbsent { entry }
+                | Action::Refuse { entry, .. } => targets.contains(&entry.1),
+            })
+            .collect();
+        if let Some(why) = list_error {
+            for a in &actions {
+                match a {
+                    Action::MarkAbsent { entry } | Action::Adopt { entry, .. } | Action::Remove { entry, .. } => {
+                        attempt(&mut self.ledger, &mut *self.journal, self.clock, entry)?;
+                        settle(
+                            &mut self.ledger,
+                            &mut *self.journal,
+                            self.clock,
+                            entry,
+                            CleanupOutcome::Failed(format!("could not list the runtime: {why}")),
+                        )?;
+                    }
+                    other => {
+                        execute_actions(
+                            std::slice::from_ref(other),
+                            &mut self.ledger,
+                            &mut *self.journal,
+                            &mut *self.backend,
+                            self.clock,
+                        )?;
+                    }
+                }
+            }
+        } else {
+            execute_actions(
+                &actions,
+                &mut self.ledger,
+                &mut *self.journal,
+                &mut *self.backend,
+                self.clock,
+            )?;
+        }
+        let stuck: Vec<String> = targets
+            .iter()
+            .filter_map(|k| self.ledger.find(&dep, k))
+            .filter(|e| !e.is_released())
+            .map(|e| format!("{} {}", e.key.kind.as_str(), e.key.name))
+            .collect();
+        Ok((!stuck.is_empty()).then(|| {
+            format!(
+                "could not remove the preliminary check's resources before cutover ({}); nothing was cut over",
+                stuck.join(", ")
+            )
+        }))
     }
 
     fn end_cancelled(&mut self) -> R<()> {
@@ -757,7 +884,7 @@ impl Run<'_> {
         let budget = self.cfg.budgets.final_ms;
         let (res, elapsed) = self.exec(Step::FinalCheck, budget, |b, io| b.final_check(io))?;
         let res = match res {
-            Ok(ev) => Run::judge(Ok(ev)),
+            Ok(ev) => Run::judge(Ok(ev), self.backend.accepts_simulated_evidence()),
             Err(e) => Err(e),
         };
         Ok(match res {
@@ -850,7 +977,7 @@ pub fn run_deployment_with(
         return finish(run);
     }
     if !run.pre_step(Step::PreliminaryCheck, FailureKind::PreliminaryCheck, |b, io| {
-        Run::judge(b.preliminary_check(io))
+        Run::judge(b.preliminary_check(io), b.accepts_simulated_evidence())
     })? {
         return finish(run);
     }
