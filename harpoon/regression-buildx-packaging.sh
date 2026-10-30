@@ -146,8 +146,25 @@ A="$(mkapp signmissing)"; mkdir -p "$A/Contents/MacOS"; cp /bin/ls "$A/Contents/
 EXPECT_MSG="docker-buildx not found" expect_fail "ad-hoc sign-app refuses a bundle without Buildx" sh "$REPO_ROOT/ui/harpoon-desktop/scripts/sign-app.sh" "$A"
 EXPECT_MSG="HARPOON_SIGN_IDENTITY not set" expect_fail "Developer ID sign-app still requires an identity" env -u HARPOON_SIGN_IDENTITY bash "$REPO_ROOT/tools/release/macos/sign-app.sh" "$A"
 
-# ---- 9. nothing under the repo's tracked files is a binary download
-if git -C "$REPO_ROOT" ls-files | grep -Eq '(^|/)(docker-buildx|buildx-v[0-9.]+\.darwin-)'; then bad "a Buildx binary is tracked in git"; else ok "no Buildx binary is tracked in git"; fi
+# ---- 9. no Buildx binary is tracked in git
+# Judge the FILENAME (last path component) only: a directory called docker-buildx/ legitimately
+# holds the tracked license and notice. Rejects a file named docker-buildx or buildx-v*.darwin-*
+# (with or without a suffix such as .part), wherever it sits.
+tracked_buildx_binaries() { awk -F/ '$NF == "docker-buildx" || $NF ~ /^buildx-v[0-9][0-9.]*\.darwin-/ || $NF ~ /^docker-buildx\.(part|bak|old)$/ {print}'; }
+# predicate self-tests
+printf '%s\n' harpoon/third-party/docker-buildx/LICENSE harpoon/third-party/docker-buildx/NOTICE.md harpoon/fetch-buildx.sh tools/check-bundled-buildx.sh | tracked_buildx_binaries | grep -q . \
+  && bad "predicate wrongly flags the license/notice/scripts" || ok "predicate accepts the license, notice and scripts"
+for f in bin/docker-buildx harpoon/build/docker-buildx harpoon/third-party/docker-buildx/docker-buildx buildx-v0.38.1.darwin-arm64 x/buildx-v0.38.1.darwin-amd64 a/b/buildx-v9.9.9.darwin-arm64.part Resources/harpoon/bin/docker-buildx; do
+  [ -n "$(printf '%s\n' "$f" | tracked_buildx_binaries)" ] && ok "predicate rejects tracked $f" || bad "predicate misses tracked $f"
+done
+# the real tree
+TRACKED="$(git -C "$REPO_ROOT" ls-files)"
+printf '%s\n' "$TRACKED" | grep -qx 'harpoon/third-party/docker-buildx/LICENSE' && ok "the license is tracked" || bad "the license is not tracked"
+printf '%s\n' "$TRACKED" | grep -qx 'harpoon/third-party/docker-buildx/NOTICE.md' && ok "the notice is tracked" || bad "the notice is not tracked"
+FOUND="$(printf '%s\n' "$TRACKED" | tracked_buildx_binaries)"
+[ -z "$FOUND" ] && ok "no Buildx binary is tracked in git" || bad "a Buildx binary is tracked in git: $FOUND"
+git -C "$REPO_ROOT" check-ignore harpoon/build/docker-buildx harpoon/build/buildx-cache/"$ARM" >/dev/null && ok "harpoon/build/ is git-ignored (binary and cache)" || bad "harpoon/build/ is not ignored"
+[ -z "$(printf '%s\n' "$TRACKED" | grep '^harpoon/build/')" ] && ok "nothing under harpoon/build/ is tracked" || bad "harpoon/build/ has tracked files"
 
 echo "buildx packaging regression: $PASS passed, $FAILN failed, $SKIP skipped"
 [ "$FAILN" -eq 0 ]
