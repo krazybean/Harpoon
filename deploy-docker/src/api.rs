@@ -428,13 +428,68 @@ impl DockerApi {
         Ok(out)
     }
 
-    /// Host ports Docker currently publishes.
+    /// Host ports Docker publishes **or has configured**. `GET /containers/json` reports a port
+    /// only while its container is running, so every container that is not running is inspected
+    /// and its `HostConfig.PortBindings` read: starting it later would claim that port.
     pub fn published_ports(&self, left: Duration) -> Result<BTreeSet<u16>, ApiError> {
-        Ok(self
-            .list_containers(left)?
-            .into_iter()
-            .flat_map(|c| c.host_ports)
-            .collect())
+        let mut out = BTreeSet::new();
+        for c in self.list_containers(left)? {
+            out.extend(c.host_ports.iter().copied());
+            if c.state != "running" {
+                out.extend(self.configured_host_ports(&c.id, left)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Host ports in a container's `HostConfig.PortBindings` (empty if it has none or vanished).
+    pub fn configured_host_ports(
+        &self,
+        id: &str,
+        left: Duration,
+    ) -> Result<BTreeSet<u16>, ApiError> {
+        let r = self.call("GET", &format!("/containers/{}/json", enc(id)), None, left)?;
+        match r.status {
+            200 => {
+                let j = parse(&r, "container inspect")?;
+                let mut ports = BTreeSet::new();
+                let bindings = j.get("HostConfig").and_then(|h| h.get("PortBindings"));
+                match bindings {
+                    None | Some(Json::Null) => {}
+                    Some(Json::Obj(map)) => {
+                        for (_, v) in map {
+                            match v {
+                                Json::Null => {}
+                                Json::Arr(list) => {
+                                    for b in list {
+                                        let hp =
+                                            b.get("HostPort").and_then(Json::as_str).unwrap_or("");
+                                        if let Ok(n) = hp.parse::<u16>() {
+                                            ports.insert(n);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(ApiError::Malformed {
+                                        op: "container inspect",
+                                        detail: "PortBindings entry is not a list".into(),
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Err(ApiError::Malformed {
+                            op: "container inspect",
+                            detail: "HostConfig.PortBindings is not an object".into(),
+                        })
+                    }
+                }
+                Ok(ports)
+            }
+            404 => Ok(BTreeSet::new()),
+            _ => Err(Self::unexpected("container inspect", &r)),
+        }
     }
 
     pub fn container_inspect(

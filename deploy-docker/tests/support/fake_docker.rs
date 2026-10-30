@@ -417,6 +417,19 @@ pub fn container_inspect_json(c: &Ctr) -> String {
                 ("Labels", labels_json(&c.labels)),
             ]),
         ),
+        (
+            "HostConfig",
+            obj(vec![(
+                "PortBindings",
+                match c.host_port {
+                    Some(p) => obj(vec![(
+                        "8080/tcp",
+                        Json::Arr(vec![obj(vec![("HostPort", Json::Str(p.to_string()))])]),
+                    )]),
+                    None => Json::Null,
+                },
+            )]),
+        ),
     ])
     .to_json()
 }

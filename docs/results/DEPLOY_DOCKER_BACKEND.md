@@ -44,12 +44,13 @@ with an unrelated container and the base image untouched.
 3. **Journal is memory-only** (`MemoryJournal`); the durable file journal (fsync, torn-write truncation) is B5. Crash
    tests prove the *protocol*, not disk durability.
 4. **Disk preflight is host-side** (`df` on the scratch directory). Free space inside the guest is not checked.
-5. **Context size is measured before `.dockerignore`**, so it can only over-refuse.
+5. ~~Context size is measured before `.dockerignore`~~ — **changed in B4:** measured after the `.dockerignore` rules Harpoon can interpret with certainty; see "B4" below. It can still only over-count.
 6. **No release replacement:** `stop_current` errors, `restore_previous` returns `NotAttempted`.
 7. **Volumes are rejected, not managed.** An image whose `Config.Volumes` is non-empty (inherited declarations included) is refused before any container intent or create, because Docker would create an anonymous volume the ledger does not track. Containers are still removed with `v=false`; a later milestone must add volume ownership before this restriction can be lifted.
 7a. **Image tags are never taken over.** `build()` inspects the intended tag first and fails closed if anything holds it (foreign, another deployment's, or this deployment's own); no intent is recorded and Buildx does not run. A race between that check and the build (something else creating the tag in the interval) is not prevented — Buildx would move the tag — and is only detected afterwards by the label check; closing it needs a build into a unique temporary tag plus an atomic retag, which is not part of this slice.
 8. **Health probes run on the host** against the published port; whether that path matches what a user's browser
-   reaches through Harpoon's forwarder is unverified.
+   reaches through Harpoon's forwarder is unverified. B4 adds an optional response marker (below), but the deployed
+   application must emit it and the forwarder path itself is still B7.
 9. **Container logs are fetched only on failure**; a successful deployment keeps none beyond the build output.
 10. **Timeouts use the real clock** inside the backend (step budgets from `StepIo`), while the engine's own clock is
     injectable; a fake engine clock does not advance backend deadlines.
@@ -77,3 +78,93 @@ listener on the same host port (a host process, another forwarder, a stale Docke
    and prove the probe on the leased port does not accept it; and prove a stale/foreign listener on the leased port is rejected (marker mismatch).
 4. **Requires** a disposable application image, the live runtime, and written authorization for it (B7). **This has not been run against the live
    runtime and nothing here claims it has;** B3's fake cannot show it, because the fake has no network path.
+
+## B4 — source and network boundary hardening
+Branch `feature/deploy-b4-boundaries`. Same constraints as B3: no live socket, no real build, container or deployment.
+`deploy` is untouched (124 tests); `deploy-docker` goes from 68 to 113 tests (45 new in `tests/b4_boundaries.rs`).
+
+### Folder confinement (`src/confine.rs`)
+- The selected project root, the build context and the Dockerfile are resolved with `canonicalize`. The context must lie inside the root
+  (`DockerConfig::project_root`, default: the context itself); the Dockerfile must lie inside the context. The check is component-wise, so
+  `/proj-evil` is not inside `/proj`.
+- A Dockerfile name must be a plain relative path: absolute paths, `.`/`..` parts, empty names and NULs are refused before touching the disk.
+  Symlinks are judged by where they lead (file links, directory links, chains); a link that stays inside is fine and Buildx is given the
+  **resolved** path. A dangling link is "missing", not "escaped".
+- Missing root/context/Dockerfile, wrong kind (file where a folder is expected and vice versa), permission denied (file, unsearchable folder,
+  unreadable ignore file) and over-size text files (>1 MiB) are separate errors; none is read as "no ignore file".
+- The check runs in `prepare_source` and **again immediately before the build**; a Dockerfile swapped for an escaping link in between is caught
+  (test). Residual: a swap after that second check and before Buildx opens the file cannot be excluded from user space. B7 option: build from
+  a private, `O_NOFOLLOW` copy of the confined context in the scratch directory.
+- Not changed: the size walk never follows symlinks (tested, including a link loop and a link to a large outside folder). Buildx/BuildKit does not
+  follow links out of the context either; Harpoon does not rely on that, it relies on the checks above.
+
+### `.dockerignore` and the 256 MB limit (`src/ignore.rs`)
+- Which file: `<Dockerfile>.dockerignore` if present, else `.dockerignore` in the context (BuildKit's precedence).
+- Rule: **never under-count.** The limit is applied to the tree after the exclusions Harpoon understands with certainty: literal segments,
+  `*` inside a segment, whole-segment `**`, anchored at the context root as Docker's are (`node_modules` does not match `sub/node_modules`;
+  `*.log` does not cross folders). A pattern with `?`, `[..]`, `\`, `{`, `.`/`..` segments or `**` inside a segment excludes nothing for sizing.
+  Any `!` exception line turns filtering off entirely (it could re-include an excluded path). Notes are written to the deployment log.
+- The Dockerfile and the ignore files are counted whatever the rules say, as Docker always sends them; an ignored folder that contains one is
+  still walked.
+- The limit is still enforced by Harpoon's own walk, not by Buildx; the real transfer size after Buildx applies its own matcher is not observed.
+
+### Port allocation
+- **Finding and fix:** `GET /containers/json` reports a published port only while the container is running, so a *stopped* container that is
+  configured to publish 38000 was invisible to allocation despite the doc comment in `ports.rs` saying "running or stopped". The backend now
+  inspects every non-running container and reads `HostConfig.PortBindings`; an unreadable or malformed field fails allocation rather than being
+  treated as "no ports" (tests; the fake mirrors the real shape).
+- Tested against real loopback listeners (`BindProbe`, loopback-only and wildcard), running and stopped Docker mappings, two successive
+  independent deployments (distinct application ports; the test port is reused because it is released before cutover), a failed deployment whose
+  port is released and handed out again, a port taken between the check and the start (the contested port is never probed, one replacement,
+  a second collision fails and cleans up) and the ledger's own leases (pure tests in `deploy`).
+- Journaled leases from *other* deployments are not visible while the journal is per-run memory; cross-process lease visibility is B5.
+
+### Health probing
+- `TcpHttp` now has a single deadline for the whole exchange (a server that drips one byte at a time can no longer outlast the attempt timeout),
+  refuses oversized or unterminated header blocks, never follows redirects.
+- **Response marker** (`ResponseMarker`, `DockerConfig::health_marker`): an exact header value or a body substring. A response without it is a
+  *failed attempt* whatever its status; a transport that cannot check a marker (the default for test doubles) fails closed. Without a marker,
+  an unrelated listener answering 200 on the leased port is indistinguishable from the application — a test records that on purpose.
+- Tested with disposable in-process servers: wrong/old marker, missing marker, prefix of a marker, body vs header marker, redirect (not healthy,
+  target never contacted), accept-then-hang-up, silent server, drip server, oversized and truncated headers, container stopped mid-check while the
+  port still answers, and a deployment-level run where an unrelated process holds the first test port.
+- **What this does not show.** These servers listen on loopback in the test process. Docker in the fake never binds anything. Nothing here
+  exercises Harpoon's real port forwarder, Docker's userland proxy, or the macOS-to-VM path. The marker is evidence about *who answered the probe*,
+  and only if the application emits it.
+- **Real-runtime evidence required (B7), unchanged in kind and now more precise:** (1) the container's inspected `NetworkSettings.Ports` /
+  `HostConfig.PortBindings` equal the lease; (2) the host-side listener on that port belongs to the forwarder for this VM (process owner, loopback
+  only); (3) a per-deployment marker, generated by Harpoon, handed to the disposable app (e.g. through its environment) and returned in a response
+  header — mismatch fails; (4) negative controls: an unrelated listener on a neighbouring port, and a stale listener holding the leased port;
+  (5) the same check repeated after cutover through the path a user's browser takes.
+
+### Isolation review
+- **Audit (tests):** beside running, stopped and other-deployment-labelled containers and foreign images, a successful deployment and four failing
+  ones (final check, preliminary check, two port collisions, a foreign container squatting on our name) issue no mutating request that mentions any
+  foreign id or name; every foreign object is still present in its original state; every mutation is one of create / start / stop / remove container
+  or remove image; container removal is by full id with `force=false&v=false`; image removal is `force=false&noprune=true`. A foreign image on our tag
+  is neither overwritten nor removed. Created containers carry no `Binds`, `Mounts`, `Volumes`, `VolumesFrom`, host network, privileged flag, extra PID
+  namespace or devices. The anonymous-volume rejection is unchanged and its tests are untouched.
+- **Image-tag check/build race — safe approach for B7.** Today: inspect tag → intent → Buildx; if something creates the tag in between, Buildx
+  moves it and only the post-build label check notices. Concrete fix, no retag:
+  1. Generate the tag from 128 bits of fresh randomness per attempt (`harpoon/<app>:<deployment>-<32 hex>`), record it in the Image intent before
+     the build. Nothing can pre-create or collide with a name that did not exist when the intent was written; the existing "tag must be absent"
+     check stays as a second line.
+  2. Pass `--iidfile` (in Harpoon's scratch directory) and treat the **image ID** as identity from then on: after the build require
+     `inspect(tag).Id` to equal the ID Buildx reported, then check labels and volumes, and remove **by ID only**, never by tag.
+  3. Do not retag to a friendly name: the tag API moves an existing tag silently, which would reintroduce the race. A friendly name belongs
+     in the ledger/UI, not in Docker.
+  4. Must be verified on the real engine in B7: `--iidfile` semantics (image ID vs index digest) under the containerd image store versus the classic
+     store, and that the ID printed is the one `--load` stored.
+  Not implemented here because it changes the build contract and cannot be validated without a live engine.
+
+### Evidence
+| | |
+|---|---|
+| `deploy` | 124 tests, unchanged |
+| `deploy-docker` | 113 tests (45 B4 + 46 backend + 15 wire/API + 7 units); fmt and clippy `-D warnings` clean; three repeated full runs without a failure |
+| Mutations (B4) | 19 injected; 17 caught: Dockerfile-escape check removed, context-escape check removed, `..` allowed, `!` not disabling filtering, patterns matching at any depth, always-sent files not kept, pruning a folder that holds one, marker check always passing, per-read instead of overall deadline, stopped-container ports not read, re-confinement before the build removed, truncated headers accepted, default transport ignoring the marker, symlinks followed in the size walk, exception lines kept as patterns, sibling `Dockerfile.dockerignore` ignored, ignore-file escape allowed. Two did not change behaviour: "absolute path allowed" (the plain-relative check rejects the root component anyway, so the explicit test is redundant defence) and "`#` not treated as a comment" (the line becomes a literal pattern that matches nothing). One survivor became a test fix (the truncated-header case; a test edit had silently not applied). |
+
+### Gates still open
+- **B5:** durable journal (fsync, torn tail) and cross-process lease visibility; until then port leases of other deployments are only seen through Docker.
+- **B7:** everything under "Real-runtime evidence required", the tag-race change above, LAN-isolation of the forwarder, a real-engine capture to replace
+  the documentation-derived fake, the private-copy build option for the source swap window, guest-side disk space.

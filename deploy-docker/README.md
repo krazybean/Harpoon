@@ -22,3 +22,8 @@ shell script. Nothing contacts a real Docker endpoint. The fake's response shape
 Engine API documentation; they were **not captured from a live engine**.
 
 `cargo fmt --check && cargo clippy --offline --all-targets -- -D warnings && cargo test --offline`
+
+## B4 additions
+`confine` (project/context/Dockerfile confinement), `ignore` (`.dockerignore` sizing that never under-counts), `ResponseMarker` +
+`DockerConfig::health_marker` (a health response only counts if it carries the deployment's marker), and stopped-container port bindings in
+allocation. See `docs/results/DEPLOY_DOCKER_BACKEND.md`, section "B4".
