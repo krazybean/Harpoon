@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { dialogAllowed } from "../views/deploy/context.ts";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { parseDeployHash, SCENARIOS } from "./deployPreview.ts";
@@ -88,4 +89,14 @@ test("Development route disables every Production-changing action and Keychain h
   assert.equal((screens.match(/!prod/g) ?? []).length >= 4, true);
   assert.doesNotMatch(screens, /btn\("btn--primary", \(\) => \{\}/);
   assert.match(screens, /unlock-help/);
+});
+
+test("non-Production routes can never open a Production-changing dialog", () => {
+  const mutating = [{ kind: "deploy" }, { kind: "redeploy" }, { kind: "promote" }, { kind: "retry", depId: "d-1" }, { kind: "rollback", releaseId: "r-1" }, { kind: "recover" }, { kind: "resume" }];
+  for (const env of ["development", "preview"]) for (const d of mutating) assert.equal(dialogAllowed(d, env), false, `${env}:${d.kind}`);
+  for (const d of mutating) assert.equal(dialogAllowed(d, "production"), true);
+  for (const env of ["development", "preview", "production"]) for (const d of [{ kind: "variable" }, { kind: "unlock-help" }, { kind: "create", step: 1, src: "git" }]) assert.equal(dialogAllowed(d, env), true);
+  const view = read("../views/deploy/DeployView.tsx");
+  assert.match(view, /dialogAllowed\(dialog, route\.env\)/);
+  assert.match(view, /open: guardedOpen/);
 });

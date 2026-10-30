@@ -5,7 +5,7 @@ import type { KeychainState, NextOutcome, RuntimeState, ScenarioId } from "../..
 import { SIMULATION_NOTE } from "../../lib/deployPresentation.ts";
 import { SCENARIOS, type DeployPreview } from "../../lib/deployPreview.ts";
 import { Banner } from "./parts.tsx";
-import type { Ctx, DialogState, Route } from "./context.ts";
+import { dialogAllowed, type Ctx, type DialogState, type Route } from "./context.ts";
 import { AppScreen, DeploymentScreen, HomeScreen } from "./Screens.tsx";
 import { DeployDialogs } from "./Dialogs.tsx";
 import { Play } from "@phosphor-icons/react";
@@ -63,8 +63,10 @@ export function DeployView({ sim, realRuntime, onStartHarpoon, preview: previewP
     else onStartHarpoon();
   }, [runtimeOverride, onStartHarpoon, setRuntimeOverride]);
 
-  const ctx: Ctx = useMemo(() => ({ state, runtime, runtimeSource: runtimeOverride ? "simulated" : "harpoon", route, setRoute, dispatch, open: setDialog, startRuntime }),
-    [state, runtime, runtimeOverride, route, setRoute, dispatch, startRuntime]);
+  // Production-changing dialogs are refused outside the Production route, even if a button is missed.
+  const guardedOpen = useCallback((d: DialogState | null) => { if (d && !dialogAllowed(d, route.env)) return; setDialog(d); }, [route.env]);
+  const ctx: Ctx = useMemo(() => ({ state, runtime, runtimeSource: runtimeOverride ? "simulated" : "harpoon", route, setRoute, dispatch, open: guardedOpen, startRuntime }),
+    [state, runtime, runtimeOverride, route, setRoute, dispatch, startRuntime, guardedOpen]);
 
   const showBanner = runtime !== "connected";
   return (
@@ -90,7 +92,7 @@ export function DeployView({ sim, realRuntime, onStartHarpoon, preview: previewP
         </Banner>
       )}
       {route.screen === "home" ? <HomeScreen c={ctx} /> : route.screen === "dep" ? <DeploymentScreen c={ctx} /> : <AppScreen c={ctx} />}
-      {dialog ? <DeployDialogs c={ctx} dialog={dialog} /> : null}
+      {dialog && dialogAllowed(dialog, route.env) ? <DeployDialogs c={ctx} dialog={dialog} /> : null}
     </div>
   );
 }

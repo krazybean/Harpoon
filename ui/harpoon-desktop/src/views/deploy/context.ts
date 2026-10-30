@@ -25,3 +25,7 @@ export type Ctx = {
   open: (d: DialogState | null) => void;
   startRuntime: () => void;
 };
+
+/** Dialogs that start or change Production state; the simulation models Production only. */
+const PRODUCTION_ONLY: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume"];
+export const dialogAllowed = (d: DialogState, env: Env): boolean => env === "production" || !PRODUCTION_ONLY.includes(d.kind);

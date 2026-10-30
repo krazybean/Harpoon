@@ -100,6 +100,43 @@ try {
   await evalJs("[...document.querySelectorAll('.shell-nav__item')].find(b => b.getAttribute('aria-label') === 'Deployments').click()");
   await sleep(500);
   await check("Deployments state survives navigating away and back", /Latest deployment|Projects/.test(await text()));
+  // PR #105 round 2: no visible entry point in Development or Preview may start a Production mutation.
+  await setSelect("Runtime", "connected");
+  const MUTATING = /^(Deploy|Redeploy|Roll back…|Roll back to .*|Promote…|Retry recovery|Retry deployment|Redeploy this revision|Review & resume…|Deploy from folder…)$/;
+  const entryPoints = (env) => evalJs(`(() => { const re = ${MUTATING}; return [...document.querySelectorAll('[data-testid=deployments-view] button')].filter(b => re.test(b.innerText.replace(/\\s+/g,' ').trim()) && !b.disabled).map(b => b.innerText.trim()); })()`);
+  const dialogOpen = () => evalJs("!!document.querySelector('[role=dialog]')");
+  let leaked = [];
+  for (const scenario of ["healthy", "cutover-restored", "restore-failed", "rolled-back-paused"]) {
+    await setSelect("Scenario", scenario);
+    await sleep(300);
+    for (const env of ["Development", "Preview"]) {
+      await evalJs("[...document.querySelectorAll('.dp-card')].find(x => /api/.test(x.innerText))?.click()");
+      await sleep(200);
+      await click(env);
+      await sleep(200);
+      for (const tab of ["Overview", "Deployments", "Logs", "Metrics", "Variables", "Settings"]) {
+        await evalJs(`[...document.querySelectorAll('.dp-tabs button')].find(b => b.innerText.trim().startsWith(${JSON.stringify(tab)}))?.click()`);
+        await sleep(150);
+        const open = await entryPoints(env);
+        if (open.length) leaked.push(`${scenario}/${env}/${tab}: ${open.join(", ")}`);
+        if (await dialogOpen()) leaked.push(`${scenario}/${env}/${tab}: dialog open`);
+      }
+      // the deployment detail screen, reached from the Deployments tab, with the environment still non-Production
+      await evalJs("[...document.querySelectorAll('.dp-tabs button')].find(b => b.innerText.trim().startsWith('Deployments'))?.click()");
+      await sleep(150);
+      await evalJs("document.querySelector('.dp-table tr.is-click')?.click()");
+      await sleep(200);
+      const detail = await entryPoints(env);
+      if (detail.length) leaked.push(`${scenario}/${env}/detail: ${detail.join(", ")}`);
+      // leave and come back: the Deployments view remounts on its Home screen
+      await evalJs("[...document.querySelectorAll('.shell-nav__item')].find(b => b.getAttribute('aria-label') === 'Containers').click()");
+      await sleep(300);
+      await evalJs("[...document.querySelectorAll('.shell-nav__item')].find(b => b.getAttribute('aria-label') === 'Deployments').click()");
+      await sleep(300);
+    }
+  }
+  await check("Development/Preview expose no enabled Production-mutating entry point (4 scenarios × 2 envs × 6 tabs + detail)", leaked.length === 0, leaked.slice(0, 6).join(" | "));
+  await setSelect("Scenario", "healthy");
   // PR #105 review corrections: Development cannot act on Production; Keychain help is real.
   await setSelect("Runtime", "connected");
   await sleep(300);

@@ -68,7 +68,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
       </div>
       {needs.map((n) => (
         <Banner key={n.app.id} tone={n.attention.tone === "err" ? "err" : "warn"} title={`${n.app.projectId} / ${n.app.name} needs attention`}
-          actions={btn("btn--primary", () => c.setRoute({ screen: "app", appId: n.app.id, tab: "overview" }), `Open ${n.app.name}`)}>
+          actions={btn("btn--primary", () => c.setRoute({ screen: "app", appId: n.app.id, tab: "overview", env: "production" }), `Open ${n.app.name}`)}>
           {n.attention.text}{n.app.automation.state === "paused" ? " Automatic deployments are paused." : ""}
         </Banner>
       ))}
@@ -120,13 +120,13 @@ export function AppScreen({ c }: { c: Ctx }) {
       </div>
       {att && <Banner tone={att.tone} title={att.title}
         actions={<>
-          {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !ok })}
-          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !ok })}
+          {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !ok || !prod, title: prodOnly })}
+          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !ok || !prod, title: prodOnly })}
           {latest && btn("btn--secondary", () => c.setRoute({ screen: "dep", depId: latest.id }), `Inspect ${latest.id}`)}
         </>}>{att.text}</Banner>}
       {paused && ok && (
         <Banner tone="warn" icon={<PausedIcon />} title="Automatic deployments are paused"
-          actions={btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>)}>
+          actions={btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: !prod, title: prodOnly })}>
           {pauseText(app)} <b>{app.automation.held.length} push{app.automation.held.length === 1 ? "" : "es"} held</b> — nothing was discarded. Manual deployments still work.
         </Banner>
       )}
@@ -233,7 +233,7 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
               <dt>State</dt><dd>{!ok ? "Not watching — automatic deployment only runs while Harpoon is running" : a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Watching for pushes"}</dd>
               <dt>Held events</dt><dd>{a.held.length ? a.held.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> {h.revision.message} <span className="dp-faint">{formatAge(h.ageMin)}</span></div>) : "None"}</dd>
             </dl>
-            {a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>)}</div>}
+            {a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: c.route.env !== "production", title: c.route.env !== "production" ? "Simulated Deployments only models Production release state. Switch to Production to use this action." : undefined })}</div>}
             <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Pushes that arrive while no Harpoon process is running are found on the next run and shown as <i>late</i>, never dropped.</p>
           </div>
         </section>
@@ -278,7 +278,8 @@ function DevTab({ c }: { c: Ctx }) {
   return (
     <div className="dp-panel dp-empty"><div className="art"><FolderSimple size={34} /></div><h2>Development deploys from a local folder</h2>
       <p>Point Harpoon at a directory with a Dockerfile and deploy it to your local runtime. There are no automatic triggers in Development.</p>
-      {btn("btn--primary", () => c.open({ kind: "deploy" }), <><FolderSimple size={14} /> Deploy from folder…</>, { disabled: !connected(c) })}</div>
+      {btn("btn--primary", () => c.open({ kind: "deploy" }), <><FolderSimple size={14} /> Deploy from folder…</>, { disabled: true, title: "Development deployment is not simulated yet." })}
+      <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Development deployment simulation is not implemented yet — this action is disabled rather than touching Production.</p></div>
   );
 }
 
