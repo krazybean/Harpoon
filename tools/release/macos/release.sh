@@ -5,6 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VERSION="${1:-${HARPOON_VERSION:-}}"
+PREFLIGHT_ONLY=0
+if [ "${1:-}" = "--preflight" ]; then
+  PREFLIGHT_ONLY=1
+  VERSION="${HARPOON_VERSION:-}"
+fi
 if [ -z "$VERSION" ]; then
   # fallback to package.json
   VERSION=$(node -p "require('$REPO_ROOT/ui/harpoon-desktop/package.json').version" 2>/dev/null || echo "")
@@ -20,12 +25,21 @@ case "$HARPOON_ARCH" in
   *) echo "[release] FAIL: unsupported HARPOON_ARCH $HARPOON_ARCH (arm64|universal)" >&2; exit 1 ;;
 esac
 echo "[release] Harpoon v$VERSION release candidate" >&2
-# Prereqs
-for cmd in swiftc codesign cargo node npm docker xcrun; do
+# Prereqs — run before any build, staging, signing, or notarization side effect.
+for cmd in swiftc codesign cargo node npm docker xcrun security spctl otool shasum stat; do
   if ! command -v "$cmd" >/dev/null 2>&1; then echo "[release] FAIL: $cmd not found" >&2; exit 1; fi
 done
 if [ -z "${HARPOON_SIGN_IDENTITY:-}" ]; then echo "[release] FAIL: HARPOON_SIGN_IDENTITY not set (Developer ID Application)" >&2; security find-identity -v -p codesigning 2>&1 | head -n 20 >&2; exit 1; fi
 if ! security find-identity -v -p codesigning 2>&1 | grep -F "$HARPOON_SIGN_IDENTITY" | grep -q "Developer ID Application"; then echo "[release] FAIL: identity not Developer ID Application: $HARPOON_SIGN_IDENTITY" >&2; exit 1; fi
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+  echo "[release] FAIL: working tree must be clean before release preflight" >&2
+  git -C "$REPO_ROOT" status --short >&2
+  exit 1
+fi
+if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
+  echo "[release] PREFLIGHT PASS: clean tree, prerequisites, and Developer ID identity" >&2
+  exit 0
+fi
 # Guest assets
 echo "[release] guest assets..." >&2
 bash "$REPO_ROOT/tools/guest-builder/build.sh" 2>&1 | tail -n 20
@@ -101,9 +115,10 @@ fi
 rm -f "$SIGN_LOG"
 # Also sign the original bundle location for consistency (so future verify uses signed) — strict
 if ! bash "$SCRIPT_DIR/sign-app.sh" "$APP" 2>&1 | tee "$SIGN_LOG"; then
-  echo "[release] WARN: signing original bundle failed" >&2
+  echo "[release] FAIL: signing original bundle failed" >&2
   cat "$SIGN_LOG" >&2
-  # do not exit, dist is authoritative
+  rm -f "$SIGN_LOG"
+  exit 1
 fi
 rm -f "$SIGN_LOG"
 # Verify signatures (Developer ID) — preserve exit
@@ -139,15 +154,27 @@ DMG="$DIST_DIR/Harpoon-${VERSION}-${HARPOON_ARCH}.dmg"
 if [ ! -f "$DMG" ]; then echo "[release] FAIL: DMG not found at $DMG" >&2; exit 1; fi
 # Sign DMG
 echo "[release] signing DMG..." >&2
-codesign --force --sign "$HARPOON_SIGN_IDENTITY" --timestamp --verbose "$DMG" 2>&1 | tail -n 10 || true
-codesign --verify --verbose "$DMG" 2>&1 | tail -n 10 || true
+if ! codesign --force --sign "$HARPOON_SIGN_IDENTITY" --timestamp --verbose "$DMG"; then
+  echo "[release] FAIL: DMG signing failed" >&2
+  exit 1
+fi
+if ! codesign --verify --verbose "$DMG"; then
+  echo "[release] FAIL: DMG signature verification failed" >&2
+  exit 1
+fi
 # Notarize
 echo "[release] notarizing..." >&2
 bash "$SCRIPT_DIR/notarize.sh" "$DMG" 2>&1 | tail -n 50
 # Gatekeeper
 echo "[release] Gatekeeper..." >&2
-spctl --assess --type execute --verbose=4 "$DIST_DIR/Harpoon.app" 2>&1 | tail -n 20 || echo "[release] spctl app: $(spctl --assess --type execute --verbose=4 "$DIST_DIR/Harpoon.app" 2>&1 | head -n 5)" >&2
-spctl --assess --type install --verbose=4 "$DMG" 2>&1 | tail -n 20 || true
+if ! spctl --assess --type execute --verbose=4 "$DIST_DIR/Harpoon.app"; then
+  echo "[release] FAIL: Gatekeeper rejected Harpoon.app" >&2
+  exit 1
+fi
+if ! spctl --assess --type install --verbose=4 "$DMG"; then
+  echo "[release] FAIL: Gatekeeper rejected DMG" >&2
+  exit 1
+fi
 # Tarball (if retained)
 if [ -f "$REPO_ROOT/ui/harpoon-desktop/scripts/release.mjs" ]; then
   echo "[release] tarball..." >&2
