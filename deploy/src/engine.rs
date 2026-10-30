@@ -8,16 +8,31 @@
 //! * only a failure **after** the cutover began triggers the single, bounded restoration;
 //! * the engine never retries, rolls back, promotes or resumes anything by itself.
 
-use crate::backend::{Backend, Event, RestoreResult, StepError, Trace};
-use crate::ids::ReleaseId;
+use crate::backend::{Backend, Event, Op, OpTrace, ResourceOps, RestoreResult, StepError, Trace};
+use crate::health::CheckEvidence;
+use crate::ids::{ApplicationId, DeploymentId, ReleaseId};
+use crate::ledger::{
+    plan, Action, CleanupOutcome, Disposition, EndState, Ledger, LedgerError, LedgerRecord, Observed, RemoveRequest,
+    RemoveResult, ResourceKey, ResourceKind,
+};
+use crate::logs::{LogCapture, LogLimits, LogSink, Redactor};
+use crate::ports::PortLease;
 use crate::state::{Deployment, DeploymentStatus, Failure, FailureKind, RecoveryOutcome, Step, TransitionError};
 use crate::time::Clock;
 use std::fmt;
 
-/// Durable storage of deployment records. The real one will be SQLite; the engine only
-/// needs "write this record now".
+/// Durable storage. The real ones are a JSON-lines file (first slice only) and later SQLite;
+/// the engine only needs "write this now".
+///
+/// **Durability contract:** when `persist` or `record` returns `Ok`, the write has reached
+/// stable storage (file `fsync`, and the directory on creation). Returning `Ok` for a write
+/// that can still be lost is a bug in the implementation, because the engine acts on the
+/// strength of it — a ledger *intent* is only useful if it survives the crash that follows
+/// the create call.
 pub trait Journal {
     fn persist(&mut self, d: &Deployment) -> Result<(), JournalError>;
+    /// Append one resource-ledger record (intent, receipt, cleanup attempt/result).
+    fn record(&mut self, r: &LedgerRecord) -> Result<(), JournalError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +42,17 @@ pub enum JournalError {
     Io(String),
 }
 
-/// A journal that keeps every snapshot in memory and can "crash" at the Nth write.
+/// A journal that keeps every write in memory and can "crash" at the Nth write. Deployment
+/// snapshots and ledger records share one write counter, so a crash can land between an
+/// intent and its receipt, or between a cleanup attempt and its result.
 #[derive(Default)]
 pub struct MemoryJournal {
     pub snapshots: Vec<Deployment>,
+    pub ledger_records: Vec<LedgerRecord>,
+    writes: usize,
     crash_at: Option<usize>,
     trace: Option<Trace>,
+    ops: Option<OpTrace>,
 }
 
 impl MemoryJournal {
@@ -44,9 +64,8 @@ impl MemoryJournal {
     /// exactly as if the process had been killed just before it happened.
     pub fn crash_at(n: usize) -> MemoryJournal {
         MemoryJournal {
-            snapshots: Vec::new(),
             crash_at: Some(n),
-            trace: None,
+            ..MemoryJournal::default()
         }
     }
 
@@ -56,16 +75,33 @@ impl MemoryJournal {
         self
     }
 
+    /// Also record every ledger write into a shared [`OpTrace`].
+    pub fn with_ops_trace(mut self, t: OpTrace) -> Self {
+        self.ops = Some(t);
+        self
+    }
+
     pub fn last(&self) -> Option<&Deployment> {
         self.snapshots.last()
+    }
+
+    /// Total successful writes (snapshots + ledger records).
+    pub fn writes(&self) -> usize {
+        self.writes
+    }
+
+    fn gate(&mut self) -> Result<(), JournalError> {
+        if self.crash_at == Some(self.writes) {
+            return Err(JournalError::Crash);
+        }
+        self.writes += 1;
+        Ok(())
     }
 }
 
 impl Journal for MemoryJournal {
     fn persist(&mut self, d: &Deployment) -> Result<(), JournalError> {
-        if self.crash_at == Some(self.snapshots.len()) {
-            return Err(JournalError::Crash);
-        }
+        self.gate()?;
         if let Some(t) = &self.trace {
             let running = d
                 .steps
@@ -81,6 +117,15 @@ impl Journal for MemoryJournal {
         self.snapshots.push(d.clone());
         Ok(())
     }
+
+    fn record(&mut self, r: &LedgerRecord) -> Result<(), JournalError> {
+        self.gate()?;
+        if let Some(t) = &self.ops {
+            t.borrow_mut().push(Op::Write(r.clone()));
+        }
+        self.ledger_records.push(r.clone());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +138,66 @@ impl Default for Policy {
     fn default() -> Self {
         Policy {
             restore_budget_ms: 60_000,
+        }
+    }
+}
+
+/// Per-step time budgets (review gap #2). A step that runs past its budget fails with an
+/// explicit timeout, **even if the backend eventually returned success**: a late answer is
+/// not trusted. Defaults are the first-test values (build 10 min, health 60 s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    pub source_ms: u64,
+    pub build_ms: u64,
+    pub preliminary_ms: u64,
+    pub cutover_ms: u64,
+    pub final_ms: u64,
+    /// The whole resource-cleanup phase of one deployment.
+    pub cleanup_ms: u64,
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Budgets {
+            source_ms: 120_000,
+            build_ms: 600_000,
+            preliminary_ms: 60_000,
+            cutover_ms: 60_000,
+            final_ms: 60_000,
+            cleanup_ms: 60_000,
+        }
+    }
+}
+
+impl Budgets {
+    pub fn for_step(&self, s: Step) -> u64 {
+        match s {
+            Step::Source => self.source_ms,
+            Step::Build => self.build_ms,
+            Step::PreliminaryCheck => self.preliminary_ms,
+            Step::Cutover => self.cutover_ms,
+            Step::FinalCheck => self.final_ms,
+            Step::Recovery => self.cleanup_ms,
+        }
+    }
+}
+
+/// Everything beyond [`Policy`]. `run_deployment` uses the defaults.
+#[derive(Debug, Clone)]
+pub struct RunConfig {
+    pub policy: Policy,
+    pub budgets: Budgets,
+    pub log_limits: LogLimits,
+    pub redactor: Redactor,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        RunConfig {
+            policy: Policy::default(),
+            budgets: Budgets::default(),
+            log_limits: LogLimits::default(),
+            redactor: Redactor::none(),
         }
     }
 }
@@ -116,6 +221,27 @@ pub enum PauseReason {
 pub struct Report {
     pub status: DeploymentStatus,
     pub pause: Option<PauseReason>,
+    /// The ledger as it ended. Failed or refused cleanups are in here and stay there.
+    pub ledger: Ledger,
+    /// What each check actually observed, in step order.
+    pub evidence: Vec<(Step, CheckEvidence)>,
+    /// Bounded, redacted logs per step.
+    pub logs: Vec<(Step, LogCapture)>,
+    /// Things that went wrong without changing the status (for example a failed `stop_new`).
+    pub warnings: Vec<String>,
+    /// Objects labelled as this deployment's but unknown to the ledger. Reported, never removed.
+    pub unaccounted: Vec<Observed>,
+}
+
+impl Report {
+    /// Entries of **this** ledger whose cleanup failed or was refused. A deployment can be
+    /// `Succeeded` or `Failed` and still have these; they are never dropped from the report.
+    pub fn cleanup_problems(&self) -> Vec<&crate::ledger::Entry> {
+        self.ledger.needing_attention()
+    }
+    pub fn is_clean(&self) -> bool {
+        self.cleanup_problems().is_empty() && self.unaccounted.is_empty() && self.warnings.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -124,6 +250,8 @@ pub enum EngineError {
     Journal(JournalError),
     /// A bug in the caller or the engine: an invalid transition was requested.
     Transition(TransitionError),
+    /// A bug in the caller or the engine: an invalid ledger record was attempted.
+    Ledger(LedgerError),
 }
 
 impl fmt::Display for EngineError {
@@ -131,6 +259,7 @@ impl fmt::Display for EngineError {
         match self {
             EngineError::Journal(e) => write!(f, "journal write failed: {e:?}"),
             EngineError::Transition(e) => write!(f, "{e}"),
+            EngineError::Ledger(e) => write!(f, "{e}"),
         }
     }
 }
@@ -147,8 +276,276 @@ impl From<TransitionError> for EngineError {
         EngineError::Transition(e)
     }
 }
+impl From<LedgerError> for EngineError {
+    fn from(e: LedgerError) -> Self {
+        EngineError::Ledger(e)
+    }
+}
 
 type R<T> = Result<T, EngineError>;
+
+// ------------------------------------------------------------------ ledger writes
+
+/// Validate against a copy, make the write durable, and only then adopt the new state: the
+/// in-memory ledger never gets ahead of the journal.
+fn write_record(ledger: &mut Ledger, journal: &mut dyn Journal, r: LedgerRecord) -> R<()> {
+    let mut next = ledger.clone();
+    next.apply(&r)?;
+    journal.record(&r)?;
+    *ledger = next;
+    Ok(())
+}
+
+/// A recorded intent to create one object. Only [`StepIo::intend`] can make one, and
+/// [`StepIo::receipt`] needs it, so "receipt without intent" cannot be written by a backend.
+#[derive(Debug)]
+pub struct Intent {
+    key: ResourceKey,
+}
+
+impl Intent {
+    pub fn key(&self) -> &ResourceKey {
+        &self.key
+    }
+}
+
+/// What a backend step may use: its deadline, a bounded redacting log, and the ledger
+/// protocol. **Create nothing before `intend` returns; record the id with `receipt`.**
+pub struct StepIo<'a> {
+    /// Time the step has. The backend must stop and report a timeout when it is spent.
+    pub budget_ms: u64,
+    pub log: &'a mut LogSink,
+    ledger: &'a mut Ledger,
+    journal: &'a mut dyn Journal,
+    clock: &'a dyn Clock,
+    app: &'a ApplicationId,
+    dep: &'a DeploymentId,
+}
+
+impl StepIo<'_> {
+    pub fn app(&self) -> &ApplicationId {
+        self.app
+    }
+    pub fn deployment(&self) -> &DeploymentId {
+        self.dep
+    }
+    pub fn ledger(&self) -> &Ledger {
+        self.ledger
+    }
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
+    fn write(&mut self, r: LedgerRecord) -> Result<(), StepError> {
+        let mut next = self.ledger.clone();
+        next.apply(&r).map_err(|e| StepError::new(e.to_string()))?;
+        self.journal.record(&r)?;
+        *self.ledger = next;
+        Ok(())
+    }
+
+    /// Record, durably, that this object is about to be created. After a crash this is all
+    /// that is known: the object may or may not exist.
+    pub fn intend(&mut self, key: ResourceKey, disposition: Disposition) -> Result<Intent, StepError> {
+        let at_ms = self.now_ms();
+        self.write(LedgerRecord::Intent {
+            key: key.clone(),
+            app: self.app.clone(),
+            deployment: self.dep.clone(),
+            disposition,
+            at_ms,
+        })?;
+        Ok(Intent { key })
+    }
+
+    /// Record the **actual id the runtime returned**. Only now is the object known to exist.
+    pub fn receipt(&mut self, intent: &Intent, id: &str) -> Result<(), StepError> {
+        let at_ms = self.now_ms();
+        self.write(LedgerRecord::Receipt {
+            key: intent.key.clone(),
+            deployment: self.dep.clone(),
+            id: id.to_string(),
+            at_ms,
+        })
+    }
+
+    /// Reserve a host port: intent and receipt in one call (a lease has no runtime id).
+    pub fn lease_port(&mut self, lease: PortLease) -> Result<Intent, StepError> {
+        let intent = self.intend(
+            ResourceKey::new(ResourceKind::PortLease, lease.host_port.to_string()),
+            Disposition::RemoveOnFailure,
+        )?;
+        self.receipt(&intent, &lease.host_port.to_string())?;
+        Ok(intent)
+    }
+}
+
+// ------------------------------------------------------------------ cleanup and recovery
+
+fn request_for(entry: &crate::ledger::Entry, id: &str) -> RemoveRequest {
+    RemoveRequest {
+        kind: entry.key.kind,
+        id: id.to_string(),
+        name: entry.key.name.clone(),
+        app: entry.app.clone(),
+        deployment: entry.deployment.clone(),
+    }
+}
+
+/// Carry out a plan. Every removal is bracketed by an attempt and a result record, and an
+/// adopted object gets a receipt with the id the runtime reported **before** it is removed.
+/// Returns the objects that were only reported, never touched.
+pub fn execute_actions(
+    actions: &[Action],
+    ledger: &mut Ledger,
+    journal: &mut dyn Journal,
+    ops: &mut dyn ResourceOps,
+    clock: &dyn Clock,
+) -> R<Vec<Observed>> {
+    let mut unaccounted = Vec::new();
+    for a in actions {
+        match a {
+            Action::ReportOnly { observed, .. } => unaccounted.push(observed.clone()),
+            Action::Adopt { entry, observed } => {
+                write_record(
+                    ledger,
+                    journal,
+                    LedgerRecord::Receipt {
+                        key: entry.1.clone(),
+                        deployment: entry.0.clone(),
+                        id: observed.id.clone(),
+                        at_ms: clock.now_ms(),
+                    },
+                )?;
+            }
+            Action::ReleaseLease { entry } => {
+                attempt(ledger, journal, clock, entry)?;
+                settle(ledger, journal, clock, entry, CleanupOutcome::Removed)?;
+            }
+            Action::MarkAbsent { entry } => {
+                attempt(ledger, journal, clock, entry)?;
+                settle(ledger, journal, clock, entry, CleanupOutcome::AlreadyAbsent)?;
+            }
+            Action::Refuse { entry, reason } => {
+                attempt(ledger, journal, clock, entry)?;
+                settle(ledger, journal, clock, entry, CleanupOutcome::Refused(reason.clone()))?;
+            }
+            Action::Remove { entry, observed, adopt } => {
+                if *adopt {
+                    write_record(
+                        ledger,
+                        journal,
+                        LedgerRecord::Receipt {
+                            key: entry.1.clone(),
+                            deployment: entry.0.clone(),
+                            id: observed.id.clone(),
+                            at_ms: clock.now_ms(),
+                        },
+                    )?;
+                }
+                attempt(ledger, journal, clock, entry)?;
+                let e = ledger.find(&entry.0, &entry.1).expect("planned entries exist").clone();
+                let outcome = match ops.remove_resource(&request_for(&e, &observed.id)) {
+                    Ok(RemoveResult::Removed) => CleanupOutcome::Removed,
+                    Ok(RemoveResult::AlreadyAbsent) => CleanupOutcome::AlreadyAbsent,
+                    Ok(RemoveResult::Refused(why)) => CleanupOutcome::Refused(why),
+                    Err(err) => CleanupOutcome::Failed(err.message),
+                };
+                settle(ledger, journal, clock, entry, outcome)?;
+            }
+        }
+    }
+    Ok(unaccounted)
+}
+
+fn attempt(
+    ledger: &mut Ledger,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    entry: &(DeploymentId, ResourceKey),
+) -> R<()> {
+    write_record(
+        ledger,
+        journal,
+        LedgerRecord::CleanupAttempt {
+            key: entry.1.clone(),
+            deployment: entry.0.clone(),
+            at_ms: clock.now_ms(),
+        },
+    )
+}
+
+fn settle(
+    ledger: &mut Ledger,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    entry: &(DeploymentId, ResourceKey),
+    outcome: CleanupOutcome,
+) -> R<()> {
+    write_record(
+        ledger,
+        journal,
+        LedgerRecord::CleanupResult {
+            key: entry.1.clone(),
+            deployment: entry.0.clone(),
+            outcome,
+            at_ms: clock.now_ms(),
+        },
+    )
+}
+
+/// List the runtime, plan, execute. If the runtime cannot even be listed, every object that
+/// would have needed removal is recorded as a **failed** cleanup (not skipped) and port
+/// leases are released (ledger-only). Used right after a deployment and again at startup.
+pub fn reconcile(
+    ledger: &mut Ledger,
+    ended: &[(DeploymentId, EndState)],
+    journal: &mut dyn Journal,
+    ops: &mut dyn ResourceOps,
+    clock: &dyn Clock,
+) -> R<Vec<Observed>> {
+    match ops.list_resources() {
+        Ok(observed) => {
+            let actions = plan(ledger, &observed, ended);
+            execute_actions(&actions, ledger, journal, ops, clock)
+        }
+        Err(e) => {
+            // Plan against an empty runtime to learn *which* entries need cleanup, then fail them honestly.
+            let actions = plan(ledger, &[], ended);
+            for a in &actions {
+                match a {
+                    Action::ReleaseLease { entry } => {
+                        attempt(ledger, journal, clock, entry)?;
+                        settle(ledger, journal, clock, entry, CleanupOutcome::Removed)?;
+                    }
+                    Action::MarkAbsent { entry } => {
+                        attempt(ledger, journal, clock, entry)?;
+                        settle(
+                            ledger,
+                            journal,
+                            clock,
+                            entry,
+                            CleanupOutcome::Failed(format!("could not list the runtime: {}", e.message)),
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// `Some` for a deployment that has finished (or was interrupted); `None` while it may still run.
+pub fn end_state(status: DeploymentStatus) -> Option<EndState> {
+    match status {
+        DeploymentStatus::Succeeded => Some(EndState::Succeeded),
+        s if s.is_terminal() => Some(EndState::NotSucceeded),
+        _ => None,
+    }
+}
+
+// ------------------------------------------------------------------ the run
 
 struct Run<'a> {
     d: &'a mut Deployment,
@@ -156,7 +553,15 @@ struct Run<'a> {
     journal: &'a mut dyn Journal,
     clock: &'a dyn Clock,
     cancel: &'a dyn Fn() -> bool,
+    cfg: &'a RunConfig,
+    ledger: Ledger,
+    evidence: Vec<(Step, CheckEvidence)>,
+    logs: Vec<(Step, LogCapture)>,
+    warnings: Vec<String>,
+    unaccounted: Vec<Observed>,
 }
+
+type StepOut = Result<Option<CheckEvidence>, StepError>;
 
 impl Run<'_> {
     fn now(&self) -> u64 {
@@ -167,18 +572,88 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Call the backend with a fresh log sink and the step's deadline. A journal failure
+    /// inside the step aborts the run; a result that arrives past the budget becomes a timeout.
+    fn exec<T>(
+        &mut self,
+        step: Step,
+        budget: u64,
+        f: impl FnOnce(&mut dyn Backend, &mut StepIo<'_>) -> Result<T, StepError>,
+    ) -> R<(Result<T, StepError>, u64)> {
+        let mut sink = LogSink::new(self.cfg.log_limits, self.cfg.redactor.clone());
+        let start = self.clock.now_ms();
+        let res = {
+            let mut io = StepIo {
+                budget_ms: budget,
+                log: &mut sink,
+                ledger: &mut self.ledger,
+                journal: &mut *self.journal,
+                clock: self.clock,
+                app: &self.d.application_id,
+                dep: &self.d.id,
+            };
+            f(&mut *self.backend, &mut io)
+        };
+        let elapsed = self.clock.now_ms().saturating_sub(start);
+        let cap = sink.capture();
+        if cap.summary.lines_seen > 0 {
+            self.logs.push((step, cap));
+        }
+        let res = match res {
+            Err(StepError { fatal: Some(j), .. }) => return Err(EngineError::Journal(j)),
+            Err(e) => Err(e),
+            Ok(_) if elapsed > budget => Err(StepError::timeout(format!(
+                "the step finished after {elapsed} ms, past its {budget} ms budget; its result is not trusted"
+            ))),
+            Ok(v) => Ok(v),
+        };
+        Ok((res, elapsed))
+    }
+
+    /// A check that "passed" must say so in its evidence.
+    fn judge(res: Result<CheckEvidence, StepError>) -> StepOut {
+        match res {
+            Ok(ev) => match ev.validate() {
+                Ok(()) => Ok(Some(ev)),
+                Err(why) => Err(StepError::new(format!("the check did not establish health: {why}")).with_evidence(ev)),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn describe(&mut self, step: Step, e: &StepError, elapsed: u64, budget: u64) -> String {
+        let mut msg = self.cfg.redactor.apply(&e.message).0;
+        if e.timed_out {
+            msg = format!("timed out after {elapsed} ms (budget {budget} ms): {msg}");
+        }
+        if let Some(ev) = e.evidence.as_deref() {
+            msg = format!("{msg} ({})", ev.summary());
+            self.evidence.push((step, ev.clone()));
+        }
+        msg
+    }
+
     /// Run one pre-cutover step. `Ok(true)` = continue, `Ok(false)` = the deployment ended.
-    fn pre_step(&mut self, step: Step, kind: FailureKind, f: fn(&mut dyn Backend) -> Result<(), StepError>) -> R<bool> {
+    fn pre_step(
+        &mut self,
+        step: Step,
+        kind: FailureKind,
+        f: impl FnOnce(&mut dyn Backend, &mut StepIo<'_>) -> StepOut,
+    ) -> R<bool> {
         if (self.cancel)() {
             return self.end_cancelled().map(|_| false);
         }
         let now = self.now();
         self.d.start_step(step, now)?;
         self.save()?; // before the side effect
-        let res = f(&mut *self.backend);
+        let budget = self.cfg.budgets.for_step(step);
+        let (res, elapsed) = self.exec(step, budget, f)?;
         let now = self.now();
         match res {
-            Ok(()) => {
+            Ok(ev) => {
+                if let Some(ev) = ev {
+                    self.evidence.push((step, ev));
+                }
                 self.d.finish_step(step, true, "", now)?;
                 if step == Step::Build {
                     self.d.release = Some(ReleaseId::from_deployment(&self.d.id));
@@ -187,11 +662,13 @@ impl Run<'_> {
                 Ok(true)
             }
             Err(e) => {
-                self.d.finish_step(step, false, &e.message, now)?;
+                let message = self.describe(step, &e, elapsed, budget);
+                self.d.finish_step(step, false, &message, now)?;
                 self.d.failure = Some(Failure {
                     step,
                     kind,
-                    message: e.message,
+                    message,
+                    timed_out: e.timed_out,
                 });
                 self.d.transition(DeploymentStatus::Failed, now)?;
                 self.save()?;
@@ -212,6 +689,19 @@ impl Run<'_> {
         self.save()
     }
 
+    /// Best-effort stop of a new release that started but failed. A failure is kept as a
+    /// warning in the report instead of being thrown away.
+    fn stop_failed_new_release(&mut self) -> R<()> {
+        let budget = self.cfg.budgets.cleanup_ms;
+        let (res, _) = self.exec(Step::Cutover, budget, |b, io| b.stop_new(io))?;
+        if let Err(e) = res {
+            let m = self.cfg.redactor.apply(&e.message).0;
+            self.warnings
+                .push(format!("could not stop the failed new release: {m}"));
+        }
+        Ok(())
+    }
+
     /// A failure after the cutover began: persist it, then make the one bounded
     /// restoration attempt and record the outcome.
     fn fail_after_cutover(
@@ -219,19 +709,25 @@ impl Run<'_> {
         step: Step,
         kind: FailureKind,
         message: String,
+        timed_out: bool,
         new_started: bool,
         budget_ms: u64,
     ) -> R<()> {
         let now = self.now();
         self.d.finish_step(step, false, &message, now)?;
-        self.d.failure = Some(Failure { step, kind, message });
+        self.d.failure = Some(Failure {
+            step,
+            kind,
+            message,
+            timed_out,
+        });
         self.d.fail_cutover(now)?;
         self.d.start_step(Step::Recovery, now)?;
         self.d.start_recovery(budget_ms, now)?;
         self.save()?; // recovery is recorded as in progress before it starts
 
         if new_started {
-            let _ = self.backend.stop_new(); // best effort: free the address for the restore
+            self.stop_failed_new_release()?; // best effort: free the address for the restore
         }
         let outcome = match self.backend.restore_previous(budget_ms) {
             RestoreResult::Healthy => RecoveryOutcome::Restored,
@@ -246,9 +742,58 @@ impl Run<'_> {
         self.d.transition(DeploymentStatus::Failed, now)?;
         self.save()
     }
+
+    /// One cutover-phase backend call. `Ok(Ok(()))` = done; `Ok(Err((message, timed_out)))` = failed.
+    fn cutover_call(
+        &mut self,
+        f: impl FnOnce(&mut dyn Backend, &mut StepIo<'_>) -> Result<(), StepError>,
+    ) -> R<Result<(), (String, bool)>> {
+        let budget = self.cfg.budgets.cutover_ms;
+        let (res, elapsed) = self.exec(Step::Cutover, budget, f)?;
+        Ok(res.map_err(|e| (self.describe(Step::Cutover, &e, elapsed, budget), e.timed_out)))
+    }
+
+    fn final_check(&mut self) -> R<Result<(), (String, bool)>> {
+        let budget = self.cfg.budgets.final_ms;
+        let (res, elapsed) = self.exec(Step::FinalCheck, budget, |b, io| b.final_check(io))?;
+        let res = match res {
+            Ok(ev) => Run::judge(Ok(ev)),
+            Err(e) => Err(e),
+        };
+        Ok(match res {
+            Ok(ev) => {
+                if let Some(ev) = ev {
+                    self.evidence.push((Step::FinalCheck, ev));
+                }
+                Ok(())
+            }
+            Err(e) => Err((self.describe(Step::FinalCheck, &e, elapsed, budget), e.timed_out)),
+        })
+    }
+
+    /// After the terminal state is on disk: release what this deployment created.
+    fn cleanup(&mut self) -> R<()> {
+        let Some(end) = end_state(self.d.status) else {
+            return Ok(());
+        };
+        if !self.ledger.entries().iter().any(|e| e.deployment == self.d.id) {
+            return Ok(());
+        }
+        let ended = [(self.d.id.clone(), end)];
+        let un = reconcile(
+            &mut self.ledger,
+            &ended,
+            &mut *self.journal,
+            &mut *self.backend,
+            self.clock,
+        )?;
+        self.unaccounted.extend(un);
+        Ok(())
+    }
 }
 
-/// Drive one deployment from `Queued` to a terminal state.
+/// Drive one deployment from `Queued` to a terminal state with the default [`RunConfig`]
+/// (apart from `policy`).
 ///
 /// `cancel` is polled before each step up to and including the start of the cutover.
 /// Once the cutover has begun it is ignored: the engine never leaves a half-applied
@@ -262,25 +807,50 @@ pub fn run_deployment(
     policy: &Policy,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Report, EngineError> {
+    let cfg = RunConfig {
+        policy: *policy,
+        ..RunConfig::default()
+    };
+    run_deployment_with(d, ctx, backend, journal, clock, &cfg, cancel)
+}
+
+/// [`run_deployment`] with explicit budgets, log limits and secrets to redact.
+pub fn run_deployment_with(
+    d: &mut Deployment,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    cfg: &RunConfig,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Report, EngineError> {
     let mut run = Run {
         d,
         backend,
         journal,
         clock,
         cancel,
+        cfg,
+        ledger: Ledger::new(),
+        evidence: Vec::new(),
+        logs: Vec::new(),
+        warnings: Vec::new(),
+        unaccounted: Vec::new(),
     };
     let now = run.now();
     run.d.transition(DeploymentStatus::Running, now)?;
     run.save()?;
 
-    if !run.pre_step(Step::Source, FailureKind::Source, |b| b.prepare_source())? {
+    if !run.pre_step(Step::Source, FailureKind::Source, |b, io| {
+        b.prepare_source(io).map(|()| None)
+    })? {
         return finish(run);
     }
-    if !run.pre_step(Step::Build, FailureKind::Build, |b| b.build())? {
+    if !run.pre_step(Step::Build, FailureKind::Build, |b, io| b.build(io).map(|()| None))? {
         return finish(run);
     }
-    if !run.pre_step(Step::PreliminaryCheck, FailureKind::PreliminaryCheck, |b| {
-        b.preliminary_check()
+    if !run.pre_step(Step::PreliminaryCheck, FailureKind::PreliminaryCheck, |b, io| {
+        Run::judge(b.preliminary_check(io))
     })? {
         return finish(run);
     }
@@ -291,7 +861,7 @@ pub fn run_deployment(
         return finish(run);
     }
 
-    let budget = policy.restore_budget_ms;
+    let budget = cfg.policy.restore_budget_ms;
     match &ctx.previous_release {
         None => {
             // First deployment: nothing to stop, nothing to restore.
@@ -299,14 +869,15 @@ pub fn run_deployment(
             let now = run.now();
             run.d.start_step(Step::Cutover, now)?;
             run.save()?;
-            let started = run.backend.start_new();
+            let started = run.cutover_call(|b, io| b.start_new(io))?;
             let now = run.now();
-            if let Err(e) = started {
-                run.d.finish_step(Step::Cutover, false, &e.message, now)?;
+            if let Err((message, timed_out)) = started {
+                run.d.finish_step(Step::Cutover, false, &message, now)?;
                 run.d.failure = Some(Failure {
                     step: Step::Cutover,
                     kind: FailureKind::Cutover,
-                    message: e.message,
+                    message,
+                    timed_out,
                 });
                 run.d.transition(DeploymentStatus::Failed, now)?;
                 run.save()?;
@@ -315,21 +886,23 @@ pub fn run_deployment(
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
             run.save()?;
-            let chk = run.backend.final_check();
+            let chk = run.final_check()?;
             let now = run.now();
             match chk {
                 Ok(()) => {
                     run.d.finish_step(Step::FinalCheck, true, "", now)?;
                     run.succeed()?;
                 }
-                Err(e) => {
-                    run.d.finish_step(Step::FinalCheck, false, &e.message, now)?;
+                Err((message, timed_out)) => {
+                    run.d.finish_step(Step::FinalCheck, false, &message, now)?;
                     run.d.failure = Some(Failure {
                         step: Step::FinalCheck,
                         kind: FailureKind::FinalCheck,
-                        message: e.message,
+                        message,
+                        timed_out,
                     });
-                    let _ = run.backend.stop_new();
+                    run.stop_failed_new_release()?;
+                    let now = run.now();
                     run.d.transition(DeploymentStatus::Failed, now)?;
                     run.save()?;
                 }
@@ -343,27 +916,27 @@ pub fn run_deployment(
             run.d.start_step(Step::Cutover, now)?;
             run.save()?;
 
-            if let Err(e) = run.backend.stop_current() {
-                run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, e.message, false, budget)?;
+            if let Err((m, to)) = run.cutover_call(|b, io| b.stop_current(io))? {
+                run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, m, to, false, budget)?;
                 return finish(run);
             }
-            if let Err(e) = run.backend.start_new() {
-                run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, e.message, false, budget)?;
+            if let Err((m, to)) = run.cutover_call(|b, io| b.start_new(io))? {
+                run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, m, to, false, budget)?;
                 return finish(run);
             }
             let now = run.now();
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
             run.save()?;
-            match run.backend.final_check() {
+            match run.final_check()? {
                 Ok(()) => {
                     let now = run.now();
                     run.d.finish_step(Step::FinalCheck, true, "", now)?;
                     run.d.confirm_cutover(now)?;
                     run.succeed()?;
                 }
-                Err(e) => {
-                    run.fail_after_cutover(Step::FinalCheck, FailureKind::FinalCheck, e.message, true, budget)?;
+                Err((m, to)) => {
+                    run.fail_after_cutover(Step::FinalCheck, FailureKind::FinalCheck, m, to, true, budget)?;
                 }
             }
             finish(run)
@@ -371,7 +944,8 @@ pub fn run_deployment(
     }
 }
 
-fn finish(run: Run<'_>) -> Result<Report, EngineError> {
+fn finish(mut run: Run<'_>) -> Result<Report, EngineError> {
+    run.cleanup()?;
     let pause = match run.d.cutover {
         crate::state::CutoverState::Failed { .. } => Some(PauseReason::FailedCutover),
         _ => None,
@@ -379,5 +953,10 @@ fn finish(run: Run<'_>) -> Result<Report, EngineError> {
     Ok(Report {
         status: run.d.status,
         pause,
+        ledger: run.ledger,
+        evidence: run.evidence,
+        logs: run.logs,
+        warnings: run.warnings,
+        unaccounted: run.unaccounted,
     })
 }

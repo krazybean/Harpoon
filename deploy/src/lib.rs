@@ -14,7 +14,11 @@
 
 pub mod backend;
 pub mod engine;
+pub mod health;
 pub mod ids;
+pub mod ledger;
+pub mod logs;
+pub mod ports;
 pub mod queue;
 pub mod state;
 pub mod time;

@@ -234,6 +234,8 @@ pub struct Failure {
     pub step: Step,
     pub kind: FailureKind,
     pub message: String,
+    /// The step exceeded its budget. The result, if one arrived late, is not trusted.
+    pub timed_out: bool,
 }
 
 // ------------------------------------------------------------------ errors

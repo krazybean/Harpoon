@@ -2,7 +2,7 @@
 
 Milestone B, step 0 of the Harpoon 2.1 deployment control plane (see
 `docs/deployment-control-plane-requirements.md`, D4/D5/D10). Pure Rust, **no dependencies**,
-no I/O.
+no I/O. 112 tests (47 foundation + 47 B1 + 18 B1 corrections).
 
 ## In scope
 - `ids` — stable, typed, sortable identifiers (`prj_…`, `app_…`, `dep_…`, `rel_…`) and the three
@@ -16,6 +16,23 @@ no I/O.
 - `backend` — the *local* execution seam (`Backend`) and a scripted `FakeBackend`.
 - `engine` — `run_deployment`, the lifecycle driver, and a `Journal` trait with an in-memory
   implementation that can "crash" at any write.
+
+## ## B1 extension (still offline)
+Closes review gaps #1–#5 from `docs/results/DEPLOY_ENGINE_FOUNDATION_REVIEW.md`:
+- `ledger` — durable **resource ledger**: *intent* (before the object is created) and *receipt* (the id the runtime
+  actually returned) records, cleanup *attempt*/*result* records, a pure `plan()` that reconciles the ledger against what
+  the runtime reports **by verified Harpoon labels only** (`managed=true`, app, deployment — all three), and a
+  checksummed one-record-per-line codec that discards a torn trailing write and refuses silent corruption.
+- `engine` — `StepIo` (the only way a backend can record intent/receipt), per-step `Budgets` with explicit timeouts
+  (a late success is not trusted), cleanup after every terminal state, `reconcile()` for startup recovery, a `Report`
+  that carries the ledger, evidence, bounded logs, warnings and unaccounted objects. `Journal` gained `record()` and
+  a durability contract.
+- `logs` — bounded head+tail log sink, redaction before storage (no length floor, longest first), truncation counts.
+- `ports` — typed `PortLease`, the approved ranges, allocation over three occupancy sources, one-shot collision replacement.
+- `health` — `CheckEvidence` (attempts, streaks, elapsed, scope note) and a deterministic `run_health`; the engine
+  refuses a pass whose evidence is not `Healthy`.
+
+Still no Docker, VM, network, filesystem journal or process: `FakeBackend` + `FakeRuntime` + `MemoryJournal` only.
 
 ## Explicitly out of scope
 Docker or VM calls, network listeners, background processes, SQLite, Keychain, Git, a
