@@ -13,6 +13,9 @@ on:
       - .github/workflows/universal-dmg.yml
       - harpoon/build.sh
       - harpoon/fetch-docker-cli.sh
+      - harpoon/fetch-buildx.sh
+      - harpoon/third-party/**
+      - tools/check-bundled-buildx.sh
       - harpoon/Sources/**
       - tools/guest-builder/**
       - tools/release/**

@@ -13,6 +13,7 @@
 //! Spec: `docs/deployment-control-plane-requirements.md` (D4, D5, D10).
 
 pub mod backend;
+pub mod buildx;
 pub mod engine;
 pub mod health;
 pub mod ids;

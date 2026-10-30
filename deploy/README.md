@@ -2,7 +2,7 @@
 
 Milestone B, step 0 of the Harpoon 2.1 deployment control plane (see
 `docs/deployment-control-plane-requirements.md`, D4/D5/D10). Pure Rust, **no dependencies**,
-no I/O. 112 tests (47 foundation + 47 B1 + 18 B1 corrections).
+no I/O. 118 tests (47 foundation + 47 B1 + 18 B1 corrections + 6 B2).
 
 ## In scope
 - `ids` — stable, typed, sortable identifiers (`prj_…`, `app_…`, `dep_…`, `rel_…`) and the three
@@ -60,3 +60,7 @@ restoring twice, pausing on any failure) were each caught by at least one test.
 ```sh
 cd deploy && cargo test --offline
 ```
+
+## B2 (packaging support)
+- `buildx` — pure resolution of the bundled `Resources/harpoon/bin/docker-buildx` through a `FileProbe` (no I/O here), with explicit
+  errors and **no fallback**, plus the isolated environment a buildx process may receive. See `docs/results/DEPLOY_BUILDX_PACKAGING.md`.
