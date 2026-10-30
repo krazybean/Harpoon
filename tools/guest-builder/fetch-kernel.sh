@@ -10,7 +10,9 @@ OUT_DIR="$(guest_asset_dir "$REPO_ROOT/assets/guest")"
 CACHE_DIR="$OUT_DIR/.cache"
 mkdir -p "$OUT_DIR" "$CACHE_DIR"
 
-BASE="$GUEST_ALPINE_BASE/netboot"
+# Alpine's unversioned netboot path is mutable; keep all guest inputs on one release.
+ALPINE_NETBOOT_RELEASE="3.22.6"
+BASE="$GUEST_ALPINE_BASE/netboot-$ALPINE_NETBOOT_RELEASE"
 KERNEL_CACHE="$CACHE_DIR/vmlinuz-virt"
 INITRAMFS_CACHE="$CACHE_DIR/initramfs-virt"
 OUT_IMAGE="$OUT_DIR/Image-virt"
@@ -50,7 +52,7 @@ echo "[fetch-kernel] initramfs-virt $(stat -f%z "$INITRAMFS_CACHE" 2>/dev/null |
 if command -v shasum >/dev/null; then
   echo "[fetch-kernel] sha256 vmlinuz: $(shasum -a 256 "$KERNEL_CACHE" | cut -d' ' -f1)" >&2
 fi
-echo "[fetch-kernel] source: $BASE (Alpine 3.22 virt 6.12.x)" >&2
+echo "[fetch-kernel] source: $BASE (Alpine netboot $ALPINE_NETBOOT_RELEASE, virt $GUEST_KERNEL_VERSION)" >&2
 
 if [ "$HARPOON_GUEST_ARCH" = "x86_64" ]; then
   # Virtualization.framework on Intel boots the x86_64 bzImage directly.

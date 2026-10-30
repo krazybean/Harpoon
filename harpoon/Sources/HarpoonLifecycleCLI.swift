@@ -215,14 +215,13 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
             lastLogCheck = log
             if log.contains("HARPOON_RUNNING") && FileManager.default.fileExists(atPath: HarpoonPaths.dockerSocketPath) {
                 // verify perms 0600
-                let perms = socketPerms(HarpoonPaths.dockerSocketPath)
                 // perms from stat includes more, but we check via stat -f; use direct check
                 var st = stat()
                 var okPerms = false
                 if stat(HarpoonPaths.dockerSocketPath, &st) == 0 {
                     okPerms = (st.st_mode & 0o777) == 0o600
                 }
-                if okPerms || true { // socket exists is primary; perms warning but still success
+                if okPerms {
                     success = true
                     break
                 }

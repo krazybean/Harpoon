@@ -355,7 +355,13 @@ readyPoll.setEventHandler {
         readyPollCancelled = true
         lifecycle.transition(to: .dockerReady)
         log("HARPOON_DOCKER_READY observed, starting bridges")
-        manager.startBridges()
+        guard manager.startBridges() else {
+            readyPoll.cancel()
+            lifecycle.fail("bridge startup failed")
+            log("HARPOON_BRIDGE_START_FAILURE")
+            initiateShutdown(reason: "BRIDGE_START_FAILURE")
+            return
+        }
         lifecycle.transition(to: .running)
         log("VM Running, vsock bridge active, socket \(config.dockerSocketPath)")
         log("HARPOON_RUNNING")

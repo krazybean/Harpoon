@@ -18,6 +18,7 @@ SRC_INIT="$REPO_ROOT/tools/guest-builder/src/init"
 SRC_MGMT="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt"
 SRC_MGMT_WRAPPER="$REPO_ROOT/tools/guest-builder/src/harpoon-mgmt-wrapper"
 ROOT_IMG="$ASSET_DIR/harpoon-root.img"
+KERNEL_RELEASE_CHECK="$SCRIPT_DIR/verify-initramfs-kernel.sh"
 source "$SCRIPT_DIR/build-engine.sh"
 mkdir -p "$ASSET_DIR" "$CACHE_DIR"
 
@@ -33,7 +34,7 @@ input_manifest() {
   printf 'pin %s %s\n' initramfs-virt "$EXPECTED_INITRAMFS_VIRT_SHA"
   printf 'pin %s %s\n' modloop "$EXPECTED_MODLOOP_SHA"
   printf 'pin %s %s\n' minirootfs "$EXPECTED_MINIROOTFS_SHA"
-  for file in "$SCRIPT_DIR/build-initramfs.sh" "$SCRIPT_DIR/rebuild-initramfs-container.sh" "$SRC_INIT" "$SRC_MGMT" "$SRC_MGMT_WRAPPER" "$REPO_ROOT/tools/guest-builder/required-modules.txt" "$REPO_ROOT/tools/guest-builder/required-kernel-features.txt" "$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt" "$ROOT_IMG"; do
+  for file in "$SCRIPT_DIR/build-initramfs.sh" "$SCRIPT_DIR/rebuild-initramfs-container.sh" "$KERNEL_RELEASE_CHECK" "$SRC_INIT" "$SRC_MGMT" "$SRC_MGMT_WRAPPER" "$REPO_ROOT/tools/guest-builder/required-modules.txt" "$REPO_ROOT/tools/guest-builder/required-kernel-features.txt" "$REPO_ROOT/tools/guest-builder/kernel-feature-modules.txt" "$ROOT_IMG"; do
     [ -f "$file" ] || { echo "[build-initramfs] FAIL: missing input $file" >&2; return 1; }
     rel="${file#$REPO_ROOT/}"
     printf 'sha256 %s %s\n' "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$rel"
@@ -48,6 +49,7 @@ case "${1:-}" in
   --fingerprint) cat "$CURRENT_INPUTS"; exit 0 ;;
   --check)
     if [ -f "$OUT" ] && [ -f "$FINGERPRINT" ] && cmp -s "$CURRENT_INPUTS" "$FINGERPRINT"; then
+      "$KERNEL_RELEASE_CHECK" "$OUT" "$EXPECTED_KERNEL"
       echo "[build-initramfs] current: $OUT" >&2
       exit 0
     fi
@@ -119,9 +121,9 @@ if [ -f "$OUT" ]; then echo "[build-initramfs] STALE: input manifest missing, ma
 
 # 3. deterministic REBUILD via Docker Linux (Alpine 3.22)
 # Pinned inputs (Alpine 3.22, kernel 6.12.110-0-virt; aarch64 shown, every arch pinned in guest-arch.sh):
-#   Kernel: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt (6.12.110-0-virt)
-#   Initramfs-virt: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/initramfs-virt
-#   Modloop: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/modloop-virt
+#   Kernel: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-3.22.6/vmlinuz-virt (6.12.110-0-virt)
+#   Initramfs-virt: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-3.22.6/initramfs-virt
+#   Modloop: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-3.22.6/modloop-virt
 #   Minirootfs: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.1-aarch64.tar.gz
 # Packages pinned at build time via apk add with explicit Alpine 3.22 repos (no latest).
 # Required modules injected from modloop via modules.dep dependency walk (virtio, vsock, etc).
@@ -142,6 +144,7 @@ if harpoon_detect_build_engine; then
     -v "$REPO_ROOT:/repo" -v "$CACHE_DIR:/cache" alpine:3.22 \
     sh /repo/tools/guest-builder/rebuild-initramfs-container.sh
   if [ -f "$OUT" ]; then
+    "$KERNEL_RELEASE_CHECK" "$OUT" "$EXPECTED_KERNEL"
     write_fingerprint
     echo "[build-initramfs] REBUILD SUCCESS at $OUT" >&2
     ls -lh "$OUT" >&2
@@ -155,6 +158,7 @@ fi
 if [ "${HARPOON_ALLOW_BOOTSTRAP:-}" = "1" ] && [ -f "$BOOTSTRAP" ]; then
   echo "[build-initramfs] BOOTSTRAP MODE (development-only, HARPOON_ALLOW_BOOTSTRAP=1): using $BOOTSTRAP" >&2
   cp -p "$BOOTSTRAP" "$OUT"
+  "$KERNEL_RELEASE_CHECK" "$OUT" "$EXPECTED_KERNEL"
   rm -f "$FINGERPRINT"
   ls -lh "$OUT" >&2
   if command -v shasum >/dev/null; then echo "[build-initramfs] sha256 $(shasum -a 256 "$OUT" | cut -d' ' -f1)" >&2; fi
