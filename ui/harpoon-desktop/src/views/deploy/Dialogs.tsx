@@ -49,7 +49,7 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
     const trigger = dialog.kind === "retry" ? "retry" : dialog.kind === "promote" ? "promote" : dialog.kind === "redeploy" ? "redeploy" : "manual";
     return (
       <Dialog title={title} sub="Review the plan before anything changes. (Simulated: confirming starts a mock deployment.)" onClose={close}
-        footer={<button className="btn btn--primary" disabled={locked || !!c.state.job} onClick={() => { c.dispatch({ type: "start-deploy", appId: app.id, trigger, revision }, true); c.open(null); c.setRoute({ screen: "app", tab: "logs" }); }}><RocketLaunch size={14} /> {dialog.kind === "promote" ? "Promote" : "Deploy"}</button>}>
+        footer={<button className="btn btn--primary" disabled={locked || !!c.state.job} onClick={() => { c.dispatch({ type: "start-deploy", appId: app.id, trigger, revision, env: "production" }, true); c.open(null); c.setRoute({ screen: "app", tab: "logs" }); }}><RocketLaunch size={14} /> {dialog.kind === "promote" ? "Promote" : "Deploy"}</button>}>
         <Plan>
           <Row icon={<Cube size={14} />}>{dialog.kind === "promote" ? <>A <b>new deployment</b> of <span className="mono">{revision.sha}</span> under Production configuration — Production secrets are resolved, not Preview's. The image is <b>rebuilt</b> because a build-time variable differs.</> : <>Build <span className="mono">{revision.sha}</span> from <code>{app.settings.dockerfile}</code> — <b>the running release is not touched</b></>}</Row>
           <Row icon={<Check size={14} />}>Run a preliminary health check on the new build using a temporary port</Row>
@@ -81,6 +81,20 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
     );
   }
 
+  if (dialog.kind === "unlock-help") {
+    return (
+      <Dialog title="Unlocking the Keychain" sub="Simulated help — Harpoon does not touch your real Keychain here." onClose={close}
+        footer={<button className="btn btn--primary" onClick={close}>Close</button>}>
+        <Plan>
+          <Row icon={<Key size={14} />}>Secrets live in your macOS login Keychain. It locks when you log out or after a timeout set in <b>Keychain Access</b>.</Row>
+          <Row icon={<Check size={14} />}>To unlock it, open <b>Keychain Access</b>, select <b>login</b> and choose <b>File → Unlock Keychain</b>, or log out and back in.</Row>
+          <Row icon={<Pause size={14} />}>While it is locked nothing is built, stopped or replaced. Come back and deploy again once it is unlocked.</Row>
+          <Row icon={<Cube size={14} />}>In this simulation, use the <b>Keychain</b> control in the simulation bar to switch to unlocked.</Row>
+        </Plan>
+      </Dialog>
+    );
+  }
+
   if (dialog.kind === "resume") {
     return <ResumeDialog c={c} app={app} close={close} />;
   }
@@ -108,7 +122,7 @@ function ResumeDialog({ c, app, close }: { c: Ctx; app: AppModel; close: () => v
     <Dialog wide title="Resume automatic deployments" sub={app.automation.state === "paused" ? "Paused. Choose explicitly what happens to the events that arrived meanwhile." : "Automation is already active."} onClose={close}
       footer={<>
         <button className="btn btn--secondary" onClick={() => { c.dispatch({ type: "resume", appId: app.id, mode: "skip" }); close(); }}>Resume without deploying</button>
-        <button className="btn btn--primary" disabled={!held.length} onClick={() => { c.dispatch({ type: "resume", appId: app.id, mode: "deploy", heldEventId: pick }, true); close(); }}><Play size={14} /> Resume &amp; deploy</button>
+        <button className="btn btn--primary" disabled={!held.length || !pick || c.state.keychain === "locked" || !!c.state.job} title={c.state.keychain === "locked" ? "Keychain is locked — held events are kept until it is unlocked" : c.state.job ? "A deployment is already running — held events are kept" : undefined} onClick={() => { c.dispatch({ type: "resume", appId: app.id, mode: "deploy", heldEventId: pick }, true); close(); }}><Play size={14} /> Resume &amp; deploy</button>
       </>}>
       <div className="dp-h2">Held events ({held.length})</div>
       <div className="dp-tablewrap"><table className="dp-table"><tbody>

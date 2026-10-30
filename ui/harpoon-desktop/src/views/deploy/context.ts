@@ -9,6 +9,7 @@ export type DialogState =
   | { kind: "retry"; depId: string }
   | { kind: "rollback"; releaseId: string }
   | { kind: "resume" }
+  | { kind: "unlock-help" }
   | { kind: "recover" }
   | { kind: "variable"; name?: string };
 

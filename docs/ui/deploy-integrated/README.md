@@ -64,3 +64,12 @@ Side-by-side crops (prototype left, integrated right): `comparison/`.
 - Scenarios `building` and `recovering` hold still until stepped; user-started deployments run by
   themselves (~0.9 s per phase). Durations and metrics are illustrative.
 - The global rail does not collapse; the existing header meters show `N/A` outside Tauri.
+
+## WKWebView smoke test (PR review follow-up)
+
+`wkwebview.swift` loads the Vite dev server in a real `WKWebView` (macOS WebKit, the engine Tauri uses) and drives the
+Deployments UI: navigation, scroll container, deploy dialog, Development actions disabled, Keychain help, simulated
+labels, simulated disconnected runtime, return to Containers. Screenshots are in `wkwebview/`.
+
+This is the WebKit engine in a minimal Swift host, **not** the packaged Tauri app: Tauri IPC, window chrome and the real
+runtime were not exercised.

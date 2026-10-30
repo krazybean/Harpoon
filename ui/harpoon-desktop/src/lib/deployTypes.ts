@@ -155,7 +155,7 @@ export type DeployAction =
   | { type: "set-scenario"; scenario: ScenarioId }
   | { type: "set-keychain"; keychain: KeychainState }
   | { type: "set-next-outcome"; outcome: NextOutcome }
-  | { type: "start-deploy"; appId: string; trigger: Trigger; revision?: Revision }
+  | { type: "start-deploy"; appId: string; trigger: Trigger; revision?: Revision; env?: Env }
   | { type: "advance" }
   | { type: "rollback"; appId: string; releaseId: string }
   | { type: "recover"; appId: string }

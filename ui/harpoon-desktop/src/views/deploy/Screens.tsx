@@ -99,6 +99,8 @@ export function AppScreen({ c }: { c: Ctx }) {
   const recovering = recoveryInProgress(app);
   const paused = app.automation.state === "paused";
   const down = st.kind === "down";
+  const prod = env === "production";
+  const prodOnly = prod ? undefined : "Simulated Deployments only models Production release state. Switch to Production to use this action.";
 
   const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : <Check size={20} />;
   const heroClass = st.kind === "down" ? "err" : st.kind === "recovering" ? "info" : st.kind === "unknown" ? "idle" : "";
@@ -144,10 +146,10 @@ export function AppScreen({ c }: { c: Ctx }) {
           </div>
         </div>
         <div className="dp-actions">
-          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !ok })}
-          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !ok || !app.releases.length })}
-          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !ok || !rollbackTarget || recovering || !!c.state.job })}
-          {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !ok || !app.previews.length })}
+          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !ok || !prod, title: prodOnly })}
+          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !ok || !prod || !app.releases.length, title: prodOnly })}
+          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !ok || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
+          {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !ok || !prod || !app.previews.length, title: prodOnly })}
         </div>
       </div></div>
       <div className="dp-tabs" role="tablist">
@@ -353,7 +355,7 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
   const locked = c.state.keychain === "locked";
   return (
     <>
-      {locked && <Banner tone="err" icon={<Lock size={18} />} title="Keychain is locked" actions={btn("btn--primary", () => {}, <><Key size={14} /> How to unlock</>)}>Harpoon can't read secret values. Deployments that need them will fail <b>before any change</b> — nothing is built, stopped or replaced. History and logs still work.</Banner>}
+      {locked && <Banner tone="err" icon={<Lock size={18} />} title="Keychain is locked" actions={btn("btn--primary", () => c.open({ kind: "unlock-help" }), <><Key size={14} /> How to unlock</>)}>Harpoon can't read secret values. Deployments that need them will fail <b>before any change</b> — nothing is built, stopped or replaced. History and logs still work.</Banner>}
       <div className="dp-row dp-row--wrap" style={{ marginBottom: 10 }}>
         <div className="dp-seg"><button aria-pressed="true">{c.route.env[0].toUpperCase() + c.route.env.slice(1)}</button><button aria-pressed="false" disabled title="Not part of this mock">Compare with Preview</button></div>
         <span className="dp-spacer" /><span className="dp-faint hide-compact">Values resolve at deploy time; releases keep a snapshot. Changing a value affects <b>new</b> deployments only.</span>
@@ -408,7 +410,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
   const app = c.state.apps[c.route.appId];
   const d = app?.deployments.find((x) => x.id === c.route.depId) ?? app?.deployments[0];
   if (!app || !d) return <Banner tone="warn" title="Deployment not found">This simulated deployment no longer exists in the current scenario.</Banner>;
-  const ok = connected(c);
+  const ok = connected(c) && c.route.env === "production"; // the mock only models Production release state
   const r = d.recovery;
   const fail = d.status === "failed" || r?.outcome === "in_progress";
   const rel = d.releaseId ? app.releases.find((x) => x.id === d.releaseId) : null;

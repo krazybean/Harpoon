@@ -100,6 +100,23 @@ try {
   await evalJs("[...document.querySelectorAll('.shell-nav__item')].find(b => b.getAttribute('aria-label') === 'Deployments').click()");
   await sleep(500);
   await check("Deployments state survives navigating away and back", /Latest deployment|Projects/.test(await text()));
+  // PR #105 review corrections: Development cannot act on Production; Keychain help is real.
+  await setSelect("Runtime", "connected");
+  await sleep(300);
+  await evalJs("[...document.querySelectorAll('.dp-card')].find(x => /api/.test(x.innerText))?.click()");
+  await sleep(300);
+  await click("Development");
+  await sleep(300);
+  const devDisabled = await evalJs("(() => { const bs = [...document.querySelectorAll('.dp-actions button')]; return bs.length > 0 && bs.every(b => b.disabled); })()");
+  await check("Development route: Deploy/Redeploy/Roll back/Promote are all disabled", devDisabled);
+  await click("Production");
+  await sleep(300);
+  await evalJs("[...document.querySelectorAll('.dp-tabs button')].find(b => /^Variables/.test(b.innerText.trim()))?.click()");
+  await setSelect("Keychain", "locked");
+  await sleep(400);
+  await check("locked Keychain: 'How to unlock' opens simulated help", (await click("How to unlock")) && await waitFor(async () => /does not touch your real Keychain/.test(await evalJs("document.body.innerText"))));
+  await click("Close");
+  await setSelect("Keychain", "unlocked");
 } catch (e) {
   console.log("ERROR", e.message);
   results.push({ name: "script", ok: false });

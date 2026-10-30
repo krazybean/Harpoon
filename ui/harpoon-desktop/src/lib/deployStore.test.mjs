@@ -253,3 +253,65 @@ test("create-project from the empty state yields a healthy, consistent workspace
   assert.equal(s.projects.length, 2);
   assert.equal(appStatus(api(s), "connected").kind, "running");
 });
+
+// ---- PR #105 review corrections
+
+const pausedWithHeld = () => initialState("cutover-restored");
+const heldIds = (s) => api(s).automation.held.map((h) => h.id);
+
+test("resume & deploy with a locked Keychain keeps paused state and held events", () => {
+  let s = pausedWithHeld();
+  assert.ok(heldIds(s).length > 0);
+  s = reduce(s, { type: "set-keychain", keychain: "locked" });
+  const before = JSON.stringify(s);
+  const after = reduce(s, { type: "resume", appId: "api", mode: "deploy", heldEventId: heldIds(s)[0] });
+  assert.equal(JSON.stringify(after), before);
+  assert.equal(api(after).automation.state, "paused");
+});
+
+test("resume & deploy while a deployment is running keeps paused state and held events", () => {
+  let s = pausedWithHeld();
+  s = reduce(s, { type: "rollback", appId: "api", releaseId: api(s).releases.find((r) => r.id !== api(s).currentReleaseId).id });
+  s = reduce(s, { type: "start-deploy", appId: "api", trigger: "manual" });
+  assert.ok(s.job);
+  const held = heldIds(s);
+  const after = reduce(s, { type: "resume", appId: "api", mode: "deploy", heldEventId: held[0] });
+  assert.equal(api(after).automation.state, "paused");
+  assert.deepEqual(heldIds(after), held);
+});
+
+test("resume & deploy never substitutes another revision for an invalid selection", () => {
+  const s = pausedWithHeld();
+  for (const id of ["nope", undefined]) {
+    const after = reduce(s, { type: "resume", appId: "api", mode: "deploy", heldEventId: id });
+    assert.equal(api(after).automation.state, "paused");
+    assert.deepEqual(heldIds(after), heldIds(s));
+    assert.equal(after.job, null);
+  }
+});
+
+test("resume & deploy deploys exactly the selected held revision", () => {
+  const s = pausedWithHeld();
+  const first = api(s).automation.held[0];
+  const after = reduce(s, { type: "resume", appId: "api", mode: "deploy", heldEventId: first.id });
+  assert.equal(api(after).automation.state, "active");
+  assert.equal(api(after).deployments[0].revision.sha, first.revision.sha);
+});
+
+test("resume without deploying still dismisses held events explicitly", () => {
+  const after = reduce(pausedWithHeld(), { type: "resume", appId: "api", mode: "skip" });
+  assert.equal(api(after).automation.state, "active");
+  assert.deepEqual(heldIds(after), []);
+  assert.equal(after.job, null);
+});
+
+test("a Development deploy action cannot change Production", () => {
+  const s = initialState("healthy");
+  for (const env of ["development", "preview"]) {
+    const after = reduce(s, { type: "start-deploy", appId: "api", trigger: "manual", env });
+    assert.equal(JSON.stringify(after), JSON.stringify(s));
+  }
+  const prod = reduce(s, { type: "start-deploy", appId: "api", trigger: "manual", env: "production" });
+  assert.ok(prod.job);
+  assert.equal(drain(prod).apps.api.deployments[0].env, "production");
+});

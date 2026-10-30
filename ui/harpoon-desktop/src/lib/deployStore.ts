@@ -182,6 +182,8 @@ export function reduce(state: DeployState, action: DeployAction): DeployState {
       const app = s.apps[action.appId];
       // Guards: one deployment at a time, and an unreadable secret fails *before any side effect*.
       if (!app || s.job || s.keychain === "locked") return state;
+      // The mock models one environment's release state (Production). Never let another environment's action change it.
+      if (action.env && action.env !== "production") return state;
       const revision = action.revision ?? REV.next;
       const d = newDeployment(s, action.trigger, revision);
       app.deployments.unshift(d);
@@ -227,13 +229,17 @@ export function reduce(state: DeployState, action: DeployAction): DeployState {
     case "resume": {
       const app = s.apps[action.appId];
       if (!app || app.automation.state !== "paused") return state;
-      const picked: HeldEvent | undefined = action.mode === "deploy" ? (app.automation.held.find((h) => h.id === action.heldEventId) ?? app.automation.held[app.automation.held.length - 1]) : undefined;
-      app.automation = { state: "active", held: [] }; // held events are dismissed by the developer's explicit choice
-      if (picked && !s.job && s.keychain !== "locked") {
-        const d = newDeployment(s, "poll", picked.revision);
-        app.deployments.unshift(d);
-        s.job = { appId: app.id, deploymentId: d.id, outcome: s.nextOutcome, hadPrevious: app.currentReleaseId !== null, phase: 0 };
+      if (action.mode === "skip") {
+        app.automation = { state: "active", held: [] }; // dismissed by the developer's explicit choice
+        return s;
       }
+      // Resume & deploy: nothing changes unless the selected deployment can actually start. Never substitute another revision.
+      const picked: HeldEvent | undefined = app.automation.held.find((h) => h.id === action.heldEventId);
+      if (!picked || s.job || s.keychain === "locked") return state;
+      app.automation = { state: "active", held: [] };
+      const d = newDeployment(s, "poll", picked.revision);
+      app.deployments.unshift(d);
+      s.job = { appId: app.id, deploymentId: d.id, outcome: s.nextOutcome, hadPrevious: app.currentReleaseId !== null, phase: 0 };
       return s;
     }
     case "create-project": {

@@ -81,3 +81,11 @@ test("existing screens keep their own files and are not edited by this feature",
     assert.doesNotMatch(read(`../views/${f}.tsx`), /deploy/i, `${f} must not reference the deployment feature`);
   }
 });
+
+test("Development route disables every Production-changing action and Keychain help is wired", () => {
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(screens, /const prod = env === "production"/);
+  assert.equal((screens.match(/!prod/g) ?? []).length >= 4, true);
+  assert.doesNotMatch(screens, /btn\("btn--primary", \(\) => \{\}/);
+  assert.match(screens, /unlock-help/);
+});
