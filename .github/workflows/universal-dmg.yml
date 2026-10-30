@@ -90,7 +90,13 @@ jobs:
           fi
           gh release download "$ASSETS_TAG" --repo "$GITHUB_REPOSITORY" --pattern harpoon-guest-assets.tar.gz --output "$RUNNER_TEMP/guest-assets.tar.gz"
           echo "$ASSETS_SHA256  $RUNNER_TEMP/guest-assets.tar.gz" | shasum -a 256 -c -
+          # RC2 carries a reproducible arm64 initramfs in-tree; preserve it before
+          # extracting the cached guest bundle, then overlay it and regenerate its
+          # manifest. x86_64 assets remain the separately verified experimental Intel guest.
+          cp assets/guest/harpoon-initramfs.cpio.gz "$RUNNER_TEMP/rc2-arm64-initramfs.cpio.gz"
           tar -xzf "$RUNNER_TEMP/guest-assets.tar.gz" -C assets/guest
+          cp "$RUNNER_TEMP/rc2-arm64-initramfs.cpio.gz" assets/guest/harpoon-initramfs.cpio.gz
+          HARPOON_GUEST_ARCH=aarch64 bash tools/guest-builder/guest-assets-manifest.sh --write assets/guest
           for arch in aarch64 x86_64; do
             HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/guest-assets-manifest.sh --verify
             HARPOON_GUEST_ARCH=$arch bash tools/guest-builder/verify-root.sh "$(HARPOON_GUEST_ARCH=$arch sh -c '. tools/guest-builder/guest-arch.sh; guest_asset_dir assets/guest')/harpoon-root.img"
