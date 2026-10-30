@@ -76,6 +76,11 @@ pub enum Verdict {
 pub struct CheckEvidence {
     pub target: String,
     pub expected: String,
+    /// The status class the observations are judged against; carried so the evidence can be
+    /// re-validated without trusting `verdict`.
+    pub expect: StatusClass,
+    /// True when the observations were scripted by a fake, not made against a container.
+    pub simulated: bool,
     pub attempts: Vec<Attempt>,
     pub consecutive_required: u8,
     pub consecutive_reached: u8,
@@ -85,8 +90,46 @@ pub struct CheckEvidence {
 }
 
 impl CheckEvidence {
+    /// Healthy only if the verdict says so *and* the observations back it up. A verdict alone
+    /// establishes nothing.
     pub fn is_healthy(&self) -> bool {
-        self.verdict == Verdict::Healthy
+        self.validate().is_ok()
+    }
+
+    /// Re-derive the verdict from the observations. Requires a positive threshold, at least
+    /// `consecutive_required` trailing accepted observations made while the container was
+    /// running, and `consecutive_reached` equal to that trailing run.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.verdict != Verdict::Healthy {
+            return Err(format!("verdict is {:?}", self.verdict));
+        }
+        if self.consecutive_required == 0 {
+            return Err("no positive consecutive-success threshold configured".into());
+        }
+        if self.attempts.is_empty() {
+            return Err("no health observation was made".into());
+        }
+        let run = self
+            .attempts
+            .iter()
+            .rev()
+            .take_while(|a| {
+                a.container_running && matches!(&a.observation, Observation::Status(s) if self.expect.accepts(*s))
+            })
+            .count();
+        if run < usize::from(self.consecutive_required) {
+            return Err(format!(
+                "observations show {run} trailing successes while running, {} required",
+                self.consecutive_required
+            ));
+        }
+        if usize::from(self.consecutive_reached) != run.min(usize::from(u8::MAX)) {
+            return Err(format!(
+                "claims {} consecutive successes but observations show {run}",
+                self.consecutive_reached
+            ));
+        }
+        Ok(())
     }
 
     pub fn last_observation(&self) -> Option<&Observation> {
@@ -113,15 +156,42 @@ impl CheckEvidence {
         )
     }
 
-    /// Evidence for a check that was not run at all (a fake that does not probe).
+    /// Evidence for a check that was not run at all. It can never establish health.
     pub fn not_probed(target: &str) -> CheckEvidence {
         CheckEvidence {
             target: target.to_string(),
             expected: "no probe configured".to_string(),
+            expect: StatusClass::Success2xx,
+            simulated: false,
             attempts: Vec::new(),
             consecutive_required: 0,
             consecutive_reached: 0,
             elapsed_ms: 0,
+            verdict: Verdict::NotHealthy,
+            scope_note: SCOPE_NOTE,
+        }
+    }
+
+    /// Scripted passing evidence for fakes: `spec.consecutive_ok` explicit HTTP 200
+    /// observations against a running container, marked as simulated. No networking.
+    pub fn simulated_passing(target: &str, spec: &HealthSpec) -> CheckEvidence {
+        let n = spec.consecutive_ok.max(1);
+        let attempts = (0..u64::from(n))
+            .map(|i| Attempt {
+                at_ms: i * spec.interval_ms,
+                observation: Observation::Status(200),
+                container_running: true,
+            })
+            .collect();
+        CheckEvidence {
+            target: target.to_string(),
+            expected: format!("HTTP {:?}, {} consecutive (simulated)", spec.expect, n),
+            expect: spec.expect,
+            simulated: true,
+            attempts,
+            consecutive_required: n,
+            consecutive_reached: n,
+            elapsed_ms: u64::from(n - 1) * spec.interval_ms,
             verdict: Verdict::Healthy,
             scope_note: SCOPE_NOTE,
         }
@@ -173,7 +243,7 @@ pub fn run_health(
         }
         run = if ok { run.saturating_add(1) } else { 0 };
         best = best.max(run);
-        if run >= spec.consecutive_ok {
+        if spec.consecutive_ok > 0 && run >= spec.consecutive_ok {
             break Verdict::Healthy;
         }
         if clock.now_ms().saturating_sub(start) + spec.interval_ms > spec.startup_deadline_ms {
@@ -184,6 +254,8 @@ pub fn run_health(
     CheckEvidence {
         target: target.to_string(),
         expected: format!("HTTP {:?}, {} consecutive", spec.expect, spec.consecutive_ok),
+        expect: spec.expect,
+        simulated: false,
         attempts,
         consecutive_required: spec.consecutive_ok,
         consecutive_reached: if verdict == Verdict::Healthy { run } else { best },

@@ -2,7 +2,7 @@
 
 Milestone B, step 0 of the Harpoon 2.1 deployment control plane (see
 `docs/deployment-control-plane-requirements.md`, D4/D5/D10). Pure Rust, **no dependencies**,
-no I/O. 94 tests (47 foundation + 47 B1).
+no I/O. 112 tests (47 foundation + 47 B1 + 18 B1 corrections).
 
 ## In scope
 - `ids` — stable, typed, sortable identifiers (`prj_…`, `app_…`, `dep_…`, `rel_…`) and the three

@@ -613,8 +613,10 @@ impl Run<'_> {
     /// A check that "passed" must say so in its evidence.
     fn judge(res: Result<CheckEvidence, StepError>) -> StepOut {
         match res {
-            Ok(ev) if ev.is_healthy() => Ok(Some(ev)),
-            Ok(ev) => Err(StepError::new("the check returned without confirming health").with_evidence(ev)),
+            Ok(ev) => match ev.validate() {
+                Ok(()) => Ok(Some(ev)),
+                Err(why) => Err(StepError::new(format!("the check did not establish health: {why}")).with_evidence(ev)),
+            },
             Err(e) => Err(e),
         }
     }

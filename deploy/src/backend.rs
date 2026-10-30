@@ -6,7 +6,7 @@
 //! container or health probe is actually performed.
 
 use crate::engine::{JournalError, StepIo};
-use crate::health::CheckEvidence;
+use crate::health::{CheckEvidence, HealthSpec};
 use crate::ids::{labels, ApplicationId, DeploymentId};
 use crate::ledger::{Disposition, LedgerRecord, Observed, RemoveRequest, RemoveResult, ResourceKey, ResourceKind};
 use crate::ports::{self, Occupancy, Purpose};
@@ -480,7 +480,10 @@ impl Backend for FakeBackend {
         let name = format!("hp-{}-pre", io.deployment());
         self.create(io, ResourceKind::Container, &name, Disposition::RemoveAlways)?;
         self.run(Call::PreliminaryCheck, |b| b.preliminary.clone())?;
-        Ok(CheckEvidence::not_probed("fake preliminary check"))
+        Ok(CheckEvidence::simulated_passing(
+            "fake preliminary check",
+            &HealthSpec::first_test("/"),
+        ))
     }
     fn stop_current(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.run(Call::StopCurrent, |b| b.stop_current.clone())
@@ -509,7 +512,7 @@ impl Backend for FakeBackend {
         Ok(self
             .final_evidence
             .clone()
-            .unwrap_or_else(|| CheckEvidence::not_probed("fake final check")))
+            .unwrap_or_else(|| CheckEvidence::simulated_passing("fake final check", &HealthSpec::first_test("/"))))
     }
     fn stop_new(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.run(Call::StopNew, |b| b.stop_new.clone())

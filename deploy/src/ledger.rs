@@ -188,13 +188,16 @@ pub struct Entry {
     pub id: Option<String>,
     pub state: EntryState,
     pub cleanup_attempts: u32,
+    /// An attempt was recorded and its result has not been. Exactly one result may consume it;
+    /// if it is never consumed the removal's outcome is unknown and stays unresolved.
+    pub cleanup_outstanding: bool,
     pub intent_ms: u64,
 }
 
 impl Entry {
-    /// Needs the user's attention: cleanup failed or was refused. Never silently dropped.
+    /// Needs the user's attention: cleanup failed, was refused, or was attempted with no recorded result. Never silently dropped.
     pub fn needs_attention(&self) -> bool {
-        matches!(self.state, EntryState::CleanupFailed(_) | EntryState::Refused(_))
+        self.cleanup_outstanding || matches!(self.state, EntryState::CleanupFailed(_) | EntryState::Refused(_))
     }
     pub fn is_released(&self) -> bool {
         matches!(self.state, EntryState::Released(_))
@@ -259,6 +262,12 @@ impl Ledger {
         self.entries.iter().filter(|e| e.needs_attention()).collect()
     }
 
+    /// Entries with a cleanup attempt that never got a result: the removal may or may not have
+    /// happened. Reported like a failure, never as success.
+    pub fn cleanup_interrupted(&self) -> Vec<&Entry> {
+        self.entries.iter().filter(|e| e.cleanup_outstanding).collect()
+    }
+
     /// Entries that are not settled: still `Intended`/`Created`, or cleanup failed.
     pub fn unsettled(&self) -> Vec<&Entry> {
         self.entries
@@ -296,6 +305,7 @@ impl Ledger {
                     id: None,
                     state: EntryState::Intended,
                     cleanup_attempts: 0,
+                    cleanup_outstanding: false,
                     intent_ms: *at_ms,
                 });
             }
@@ -324,7 +334,10 @@ impl Ledger {
                         "cleanup attempt on a settled entry",
                     ));
                 }
+                // A second attempt while one is outstanding means the first was interrupted;
+                // the new one is a real retry and takes over as the outstanding attempt.
                 e.cleanup_attempts += 1;
+                e.cleanup_outstanding = true;
             }
             LedgerRecord::CleanupResult {
                 key,
@@ -335,12 +348,13 @@ impl Ledger {
                 let e = self
                     .find_mut(deployment, key)
                     .ok_or_else(|| LedgerError::UnknownEntry(key.clone()))?;
-                if e.cleanup_attempts == 0 {
+                if !e.cleanup_outstanding {
                     return Err(LedgerError::OutOfOrder(
                         key.clone(),
-                        "cleanup result without an attempt",
+                        "cleanup result without an outstanding attempt",
                     ));
                 }
+                e.cleanup_outstanding = false;
                 e.state = match outcome {
                     CleanupOutcome::Removed => EntryState::Released(Released::Removed),
                     CleanupOutcome::AlreadyAbsent => EntryState::Released(Released::AlreadyAbsent),

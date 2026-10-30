@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use harpoon_deploy::backend::{Call, FakeBackend, Op, OpTrace, ResourceCall};
 use harpoon_deploy::engine::{run_deployment_with, Budgets, EngineError, JournalError, MemoryJournal, RunConfig};
-use harpoon_deploy::health::{Attempt, CheckEvidence, Observation, Verdict, SCOPE_NOTE};
+use harpoon_deploy::health::{Attempt, CheckEvidence, Observation, StatusClass, Verdict, SCOPE_NOTE};
 use harpoon_deploy::ledger::{Disposition, EndState, EntryState, Ledger, LedgerRecord, Released, ResourceKind};
 use harpoon_deploy::logs::Redactor;
 use harpoon_deploy::state::*;
@@ -563,6 +563,8 @@ fn unhealthy_evidence() -> CheckEvidence {
     CheckEvidence {
         target: "http://127.0.0.1:39001/".into(),
         expected: "HTTP 2xx, 2 consecutive".into(),
+        expect: StatusClass::Success2xx,
+        simulated: false,
         attempts: vec![Attempt {
             at_ms: 1,
             observation: Observation::Status(503),
