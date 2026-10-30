@@ -5,7 +5,7 @@ Result of the review of state transitions, cutover journal, crash recovery and t
 Nothing here adds I/O; the only code change in this review is one clippy fix (`io::Error::other`).
 
 ## What was verified
-- `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test --locked --offline`: 47 tests
+- `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test --offline`: 47 tests
   (26 unit + 21 lifecycle) pass on Rust 1.97.1. New workflow `deploy-engine.yml` runs the same, path-filtered,
   plus a guard that the crate declares no dependencies and uses no `std::net`/`std::process`/async/db APIs.
 - **State transitions:** the 8 × 8 transition relation is table-tested. Terminal states have no exits;

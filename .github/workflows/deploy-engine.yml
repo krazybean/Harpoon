@@ -58,7 +58,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --locked --offline --all-targets -- -D warnings
+        run: cargo clippy --offline --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked --offline
+        run: cargo test --offline
