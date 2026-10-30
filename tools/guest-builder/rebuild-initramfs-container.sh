@@ -2,7 +2,8 @@
 set -euo pipefail
 apk add --no-cache cpio gzip squashfs-tools curl e2fsprogs e2fsprogs-extra > /dev/null
 . /repo/tools/guest-builder/guest-arch.sh
-BASE="$GUEST_ALPINE_BASE"
+ALPINE_NETBOOT_RELEASE="3.22.6"
+BASE="$GUEST_ALPINE_BASE/netboot-$ALPINE_NETBOOT_RELEASE"
 CACHE="/cache"
 REPO="/repo"
 ASSET_DIR="$(guest_asset_dir /repo/assets/guest)"
@@ -12,7 +13,7 @@ LOADER="$GUEST_MUSL_LOADER"
 # Fetch modloop and minirootfs to cache if missing
 if [ ! -f "$CACHE/modloop-virt" ]; then
   echo "[rebuild] fetching modloop-virt..." >&2
-  curl -L --fail -o "$CACHE/modloop-virt" "$BASE/netboot/modloop-virt"
+  curl -L --fail -o "$CACHE/modloop-virt" "$BASE/modloop-virt"
   echo "[rebuild] modloop sha256 $(sha256sum "$CACHE/modloop-virt" | cut -d" " -f1)" >&2
 fi
 if [ "$(sha256sum "$CACHE/modloop-virt" | awk "{print \$1}")" != "$EXPECTED_MODLOOP_SHA" ]; then echo "[rebuild] FAIL modloop sha mismatch expected $EXPECTED_MODLOOP_SHA" >&2; exit 1; fi

@@ -2,6 +2,20 @@
 
 > Harpoon is a lightweight Docker-compatible runtime for Apple Silicon macOS. Docker Engine remains authoritative for containers/images/volumes/networks/API/Compose/BuildKit. Harpoon owns only the macOS↔Linux boundary (VM lifecycle, socket bridge, networking, bind-mount transport, resources, memory reclamation, diagnostics).
 
+## Deployment control plane initiative — SPEC DRAFT / SPIKE COMPLETE (2026-10-29)
+
+The project has started a separate Harpoon-native deployment control-plane initiative.
+The canonical status and direction index is
+`docs/harpoon-2-status-and-direction.md`; the proposed boundary is recorded in
+`docs/decisions/0004-deployment-control-plane-boundary.md`.
+The requirements draft is `docs/deployment-control-plane-requirements.md`; the
+Coolify investigation is `docs/results/SPIKE_COOLIFY_DEPLOYMENT.md`. This initiative
+must preserve Docker ownership and must not expand the runtime MVP into a second
+container engine, SSH-managed remote-server product, Kubernetes, or multi-server
+orchestration. The next step is a narrow single-runtime prototype: deploy-key-backed
+Git source, Dockerfile/Compose/image deployment, serialized deployment state, health
+gating, rollback safety, and verified GitHub/GitLab webhook fixtures.
+
 ## Current Position
 
 ### Harpoon 2 stabilization transition — FEATURE COMPLETE / RELEASE NOT READY (2026-10-17 America/Chicago)

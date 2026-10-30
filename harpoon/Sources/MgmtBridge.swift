@@ -3,18 +3,18 @@ import Virtualization
 
 extension BridgeSet {
 // MARK: - Management channel (Stage 3A) vsock 2377, unix 0600, no TCP, no SSH
-func startMgmtBridge() {
-    guard vsockDevice != nil else { log("HARPOON_MGMT_BRIDGE_SKIP no vsock"); return }
+func startMgmtBridge() -> Bool {
+    guard vsockDevice != nil else { log("HARPOON_MGMT_BRIDGE_SKIP no vsock"); return true }
     if FileManager.default.fileExists(atPath: config.mgmtSocketPath) {
         if isSocketLive(config.mgmtSocketPath) {
             log("HARPOON_ALREADY_RUNNING mgmt \(config.mgmtSocketPath) in use")
-            return
+            return false
         }
         log("HARPOON_STALE_CLEANUP removing stale \(config.mgmtSocketPath)")
         try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
     }
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { log("HARPOON_MGMT_FAILED socket \(String(cString:strerror(errno)))"); return }
+    guard fd >= 0 else { log("HARPOON_MGMT_FAILED socket \(String(cString:strerror(errno)))"); return false }
     mgmtListenerFd = fd
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -24,10 +24,20 @@ func startMgmtBridge() {
     let br = withUnsafePointer(to: addr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in Darwin.bind(fd, sp, len) } }
     guard br == 0 else {
         if errno == EADDRINUSE { log("HARPOON_ALREADY_RUNNING mgmt bind \(config.mgmtSocketPath) \(String(cString:strerror(errno)))") } else { log("HARPOON_MGMT_FAILED bind \(String(cString:strerror(errno)))") }
-        close(fd); mgmtListenerFd = -1; return
+        close(fd); mgmtListenerFd = -1; return false
     }
-    chmod(config.mgmtSocketPath, 0o600)
-    guard listen(fd, 16) == 0 else { log("HARPOON_MGMT_FAILED listen \(String(cString:strerror(errno)))"); close(fd); mgmtListenerFd = -1; return }
+    guard chmod(config.mgmtSocketPath, 0o600) == 0 else {
+        log("HARPOON_MGMT_FAILED chmod 0600 \(String(cString:strerror(errno)))")
+        try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
+        close(fd); mgmtListenerFd = -1; return false
+    }
+    var socketStat = stat()
+    guard stat(config.mgmtSocketPath, &socketStat) == 0 && (socketStat.st_mode & 0o777) == 0o600 else {
+        log("HARPOON_MGMT_FAILED socket mode is not 0600")
+        try? FileManager.default.removeItem(atPath: config.mgmtSocketPath)
+        close(fd); mgmtListenerFd = -1; return false
+    }
+    guard listen(fd, 16) == 0 else { log("HARPOON_MGMT_FAILED listen \(String(cString:strerror(errno)))"); close(fd); mgmtListenerFd = -1; return false }
     ownsMgmtSocket = true
     log("HARPOON_MGMT_LISTENING \(config.mgmtSocketPath) 0600 -> vsock:\(config.mgmtVsockPort)")
     let flags = fcntl(fd, F_GETFL, 0)
@@ -106,6 +116,7 @@ func startMgmtBridge() {
     }
     source.setCancelHandler { close(fd) }
     source.resume()
+    return true
 }
 
 // M4: HTTP-aware first-request translation for host bind mounts

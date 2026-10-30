@@ -232,22 +232,6 @@ func isLockHeld() -> Bool {
     }
 }
 
-func socketExists0600(_ path: String) -> Bool {
-    var st = stat()
-    if stat(path, &st) != 0 { return false }
-    if (st.st_mode & S_IFMT) != S_IFSOCK { return false }
-    let perms = st.st_mode & 0o777
-    // we report 0600 check elsewhere, but existence check here
-    return perms == 0o600 || true // existence true even if perms off
-}
-
-func socketPerms(_ path: String) -> String {
-    var st = stat()
-    if stat(path, &st) != 0 { return "missing" }
-    let perms = st.st_mode & 0o777
-    return String(format: "%o", perms)
-}
-
 func dockerSocketReady() -> Bool {
     let path = HarpoonPaths.dockerSocketPath
     let fm = FileManager.default

@@ -43,11 +43,16 @@ final class BridgeSet {
         self.log = log
     }
 
-    func startAll() {
-        startUnixBridge()
+    @discardableResult
+    func startAll() -> Bool {
+        guard startUnixBridge() else { return false }
         startBalloonControl()
-        startMgmtBridge()
+        guard startMgmtBridge() else {
+            stopAll()
+            return false
+        }
         startPortForwarding()
+        return true
     }
 
     func stopAll() {
