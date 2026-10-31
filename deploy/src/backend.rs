@@ -144,6 +144,13 @@ pub trait Backend: ResourceOps {
     fn accepts_simulated_evidence(&self) -> bool {
         false
     }
+    /// Whether this backend can replace a running release (stop it, start the new one, and make
+    /// the bounded restoration attempt). A backend that cannot must say so: the engine then
+    /// prepares the candidate (build and preliminary check) and stops before anything is
+    /// stopped, instead of beginning a cutover it cannot complete or undo.
+    fn supports_cutover(&self) -> bool {
+        true
+    }
     /// One bounded attempt to bring the previous release back. `budget_ms` is a limit the
     /// backend must respect; it must not retry.
     fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult;
@@ -257,6 +264,7 @@ pub struct FakeBackend {
     remove_refuses: Vec<String>,
     list_fails: bool,
     final_evidence: Option<CheckEvidence>,
+    cutover_supported: bool,
 }
 
 impl FakeBackend {
@@ -281,6 +289,7 @@ impl FakeBackend {
             remove_refuses: Vec::new(),
             list_fails: false,
             final_evidence: None,
+            cutover_supported: true,
         }
     }
 
@@ -314,6 +323,11 @@ impl FakeBackend {
     /// Removing the object with this name is refused because its labels changed.
     pub fn refuse_remove(mut self, name: &str) -> Self {
         self.remove_refuses.push(name.to_string());
+        self
+    }
+    /// The backend cannot replace a running release (like the Docker backend today).
+    pub fn without_cutover(mut self) -> Self {
+        self.cutover_supported = false;
         self
     }
     pub fn fail_list(mut self) -> Self {
@@ -471,6 +485,9 @@ impl ResourceOps for FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    fn supports_cutover(&self) -> bool {
+        self.cutover_supported
+    }
     fn accepts_simulated_evidence(&self) -> bool {
         true
     }

@@ -4,9 +4,10 @@ use crate::{exit, Fail, Gate};
 use harpoon_deploy::backend::{FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
-    end_state, execute_actions, reconcile, run_deployment_with, Context, Report, RunConfig,
+    end_state, execute_actions, reconcile, run_deployment_confirmed, run_deployment_with, Context,
+    CutoverPlan, NotCutOver, Report, RunConfig,
 };
-use harpoon_deploy::ids::{ApplicationId, IdGenerator};
+use harpoon_deploy::ids::{ApplicationId, IdGenerator, ReleaseId};
 use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger, Observed, ResourceKind,
 };
@@ -38,6 +39,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "recover" => recover(p, out),
         "reconcile" => reconcile_cmd(p, out),
         "deploy" => deploy(p, gate, out),
+        "replace" => replace(p, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
@@ -397,6 +399,9 @@ fn status(p: &Parsed, out: &mut String) -> R {
                 f.step.as_str(),
                 f.message.lines().next().unwrap_or("")
             );
+        }
+        if let Some(ms) = d.interruption.and_then(|i| i.duration_ms()) {
+            let _ = writeln!(out, "    interruption: {ms} ms between stopping the previous release and the confirmed new one");
         }
         if d.status == DeploymentStatus::Interrupted && d.application_may_be_down() {
             let _ = writeln!(
@@ -1164,6 +1169,176 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     )
 }
 
+// ------------------------------------------------------------------ replace
+
+/// The release currently serving `app`: the most recently finished succeeded deployment whose
+/// serving container is still recorded and not released. `None` when there is nothing to replace.
+fn current_release(
+    ledger: &Ledger,
+    deps: &[Deployment],
+    app: &ApplicationId,
+) -> Option<(harpoon_deploy::ids::DeploymentId, ReleaseId)> {
+    deps.iter()
+        .filter(|d| d.application_id == *app && d.status == DeploymentStatus::Succeeded)
+        .filter(|d| {
+            ledger.entries().iter().any(|e| {
+                e.deployment == d.id && e.key.kind == ResourceKind::Container && !e.is_released()
+            })
+        })
+        .max_by(|a, b| {
+            a.finished_ms
+                .cmp(&b.finished_ms)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        })
+        .and_then(|d| d.release.clone().map(|r| (d.id.clone(), r)))
+}
+
+/// Health-gated replacement of a running release, offline only. The candidate is built and checked
+/// while the current release keeps running; the cutover plan and its anticipated interruption are
+/// printed before anything is stopped; the cutover itself needs `--confirm-cutover`.
+///
+/// Live replacement is deliberately not available: the bounded restoration that must follow a
+/// failed cutover is the next milestone, so a live run is refused before anything is read.
+fn replace(p: &Parsed, out: &mut String) -> R {
+    if !p.switch("simulate") {
+        return Err(Fail::refused(
+            "live replacement is not enabled in this build: the bounded cutover recovery that must follow a failed cutover is not implemented yet. \
+             Nothing was read, written or contacted. Use `replace --simulate` against a separate runtime directory for an offline run.",
+        ));
+    }
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let app: ApplicationId = p
+        .value("app")
+        .ok_or_else(|| Fail::usage("replace needs --app APPLICATION_ID"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?;
+    let sock = PathBuf::from("/nonexistent");
+    let s = source_cfg(p, &rt, &sock, true)?;
+    // Look before opening the writer: a refusal must not create a journal.
+    let Some(existing) = store::read_restored(&rt)? else {
+        return Err(replace_refused(&[format!(
+            "application {app} has no running release recorded; use `deploy` for a first deployment"
+        )]));
+    };
+    if current_release(&existing.ledger, &existing.deployments, &app).is_none() {
+        return Err(replace_refused(&[format!(
+            "application {app} has no running release recorded; use `deploy` for a first deployment"
+        )]));
+    }
+    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let deps = restored.deployments.clone();
+
+    let mut blockers = unfinished(&deps);
+    blockers.extend(unresolved(&restored.ledger, &deps));
+    blockers.extend(
+        deps.iter()
+            .filter(|d| d.application_may_be_down())
+            .map(|d| {
+                format!(
+                    "deployment {} began a cutover that was never confirmed: the application may be down. Replacing is blocked until the bounded cutover recovery exists",
+                    d.id
+                )
+            }),
+    );
+    let Some((cur_dep, cur_release)) = current_release(&restored.ledger, &deps, &app) else {
+        blockers.push(format!("application {app} has no running release recorded"));
+        return Err(replace_refused(&blockers));
+    };
+    if !blockers.is_empty() {
+        return Err(replace_refused(&blockers));
+    }
+
+    let mut gen = IdGenerator::new(SystemClock, OsEntropy::new());
+    let dep_id = gen
+        .deployment()
+        .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?;
+    let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
+    d.transition(DeploymentStatus::Queued, now_ms())
+        .map_err(|e| Fail::failed(e.to_string()))?;
+    let cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
+    let plan = CutoverPlan::new(&d.application_id, &cur_release, &d.id, &cfg);
+    let _ = writeln!(
+        out,
+        "deployment {} (application {}) — SIMULATED, no Docker; replaces the release of deployment {cur_dep}",
+        d.id, d.application_id
+    );
+    for l in plan.lines() {
+        let _ = writeln!(out, "{l}");
+    }
+    let confirmed = p.switch("confirm-cutover");
+    if !confirmed {
+        let _ = writeln!(
+            out,
+            "cutover not confirmed: the candidate will be built and checked, then the run stops with the current release untouched"
+        );
+    }
+
+    let ctx = Context {
+        previous_release: Some(cur_release),
+    };
+    let clock = ManualClock::new(now_ms());
+    let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+    let report = run_deployment_confirmed(
+        &mut d,
+        &ctx,
+        &mut b,
+        &mut journal,
+        &clock,
+        &cfg,
+        &|| false,
+        &|_: &CutoverPlan| confirmed,
+    )
+    .map_err(|e| {
+        Fail::failed(format!(
+            "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
+        ))
+    })?;
+    print_report(out, &d, &report);
+    if let Some(i) = &d.interruption {
+        let _ = match i.duration_ms() {
+            Some(ms) => writeln!(
+                out,
+                "measured interruption: {ms} ms (simulated clock; a real cutover has not been measured)"
+            ),
+            None => writeln!(
+                out,
+                "interruption still open: the application may be down; run `recover`"
+            ),
+        };
+    }
+    if let Some(pr) = &report.prepared {
+        let _ = match pr.why {
+            NotCutOver::NotConfirmed => writeln!(
+                out,
+                "candidate prepared, current release untouched. Re-run with --confirm-cutover to perform the (simulated) cutover; the candidate image is kept (see `cleanup-image`)."
+            ),
+            NotCutOver::Unsupported => writeln!(
+                out,
+                "candidate prepared, current release untouched: this backend cannot replace a running release."
+            ),
+        };
+        return Ok(exit::OK);
+    }
+    Ok(
+        if report.status == DeploymentStatus::Succeeded && report.is_clean() {
+            exit::OK
+        } else {
+            exit::FAILED
+        },
+    )
+}
+
+fn replace_refused(blockers: &[String]) -> Fail {
+    let mut m = String::from("replace refused:\n");
+    for b in blockers {
+        let _ = writeln!(m, "  {b}");
+    }
+    m.push_str(
+        "Nothing was built or stopped. Use `status`, `recover` and `reconcile` to resolve this.",
+    );
+    Fail::refused(m)
+}
+
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     let _ = writeln!(out, "result: {}", r.status);
     for s in &d.steps {
@@ -1171,6 +1346,16 @@ fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     }
     if let Some(f) = &d.failure {
         let _ = writeln!(out, "failure at {}: {}", f.step.as_str(), f.message);
+        // Failure evidence for inspection: the bounded, redacted output of the failing step.
+        for (step, cap) in &r.logs {
+            if *step == f.step {
+                let lines: Vec<&str> = cap.text.lines().collect();
+                let from = lines.len().saturating_sub(20);
+                for l in &lines[from..] {
+                    let _ = writeln!(out, "  | {l}");
+                }
+            }
+        }
     }
     for (step, ev) in &r.evidence {
         let _ = writeln!(

@@ -221,9 +221,79 @@ pub enum PauseReason {
     FailedCutover,
 }
 
+/// What a cutover would do and how long Harpoon may hold the application down, shown **before**
+/// anything is stopped. The bound comes from the configured time budgets, not from a measurement:
+/// the measured interruption is recorded on the deployment afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutoverPlan {
+    pub application: ApplicationId,
+    pub previous: ReleaseId,
+    pub candidate: ReleaseId,
+    /// Upper bound: stopping the previous release and starting the new one each get the cutover
+    /// budget, and the final check follows. The application can be down for all of it.
+    pub max_interruption_ms: u64,
+    pub restore_budget_ms: u64,
+}
+
+impl CutoverPlan {
+    pub fn new(
+        application: &ApplicationId,
+        previous: &ReleaseId,
+        candidate: &DeploymentId,
+        cfg: &RunConfig,
+    ) -> CutoverPlan {
+        CutoverPlan {
+            application: application.clone(),
+            previous: previous.clone(),
+            candidate: ReleaseId::from_deployment(candidate),
+            max_interruption_ms: cfg
+                .budgets
+                .cutover_ms
+                .saturating_mul(2)
+                .saturating_add(cfg.budgets.final_ms),
+            restore_budget_ms: cfg.policy.restore_budget_ms,
+        }
+    }
+
+    /// Plain statement of what will happen. It promises neither zero downtime nor recovery.
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!(
+                "cutover plan for application {}: replace release {} with {}",
+                self.application, self.previous, self.candidate
+            ),
+            "  1. the candidate has been built and passed its preliminary check while the current release kept running".to_string(),
+            format!("  2. Harpoon stops release {}: the application is down from this moment", self.previous),
+            format!("  3. Harpoon starts {} and runs its final health check", self.candidate),
+            format!(
+                "  anticipated interruption: unmeasured; at most {} ms by the configured time budgets (published ports cannot be held by two containers)",
+                self.max_interruption_ms
+            ),
+            "  no zero-downtime claim; data, volumes and schema are not touched".to_string(),
+        ]
+    }
+}
+
+/// Why a prepared candidate was not cut over. The current release was not touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotCutOver {
+    /// The caller did not confirm the displayed plan.
+    NotConfirmed,
+    /// The backend cannot replace a running release.
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    pub plan: CutoverPlan,
+    pub why: NotCutOver,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub deployment: DeploymentId,
+    /// Set when the candidate was built and checked but the cutover was deliberately not begun.
+    pub prepared: Option<Prepared>,
     pub status: DeploymentStatus,
     pub pause: Option<PauseReason>,
     /// The ledger as it ended. Failed or refused cleanups are in here and stay there.
@@ -634,6 +704,7 @@ struct Run<'a> {
     logs: Vec<(Step, LogCapture)>,
     warnings: Vec<String>,
     unaccounted: Vec<Observed>,
+    prepared: Option<Prepared>,
 }
 
 type StepOut = Result<Option<CheckEvidence>, StepError>;
@@ -744,10 +815,21 @@ impl Run<'_> {
         let now = self.now();
         match res {
             Ok(ev) => {
+                // The step record keeps what was observed, so it survives in the durable store.
+                let note = ev
+                    .as_ref()
+                    .map(|ev| {
+                        format!(
+                            "health evidence{}: {}",
+                            if ev.simulated { " (simulated)" } else { "" },
+                            ev.summary()
+                        )
+                    })
+                    .unwrap_or_default();
                 if let Some(ev) = ev {
                     self.evidence.push((step, ev));
                 }
-                self.d.finish_step(step, true, "", now)?;
+                self.d.finish_step(step, true, &note, now)?;
                 if step == Step::Build {
                     self.d.release = Some(ReleaseId::from_deployment(&self.d.id));
                 }
@@ -986,7 +1068,8 @@ pub fn run_deployment(
     run_deployment_with(d, ctx, backend, journal, clock, &cfg, cancel)
 }
 
-/// [`run_deployment`] with explicit budgets, log limits and secrets to redact.
+/// [`run_deployment`] with explicit budgets, log limits and secrets to redact. A replacement
+/// proceeds to its cutover; use [`run_deployment_confirmed`] to make that conditional.
 pub fn run_deployment_with(
     d: &mut Deployment,
     ctx: &Context,
@@ -995,6 +1078,25 @@ pub fn run_deployment_with(
     clock: &dyn Clock,
     cfg: &RunConfig,
     cancel: &dyn Fn() -> bool,
+) -> Result<Report, EngineError> {
+    run_deployment_confirmed(d, ctx, backend, journal, clock, cfg, cancel, &|_| true)
+}
+
+/// [`run_deployment_with`] where replacing a running release needs `confirm` to accept the
+/// displayed [`CutoverPlan`]. It is asked only after the build and the preliminary check passed
+/// and before anything is stopped. A refusal (or a backend that cannot cut over) ends the
+/// deployment `Cancelled` with the candidate prepared and the current release untouched, and
+/// reports it in [`Report::prepared`]. Never asked for a first deployment.
+#[allow(clippy::too_many_arguments)]
+pub fn run_deployment_confirmed(
+    d: &mut Deployment,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    cfg: &RunConfig,
+    cancel: &dyn Fn() -> bool,
+    confirm: &dyn Fn(&CutoverPlan) -> bool,
 ) -> Result<Report, EngineError> {
     let mut run = Run {
         d,
@@ -1008,6 +1110,7 @@ pub fn run_deployment_with(
         logs: Vec::new(),
         warnings: Vec::new(),
         unaccounted: Vec::new(),
+        prepared: None,
     };
     let now = run.now();
     run.d.transition(DeploymentStatus::Running, now)?;
@@ -1081,7 +1184,21 @@ pub fn run_deployment_with(
             }
             finish(run)
         }
-        Some(_) => {
+        Some(previous) => {
+            let plan = CutoverPlan::new(&run.d.application_id, previous, &run.d.id, cfg);
+            let why = if !run.backend.supports_cutover() {
+                Some(NotCutOver::Unsupported)
+            } else if !confirm(&plan) {
+                Some(NotCutOver::NotConfirmed)
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                // Nothing was stopped: the candidate stays prepared, the current release runs on.
+                run.prepared = Some(Prepared { plan, why });
+                run.end_cancelled()?;
+                return finish(run);
+            }
             // The journal entry goes to disk BEFORE the healthy release is stopped.
             let now = run.now();
             run.d.begin_cutover(now)?;
@@ -1124,6 +1241,7 @@ fn finish(mut run: Run<'_>) -> Result<Report, EngineError> {
     };
     Ok(Report {
         deployment: run.d.id.clone(),
+        prepared: run.prepared,
         status: run.d.status,
         pause,
         ledger: run.ledger,
