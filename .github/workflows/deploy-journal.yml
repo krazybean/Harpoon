@@ -47,14 +47,19 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Only the engine crate as a dependency, no database or network in the sources
+      - name: Only the engine crate as a dependency, SQLite confined to src/sqlite.rs, no network in the sources
         run: |
           deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
           if [ "$deps" != 'harpoon-deploy = { path = "../deploy" }' ]; then
             echo "unexpected dependencies in deploy-journal/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
           fi
-          if grep -rnE 'std::net|std::process|UnixStream|rusqlite|sqlite|tokio|docker' src | grep -vE ':[0-9]+:[[:space:]]*//'; then
-            echo "the journal is local files only: no network, process, database or Docker access" >&2; exit 1
+          # SQLite is permitted only through the system library's C API in src/sqlite.rs (no crate).
+          # Everything else, and every file's network, process, async-runtime and Docker access, stays banned.
+          if grep -rnE 'std::net|std::process|UnixStream|rusqlite|tokio|docker' src | grep -vE ':[0-9]+:[[:space:]]*//'; then
+            echo "the journal is local files only: no network, process, database crate or Docker access" >&2; exit 1
+          fi
+          if grep -rnE 'sqlite' src --exclude=sqlite.rs --exclude=lib.rs | grep -vE ':[0-9]+:[[:space:]]*//'; then
+            echo "SQLite is confined to src/sqlite.rs" >&2; exit 1
           fi
 
       - name: Format

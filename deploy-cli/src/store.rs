@@ -2,7 +2,7 @@
 //! simulated/docker marker, and the translation of journal errors into actionable diagnostics.
 
 use crate::Fail;
-use harpoon_deploy_journal::{Restored, SqliteJournal, SQLITE_FILE};
+use harpoon_deploy_journal::{Restored, SqliteJournal, SqliteOpenError, SQLITE_FILE};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -176,10 +176,28 @@ pub fn prepare_for_writing(rt: &Runtime, want: Kind) -> Result<(), Fail> {
     Ok(())
 }
 
+/// A held writer lock is retried later; anything else means the store cannot be trusted and
+/// deployments are refused, with nothing repaired or discarded.
+pub fn open_error(rt: &Runtime, e: SqliteOpenError) -> Fail {
+    if e.0.contains("another Harpoon process holds") {
+        return Fail::journal(format!(
+            "another Harpoon process holds the journal ({}). Nothing waits and nothing was changed; retry when it has finished. \
+             Do not create a second journal directory: that would bypass lease coordination.",
+            rt.journal_dir().display()
+        ));
+    }
+    Fail::journal(format!(
+        "the journal is not usable: {e}.\n\
+         Nothing was changed, repaired or discarded, and deployments are refused until you resolve this.\n\
+         To keep a copy for investigation: harpoon-deploy export-journal --runtime-dir {} --to <new file>\n\
+         Do not delete or reset the journal: it is the record of what Harpoon created.",
+        rt.dir.display()
+    ))
+}
+
 pub fn open_writer(rt: &Runtime, kind: Kind) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    SqliteJournal::open(&rt.journal_dir())
-        .map_err(|e| Fail::journal(format!("cannot open {}: {e}", rt.journal_file().display())))
+    SqliteJournal::open(&rt.journal_dir()).map_err(|e| open_error(rt, e))
 }
 
 pub fn open_writer_recovered(
@@ -188,8 +206,7 @@ pub fn open_writer_recovered(
     now_ms: u64,
 ) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    SqliteJournal::open_recovered(&rt.journal_dir(), now_ms)
-        .map_err(|e| Fail::journal(format!("cannot open {}: {e}", rt.journal_file().display())))
+    SqliteJournal::open_recovered(&rt.journal_dir(), now_ms).map_err(|e| open_error(rt, e))
 }
 
 /// Read-only restore; `None` when there is no journal yet. Never creates or writes anything.
@@ -199,5 +216,5 @@ pub fn read_restored(rt: &Runtime) -> Result<Option<Restored>, Fail> {
     }
     SqliteJournal::read_only(&rt.journal_dir())
         .map(Some)
-        .map_err(|e| Fail::journal(format!("cannot read {}: {e}", rt.journal_file().display())))
+        .map_err(|e| open_error(rt, e))
 }

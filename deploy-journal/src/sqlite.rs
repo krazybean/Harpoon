@@ -4,7 +4,7 @@
 //! The engine therefore keeps one replay path while SQLite supplies transactions, migrations and
 //! indexed durable storage. The tiny FFI avoids adding a dependency to the offline foundation.
 
-use super::{lines, Restored};
+use super::{lines, LockStatus, Restored};
 use harpoon_deploy::engine::{Journal, JournalError};
 use harpoon_deploy::journal_format::{decode_line, encode_ledger, encode_snapshot, replay, Line};
 use harpoon_deploy::ledger::LedgerRecord;
@@ -269,6 +269,14 @@ impl SqliteJournal {
     pub fn open(dir: &Path) -> Result<(SqliteJournal, Restored), SqliteOpenError> {
         let lock = lock_dir(dir)?;
         let path = dir.join(SQLITE_FILE);
+        // Create the file privately first: SQLite would use the process umask (typically 0644).
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| SqliteOpenError(format!("cannot create {}: {e}", path.display())))?;
         let db = Db::open(&path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
         migrate(&db)?;
         let mut journal = SqliteJournal { db, _lock: lock };
@@ -278,20 +286,9 @@ impl SqliteJournal {
             && dir.join(super::JOURNAL_FILE).exists()
         {
             // One-time upgrade only: the legacy journal remains untouched as an exportable
-            // recovery artifact, while all future reads and writes use SQLite.
-            let old = lines(dir)
-                .map_err(|e| SqliteOpenError(format!("cannot migrate legacy journal: {e}")))?;
-            for line in old {
-                match line {
-                    Line::Header { .. } => {}
-                    Line::Snapshot(d) => journal.persist(&d).map_err(|e| {
-                        SqliteOpenError(format!("cannot migrate legacy journal: {e:?}"))
-                    })?,
-                    Line::Ledger(r) => journal.record(&r).map_err(|e| {
-                        SqliteOpenError(format!("cannot migrate legacy journal: {e:?}"))
-                    })?,
-                }
-            }
+            // recovery artifact, while all future reads and writes use SQLite. The import is a
+            // single transaction, so an interruption leaves SQLite empty and the next open retries.
+            journal.import_legacy(dir)?;
             restored = restore(&journal.db)?;
         }
         Ok((journal, restored))
@@ -314,31 +311,113 @@ impl SqliteJournal {
         Ok((journal, restored))
     }
 
+    /// Read without locking or writing. A runtime that has only the legacy journal (no writer has
+    /// upgraded it yet) is read from that journal, exactly as before the SQLite store existed.
     pub fn read_only(dir: &Path) -> Result<Restored, SqliteOpenError> {
         let path = dir.join(SQLITE_FILE);
-        let db = Db::open(&path, SQLITE_OPEN_READONLY)?;
-        restore(&db)
+        if !path.exists() {
+            return legacy_read(dir);
+        }
+        let restored = restore(&Db::open(&path, SQLITE_OPEN_READONLY)?)?;
+        if restored.deployments.is_empty()
+            && restored.ledger.entries().is_empty()
+            && dir.join(super::JOURNAL_FILE).exists()
+        {
+            return legacy_read(dir);
+        }
+        Ok(restored)
+    }
+
+    /// The stored record lines in order, for diagnostics and tests. Reads only.
+    pub fn record_lines(dir: &Path) -> Result<Vec<String>, SqliteOpenError> {
+        let db = Db::open(&dir.join(SQLITE_FILE), SQLITE_OPEN_READONLY)?;
+        let stmt = statement(&db, "SELECT body FROM records ORDER BY seq")?;
+        let mut out = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(stmt.0) } {
+                SQLITE_ROW => {
+                    let p = unsafe { sqlite3_column_text(stmt.0, 0) };
+                    if p.is_null() {
+                        return Err(SqliteOpenError("SQLite record has NULL body".into()));
+                    }
+                    out.push(
+                        unsafe { CStr::from_ptr(p.cast()) }
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                SQLITE_DONE => return Ok(out),
+                _ => return Err(SqliteOpenError(message(&db))),
+            }
+        }
+    }
+
+    /// Store `body` without validating it. Only for tests that forge damaged or misplaced records
+    /// to prove replay fails closed; the engine never calls it.
+    #[doc(hidden)]
+    pub fn append_unchecked(&mut self, kind: &str, body: &str) -> Result<(), SqliteOpenError> {
+        self.insert(kind, body)
+            .map_err(|e| SqliteOpenError(format!("{e:?}")))
+    }
+
+    fn import_legacy(&mut self, dir: &Path) -> Result<(), SqliteOpenError> {
+        let fail = |e: String| SqliteOpenError(format!("cannot migrate legacy journal: {e}"));
+        let old = lines(dir).map_err(|e| fail(e.to_string()))?;
+        self.db.exec("BEGIN IMMEDIATE")?;
+        let imported = old.iter().try_for_each(|line| match line {
+            Line::Header { .. } => Ok(()),
+            Line::Snapshot(d) => self.insert_row("snapshot", &encode_snapshot(d)),
+            Line::Ledger(r) => self.insert_row("ledger", &encode_ledger(r)),
+        });
+        match imported.and_then(|()| self.db.exec("COMMIT").map_err(|e| e.to_string())) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.db.exec("ROLLBACK");
+                Err(fail(e))
+            }
+        }
+    }
+
+    fn insert_row(&self, kind: &str, body: &str) -> Result<(), String> {
+        let stmt = statement(&self.db, "INSERT INTO records(kind, body) VALUES (?1, ?2)")
+            .map_err(|e| e.to_string())?;
+        bind(&stmt, 1, kind).map_err(|e| e.to_string())?;
+        bind(&stmt, 2, body).map_err(|e| e.to_string())?;
+        if unsafe { sqlite3_step(stmt.0) } != SQLITE_DONE {
+            return Err(message(&self.db));
+        }
+        Ok(())
     }
 
     fn insert(&mut self, kind: &str, body: &str) -> Result<(), JournalError> {
         self.db
             .exec("BEGIN IMMEDIATE")
             .map_err(|e| JournalError::Io(e.to_string()))?;
-        let result = (|| {
-            let stmt = statement(&self.db, "INSERT INTO records(kind, body) VALUES (?1, ?2)")
-                .map_err(|e| e.to_string())?;
-            bind(&stmt, 1, kind).map_err(|e| e.to_string())?;
-            bind(&stmt, 2, body).map_err(|e| e.to_string())?;
-            if unsafe { sqlite3_step(stmt.0) } != SQLITE_DONE {
-                return Err(message(&self.db));
-            }
-            self.db.exec("COMMIT").map_err(|e| e.to_string())
-        })();
+        let result = self
+            .insert_row(kind, body)
+            .and_then(|()| self.db.exec("COMMIT").map_err(|e| e.to_string()));
         if result.is_err() {
             let _ = self.db.exec("ROLLBACK");
         }
         result.map_err(JournalError::Io)
     }
+}
+
+fn legacy_read(dir: &Path) -> Result<Restored, SqliteOpenError> {
+    super::read_only(dir).map_err(|e| SqliteOpenError(format!("legacy journal: {e}")))
+}
+
+/// Is a writer holding the store right now? Looks at the SQLite writer lock and, for a runtime
+/// that has not been upgraded yet, the legacy journal lock. Creates and writes nothing.
+pub fn writer_lock_status(dir: &Path) -> Result<LockStatus, SqliteOpenError> {
+    for name in [LOCK_FILE, super::LOCK_FILE] {
+        match super::lock_status_of(&dir.join(name)) {
+            Ok(LockStatus::NotInitialized) => continue,
+            Ok(status) => return Ok(status),
+            Err(e) => return Err(SqliteOpenError(e.to_string())),
+        }
+    }
+    Ok(LockStatus::NotInitialized)
 }
 
 impl Journal for SqliteJournal {

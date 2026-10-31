@@ -6,9 +6,11 @@ use harpoon_deploy_journal::{SqliteJournal, SQLITE_FILE};
 use std::path::PathBuf;
 
 fn temp_dir() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let p = std::env::temp_dir().join(format!(
-        "harpoon-sqlite-{}-{}",
+        "harpoon-sqlite-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -79,5 +81,93 @@ fn sqlite_writer_lock_is_fail_fast() {
     };
     assert!(error.to_string().contains("another Harpoon process holds"));
     drop(db);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn legacy_journal(dir: &std::path::Path) -> (Deployment, LedgerRecord) {
+    let (app, dep) = ids();
+    let mut deployment = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 10);
+    deployment.transition(DeploymentStatus::Queued, 11).unwrap();
+    let record = LedgerRecord::Intent {
+        key: ResourceKey::new(ResourceKind::PortLease, "38001"),
+        app,
+        deployment: dep,
+        disposition: Disposition::RemoveOnFailure,
+        at_ms: 11,
+    };
+    let (mut old, _) = harpoon_deploy_journal::FileJournal::open(dir).unwrap();
+    old.persist(&deployment).unwrap();
+    old.record(&record).unwrap();
+    (deployment, record)
+}
+
+#[test]
+fn a_runtime_with_only_the_legacy_journal_is_readable_without_creating_anything() {
+    let dir = temp_dir();
+    legacy_journal(&dir);
+    let listing = || {
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = listing();
+    let restored = SqliteJournal::read_only(&dir).unwrap();
+    assert_eq!(restored.deployments.len(), 1);
+    assert_eq!(restored.ledger.leased_ports(), vec![38001]);
+    assert_eq!(listing(), before, "reading created nothing");
+    assert!(!dir.join(SQLITE_FILE).exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_legacy_journal_is_imported_once_and_left_untouched() {
+    let dir = temp_dir();
+    legacy_journal(&dir);
+    let wal = std::fs::read(dir.join("journal.wal")).unwrap();
+    {
+        let (_db, restored) = SqliteJournal::open(&dir).unwrap();
+        assert_eq!(restored.deployments.len(), 1);
+        assert_eq!(restored.ledger.leased_ports(), vec![38001]);
+    }
+    let (_db, again) = SqliteJournal::open(&dir).unwrap();
+    assert_eq!(again.deployments.len(), 1, "imported once, not twice");
+    assert_eq!(again.ledger.entries().len(), 1);
+    assert_eq!(std::fs::read(dir.join("journal.wal")).unwrap(), wal);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_damaged_legacy_journal_imports_nothing_and_fails_closed() {
+    let dir = temp_dir();
+    legacy_journal(&dir);
+    let mut wal = std::fs::read(dir.join("journal.wal")).unwrap();
+    let at = wal.len() / 2;
+    wal[at] ^= 0x55;
+    std::fs::write(dir.join("journal.wal"), &wal).unwrap();
+    assert!(SqliteJournal::open(&dir).is_err());
+    assert!(SqliteJournal::read_only(&dir).is_err());
+    // nothing half-imported: once the journal is whole again the import starts from scratch
+    wal[at] ^= 0x55;
+    std::fs::write(dir.join("journal.wal"), &wal).unwrap();
+    let (_db, restored) = SqliteJournal::open(&dir).unwrap();
+    assert_eq!(restored.deployments.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_writer_lock_is_visible_to_readers_without_taking_it() {
+    use harpoon_deploy_journal::{writer_lock_status, LockStatus};
+    let dir = temp_dir();
+    assert_eq!(
+        writer_lock_status(&dir).unwrap(),
+        LockStatus::NotInitialized
+    );
+    let (db, _) = SqliteJournal::open(&dir).unwrap();
+    assert_eq!(writer_lock_status(&dir).unwrap(), LockStatus::Held);
+    drop(db);
+    assert_eq!(writer_lock_status(&dir).unwrap(), LockStatus::Free);
     let _ = std::fs::remove_dir_all(dir);
 }
