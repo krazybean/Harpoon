@@ -1,3 +1,17 @@
+# Harpoon roadmap questions
+
+The single authoritative tracker of milestone status — including the Harpoon 2.1 deployment milestones and
+the next executable one — is `docs/roadmap.md`. Scope, acceptance criteria and stop conditions for the
+deployment milestones are in `docs/deployment-control-plane-requirements.md`; `docs/results/` holds
+evidence, not competing roadmaps.
+
+- Answer "what is done / what is next" by reading `docs/roadmap.md` and the evidence it links. Do not start a
+  research or reconciliation project for ordinary roadmap interpretation; investigate only when that
+  evidence is genuinely contradictory or missing.
+- When a milestone PR merges, update its row and the "next executable milestone" in `docs/roadmap.md` in the
+  same PR (or an immediately accompanying documentation PR).
+- Harpoon 2.0 runtime/distribution gates and Harpoon 2.1 deployment milestones are separate tracks.
+
 # Harpoon historical knowledge retrieval
 
 For previous architectural decisions, implementation rationale, historical constraints, design changes, or earlier investigations, consult Harpoon's project-local QMD index before making assumptions.

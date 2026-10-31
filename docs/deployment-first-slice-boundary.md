@@ -1,5 +1,9 @@
 # Milestone B — the smallest real deployment boundary
 
+> Design and isolation rules for the first slice. Step status (B1–B8.x and what follows) is tracked only in
+> [the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker); the plan table in §6 is the
+> original plan, not a status.
+
 Target slice: **local folder → Dockerfile build → container start → health check → logs → truthful result.**
 Builds on `docs/deployment-control-plane-requirements.md` (D1–D10), the offline engine foundation (`deploy/`, PR #106)
 and the findings in `docs/results/DEPLOY_BUILDX_VALIDATION.md` and `COMPAT_BUILDX_AND_PORT_FORWARDING.md`.

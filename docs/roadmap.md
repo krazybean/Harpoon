@@ -2,44 +2,117 @@
 
 > Harpoon is a lightweight Docker-compatible runtime for Apple Silicon macOS. Docker Engine remains authoritative for containers/images/volumes/networks/API/Compose/BuildKit. Harpoon owns only the macOS↔Linux boundary (VM lifecycle, socket bridge, networking, bind-mount transport, resources, memory reclamation, diagnostics).
 
-## Deployment control plane initiative (Harpoon 2.1) — SPEC REVISED / AWAITING OWNER APPROVAL (2026-10-30)
+## Deployment control plane (Harpoon 2.1) — canonical milestone tracker
 
-A separate, Harpoon-native deployment control-plane initiative is in specification. It
-is **proposed, not implemented**, and does not touch the runtime, guest assets, or the
-2.0 release work. The canonical index is `docs/harpoon-2-status-and-direction.md`; the
-boundary decision is `docs/decisions/0004-deployment-control-plane-boundary.md`; the
-requirements and milestones are `docs/deployment-control-plane-requirements.md`; the
-research is `docs/results/SPIKE_COOLIFY_DEPLOYMENT.md` (orchestration) and
-`docs/results/SPIKE_VERCEL_UX.md` (developer experience, documentation-only).
+**This section is the single authoritative status of the Harpoon 2.1 deployment milestones.**
+Everything else is supporting material, not a second tracker:
 
-Approved decisions: Rust engine (CLI first), SQLite, macOS Keychain for secret values,
-host-side execution over the existing Docker API/CLI, no mandatory Redis/PostgreSQL/
-Kubernetes, no new daemon until justified, brief documented interruptions acceptable.
-Deploying to Vercel or other providers is an open possibility, deliberately undecided.
+- Scope, acceptance criteria, failure tests and stop conditions:
+  `docs/deployment-control-plane-requirements.md` (the authority for *what* a milestone must do).
+- Boundary decision: `docs/decisions/0004-deployment-control-plane-boundary.md`.
+- First-slice design and isolation rules: `docs/deployment-first-slice-boundary.md`.
+- Evidence of what was built and observed: `docs/results/DEPLOY_*.md` (historical records; they are
+  not edited when later work supersedes a statement in them — the newer record is linked below).
+- `docs/harpoon-2-status-and-direction.md` is an index that points here.
 
-Milestones (each with prerequisites, acceptance tests, failure scenarios, stop
-conditions and exclusions in the requirements document):
+**Rule for keeping this current.** When a milestone PR merges, the same PR (or an immediately
+accompanying documentation PR) marks its row complete with the PR number and evidence link, and
+updates **Next executable milestone** below. A roadmap question is answered by reading this section
+and the evidence it links; new investigation is warranted only when that evidence is genuinely
+contradictory or missing.
+
+**Tracks.** Harpoon 2.0 runtime/distribution gates (release candidates, second-Mac verification,
+signing, packaging, UI polish, Intel, DNS) are a separate track and are not prerequisites of any 2.1
+milestone below. The "Next milestone" lines under *Current Position* belong to the 2.0 runtime/UI
+track; the 2.1 next milestone is stated only here. Anything that does block a 2.1 milestone must
+name the specific acceptance criterion it blocks; otherwise it is deferred without interrupting
+execution.
+
+Approved decisions (2026-10-30): Rust engine (CLI first), SQLite as the permanent store, macOS
+Keychain for secret values, host-side execution over the existing Docker API/CLI, no mandatory
+Redis/PostgreSQL/Kubernetes, no new daemon until justified, brief documented interruptions
+acceptable. Deploying to Vercel or other providers is an open possibility, deliberately undecided.
+
+### What exists today versus what is still incomplete
+
+**Implemented — the first-deployment slice (offline-tested; live-accepted once for a disposable
+deployment):** a local-directory Dockerfile deployment with bundled, pinned Buildx and image
+identity by id; preliminary and final health checks attributed by per-container marker; loopback-only
+port publishing with LAN isolation measured; a durable checksummed single-writer journal with crash
+recovery; a gated CLI (`status`, `doctor`, `plan`, `recover`, `reconcile`, `deploy`, `teardown`,
+`cleanup-image`, `inventory`, `export-journal`) with ownership-verified, dry-run-by-default cleanup.
+Evidence: `docs/results/DEPLOY_B7_LIVE_RESULTS.md` (B7 first-deployment acceptance: PASS — not
+general production readiness).
+
+**Not implemented — the full control plane:** permanent SQLite state, health-gated replacement of a
+running release, bounded cutover recovery, explicit rollback (the engine's state machine exists and is
+tested against a fake backend only; the Docker backend and CLI refuse replacement), and everything in
+Milestones C–E. Milestone B's acceptance criteria are therefore **not yet met**.
+
+**Shipping gate: closed.** `Gate::shipping()` refuses live `deploy`; the experimental gate-opening
+branch (`experiment/b7-live-gate`) is unmerged and local-only. Live work uses a separately built,
+separately authorized binary and is never part of a merge.
+
+### Milestones
 
 | Milestone | Scope | Status |
 |---|---|---|
-| A | Specification and UX discovery | In review |
-| B | Deployment engine and lifecycle (first slice: local Dockerfile deploy, health-gated replacement, bounded cutover recovery, explicit rollback) | Not started; needs baseline measurements |
-| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | Not started |
-| Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | Not started; must precede any "unattended" claim |
-| D | Git integration and automation (polling, signed-fixture webhooks); attended unless Gate U passed | Not started |
-| E | Desktop deployment experience and previews | Not started |
+| A | Specification and UX discovery | Approved (decisions 2026-10-30; B1 authorized) |
+| B | Deployment engine and lifecycle — see the step table below | **In progress**: first-deployment slice implemented and live-accepted; replacement and rollback not started |
+| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | Not started; prerequisite: Milestone B accepted |
+| Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | Not started; follows C; must precede any "unattended" claim |
+| D | Git integration and automation (polling, signed-fixture webhooks); attended unless Gate U passed | Not started; follows Gate U |
+| E | Desktop deployment experience and previews | Not started; follows D |
+
+### Milestone B — steps
+
+| Step | Scope | Status | PR(s) | Evidence |
+|---|---|---|---|---|
+| Baseline | Dockerfile build over the bridge, load, publish latency, idle cost | Complete (one host, one session) | #103 | `docs/results/DEPLOY_BASELINE.md` |
+| B1 | Offline engine foundation: state machine, resource ledger, deadlines, redaction, port leases, evidence | Complete | #106, #108 | `docs/results/DEPLOY_ENGINE_FOUNDATION_REVIEW.md` |
+| B2 | Bundled, pinned, signed Buildx | Complete as a verified artifact (not exercised in a released app) | #109 | `docs/results/DEPLOY_BUILDX_PACKAGING.md`, `DEPLOY_BUILDX_VALIDATION.md` |
+| B3 | Docker backend over the Unix socket + Buildx runner | Complete | #110 | `docs/results/DEPLOY_DOCKER_BACKEND.md` |
+| B4 | Source confinement, port allocation, attributed health probing | Complete | #111 | `docs/results/DEPLOY_DOCKER_BACKEND.md` |
+| B5 | Durable journal and crash recovery | Complete | #112 | `docs/results/DEPLOY_JOURNAL.md` |
+| B6 | Gated developer CLI | Complete | #113 | `docs/results/DEPLOY_CLI.md` |
+| B7 | First live disposable deployment, LAN isolation, ownership-verified teardown | **Complete — first-deployment acceptance PASS** (not production readiness) | #114–#118 | `docs/results/DEPLOY_B7_LIVE_RESULTS.md` |
+| B8.1 | Offline failure/recovery coverage (crash sweeps, interrupted-deploy CLI regression) | Complete | #120 | `docs/results/DEPLOY_CLI.md` (B8.1) |
+| B8.2 | Retained-image cleanup (`cleanup-image`, typed conflict outcome) | Complete (offline; simulated Docker only) | #121 | `docs/results/DEPLOY_CLI.md` (B8.2) |
+| **B8.3** | **Controlled live failure and recovery validation** | **NEXT** | — | gaps listed in `docs/results/DEPLOY_CLI.md` |
+| — | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | Not started | — | `docs/deployment-first-slice-boundary.md` decision 1 |
+| — | Health-gated replacement of a running release | Not started | — | requirements D5, Milestone B criteria 2–3 |
+| — | Bounded cutover recovery | Not started | — | requirements D5, criterion 4 |
+| — | Explicit rollback | Not started | — | requirements D5, criterion 5 |
+
+The four unnumbered rows run in the order shown, after B8.3. Milestone B is accepted only when its
+requirements criteria 1–7 pass with no stop condition triggered.
+
+### Next executable milestone: B8.3 — controlled live failure and recovery validation
+
+Validate against the real Engine what B8.1 and B8.2 proved only against a simulated one: a failing
+build; a deployment whose health check never passes (cleanup of its container and lease, the image
+retained); an interrupted deployment (kill during a run) followed by `recover`, `reconcile` and
+`cleanup-image`; and the real Docker behaviour that the simulated server only models (image-deletion
+conflicts, a container that ignores the stop signal, what the BuildKit daemon does after a killed
+build). Each live step needs its own explicit written authorization and runs with the isolation rules
+and stop conditions of `docs/deployment-first-slice-boundary.md` §4–5 (nothing unlabelled changes;
+final inventory identical to the baseline; Harpoon's process untouched). B8.3 does not open the
+shipping gate and does not claim production readiness. It is done when each scenario's observed
+outcome is recorded in a results file under `docs/results/` and any divergence from the documented
+behaviour is either fixed or listed as a gap.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,
-and Docker-state reconciliation beyond marking interrupted deployments.
+and automatic Docker-state reconciliation (cleanup stays explicit and ownership-verified, as in
+`reconcile`, `teardown` and `cleanup-image`; see ADR 0004).
 
 ## Current Position
 
 ### Harpoon 2.0 Step 1 — release hardening IN PROGRESS (2026-10-29)
 
 The Apple Silicon target is the 2.0 release scope. Intel/universal packaging,
-Windows/Linux hosts, and the proposed deployment control plane remain post-2.0
-work. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` remains a
+Windows/Linux hosts, and the 2.1 deployment control plane (tracked above) remain
+outside the 2.0 release scope. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` remains a
 testing prerelease with stale release documentation; the executable startup
 gate is drafted in `docs/releases/v2.0.0-startup-reliability.md`.
 
