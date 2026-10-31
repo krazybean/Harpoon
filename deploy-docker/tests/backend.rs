@@ -1259,54 +1259,210 @@ fn a_slow_start_is_cut_off_by_the_step_budget() {
 
 // ---------------------------------------------------------------- crash injection
 
-#[test]
-fn a_crash_at_every_write_is_recovered_by_label_with_the_real_backend() {
-    // measure the writes of a clean run first
+/// The failure shapes the crash sweep is run over. Every one drives the real `DockerBackend`
+/// through the real engine against the *simulated* Docker server; none touches a Docker Engine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sweep {
+    /// Healthy end to end.
+    Success,
+    /// The preliminary check never gets a healthy answer.
+    PreliminaryHealthFails,
+    /// The preliminary check passes; the final check (after the cutover) never does.
+    FinalHealthFails,
+    /// Both candidate host ports are held by someone else.
+    Collision,
+    /// The final check fails and Docker refuses every container removal.
+    FailedRemoval,
+}
+
+impl Sweep {
+    fn transport(self) -> Scripted {
+        match self {
+            Sweep::Success | Sweep::Collision => ok200(),
+            Sweep::PreliminaryHealthFails => Scripted::always(Observation::Status(503)),
+            Sweep::FinalHealthFails | Sweep::FailedRemoval => {
+                let t = Scripted::always(Observation::Status(503));
+                *t.answers.borrow_mut() = vec![Observation::Status(200), Observation::Status(200)];
+                t
+            }
+        }
+    }
+
+    fn expected(self) -> DeploymentStatus {
+        match self {
+            Sweep::Success => DeploymentStatus::Succeeded,
+            _ => DeploymentStatus::Failed,
+        }
+    }
+
+    /// Put the simulated engine into the state this scenario needs. Called again after a
+    /// "restart", because clearing the faults is how a test says Docker has recovered.
+    fn arm(self, h: &Harness) {
+        match self {
+            Sweep::Collision => h.docker.with(|s| {
+                s.taken_ports.extend([38000, 38001]);
+            }),
+            Sweep::FailedRemoval => h.docker.fault(
+                Some("DELETE"),
+                "/containers/",
+                10_000,
+                Action::Respond(500, "{\"message\":\"device or resource busy\"}".into()),
+            ),
+            _ => {}
+        }
+    }
+}
+
+struct Bystanders {
+    container: String,
+    image: String,
+}
+
+fn add_bystanders(h: &Harness) -> Bystanders {
+    h.docker.with(|s| Bystanders {
+        container: s.add_container("bystander", vec![], true),
+        image: s.add_image("bystander:1", vec![]),
+    })
+}
+
+fn assert_bystanders(h: &Harness, by: &Bystanders, ctx: &str) {
+    assert!(
+        h.docker
+            .container("bystander")
+            .map(|c| c.id == by.container && c.running)
+            .unwrap_or(false),
+        "{ctx}: the unrelated container was touched"
+    );
+    assert!(
+        h.docker.with(|s| s.images.iter().any(|i| i.id == by.image)),
+        "{ctx}: the unrelated image was touched"
+    );
+    assert!(
+        h.docker.with(|s| s
+            .images
+            .iter()
+            .any(|i| i.tags.contains(&"alpine:3.22".to_string()))),
+        "{ctx}: the base image was touched"
+    );
+}
+
+/// A released ledger entry must really be gone. (The reverse is not required: a retained image
+/// is still there.)
+fn assert_released_means_gone(h: &Harness, ledger: &Ledger, ctx: &str) {
+    for e in ledger.entries() {
+        if !e.is_released() {
+            continue;
+        }
+        let Some(id) = &e.id else { continue };
+        let there = match e.key.kind {
+            ResourceKind::Container => h.docker.with(|s| s.containers.iter().any(|c| &c.id == id)),
+            ResourceKind::Image => h.docker.with(|s| s.images.iter().any(|i| &i.id == id)),
+            _ => false,
+        };
+        assert!(
+            !there,
+            "{ctx}: {:?} is recorded as released but still exists",
+            e.key
+        );
+    }
+}
+
+/// Run the scenario once cleanly (to count the journal writes and prove the scenario does what
+/// it says), then crash at every write, "restart" and reconcile, and check what must hold at
+/// every point. Returns whether some crash point left a created-but-unreceipted container that
+/// recovery adopted by its labels.
+fn crash_sweep(sc: Sweep) -> bool {
     let total = {
         let mut h = Harness::new();
         h.seed_built_image();
-        let mut b = backend_with(&h, ok200(), |c| c.health.startup_deadline_ms = 300);
+        sc.arm(&h);
+        let mut b = backend_with(&h, sc.transport(), |c| c.health.startup_deadline_ms = 300);
         let mut j = StampedJournal::new();
-        assert_eq!(h.run(&mut b, &mut j).status, DeploymentStatus::Succeeded);
+        let r = h.run(&mut b, &mut j);
+        assert_eq!(r.status, sc.expected(), "{sc:?}: {:?}", h.dep.failure);
+        if sc == Sweep::FailedRemoval {
+            assert!(
+                !r.cleanup_problems().is_empty(),
+                "{sc:?}: removal really failed"
+            );
+        }
         j.inner.writes()
     };
-    assert!(total > 20);
+    assert!(total > 10, "{sc:?}: only {total} journal writes");
     let mut adopted = false;
+    let mut crashed_mid_cleanup = false;
+    let mut still_stuck = false;
     for crash_at in 0..total {
-        let ctx = format!("crash @{crash_at}");
+        let ctx = format!("{sc:?} crash @{crash_at}");
         let mut h = Harness::new();
         h.seed_built_image();
-        // an unrelated object that must survive anything
-        let by = h
-            .docker
-            .with(|s| s.add_container("bystander", vec![], true));
-        let mut b = backend_with(&h, ok200(), |c| c.health.startup_deadline_ms = 300);
+        let by = add_bystanders(&h);
+        sc.arm(&h);
+        let mut b = backend_with(&h, sc.transport(), |c| c.health.startup_deadline_ms = 300);
         let mut first = StampedJournal::crash_at(crash_at);
         let res = h.try_run(&mut b, &mut first, &RunConfig::default());
         assert!(
             matches!(res, Err(EngineError::Journal(JournalError::Crash))),
-            "{ctx}"
+            "{ctx}: {res:?}"
         );
         if first.inner.last().is_none() {
-            continue;
+            continue; // nothing durable yet: nothing to recover, nothing created
         }
+        crashed_mid_cleanup |= first
+            .inner
+            .ledger_records
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::CleanupAttempt { .. }));
 
         // restart: replay the ledger, mark the deployment interrupted, reconcile with a new backend
         let mut ledger = Ledger::replay(&first.inner.ledger_records).expect(&ctx);
         let mut d = first.inner.last().unwrap().clone();
         recover_on_start(std::slice::from_mut(&mut d), 1);
         let end = harpoon_deploy::engine::end_state(d.status).unwrap();
-        let mut b2 = backend_with(&h, ok200(), |_| {});
-        let mut second = StampedJournal::new();
+        let mut all_records = first.inner.ledger_records.clone();
+
+        if sc == Sweep::FailedRemoval {
+            // Docker is still refusing removals after the restart: nothing may be reported as
+            // released that still exists, nothing foreign may be touched, and no entry may be
+            // left merely "intended".
+            h.docker.with(|s| s.faults.clear());
+            sc.arm(&h);
+            let mut b2 = backend_with(&h, ok200(), |_| {});
+            let mut second = StampedJournal::new();
+            harpoon_deploy::engine::reconcile(
+                &mut ledger,
+                &[(d.id.clone(), end)],
+                &mut second,
+                &mut b2,
+                &harpoon_deploy::time::SystemClock,
+            )
+            .expect(&ctx);
+            all_records.extend(second.inner.ledger_records.clone());
+            adopted |= second.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Receipt { key, .. } if key.kind == ResourceKind::Container));
+            still_stuck |= !h.objects_for_dep().is_empty();
+            assert_released_means_gone(&h, &ledger, &ctx);
+            assert_bystanders(&h, &by, &ctx);
+            for e in ledger.entries() {
+                assert!(!matches!(e.state, EntryState::Intended), "{ctx}: {e:?}");
+            }
+            // Docker recovers; a second reconcile finishes the job.
+            h.docker.with(|s| s.faults.clear());
+        } else {
+            h.docker.with(|s| s.faults.clear());
+        }
+
+        let mut b3 = backend_with(&h, ok200(), |_| {});
+        let mut third = StampedJournal::new();
         harpoon_deploy::engine::reconcile(
             &mut ledger,
             &[(d.id.clone(), end)],
-            &mut second,
-            &mut b2,
+            &mut third,
+            &mut b3,
             &harpoon_deploy::time::SystemClock,
         )
         .expect(&ctx);
-        adopted |= second.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Receipt { key, .. } if key.kind == ResourceKind::Container));
+        all_records.extend(third.inner.ledger_records.clone());
+        adopted |= third.stamps.iter().any(|(_, r)| matches!(r, LedgerRecord::Receipt { key, .. } if key.kind == ResourceKind::Container));
 
         assert!(
             h.objects_for_dep().is_empty(),
@@ -1318,26 +1474,56 @@ fn a_crash_at_every_write_is_recovered_by_label_with_the_real_backend() {
                 assert!(e.is_released(), "{ctx}: {e:?}");
             }
         }
-        assert!(
-            h.docker
-                .container("bystander")
-                .map(|c| c.id == by && c.running)
-                .unwrap_or(false),
-            "{ctx}: bystander touched"
-        );
-        assert!(
-            h.docker.with(|s| s
-                .images
-                .iter()
-                .any(|i| i.tags.contains(&"alpine:3.22".to_string()))),
-            "{ctx}: base image touched"
+        assert_released_means_gone(&h, &ledger, &ctx);
+        assert_bystanders(&h, &by, &ctx);
+        // Journal integrity: replaying every record written before and after the restart gives
+        // exactly the accounting the engine ended with.
+        assert_eq!(
+            Ledger::replay(&all_records).expect(&ctx),
+            ledger,
+            "{ctx}: the journal does not reproduce the final accounting"
         );
         no_forbidden_requests(&h);
     }
+    if sc == Sweep::FailedRemoval {
+        assert!(
+            crashed_mid_cleanup,
+            "{sc:?}: no crash point fell inside a cleanup"
+        );
+        assert!(
+            still_stuck,
+            "{sc:?}: no crash point showed objects surviving a refusing Docker, so the second reconcile proved nothing"
+        );
+    }
+    adopted
+}
+
+#[test]
+fn a_crash_at_every_write_is_recovered_by_label_with_the_real_backend() {
     assert!(
-        adopted,
+        crash_sweep(Sweep::Success),
         "some crash point left a created-but-unreceipted container that recovery adopted by label"
     );
+}
+
+#[test]
+fn a_crash_at_every_write_of_a_failed_preliminary_check_is_recovered() {
+    crash_sweep(Sweep::PreliminaryHealthFails);
+}
+
+#[test]
+fn a_crash_at_every_write_of_a_failed_final_check_is_recovered() {
+    crash_sweep(Sweep::FinalHealthFails);
+}
+
+#[test]
+fn a_crash_at_every_write_of_a_port_collision_is_recovered() {
+    crash_sweep(Sweep::Collision);
+}
+
+#[test]
+fn a_crash_at_every_write_of_a_failed_removal_is_recovered_once_docker_cooperates() {
+    crash_sweep(Sweep::FailedRemoval);
 }
 
 // ---------------------------------------------------------------- scope
