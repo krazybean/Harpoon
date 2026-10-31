@@ -9,12 +9,137 @@ use harpoon_deploy::ids::{ApplicationId, DeploymentId, IdGenerator};
 use harpoon_deploy::ledger::{Disposition, LedgerRecord, ResourceKey, ResourceKind};
 use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
 use harpoon_deploy::time::{ManualClock, SeqEntropy};
-use harpoon_deploy_cli::{run, Gate, Outcome, AUTH_FLAG, AUTH_PHRASE};
-use harpoon_deploy_journal::{read_only, FileJournal};
+use harpoon_deploy_cli::{run as cli_run, Gate, Outcome, AUTH_FLAG, AUTH_PHRASE};
+use harpoon_deploy_journal::{read_only, FileJournal, OpenError, Restored};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use support::fake_docker::Action;
 use support::Harness;
+
+// ------------------------------------------------------------------ fork gate (test isolation)
+//
+// `flock` belongs to the open file description. A child that another test thread forks while this
+// test's journal is open holds a copy of the lock until it execs (see deploy-journal's test
+// `a_child_forked_while_the_journal_is_open_keeps_the_lock_until_it_execs`), so dropping the journal
+// does not free it that instant and the next open reports "another Harpoon process holds the journal".
+// That is the operating system's behaviour, not a journal defect, and the journal stays fail-fast.
+// What the tests control is the overlap: a thread may only spawn a process (fake Buildx, fake lsof, the
+// real binary) while no thread has a journal open, and no journal is opened while a spawn is under way.
+// Holders never wait for each other; a spawner waits for them and then runs alone.
+
+struct ForkGate {
+    holders: usize,
+    spawning: bool,
+}
+
+static FORK_GATE: (std::sync::Mutex<ForkGate>, std::sync::Condvar) = (
+    std::sync::Mutex::new(ForkGate {
+        holders: 0,
+        spawning: false,
+    }),
+    std::sync::Condvar::new(),
+);
+
+/// A journal may be open for as long as this lives.
+struct Holding;
+
+fn holding() -> Holding {
+    let (m, cv) = &FORK_GATE;
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    while g.spawning {
+        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+    g.holders += 1;
+    Holding
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        let (m, cv) = &FORK_GATE;
+        m.lock().unwrap_or_else(|e| e.into_inner()).holders -= 1;
+        cv.notify_all();
+    }
+}
+
+/// Run `f`, which may spawn a process, with no journal open in any test thread. Must not be called
+/// by a thread that is itself holding a journal.
+fn spawning<T>(f: impl FnOnce() -> T) -> T {
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            let (m, cv) = &FORK_GATE;
+            m.lock().unwrap_or_else(|e| e.into_inner()).spawning = false;
+            cv.notify_all();
+        }
+    }
+    {
+        let (m, cv) = &FORK_GATE;
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        while g.spawning || g.holders > 0 {
+            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.spawning = true;
+    }
+    let _done = Done;
+    f()
+}
+
+/// A journal handle that keeps the gate's "holding" state for exactly as long as it is open.
+struct Held {
+    journal: FileJournal, // dropped first: the lock is released before the gate is
+    _gate: Holding,
+}
+
+impl std::ops::Deref for Held {
+    type Target = FileJournal;
+    fn deref(&self) -> &FileJournal {
+        &self.journal
+    }
+}
+
+impl std::ops::DerefMut for Held {
+    fn deref_mut(&mut self) -> &mut FileJournal {
+        &mut self.journal
+    }
+}
+
+fn open_j(dir: &Path) -> Result<(Held, Restored), OpenError> {
+    let gate = holding();
+    FileJournal::open(dir).map(|(journal, r)| {
+        (
+            Held {
+                journal,
+                _gate: gate,
+            },
+            r,
+        )
+    })
+}
+
+/// The CLI, in process. Commands that start a process (a live-path `deploy`, an inventory with
+/// `--lsof-path`) run alone; everything else may overlap with other tests but counts as holding.
+fn run(args: &[String], gate: &Gate) -> Outcome {
+    let spawns = (args.first().map(String::as_str) == Some("deploy")
+        && !args.iter().any(|a| a == "--simulate"))
+        || args.iter().any(|a| a == "--lsof-path");
+    if spawns {
+        spawning(|| cli_run(args, gate))
+    } else {
+        let _h = holding();
+        cli_run(args, gate)
+    }
+}
+
+fn spawn_binary(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    spawning(|| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_harpoon-deploy"));
+        c.args(args);
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        c.output().unwrap()
+    })
+}
 
 const OPEN: Gate = Gate {
     live_deploy_enabled: true,
@@ -383,7 +508,7 @@ fn leases_from_one_deployment_steer_the_next_and_the_plan() {
     let t2 = T::new();
     t2.docker_runtime();
     let (app, dep) = ids(3);
-    let (mut j, _) = FileJournal::open(&t2.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t2.journal_dir()).unwrap();
     j.persist(&finished(&app, &dep, DeploymentStatus::Succeeded))
         .unwrap();
     for (p, _) in [("39000", 0), ("38000", 1)] {
@@ -416,7 +541,7 @@ fn leases_from_one_deployment_steer_the_next_and_the_plan() {
 fn crashed_runtime(t: &T, with_unreceipted_container: bool) -> DeploymentId {
     assert_exit(&t.sim_deploy(), 0); // initialise a (simulated) runtime
     let (app, dep) = ids(9);
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&finished(&app, &dep, DeploymentStatus::Running))
         .unwrap();
     if with_unreceipted_container {
@@ -559,7 +684,7 @@ fn a_corrupt_journal_fails_closed_with_actionable_output_and_can_be_exported() {
 fn a_held_writer_lock_is_honoured_fail_fast_and_does_not_block_reading() {
     let t = T::new();
     assert_exit(&t.sim_deploy(), 0);
-    let (_held, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (_held, _) = open_j(&t.journal_dir()).unwrap();
     let before = t.journal_bytes();
     for o in [t.sim_deploy(), t.cli(&["recover"])] {
         assert_exit(&o, 4);
@@ -647,7 +772,7 @@ fn loose_permissions_symlinks_and_mixed_runtime_kinds_are_refused() {
     let t3 = T::new();
     t3.docker_runtime();
     std::fs::remove_file(t3.rt.join("runtime-kind")).unwrap();
-    drop(FileJournal::open(&t3.journal_dir()).unwrap());
+    drop(open_j(&t3.journal_dir()).unwrap());
     let o = t3.sim_deploy();
     assert_exit(&o, 6);
     assert!(o.stderr.contains("own runtime directory"), "{}", o.stderr);
@@ -703,39 +828,31 @@ fn a_real_binary_invocation_cannot_deploy_live() {
     let t = T::new();
     let (sock, res) = (t.socket(), t.resources());
     let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_harpoon-deploy"))
-        .args([
+    let rt = t.rt.display().to_string();
+    let ctx = t.h.ws.context().display().to_string();
+    let out = spawn_binary(
+        &[
             "deploy",
             "--runtime-dir",
-            &t.rt.display().to_string(),
+            &rt,
             "--docker-socket",
             &sock,
             "--resources-dir",
             &res,
             &auth,
-        ])
-        .args([
             "--project-dir",
-            &t.h.ws.context().display().to_string(),
+            &ctx,
             "--container-port",
             "8080",
-        ])
-        .env("DOCKER_HOST", "unix:///nonexistent")
-        .output()
-        .unwrap();
+        ],
+        &[("DOCKER_HOST", "unix:///nonexistent")],
+    );
     assert_eq!(out.status.code(), Some(6));
     assert!(String::from_utf8_lossy(&out.stderr).contains("disabled in this build"));
     assert!(!t.rt.exists());
     assert_eq!(t.docker_requests(), 0);
-    let help = std::process::Command::new(env!("CARGO_BIN_EXE_harpoon-deploy"))
-        .arg("help")
-        .output()
-        .unwrap();
-    assert_eq!(help.status.code(), Some(0));
-    let none = std::process::Command::new(env!("CARGO_BIN_EXE_harpoon-deploy"))
-        .output()
-        .unwrap();
-    assert_eq!(none.status.code(), Some(2));
+    assert_eq!(spawn_binary(&["help"], &[]).status.code(), Some(0));
+    assert_eq!(spawn_binary(&[], &[]).status.code(), Some(2));
 }
 
 // ------------------------------------------------------------------ gate open: the wiring against the fake Docker
@@ -889,7 +1006,7 @@ fn a_build_that_produces_no_image_fails_the_deployment_and_leaves_nothing_unreso
 fn reconcile_fixture(t: &T, status: DeploymentStatus) -> (ApplicationId, DeploymentId) {
     t.docker_runtime();
     let (app, dep) = ids(21);
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&finished(&app, &dep, status)).unwrap();
     j.record(&intent(
         &app,
@@ -1116,7 +1233,7 @@ fn a_recorded_release_blocks_a_second_first_deployment_for_the_same_application(
     let t = T::new();
     t.docker_runtime();
     let (app, dep) = ids(31);
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&finished(&app, &dep, DeploymentStatus::Succeeded))
         .unwrap();
     j.record(&intent(
@@ -1556,7 +1673,7 @@ fn succeeded_deployment(t: &T) -> Done {
         c.image = img.clone();
         (cid, img.clone())
     });
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&finished(&app, &dep, DeploymentStatus::Succeeded))
         .unwrap();
     j.record(&intent(
@@ -1835,7 +1952,7 @@ fn an_interrupted_removal_attempt_is_retried_and_not_forgotten() {
     let t = T::new();
     let d = succeeded_deployment(&t);
     // a previous run recorded its intent to remove the container and died before the result
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.record(&LedgerRecord::CleanupAttempt {
         key: ResourceKey::new(ResourceKind::Container, format!("hp-{}", d.dep)),
         deployment: d.dep.clone(),
@@ -2014,7 +2131,7 @@ fn only_a_succeeded_recorded_deployment_can_be_torn_down() {
         let t2 = T::new();
         t2.docker_runtime();
         let (app, dep) = ids(55);
-        let (mut j, _) = FileJournal::open(&t2.journal_dir()).unwrap();
+        let (mut j, _) = open_j(&t2.journal_dir()).unwrap();
         j.persist(&finished(&app, &dep, st)).unwrap();
         drop(j);
         let dd = Done {
@@ -2131,7 +2248,7 @@ fn teardown_does_not_touch_other_deployments_of_the_same_application() {
         s.containers.last_mut().unwrap().host_port = Some(38001);
         id
     });
-    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&finished(&d.app, &dep2, DeploymentStatus::Succeeded))
         .unwrap();
     j.record(&intent(
@@ -2284,7 +2401,7 @@ fn the_first_container_that_does_not_come_out_clean_stops_the_rest() {
             s.containers.last_mut().unwrap().image = d.img.clone();
             id
         });
-        let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
         j.record(&intent(
             &d.app,
             &d.dep,
@@ -2371,5 +2488,51 @@ fn the_cli_sources_never_call_a_prune_endpoint_or_force_a_removal() {
         for bad in ["/prune", "force=true", "Command::new", "env::var"] {
             assert!(!text.contains(bad), "{} contains {bad}", p.display());
         }
+    }
+}
+
+#[test]
+fn the_fork_gate_never_lets_a_spawn_overlap_an_open_journal() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static OPEN_NOW: AtomicUsize = AtomicUsize::new(0);
+    static SPAWNING_NOW: AtomicUsize = AtomicUsize::new(0);
+    let threads: Vec<_> = (0..6)
+        .map(|n| {
+            std::thread::spawn(move || {
+                for i in 0..200 {
+                    if (n + i) % 5 == 0 {
+                        spawning(|| {
+                            SPAWNING_NOW.fetch_add(1, Ordering::SeqCst);
+                            assert_eq!(
+                                OPEN_NOW.load(Ordering::SeqCst),
+                                0,
+                                "a spawn ran while a journal was open"
+                            );
+                            assert_eq!(
+                                SPAWNING_NOW.load(Ordering::SeqCst),
+                                1,
+                                "two spawns overlapped"
+                            );
+                            std::thread::yield_now();
+                            SPAWNING_NOW.fetch_sub(1, Ordering::SeqCst);
+                        });
+                    } else {
+                        let _h = holding();
+                        let _nested = holding(); // a holder may hold again without waiting
+                        OPEN_NOW.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            SPAWNING_NOW.load(Ordering::SeqCst),
+                            0,
+                            "a journal was opened during a spawn"
+                        );
+                        std::thread::yield_now();
+                        OPEN_NOW.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
     }
 }
