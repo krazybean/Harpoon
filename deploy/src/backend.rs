@@ -120,8 +120,19 @@ pub enum RestoreResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviousRelease {
     pub release: ReleaseId,
+    /// The deployment that built the release (its image carries this deployment's labels).
     pub deployment: DeploymentId,
     pub config: Option<ReleaseConfig>,
+    /// The container that actually serves it, when that is not simply the release's own (after a
+    /// restoration it belongs to the deployment that restored it). `None` = the release's own.
+    pub container: Option<ContainerRef>,
+}
+
+/// A recorded container: which deployment's ledger holds it, and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerRef {
+    pub owner: DeploymentId,
+    pub name: String,
 }
 
 /// What the engine needs to look at and remove runtime objects. Separate from [`Backend`] so
@@ -143,10 +154,27 @@ pub trait Backend: ResourceOps {
     fn preliminary_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError>;
     /// Stop the previous, healthy release. After this, Harpoon owns the interruption.
     fn stop_current(&mut self, io: &mut StepIo<'_>, previous: &PreviousRelease) -> Result<(), StepError>;
-    /// The configuration the release just started with, to be pinned in the durable record before
-    /// its final check. `None` when the backend cannot say.
+    /// Decide, **before anything is created or stopped**, the configuration the new release will
+    /// serve with (reserving its port lease through the ledger) and return it so the engine can
+    /// pin it durably first. `start_new` then uses exactly this plan. `None` = the backend cannot
+    /// plan, and the release is not pinned.
+    fn plan_release(&mut self, _io: &mut StepIo<'_>) -> Result<Option<ReleaseConfig>, StepError> {
+        Ok(None)
+    }
+    /// The configuration the release actually started with. Compared with the plan after
+    /// `start_new`; a difference (a port collision moved it) is pinned again at once.
     fn pinned_config(&self) -> Option<ReleaseConfig> {
         None
+    }
+    /// Problems that make a restoration unsafe to start, found by reading only: for example a
+    /// running container that already publishes the previous release's port. Nothing is created,
+    /// stopped or removed to answer this. An empty list means nothing was found.
+    fn restore_blockers(
+        &mut self,
+        _io: &mut StepIo<'_>,
+        _previous: &PreviousRelease,
+    ) -> Result<Vec<String>, StepError> {
+        Ok(Vec::new())
     }
     /// Start the new release on its real address.
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
@@ -291,6 +319,8 @@ pub struct FakeBackend {
     /// What the last restoration attempt was told to restore.
     pub restored: Option<PreviousRelease>,
     restore_error: Option<StepError>,
+    blockers: Vec<String>,
+    plan_error: Option<StepError>,
 }
 
 impl FakeBackend {
@@ -318,6 +348,8 @@ impl FakeBackend {
             cutover_supported: true,
             restored: None,
             restore_error: None,
+            blockers: Vec::new(),
+            plan_error: None,
         }
     }
 
@@ -411,6 +443,16 @@ impl FakeBackend {
     pub fn restore_errors(mut self, e: StepError, takes_ms: u64) -> Self {
         self.restore_error = Some(e);
         self.restore = VecDeque::from([(RestoreResult::Healthy, takes_ms)]);
+        self
+    }
+    /// A restoration would find these problems (for example an occupied port) before creating anything.
+    pub fn restore_blocked_by(mut self, problems: &[&str]) -> Self {
+        self.blockers = problems.iter().map(|p| p.to_string()).collect();
+        self
+    }
+    /// Deciding the new release's configuration fails, before anything is created or stopped.
+    pub fn fail_plan(mut self, msg: &str) -> Self {
+        self.plan_error = Some(StepError::new(msg));
         self
     }
     pub fn final_check_takes(mut self, ms: u64) -> Self {
@@ -547,8 +589,21 @@ impl Backend for FakeBackend {
     fn stop_current(&mut self, _io: &mut StepIo<'_>, _previous: &PreviousRelease) -> Result<(), StepError> {
         self.run(Call::StopCurrent, |b| b.stop_current.clone())
     }
+    fn plan_release(&mut self, _io: &mut StepIo<'_>) -> Result<Option<ReleaseConfig>, StepError> {
+        if let Some(e) = self.plan_error.clone() {
+            return Err(e);
+        }
+        Ok(Some(ReleaseConfig::simulated(39000)))
+    }
     fn pinned_config(&self) -> Option<ReleaseConfig> {
         Some(ReleaseConfig::simulated(39000))
+    }
+    fn restore_blockers(
+        &mut self,
+        _io: &mut StepIo<'_>,
+        _previous: &PreviousRelease,
+    ) -> Result<Vec<String>, StepError> {
+        Ok(self.blockers.clone())
     }
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         if let Some(world) = self.world.clone() {
@@ -581,7 +636,7 @@ impl Backend for FakeBackend {
     }
     fn restore_previous(
         &mut self,
-        _io: &mut StepIo<'_>,
+        io: &mut StepIo<'_>,
         previous: &PreviousRelease,
         budget_ms: u64,
     ) -> Result<RestoreResult, StepError> {
@@ -594,6 +649,11 @@ impl Backend for FakeBackend {
             .pop_front()
             .unwrap_or((RestoreResult::NotAttempted(Reason::ImageMissing), 0));
         self.clock.advance(takes);
+        if matches!(r, RestoreResult::Healthy | RestoreResult::StartedUnverified) && self.restore_error.is_none() {
+            // A restoration that started something has created a new, retained container.
+            let name = crate::serving::restored_container_name(io.deployment());
+            self.create(io, ResourceKind::Container, &name, Disposition::Retain)?;
+        }
         match self.restore_error.take() {
             Some(e) => Err(e),
             None => Ok(r),

@@ -536,6 +536,7 @@ fn explicit_recovery_of_an_interrupted_cutover_restores_once_through_the_docker_
     let mut d = r.h.dep.clone();
     d.transition(DeploymentStatus::Running, 10).unwrap();
     d.start_step(Step::Cutover, 11).unwrap();
+    d.replaces = Some(release(&r));
     d.begin_cutover(12).unwrap();
     let mut v = [d];
     harpoon_deploy::state::recover_on_start(&mut v, 20);
@@ -546,6 +547,7 @@ fn explicit_recovery_of_an_interrupted_cutover_restores_once_through_the_docker_
         release: release(&r),
         deployment: r.prev.clone(),
         config: None,
+        container: None,
     };
     let mut j = MemoryJournal::new();
     let rep = recover_cutover(
@@ -589,5 +591,323 @@ fn explicit_recovery_of_an_interrupted_cutover_restores_once_through_the_docker_
         r.h.docker.requests().len(),
         n,
         "a refused second attempt does not even contact Docker"
+    );
+}
+
+// ---------------------------------------------------------------- hardening after B11
+
+fn non_get(r: &Rig) -> usize {
+    r.h.docker
+        .requests()
+        .iter()
+        .filter(|q| q.method != "GET")
+        .count()
+}
+
+#[test]
+fn the_candidates_pin_is_durable_before_its_container_exists() {
+    let mut crashed = 0;
+    for n in 0..80 {
+        let mut r = rig();
+        let mut b = backend(&r, transport(Observation::Status(200)));
+        let (rel, cfg) = (release(&r), r.cfg.clone());
+        let mut j = StampedJournal::crash_at(n);
+        let res = r.h.run_replacing_with(&mut b, &mut j, &rel, &cfg);
+        let candidate = format!("hp-{}", r.h.dep.id);
+        if r.h.docker.container(&candidate).is_some() {
+            let pinned = j.inner.last().and_then(|s| s.pinned.clone());
+            let want = pinned.expect("a container exists, so the pin was durable first");
+            assert_eq!(want.image_id.len(), 71, "write {n}: an exact image id");
+            assert_ne!(want.host_port, PREV_PORT);
+            let started = r.h.docker.container(&candidate).unwrap().host_port;
+            assert_eq!(
+                started,
+                Some(want.host_port),
+                "write {n}: the pin names the port actually published"
+            );
+        }
+        if res.is_ok() {
+            break;
+        }
+        crashed += 1;
+    }
+    assert!(crashed > 5);
+}
+
+#[test]
+fn a_port_collision_moves_the_release_and_its_pin_follows() {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    h.docker.with(|s| {
+        s.taken_ports.insert(38000);
+    });
+    let mut b = h.backend(Scripted::always(Observation::Status(200)));
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
+    let pin = h.dep.pinned.clone().expect("pinned");
+    assert_eq!(
+        pin.host_port, 38001,
+        "the pin names the port the release really serves on"
+    );
+    assert_eq!(
+        j.inner.last().unwrap().pinned.as_ref().unwrap().host_port,
+        38001
+    );
+}
+
+#[test]
+fn a_pin_that_disagrees_with_the_leased_port_is_not_trusted() {
+    let mut r = rig();
+    r.cfg.previous.as_mut().unwrap().host_port = PREV_PORT + 1;
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::NotAttempted(Reason::ConfigUnavailable)
+    );
+    assert!(r
+        .h
+        .docker
+        .container(&format!("hp-{}-restored", r.h.dep.id))
+        .is_none());
+    assert!(rep
+        .logs
+        .iter()
+        .any(|(s, c)| *s == Step::Recovery && c.text.contains("cannot be trusted")));
+    only_the_previous_release_was_stopped(&r);
+}
+
+#[test]
+fn after_a_restoration_the_next_replacement_stops_the_restored_container_not_the_old_one() {
+    let mut r = rig();
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert_eq!(r.h.dep.recovery.unwrap().outcome, RecoveryOutcome::Restored);
+    let failed = r.h.dep.clone();
+    let restored_name = format!("hp-{}-restored", failed.id);
+    let restored = r.h.docker.container(&restored_name).unwrap();
+
+    // the records, as the next invocation would read them
+    let mut earlier = Deployment::new(
+        r.prev.clone(),
+        failed.application_id.clone(),
+        Trigger::Cli,
+        1,
+    );
+    earlier.transition(DeploymentStatus::Queued, 2).unwrap();
+    earlier.transition(DeploymentStatus::Running, 3).unwrap();
+    earlier.release = Some(release(&r));
+    earlier.transition(DeploymentStatus::Succeeded, 4).unwrap();
+    let deps = [earlier, failed.clone()];
+    let sv = harpoon_deploy::serving::serving_release(&rep.ledger, &deps, &failed.application_id)
+        .unwrap();
+    assert_eq!(sv.container_name, restored_name);
+    assert_eq!(sv.container_owner, failed.id);
+
+    // a new candidate replaces it, told where the release really serves
+    r.h.dep = new_deployment(&mut r.h.ids);
+    r.h.docker.with(|s| s.faults.clear());
+    r.h.seed_built_image();
+    let mut cfg = r.cfg.clone();
+    cfg.prior_ledger = rep.ledger.clone();
+    cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: sv.container_owner.clone(),
+        name: sv.container_name.clone(),
+    });
+    let mut b2 = {
+        let mut c = config(&r.h.ws, &r.h.docker);
+        c.enable_replacement = true;
+        DockerBackend::with_transport(c, Some(&r.h.ws.resources()), transport_ok())
+            .unwrap()
+            .with_entropy(test_entropy())
+            .with_port_probe(NoListeners)
+            .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+    };
+    let before = r.h.docker.requests().len();
+    let rel = release(&r);
+    let rep2 =
+        r.h.run_replacing_with(&mut b2, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("engine");
+    assert_eq!(
+        rep2.status,
+        DeploymentStatus::Succeeded,
+        "{:?}",
+        r.h.dep.failure
+    );
+    let stops: Vec<String> = r.h.docker.requests()[before..]
+        .iter()
+        .filter(|q| q.method == "POST" && q.path.contains("/stop"))
+        .map(|q| q.path.clone())
+        .collect();
+    // (the other stop is the new candidate's own preliminary container, removed before the cutover)
+    assert_eq!(
+        stops.iter().filter(|p| p.contains(&restored.id)).count(),
+        1,
+        "the restored container was stopped: {stops:?}"
+    );
+    assert!(
+        stops.iter().all(|p| !p.contains(&r.prev_container)),
+        "not the old stopped one: {stops:?}"
+    );
+    assert!(!r.h.docker.container(&restored_name).unwrap().running);
+}
+
+fn transport_ok() -> impl HttpTransport {
+    Scripted::always(Observation::Status(200))
+}
+
+#[test]
+fn a_running_container_on_the_port_blocks_the_automatic_restoration_and_is_not_touched() {
+    let mut r = rig();
+    // while Harpoon stops the old release, something else starts publishing its port
+    r.h.docker.fault(
+        Some("POST"),
+        "/stop",
+        1,
+        Action::Race(std::sync::Arc::new(|s| {
+            s.add_container("squatter", vec![], true);
+            s.containers.last_mut().unwrap().host_port = Some(PREV_PORT);
+        })),
+    );
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::NotAttempted(Reason::PortInUse)
+    );
+    assert!(
+        r.h.docker
+            .container(&format!("hp-{}-restored", r.h.dep.id))
+            .is_none(),
+        "nothing was created"
+    );
+    assert!(
+        r.h.docker.container("squatter").unwrap().running,
+        "the squatter was not touched"
+    );
+    assert!(rep.warnings.iter().any(|m| m.contains("squatter")
+        && m.contains("no Harpoon labels")
+        && m.contains("free the port yourself")));
+    assert!(r.h.dep.application_may_be_down());
+    let squatter = r.h.docker.container("squatter").unwrap().id;
+    assert!(r
+        .h
+        .docker
+        .requests()
+        .iter()
+        .all(|q| q.method == "GET" || !q.path.contains(&squatter)));
+}
+
+#[test]
+fn an_interrupted_cutover_with_the_candidate_still_running_is_reported_and_costs_no_attempt() {
+    let r = rig();
+    r.h.docker.with(|s| s.faults.clear());
+    // the previous release was stopped, and the dead candidate is still running on its port
+    let (id, app, dead) = (
+        r.prev_container.clone(),
+        r.h.dep.application_id.clone(),
+        r.h.dep.id.clone(),
+    );
+    let other = {
+        let mut g = harpoon_deploy::ids::IdGenerator::new(
+            harpoon_deploy::time::SystemClock,
+            harpoon_deploy::time::OsEntropy::new(),
+        );
+        (g.application().unwrap(), g.deployment().unwrap())
+    };
+    r.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .filter(|c| c.id == id)
+            .for_each(|c| c.running = false);
+        for (name, l) in [
+            ("dead-candidate", labels(&app, &dead)),
+            ("another-apps", labels(&other.0, &other.1)),
+            ("unlabelled", vec![]),
+        ] {
+            s.add_container(name, l, true);
+            s.containers.last_mut().unwrap().host_port = Some(PREV_PORT);
+        }
+        s.add_container("stopped-holder", vec![], false);
+        s.containers.last_mut().unwrap().host_port = Some(PREV_PORT);
+    });
+    let mut d = r.h.dep.clone();
+    d.transition(DeploymentStatus::Running, 10).unwrap();
+    d.start_step(Step::Cutover, 11).unwrap();
+    d.replaces = Some(release(&r));
+    d.begin_cutover(12).unwrap();
+    let mut v = [d];
+    harpoon_deploy::state::recover_on_start(&mut v, 20);
+    let [mut d] = v;
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let prev = harpoon_deploy::backend::PreviousRelease {
+        release: release(&r),
+        deployment: r.prev.clone(),
+        config: None,
+        container: None,
+    };
+    let mut j = MemoryJournal::new();
+    let n = non_get(&r);
+    let rep = recover_cutover(
+        &mut d,
+        prev.clone(),
+        &mut b,
+        &mut j,
+        &harpoon_deploy::time::SystemClock,
+        &r.cfg,
+    )
+    .unwrap();
+
+    // reported, with who owns each holder; the stopped one does not block
+    assert_eq!(rep.blocked.len(), 3, "{:?}", rep.blocked);
+    let text = rep.blocked.join("\n");
+    assert!(
+        text.contains("dead-candidate")
+            && text.contains("this application's Harpoon labels")
+            && text.contains("reconcile")
+    );
+    assert!(text.contains("another-apps") && text.contains("another application's Harpoon labels"));
+    assert!(text.contains("unlabelled") && text.contains("no Harpoon labels"));
+    assert!(!text.contains("stopped-holder"));
+    // nothing recorded, nothing created, nothing stopped or removed
+    assert_eq!(j.writes(), 0);
+    assert!(d.can_recover_explicitly() && d.recovery.is_none());
+    assert_eq!(non_get(&r), n);
+    for name in ["dead-candidate", "another-apps", "unlabelled"] {
+        assert!(
+            r.h.docker.container(name).unwrap().running,
+            "{name} untouched"
+        );
+    }
+
+    // once the developer clears the port, the one attempt is made and works
+    r.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .filter(|c| c.host_port == Some(PREV_PORT))
+            .for_each(|c| c.running = false)
+    });
+    let rep = recover_cutover(
+        &mut d,
+        prev,
+        &mut b,
+        &mut j,
+        &harpoon_deploy::time::SystemClock,
+        &r.cfg,
+    )
+    .unwrap();
+    assert!(rep.blocked.is_empty());
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+    assert!(
+        rep.logs
+            .iter()
+            .any(|(_, c)| c.text.contains("stopped container stopped-holder")),
+        "the stopped holder was reported"
     );
 }
