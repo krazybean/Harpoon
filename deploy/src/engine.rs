@@ -488,6 +488,18 @@ pub fn execute_actions(
                     Ok(RemoveResult::Removed) => CleanupOutcome::Removed,
                     Ok(RemoveResult::AlreadyAbsent) => CleanupOutcome::AlreadyAbsent,
                     Ok(RemoveResult::Refused(why)) => CleanupOutcome::Refused(why),
+                    // A conflict is typed only where the ledger accepts it: a retained image with a
+                    // receipt. Anywhere else it is an ordinary failed cleanup, which blocks.
+                    Ok(RemoveResult::Conflict(cause, why)) => {
+                        if e.key.kind == crate::ledger::ResourceKind::Image
+                            && e.disposition == crate::ledger::Disposition::Retain
+                            && e.id.is_some()
+                        {
+                            CleanupOutcome::Conflict(cause, why)
+                        } else {
+                            CleanupOutcome::Failed(format!("conflict ({}): {why}", cause.as_str()))
+                        }
+                    }
                     Err(err) => CleanupOutcome::Failed(err.message),
                 };
                 settle(ledger, journal, clock, entry, outcome)?;

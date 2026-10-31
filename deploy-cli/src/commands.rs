@@ -41,6 +41,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
+        "cleanup-image" => cleanup_image(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),
     }
 }
@@ -189,8 +190,19 @@ fn unresolved(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
             e.deployment
         );
         if e.needs_attention() {
+            // The one narrow exception (see `Ledger::deferred_image_conflict`): a retained image of a
+            // deployment that did not succeed, whose deletion was refused as a conflict, with
+            // everything else of that deployment released. It is reported as a notice, not a blocker.
+            let end = find_dep(deps, &e.deployment).and_then(|d| end_state(d.status));
+            if ledger.deferred_image_conflict(e, end) {
+                continue;
+            }
             let why = match &e.state {
                 EntryState::CleanupFailed(m) => format!("cleanup failed: {m}"),
+                EntryState::CleanupConflict(c, m) => format!(
+                    "cleanup refused as a conflict ({}): {m} (it blocks because this deployment has other unresolved work or did not end unsuccessfully)",
+                    c.as_str()
+                ),
                 EntryState::Refused(m) => format!("not touched, ownership not proven: {m}"),
                 _ => "a removal was attempted and its result was never recorded".to_string(),
             };
@@ -217,6 +229,43 @@ fn unresolved(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
                 }
             }
         }
+    }
+    v
+}
+
+/// Retained images of deployments that did not succeed. They never block anything by themselves;
+/// this lists them so that `cleanup-image` can be found. (A retained image whose removal failed
+/// for any reason other than a conflict is reported by `unresolved`, because that is ambiguous.)
+fn retained_image_notices(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
+    let mut v = Vec::new();
+    for e in ledger.entries() {
+        if e.key.kind != ResourceKind::Image
+            || e.disposition != Disposition::Retain
+            || e.is_released()
+            || e.cleanup_outstanding
+        {
+            continue;
+        }
+        let Some(id) = &e.id else { continue };
+        let Some(d) = find_dep(deps, &e.deployment) else {
+            continue;
+        };
+        if end_state(d.status) != Some(EndState::NotSucceeded) {
+            continue;
+        }
+        let note = match &e.state {
+            EntryState::Created => "retained".to_string(),
+            EntryState::CleanupConflict(_, m)
+                if ledger.deferred_image_conflict(e, Some(EndState::NotSucceeded)) =>
+            {
+                format!("cleanup refused as a conflict: {m}")
+            }
+            _ => continue,
+        };
+        v.push(format!(
+            "image {} (id {id}) of deployment {} ({}): {note}",
+            e.key.name, e.deployment, d.status
+        ));
     }
     v
 }
@@ -261,6 +310,16 @@ fn print_lease_and_problems(out: &mut String, r: &Restored) {
     } else {
         let _ = writeln!(out, "unresolved cleanup ({}):", u.len());
         for l in u {
+            let _ = writeln!(out, "  {l}");
+        }
+    }
+    let n = retained_image_notices(&r.ledger, &r.deployments);
+    if !n.is_empty() {
+        let _ = writeln!(
+            out,
+            "retained images of unsuccessful deployments (they do not block deployments; remove one with `cleanup-image`):"
+        );
+        for l in n {
             let _ = writeln!(out, "  {l}");
         }
     }
@@ -357,6 +416,7 @@ fn state_word(s: &EntryState) -> &'static str {
         EntryState::Created => "created",
         EntryState::Released(_) => "released",
         EntryState::CleanupFailed(_) => "cleanup-failed",
+        EntryState::CleanupConflict(..) => "cleanup-conflict",
         EntryState::Refused(_) => "refused",
     }
 }
@@ -1408,6 +1468,7 @@ fn state_note(e: &harpoon_deploy::ledger::Entry) -> &'static str {
     match &e.state {
         EntryState::Created => "recorded",
         EntryState::CleanupFailed(_) => "an earlier removal failed",
+        EntryState::CleanupConflict(..) => "an earlier removal was refused as a conflict",
         EntryState::Intended => "no receipt",
         EntryState::Refused(_) => "refused earlier",
         EntryState::Released(_) => "already released",
@@ -1714,6 +1775,11 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
                 e.key.kind.as_str(),
                 e.key.name
             )),
+            EntryState::CleanupConflict(_, m) => problems.push(format!(
+                "{} {}: removal refused as a conflict and recorded: {m}",
+                e.key.kind.as_str(),
+                e.key.name
+            )),
             EntryState::Refused(m) => problems.push(format!(
                 "{} {}: refused, not touched: {m}",
                 e.key.kind.as_str(),
@@ -1741,5 +1807,305 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
             let _ = writeln!(out, "  {pr}");
         }
         Ok(exit::FAILED)
+    }
+}
+
+// ------------------------------------------------------------------ cleanup-image (B8.2)
+
+/// Remove the retained image of ONE deployment that did not succeed. Offline-tested only.
+///
+/// Journal rules (nothing is read from Docker until they all hold), then Docker rules (image id,
+/// all three labels, only the recorded tag, no digest, no container in any state), then the
+/// deletion by id without force (parent layers are left alone). Problems that make removal uncertain are
+/// refused **without writing the journal**; only an ownership mismatch is recorded, as the same
+/// terminal refusal `reconcile` and `teardown` record. The attempt is journaled before Docker is
+/// asked, and the result after.
+fn cleanup_image(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        authorized(p)?;
+    }
+    let dep_id: harpoon_deploy::ids::DeploymentId = p
+        .value("deployment")
+        .ok_or_else(|| Fail::usage("--deployment dep_… is required (the one deployment whose retained image to remove)"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--deployment is not a deployment id: {e}")))?;
+    let image = p.value("image").ok_or_else(|| {
+        Fail::usage("--image sha256:… is required (the image id recorded for that deployment)")
+    })?;
+    let well_formed = image.strip_prefix("sha256:").is_some_and(|h| {
+        h.len() == 64 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if !well_formed {
+        return Err(Fail::usage(
+            "--image must be a full image id, sha256: followed by 64 lower-case hex digits; a tag or a prefix is not accepted",
+        ));
+    }
+    let socket = socket_flag(p)?.ok_or_else(|| {
+        Fail::runtime("cleanup-image needs an explicit --docker-socket PATH; nothing is assumed about the runtime")
+    })?;
+    if !rt.initialised() {
+        return Err(Fail::refused(format!(
+            "there is no journal at {}; nothing is recorded to clean up",
+            rt.journal_dir().display()
+        )));
+    }
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused(
+            "this is a simulated runtime; there is nothing real to clean up",
+        ));
+    }
+    let mut backend = docker_backend(p, &rt, &socket)?;
+    let (mut writer, restored) = if apply {
+        let (j, r) = store::open_writer(&rt, Kind::Docker)?;
+        (Some(j), r)
+    } else {
+        (None, store::read_restored(&rt)?.expect("initialised above"))
+    };
+    let ledger = &restored.ledger;
+
+    // ---- journal rules
+    let Some(d) = restored.deployments.iter().find(|d| d.id == dep_id) else {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} is not in the journal"
+        )));
+    };
+    let images: Vec<&harpoon_deploy::ledger::Entry> = ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == dep_id && e.key.kind == ResourceKind::Image)
+        .collect();
+    let Some(e) = images.iter().find(|e| e.id.as_deref() == Some(image)) else {
+        let recorded: Vec<String> = images
+            .iter()
+            .map(|e| {
+                e.id.clone()
+                    .unwrap_or_else(|| format!("{} (no receipt)", e.key.name))
+            })
+            .collect();
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} has no recorded image with id {image}. Recorded: {}.{}",
+            if recorded.is_empty() {
+                "none".to_string()
+            } else {
+                recorded.join(", ")
+            },
+            if images.iter().any(|e| e.id.is_none()) {
+                " An image with no receipt is resolved by `reconcile`, not here."
+            } else {
+                ""
+            }
+        )));
+    };
+    if e.is_released() {
+        let _ = writeln!(
+            out,
+            "cleanup-image: nothing to do — image {image} of {dep_id} is already released"
+        );
+        return Ok(exit::OK);
+    }
+    if let EntryState::Refused(m) = &e.state {
+        return Err(Fail::refused(format!(
+            "image {image} of {dep_id} was refused earlier ({m}); its ownership was not proven, so it will not be touched. Inspect it with `status`."
+        )));
+    }
+    match end_state(d.status) {
+        None => {
+            return Err(Fail::refused(format!(
+                "deployment {dep_id} is {}, not finished; run `recover` first",
+                d.status
+            )))
+        }
+        Some(EndState::Succeeded) => {
+            return Err(Fail::refused(format!(
+                "deployment {dep_id} succeeded. Its image is part of the running release; use `teardown` to dismantle it."
+            )))
+        }
+        Some(EndState::NotSucceeded) => {}
+    }
+    if e.disposition != Disposition::Retain {
+        return Err(Fail::refused(format!(
+            "image {image} is not a retained image ({:?}); `reconcile` manages it",
+            e.disposition
+        )));
+    }
+    let open: Vec<String> = ledger
+        .entries()
+        .iter()
+        .filter(|o| o.deployment == dep_id && o.key != e.key && !o.is_released())
+        .map(|o| format!("{} {}", o.key.kind.as_str(), o.key.name))
+        .collect();
+    if !open.is_empty() {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} still has unreleased resources ({}); run `reconcile` first. Nothing was changed.",
+            open.join(", ")
+        )));
+    }
+    if let Some(o) = ledger.entries().iter().find(|o| {
+        o.deployment != dep_id
+            && o.key.kind == ResourceKind::Image
+            && !o.is_released()
+            && o.id.as_deref() == Some(image)
+    }) {
+        return Err(Fail::refused(format!(
+            "image {image} is also recorded for deployment {}; it is shared, so it will not be removed",
+            o.deployment
+        )));
+    }
+
+    // ---- Docker rules (read-only)
+    let runtime_err = |what: &str, e: harpoon_deploy::backend::StepError| {
+        Fail::runtime(format!(
+            "{what} ({}): {}\nNothing was assumed absent or eligible and nothing was changed.",
+            socket.display(),
+            e.message
+        ))
+    };
+    let verdict = backend
+        .assess_retained_image(image, &e.key.name, &e.app, &e.deployment)
+        .map_err(|er| runtime_err("cannot inspect the image or list containers", er))?;
+    let _ = writeln!(
+        out,
+        "cleanup-image of {dep_id} (application {}) — {}",
+        d.application_id,
+        if apply {
+            "APPLYING"
+        } else {
+            "dry run: nothing will be changed"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "recorded: image {image} (tag {}), retained after a {} deployment",
+        e.key.name, d.status
+    );
+    let entry = (e.deployment.clone(), e.key.clone());
+    let mut action = None;
+    match &verdict {
+        harpoon_deploy_docker::backend::ImageVerdict::NotExclusive(why) => {
+            return Err(Fail::refused(format!(
+                "refused: {why}. Nothing was changed and the journal was not written; remove the cause and run this command again."
+            )));
+        }
+        harpoon_deploy_docker::backend::ImageVerdict::Ownership(why) => {
+            if !apply {
+                let _ = writeln!(
+                    out,
+                    "would: REFUSE image {image}: {why} — --apply would record this as a terminal refusal, exactly as `reconcile` does"
+                );
+                return Ok(exit::REFUSED);
+            }
+            action = Some(Action::Refuse {
+                entry: entry.clone(),
+                reason: why.clone(),
+            });
+        }
+        harpoon_deploy_docker::backend::ImageVerdict::Absent => {
+            let _ = writeln!(
+                out,
+                "verified: Docker has no image {image}; --apply records it as already absent"
+            );
+        }
+        harpoon_deploy_docker::backend::ImageVerdict::Eligible => {
+            let _ = writeln!(
+                out,
+                "verified: deployment is {}; its other resources are released; Docker holds exactly this id with all three Harpoon labels; only the recorded tag; no digest; no container, running or stopped, uses it",
+                d.status
+            );
+            let _ = writeln!(
+                out,
+                "{}remove image {image} by id (force=false, parent layers left alone); Docker itself re-checks references at that moment",
+                if apply { "" } else { "would: " }
+            );
+        }
+    }
+    if !apply {
+        let _ = writeln!(
+            out,
+            "dry run: nothing was changed. Add --apply and --{AUTH_FLAG}=… to carry this out."
+        );
+        return Ok(exit::OK);
+    }
+
+    // ---- apply: the attempt is journaled before Docker is asked, the result after
+    let mut ledger = restored.ledger.clone();
+    let j = writer.as_mut().expect("apply holds the writer");
+    let journal_err = |e: harpoon_deploy::engine::EngineError| {
+        Fail::failed(format!(
+            "journal write failed during cleanup-image: {e}; run `recover`, then `status`, and retry"
+        ))
+    };
+    let action = action.unwrap_or_else(|| Action::Remove {
+        entry: entry.clone(),
+        observed: Observed {
+            kind: ResourceKind::Image,
+            name: e.key.name.clone(),
+            id: image.to_string(),
+            labels: Vec::new(),
+        },
+        adopt: false,
+    });
+    let mut ops = backend.retained_image_ops();
+    execute_actions(
+        std::slice::from_ref(&action),
+        &mut ledger,
+        j,
+        &mut ops,
+        &SystemClock,
+    )
+    .map_err(journal_err)?;
+
+    let after = ledger.find(&entry.0, &entry.1).expect("the entry exists");
+    match &after.state {
+        EntryState::Released(harpoon_deploy::ledger::Released::Removed) => {
+            let _ = writeln!(out, "removed image {image} by id");
+            let _ = writeln!(out, "cleanup-image: complete");
+            Ok(exit::OK)
+        }
+        EntryState::Released(harpoon_deploy::ledger::Released::AlreadyAbsent) => {
+            let _ = writeln!(
+                out,
+                "image {image} is not in Docker; recorded as already absent"
+            );
+            let _ = writeln!(out, "cleanup-image: complete");
+            Ok(exit::OK)
+        }
+        EntryState::CleanupConflict(_, m)
+            if ledger.deferred_image_conflict(after, Some(EndState::NotSucceeded)) =>
+        {
+            let _ = writeln!(out, "kept: {m}");
+            let _ = writeln!(
+                out,
+                "cleanup-image: incomplete — the conflict is recorded and does not block other deployments; remove its cause and run this command again to retry"
+            );
+            Ok(exit::FAILED)
+        }
+        EntryState::CleanupConflict(_, m) => {
+            let _ = writeln!(out, "kept: {m}");
+            let _ = writeln!(
+                out,
+                "cleanup-image: incomplete — the conflict is recorded, but this runtime stays blocked until the deployment's other unresolved work is settled"
+            );
+            Ok(exit::FAILED)
+        }
+        EntryState::CleanupFailed(m) => {
+            let _ = writeln!(
+                out,
+                "cleanup-image: incomplete — the outcome is not certain ({m}); it is recorded, nothing was forced, and the runtime stays blocked until a repeat of this command settles it"
+            );
+            Ok(exit::FAILED)
+        }
+        EntryState::Refused(m) => {
+            let _ = writeln!(
+                out,
+                "cleanup-image: refused — {m}; recorded as a terminal refusal; nothing was touched"
+            );
+            Ok(exit::FAILED)
+        }
+        _ => {
+            let _ = writeln!(out, "cleanup-image: incomplete — the state was not settled");
+            Ok(exit::FAILED)
+        }
     }
 }

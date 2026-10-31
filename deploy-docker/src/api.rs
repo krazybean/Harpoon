@@ -28,6 +28,11 @@ impl ApiError {
     pub fn is_timeout(&self) -> bool {
         matches!(self, ApiError::Transport(HttpError::Timeout(_)))
     }
+    /// Docker answered with its documented "conflict" status (HTTP 409). Decided from the status
+    /// code only; the message text is never consulted.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, ApiError::Status { status: 409, .. })
+    }
     /// Docker reports a host port that something else holds.
     pub fn is_port_collision(&self) -> bool {
         match self {
@@ -84,6 +89,9 @@ pub struct ImageInfo {
     /// `Config.Volumes`: paths the image declares as volumes (including inherited ones). Docker
     /// creates an anonymous volume for each when a container starts from the image.
     pub volumes: Vec<String>,
+    /// `RepoDigests`: registry digests this image is known by. A locally built image has none; any
+    /// entry means it was pulled or pushed and may be referenced from elsewhere.
+    pub repo_digests: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +248,26 @@ fn message_of(r: &Response) -> String {
         .unwrap_or_else(|| r.text().chars().take(300).collect())
 }
 
+/// A JSON array of strings that Docker documents as always present (`null` means empty). A missing
+/// key, a non-array or a non-string element is **malformed**, never an empty list: callers use these
+/// lists to decide that nothing else references an image.
+fn string_list(v: Option<&Json>, op: &'static str, field: &str) -> Result<Vec<String>, ApiError> {
+    let bad = |detail: String| ApiError::Malformed { op, detail };
+    match v {
+        None => Err(bad(format!("{field} is missing"))),
+        Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Arr(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| bad(format!("{field} holds a non-string")))
+            })
+            .collect(),
+        Some(_) => Err(bad(format!("{field} is not an array"))),
+    }
+}
+
 fn labels_of(j: Option<&Json>, op: &'static str) -> Result<Labels, ApiError> {
     match j {
         None | Some(Json::Null) => Ok(Vec::new()),
@@ -372,15 +400,12 @@ impl DockerApi {
                             })
                         }
                     },
-                    tags: j
-                        .get("RepoTags")
-                        .and_then(Json::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|t| t.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    tags: string_list(j.get("RepoTags"), "image inspect", "RepoTags")?,
+                    repo_digests: string_list(
+                        j.get("RepoDigests"),
+                        "image inspect",
+                        "RepoDigests",
+                    )?,
                 }))
             }
             404 => Ok(None),
@@ -433,15 +458,7 @@ impl DockerApi {
         for i in arr {
             let id = req_str(i, "Id", "image list")?.to_string();
             let labels = labels_of(i.get("Labels"), "image list")?;
-            let tags: Vec<String> = i
-                .get("RepoTags")
-                .and_then(Json::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|t| t.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let tags = string_list(i.get("RepoTags"), "image list", "RepoTags")?;
             if tags.is_empty() {
                 out.push((id.clone(), id, labels));
             } else {
