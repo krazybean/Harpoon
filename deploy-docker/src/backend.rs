@@ -1200,6 +1200,11 @@ impl<T: HttpTransport> DockerBackend<T> {
             Ok(RemoveResult::Removed) => CleanupOutcome::Removed,
             Ok(RemoveResult::AlreadyAbsent) => CleanupOutcome::AlreadyAbsent,
             Ok(RemoveResult::Refused(w)) => CleanupOutcome::Refused(w),
+            // Containers are never removed through the retained-image path; a conflict here would be
+            // a defect, and it is recorded as an ordinary (blocking) failure.
+            Ok(RemoveResult::Conflict(c, w)) => {
+                CleanupOutcome::Failed(format!("conflict ({}): {w}", c.as_str()))
+            }
             Err(e) => CleanupOutcome::Failed(e.message),
         };
         let ok = matches!(
@@ -1330,10 +1335,12 @@ impl<T: HttpTransport> DockerBackend<T> {
 ///
 /// - removed / 404 → `Removed` / `AlreadyAbsent`;
 /// - id or labels no longer match → `Refused` (terminal, F1, unchanged);
-/// - not exclusive any more, or Docker's HTTP 409 → `Err` carrying the conflict marker
-///   (`CleanupFailed`, retryable, does not block other deployments under the narrow rule);
-/// - any other error (timeout, disconnect, 5xx, malformed) → `Err` without the marker: the outcome
-///   is ambiguous and stays blocking.
+/// - not exclusive any more → `Conflict(NotExclusive)`, from Harpoon's own structured check;
+/// - Docker's HTTP status 409 → `Conflict(DockerRefused)`, decided from the status code alone;
+///   both are the typed `CleanupConflict` outcome (retryable, and non-blocking only under the
+///   narrow rule of `Ledger::deferred_image_conflict`);
+/// - any other error (timeout, disconnect, 5xx, malformed) → `Err`, an ordinary failed cleanup: the
+///   outcome is ambiguous and stays blocking, whatever its text says.
 pub struct RetainedImageOps<'a, T: HttpTransport> {
     backend: &'a mut DockerBackend<T>,
 }
@@ -1356,10 +1363,9 @@ impl<T: HttpTransport> ResourceOps for RetainedImageOps<'_, T> {
             ImageVerdict::Absent => return Ok(RemoveResult::AlreadyAbsent),
             ImageVerdict::Ownership(why) => return Ok(RemoveResult::Refused(why)),
             ImageVerdict::NotExclusive(why) => {
-                return Err(StepError::new(
-                    harpoon_deploy::ledger::image_conflict_message(&format!(
-                        "{why}; nothing was deleted"
-                    )),
+                return Ok(RemoveResult::Conflict(
+                    harpoon_deploy::ledger::ConflictCause::NotExclusive,
+                    format!("{why}; nothing was deleted"),
                 ))
             }
             ImageVerdict::Eligible => {}
@@ -1368,11 +1374,12 @@ impl<T: HttpTransport> ResourceOps for RetainedImageOps<'_, T> {
         match self.backend.api.remove_image(&req.id, left) {
             Ok(true) => Ok(RemoveResult::Removed),
             Ok(false) => Ok(RemoveResult::AlreadyAbsent),
-            Err(e) if e.is_conflict() => Err(StepError::new(
-                harpoon_deploy::ledger::image_conflict_message(&format!(
+            Err(e) if e.is_conflict() => Ok(RemoveResult::Conflict(
+                harpoon_deploy::ledger::ConflictCause::DockerRefused,
+                format!(
                     "Docker refused to delete image {} (HTTP 409: it is still referenced); nothing was deleted",
                     short(&req.id)
-                )),
+                ),
             )),
             Err(e) => Err(api_err(&format!("removing image {}", req.name), e)),
         }

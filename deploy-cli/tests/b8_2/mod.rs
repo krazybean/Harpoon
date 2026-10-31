@@ -3,7 +3,9 @@
 //! temporary directory, real container or real image is involved.
 
 use super::*;
-use harpoon_deploy::ledger::{CleanupOutcome, EndState, Entry, EntryState, Released};
+use harpoon_deploy::ledger::{
+    CleanupOutcome, ConflictCause, EndState, Entry, EntryState, Released,
+};
 use harpoon_deploy::time::Clock as _;
 use std::sync::Arc;
 use support::fake_docker::{Action, St};
@@ -543,7 +545,7 @@ fn an_image_id_that_docker_does_not_confirm_is_also_the_terminal_refusal() {
     let t = T::new();
     let c = craft(&t, 9, DeploymentStatus::Failed);
     let body = format!(
-        "{{\"Id\":\"{}\",\"RepoTags\":[],\"Config\":{{\"Labels\":{{}}}}}}",
+        "{{\"Id\":\"{}\",\"RepoTags\":[],\"RepoDigests\":[],\"Config\":{{\"Labels\":{{}}}}}}",
         support::fake_iid(31337)
     );
     t.h.docker.fault(
@@ -629,7 +631,10 @@ fn a_conflict_is_recorded_does_not_release_the_image_and_does_not_block_unrelate
         o.stdout
     );
     // recorded, not released, and the image is intact
-    assert!(matches!(entry(&t, &c).state, EntryState::CleanupFailed(_)));
+    assert!(matches!(
+        entry(&t, &c).state,
+        EntryState::CleanupConflict(..)
+    ));
     assert!(
         is_conflict(&t, &c),
         "the classification is read back from the journal"
@@ -723,7 +728,7 @@ fn a_conflict_does_not_block_only_while_everything_else_of_the_deployment_is_rel
             c,
             ResourceKind::Image,
             &c.tag,
-            CleanupOutcome::Failed(harpoon_deploy::ledger::image_conflict_message("x")),
+            CleanupOutcome::Conflict(ConflictCause::DockerRefused, "x".into()),
         )
     };
     // a conflict alone: not blocking
@@ -777,7 +782,7 @@ fn a_conflict_does_not_block_only_while_everything_else_of_the_deployment_is_rel
             c,
             ResourceKind::Container,
             "hp-y",
-            CleanupOutcome::Failed(harpoon_deploy::ledger::image_conflict_message("x")),
+            CleanupOutcome::Failed("image-conflict: x".into()),
         ))
         .unwrap();
     });
@@ -807,7 +812,10 @@ fn ambiguous_failures_are_recorded_keep_the_runtime_blocked_and_settle_on_retry(
             matches!(entry(&t, &c).state, EntryState::CleanupFailed(_)),
             "{name}"
         );
-        assert!(!is_conflict(&t, &c), "{name}: no marker, so it blocks");
+        assert!(
+            !is_conflict(&t, &c),
+            "{name}: not a typed conflict, so it blocks"
+        );
         assert_eq!(image_present(&t, &c), !deleted, "{name}");
         let s = t.cli(&["status"]);
         assert!(
@@ -957,4 +965,176 @@ fn the_command_has_no_force_or_prune_surface_and_the_help_names_it() {
         );
     }
     let _ = harpoon_deploy::time::SystemClock.now_ms();
+}
+
+// ================================================================ the classification cannot be forged from text
+
+#[test]
+fn a_failed_cleanup_whose_text_looks_like_a_conflict_still_blocks_and_a_repeat_settles_it() {
+    for text in [
+        "image-conflict: Docker refused to delete image (HTTP 409)",
+        "conflict-docker-refused",
+        "Docker answered 409 Conflict",
+    ] {
+        let t = T::new();
+        let c = craft_with(&t, 21, DeploymentStatus::Failed, true, |j, c| {
+            j.record(&attempt(c, ResourceKind::Image, &c.tag)).unwrap();
+            j.record(&result(
+                c,
+                ResourceKind::Image,
+                &c.tag,
+                CleanupOutcome::Failed(text.into()),
+            ))
+            .unwrap();
+        });
+        assert!(matches!(entry(&t, &c).state, EntryState::CleanupFailed(_)));
+        assert!(!is_conflict(&t, &c), "{text:?}");
+        let s = t.cli(&["status"]);
+        assert!(
+            s.stdout.contains("unresolved cleanup ("),
+            "{text:?}: {}",
+            s.stdout
+        );
+        deploy_is_blocked(&t);
+        // only an explicit retry that ends in a typed outcome (or a release) changes that
+        assert_exit(&apply(&t, &c), 0);
+        deploy_is_permitted(&t);
+    }
+}
+
+#[test]
+fn the_typed_conflict_is_a_journal_token_of_its_own_and_survives_a_restart() {
+    let t = T::new();
+    let c = craft(&t, 22, DeploymentStatus::Failed);
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/images/",
+        1,
+        Action::Respond(409, "{\"message\":\"x\"}".into()),
+    );
+    assert_exit(&apply(&t, &c), 7);
+    let journal = String::from_utf8(t.journal_bytes()).unwrap();
+    let result_line = journal
+        .lines()
+        .rfind(|l| l.contains("\tresult\t"))
+        .unwrap()
+        .to_string();
+    assert!(
+        result_line.contains("\tconflict-docker-refused\t"),
+        "{result_line}"
+    );
+    assert!(!result_line.contains("\tfailed\t"), "{result_line}");
+    // every command re-reads the file: that is a restart
+    assert!(is_conflict(&t, &c));
+    assert!(t
+        .cli(&["status"])
+        .stdout
+        .contains("cleanup refused as a conflict"));
+    deploy_is_permitted(&t);
+    assert!(is_conflict(&t, &c), "still the same after another run");
+}
+
+#[test]
+fn a_misplaced_unknown_or_damaged_conflict_record_makes_the_whole_journal_unusable() {
+    use harpoon_deploy::ledger::codec;
+    let append = |t: &T, line: &str| {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(t.journal_dir().join("journal.wal"))
+            .unwrap();
+        f.write_all(line.as_bytes()).unwrap();
+        f.write_all(b"\n").unwrap();
+    };
+    let setup = |seed: u8| {
+        let t = T::new();
+        let c = craft_with(&t, seed, DeploymentStatus::Failed, true, |j, c| {
+            j.record(&intent(
+                &c.app,
+                &c.dep,
+                ResourceKind::Container,
+                "hp-z",
+                Disposition::RemoveOnFailure,
+            ))
+            .unwrap();
+            j.record(&receipt(&c.dep, ResourceKind::Container, "hp-z", "cid"))
+                .unwrap();
+            j.record(&attempt(c, ResourceKind::Container, "hp-z"))
+                .unwrap();
+        });
+        (t, c)
+    };
+    // a typed conflict on a container: well-formed, checksummed, and impossible
+    let (t, c) = setup(23);
+    append(
+        &t,
+        &codec::encode(&result(
+            &c,
+            ResourceKind::Container,
+            "hp-z",
+            CleanupOutcome::Conflict(ConflictCause::NotExclusive, "x".into()),
+        )),
+    );
+    // an outcome token this build does not know, with a valid checksum
+    let (t2, c2) = setup(24);
+    let good = codec::encode(&result(
+        &c2,
+        ResourceKind::Container,
+        "hp-z",
+        CleanupOutcome::Conflict(ConflictCause::NotExclusive, "x".into()),
+    ));
+    let body = good
+        .split_once('\t')
+        .unwrap()
+        .1
+        .replace("conflict-not-exclusive", "conflict-from-the-future");
+    let crc = {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in body.as_bytes() {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    };
+    append(&t2, &format!("{crc:08x}\t{body}"));
+    // a damaged checksum
+    let (t3, c3) = setup(25);
+    let good = codec::encode(&result(
+        &c3,
+        ResourceKind::Container,
+        "hp-z",
+        CleanupOutcome::Conflict(ConflictCause::NotExclusive, "x".into()),
+    ));
+    append(&t3, &format!("0{}", &good[1..]));
+    for (name, t) in [
+        ("misplaced", &t),
+        ("unknown token", &t2),
+        ("bad checksum", &t3),
+    ] {
+        let before = t.journal_bytes();
+        for a in [vec!["status"], vec!["recover"], vec!["doctor"]] {
+            let o = t.cli(&a);
+            assert_exit(&o, 4);
+            let _ = name;
+        }
+        deploy_is_refused_by_the_journal(t);
+        assert_eq!(
+            t.journal_bytes(),
+            before,
+            "{name}: the journal was left untouched"
+        );
+    }
+}
+
+fn deploy_is_refused_by_the_journal(t: &T) {
+    let n = writes(t);
+    let o = t.go(&OPEN, &refs(&live_args(t)));
+    assert_exit(&o, 4);
+    assert_eq!(writes(t), n);
 }

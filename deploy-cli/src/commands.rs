@@ -199,6 +199,10 @@ fn unresolved(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
             }
             let why = match &e.state {
                 EntryState::CleanupFailed(m) => format!("cleanup failed: {m}"),
+                EntryState::CleanupConflict(c, m) => format!(
+                    "cleanup refused as a conflict ({}): {m} (it blocks because this deployment has other unresolved work or did not end unsuccessfully)",
+                    c.as_str()
+                ),
                 EntryState::Refused(m) => format!("not touched, ownership not proven: {m}"),
                 _ => "a removal was attempted and its result was never recorded".to_string(),
             };
@@ -251,14 +255,10 @@ fn retained_image_notices(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
         }
         let note = match &e.state {
             EntryState::Created => "retained".to_string(),
-            EntryState::CleanupFailed(m)
+            EntryState::CleanupConflict(_, m)
                 if ledger.deferred_image_conflict(e, Some(EndState::NotSucceeded)) =>
             {
-                format!(
-                    "cleanup refused as a conflict: {}",
-                    m.strip_prefix(harpoon_deploy::ledger::IMAGE_CONFLICT_MARKER)
-                        .unwrap_or(m)
-                )
+                format!("cleanup refused as a conflict: {m}")
             }
             _ => continue,
         };
@@ -416,6 +416,7 @@ fn state_word(s: &EntryState) -> &'static str {
         EntryState::Created => "created",
         EntryState::Released(_) => "released",
         EntryState::CleanupFailed(_) => "cleanup-failed",
+        EntryState::CleanupConflict(..) => "cleanup-conflict",
         EntryState::Refused(_) => "refused",
     }
 }
@@ -1467,6 +1468,7 @@ fn state_note(e: &harpoon_deploy::ledger::Entry) -> &'static str {
     match &e.state {
         EntryState::Created => "recorded",
         EntryState::CleanupFailed(_) => "an earlier removal failed",
+        EntryState::CleanupConflict(..) => "an earlier removal was refused as a conflict",
         EntryState::Intended => "no receipt",
         EntryState::Refused(_) => "refused earlier",
         EntryState::Released(_) => "already released",
@@ -1773,6 +1775,11 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
                 e.key.kind.as_str(),
                 e.key.name
             )),
+            EntryState::CleanupConflict(_, m) => problems.push(format!(
+                "{} {}: removal refused as a conflict and recorded: {m}",
+                e.key.kind.as_str(),
+                e.key.name
+            )),
             EntryState::Refused(m) => problems.push(format!(
                 "{} {}: refused, not touched: {m}",
                 e.key.kind.as_str(),
@@ -2064,18 +2071,21 @@ fn cleanup_image(p: &Parsed, out: &mut String) -> R {
             let _ = writeln!(out, "cleanup-image: complete");
             Ok(exit::OK)
         }
-        EntryState::CleanupFailed(m)
+        EntryState::CleanupConflict(_, m)
             if ledger.deferred_image_conflict(after, Some(EndState::NotSucceeded)) =>
         {
-            let _ = writeln!(
-                out,
-                "kept: {} — nothing was deleted",
-                m.strip_prefix(harpoon_deploy::ledger::IMAGE_CONFLICT_MARKER)
-                    .unwrap_or(m)
-            );
+            let _ = writeln!(out, "kept: {m}");
             let _ = writeln!(
                 out,
                 "cleanup-image: incomplete — the conflict is recorded and does not block other deployments; remove its cause and run this command again to retry"
+            );
+            Ok(exit::FAILED)
+        }
+        EntryState::CleanupConflict(_, m) => {
+            let _ = writeln!(out, "kept: {m}");
+            let _ = writeln!(
+                out,
+                "cleanup-image: incomplete — the conflict is recorded, but this runtime stays blocked until the deployment's other unresolved work is settled"
             );
             Ok(exit::FAILED)
         }

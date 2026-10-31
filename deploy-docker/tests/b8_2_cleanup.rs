@@ -12,9 +12,8 @@ use harpoon_deploy::backend::{ResourceOps, StepError};
 use harpoon_deploy::engine::{execute_actions, EngineError, JournalError};
 use harpoon_deploy::health::Observation;
 use harpoon_deploy::ledger::{
-    image_conflict_message, Action, CleanupOutcome, Disposition, EndState, EntryState, Ledger,
-    LedgerRecord, Observed, Released, RemoveRequest, RemoveResult, ResourceKey, ResourceKind,
-    IMAGE_CONFLICT_MARKER,
+    Action, ConflictCause, Disposition, EndState, EntryState, Ledger, LedgerRecord, Observed,
+    Released, RemoveRequest, RemoveResult, ResourceKey, ResourceKind,
 };
 use harpoon_deploy_docker::backend::{DockerBackend, ImageVerdict};
 use harpoon_deploy_docker::probe::HttpTransport;
@@ -200,7 +199,7 @@ fn ownership_failures_are_the_ownership_class() {
     let (h, tag, iid) = world();
     let b = backend(&h);
     let body = format!(
-        "{{\"Id\":\"{}\",\"RepoTags\":[],\"Config\":{{\"Labels\":{{}}}}}}",
+        "{{\"Id\":\"{}\",\"RepoTags\":[],\"RepoDigests\":[],\"Config\":{{\"Labels\":{{}}}}}}",
         fake_iid(1234)
     );
     h.docker
@@ -303,14 +302,13 @@ fn a_conflict_at_delete_time_is_recorded_as_a_conflict_and_nothing_is_deleted_or
             s.containers.last_mut().unwrap().image = image.clone();
         })),
     );
-    let err = b
+    let r = b
         .retained_image_ops()
         .remove_resource(&req(&h, &tag, &iid))
-        .unwrap_err();
+        .unwrap();
     assert!(
-        err.message.starts_with(IMAGE_CONFLICT_MARKER),
-        "{}",
-        err.message
+        matches!(r, RemoveResult::Conflict(ConflictCause::DockerRefused, _)),
+        "{r:?}"
     );
     assert!(
         h.docker.with(|s| s.images.iter().any(|i| i.id == iid)),
@@ -348,12 +346,9 @@ fn the_classification_comes_from_the_status_code_not_from_docker_text() {
         let r = b.retained_image_ops().remove_resource(&req(&h, &tag, &iid));
         match (status, r) {
             (404, Ok(RemoveResult::AlreadyAbsent)) => {}
-            (_, Err(e)) => assert_eq!(
-                e.message.starts_with(IMAGE_CONFLICT_MARKER),
-                conflict,
-                "{status}: {}",
-                e.message
-            ),
+            (409, Ok(RemoveResult::Conflict(ConflictCause::DockerRefused, _))) => assert!(conflict),
+            // every other status is an error, never a typed conflict, whatever the text says
+            (_, Err(_)) => assert!(!conflict, "{status}"),
             (s, other) => panic!("{s}: {other:?}"),
         }
     }
@@ -366,15 +361,18 @@ fn the_classification_comes_from_the_status_code_not_from_docker_text() {
         1,
         Fault::Respond(409, "{\"message\":\"anything\"}".into()),
     );
-    let e = b
+    let r = b
         .retained_image_ops()
         .remove_resource(&req(&h, &tag, &iid))
-        .unwrap_err();
-    assert!(e.message.starts_with(IMAGE_CONFLICT_MARKER));
+        .unwrap();
+    assert!(matches!(
+        r,
+        RemoveResult::Conflict(ConflictCause::DockerRefused, _)
+    ));
 }
 
 #[test]
-fn ambiguous_failures_carry_no_conflict_marker() {
+fn ambiguous_failures_are_errors_never_a_typed_conflict() {
     for (name, f) in [
         ("disconnect", Fault::Disconnect),
         ("reply lost", Fault::ApplyThenDrop),
@@ -390,15 +388,8 @@ fn ambiguous_failures_carry_no_conflict_marker() {
         let (h, tag, iid) = world();
         let mut b = backend(&h);
         h.docker.fault(Some("DELETE"), "/images/", 1, f);
-        let e = b
-            .retained_image_ops()
-            .remove_resource(&req(&h, &tag, &iid))
-            .unwrap_err();
-        assert!(
-            !e.message.contains(IMAGE_CONFLICT_MARKER),
-            "{name}: {}",
-            e.message
-        );
+        let r = b.retained_image_ops().remove_resource(&req(&h, &tag, &iid));
+        assert!(r.is_err(), "{name}: {r:?}");
     }
 }
 
@@ -476,9 +467,15 @@ fn a_crash_at_every_cleanup_write_is_retried_to_a_released_image_without_touchin
     assert_eq!(total, 2, "one attempt, one result");
 
     // Also: the reply to the delete can be lost, so the image is gone when the retry looks.
-    for lose_reply in [false, true] {
+    // The reply can be lost (the image is gone when the retry looks), or Docker can refuse with 409
+    // (a typed conflict that a crash must not turn into anything non-blocking).
+    for (variant, lose_reply, conflict_409) in [
+        ("clean", false, false),
+        ("lost reply", true, false),
+        ("409", false, true),
+    ] {
         for crash_at in 0..total {
-            let ctx = format!("crash @{crash_at}, lost reply {lose_reply}");
+            let ctx = format!("crash @{crash_at}, {variant}");
             let (h, tag, iid) = world();
             let by_c = add_container_from(&h, "bystander", &fake_iid(5), true);
             let by_i = h.docker.with(|s| s.add_image("bystander:1", vec![]));
@@ -487,6 +484,14 @@ fn a_crash_at_every_cleanup_write_is_retried_to_a_released_image_without_touchin
             if lose_reply {
                 h.docker
                     .fault(Some("DELETE"), "/images/", 1, Fault::ApplyThenDrop);
+            }
+            if conflict_409 {
+                h.docker.fault(
+                    Some("DELETE"),
+                    "/images/",
+                    1,
+                    Fault::Respond(409, "{\"message\":\"x\"}".into()),
+                );
             }
             let mut first = StampedJournal::crash_at(crash_at);
             let mut b = backend(&h);
@@ -501,7 +506,7 @@ fn a_crash_at_every_cleanup_write_is_retried_to_a_released_image_without_touchin
                 )
             };
             // either the journal crashed (a crash point) or the failed delete was recorded
-            if lose_reply && crash_at == 1 {
+            if (lose_reply || conflict_409) && crash_at == 1 {
                 assert!(
                     matches!(res, Err(EngineError::Journal(JournalError::Crash))),
                     "{ctx}: {res:?}"
@@ -513,6 +518,19 @@ fn a_crash_at_every_cleanup_write_is_retried_to_a_released_image_without_touchin
             // restart: replay what is durable, then repeat the same operation
             h.docker.with(|s| s.faults.clear());
             let mut ledger = Ledger::replay(&records).expect(&ctx);
+            // Whatever was durable at the crash, an attempt without its result blocks; and a typed
+            // conflict is recorded only when its result was.
+            let e0 = ledger.entries()[0].clone();
+            if crash_at < total {
+                assert!(
+                    e0.cleanup_outstanding || e0.cleanup_attempts == 0,
+                    "{ctx}: {e0:?}"
+                );
+                assert!(
+                    !ledger.deferred_image_conflict(&e0, Some(EndState::NotSucceeded)),
+                    "{ctx}: a crashed cleanup is never deferred"
+                );
+            }
             let still_open = !ledger.entries()[0].is_released();
             assert!(
                 still_open,
@@ -598,9 +616,10 @@ fn a_recorded_conflict_is_not_a_release_and_a_later_clean_attempt_releases_it() 
         .unwrap();
     }
     let e = ledger.entries()[0].clone();
-    assert!(
-        matches!(&e.state, EntryState::CleanupFailed(m) if m.starts_with(IMAGE_CONFLICT_MARKER))
-    );
+    assert!(matches!(
+        &e.state,
+        EntryState::CleanupConflict(ConflictCause::DockerRefused, _)
+    ));
     assert!(!e.is_released());
     assert!(ledger.deferred_image_conflict(&e, Some(EndState::NotSucceeded)));
     // the cause goes away; the retry (a real second attempt) succeeds
@@ -619,7 +638,6 @@ fn a_recorded_conflict_is_not_a_release_and_a_later_clean_attempt_releases_it() 
     }
     assert!(ledger.entries()[0].is_released());
     assert_eq!(ledger.entries()[0].cleanup_attempts, 2);
-    let _ = (CleanupOutcome::Removed, image_conflict_message("x"));
 }
 
 #[test]
@@ -644,4 +662,169 @@ fn nothing_in_the_new_backend_code_prunes_forces_or_matches_by_name() {
         assert!(hits.is_empty(), "{bad}: {hits:?}");
     }
     let _: Option<&dyn HttpTransport> = None;
+}
+
+// ---------------------------------------------------------------- tag and digest lists are strict
+
+/// Docker's inspect answer for the image, with the given raw `RepoTags` and `RepoDigests` JSON.
+fn inspect_body(
+    iid: &str,
+    labels: &[(String, String)],
+    tags: Option<&str>,
+    digests: Option<&str>,
+) -> String {
+    let l = labels
+        .iter()
+        .map(|(k, v)| format!("\"{k}\":\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut f = vec![format!("\"Id\":\"{iid}\"")];
+    if let Some(t) = tags {
+        f.push(format!("\"RepoTags\":{t}"));
+    }
+    if let Some(d) = digests {
+        f.push(format!("\"RepoDigests\":{d}"));
+    }
+    f.push(format!("\"Config\":{{\"Labels\":{{{l}}}}}"));
+    format!("{{{}}}", f.join(","))
+}
+
+#[test]
+fn a_malformed_tag_or_digest_list_is_an_error_never_an_empty_set() {
+    let (h0, _, _) = world();
+    let l = labels(&h0.dep.application_id, &h0.dep.id);
+    let bad_lists: [(&str, Option<&str>); 7] = [
+        ("RepoTags is a string", Some("\"foo:latest\"")),
+        ("RepoTags is an object", Some("{\"a\":1}")),
+        ("RepoTags holds a number", Some("[\"ok:1\",7]")),
+        ("RepoTags holds null", Some("[null]")),
+        ("RepoTags holds an array", Some("[[\"x\"]]")),
+        ("RepoTags is missing", None),
+        ("RepoTags is a boolean", Some("true")),
+    ];
+    for (what, tags) in bad_lists {
+        let (h, tag, iid) = world();
+        let b = backend(&h);
+        h.docker.fault(
+            Some("GET"),
+            "/images/sha256:",
+            50,
+            Fault::Respond(200, inspect_body(&iid, &l, tags, Some("[]"))),
+        );
+        let r = assess(&h, &b, &tag, &iid);
+        assert!(r.is_err(), "{what}: {r:?}");
+        assert!(
+            r.unwrap_err().message.contains("RepoTags"),
+            "{what}: names the field"
+        );
+    }
+    for (what, digests) in [
+        ("RepoDigests is a string", Some("\"x@sha256:1\"")),
+        ("RepoDigests holds a number", Some("[1]")),
+        ("RepoDigests is missing", None),
+    ] {
+        let (h, tag, iid) = world();
+        let b = backend(&h);
+        h.docker.fault(
+            Some("GET"),
+            "/images/sha256:",
+            50,
+            Fault::Respond(200, inspect_body(&iid, &l, Some("[]"), digests)),
+        );
+        let r = assess(&h, &b, &tag, &iid);
+        assert!(r.is_err(), "{what}: {r:?}");
+    }
+    // Docker's own spelling of "none" (null) and the well-formed lists are accepted
+    for (tags, digests, want) in [
+        ("null", "null", true),
+        ("[]", "[]", true),
+        ("[\"{TAG}\"]", "[]", true),
+        ("[\"{TAG}\",\"foo:1\"]", "[]", false),
+        ("[]", "[\"r/x@sha256:1\"]", false),
+    ] {
+        let (h, tag, iid) = world();
+        let b = backend(&h);
+        let tags = tags.replace("{TAG}", &tag);
+        h.docker.fault(
+            Some("GET"),
+            "/images/sha256:",
+            50,
+            Fault::Respond(200, inspect_body(&iid, &l, Some(&tags), Some(digests))),
+        );
+        let v = assess(&h, &b, &tag, &iid).unwrap();
+        assert_eq!(v == ImageVerdict::Eligible, want, "{tags} {digests}: {v:?}");
+    }
+}
+
+#[test]
+fn a_malformed_tag_list_makes_the_deletion_an_error_and_sends_no_delete() {
+    let (h0, _, _) = world();
+    let l = labels(&h0.dep.application_id, &h0.dep.id);
+    let (h, tag, iid) = world();
+    let mut b = backend(&h);
+    h.docker.fault(
+        Some("GET"),
+        "/images/sha256:",
+        50,
+        Fault::Respond(
+            200,
+            inspect_body(&iid, &l, Some("[\"ok:1\",5]"), Some("[]")),
+        ),
+    );
+    let r = b.retained_image_ops().remove_resource(&req(&h, &tag, &iid));
+    assert!(r.is_err(), "{r:?}");
+    assert!(deletes(&h).is_empty());
+}
+
+#[test]
+fn the_image_list_is_strict_too_so_a_malformed_tag_list_is_never_read_as_untagged() {
+    for (what, tags) in [
+        ("a string", "\"x\""),
+        ("a number inside", "[\"a:1\",3]"),
+        ("an object", "{}"),
+    ] {
+        let h = Harness::new();
+        h.docker.fault(
+            Some("GET"),
+            "/images/json",
+            50,
+            Fault::Respond(
+                200,
+                format!("[{{\"Id\":\"sha256:aa\",\"RepoTags\":{tags},\"Labels\":null}}]"),
+            ),
+        );
+        let api = harpoon_deploy_docker::api::DockerApi::new(
+            h.docker.path(),
+            std::time::Duration::from_secs(3),
+        );
+        assert!(
+            api.list_images(std::time::Duration::from_secs(3)).is_err(),
+            "{what}"
+        );
+    }
+    // null (a dangling image) is an untagged image; a missing key is malformed
+    let h = Harness::new();
+    h.docker.fault(
+        Some("GET"),
+        "/images/json",
+        1,
+        Fault::Respond(
+            200,
+            "[{\"Id\":\"sha256:aa\",\"RepoTags\":null,\"Labels\":null}]".into(),
+        ),
+    );
+    let api = harpoon_deploy_docker::api::DockerApi::new(
+        h.docker.path(),
+        std::time::Duration::from_secs(3),
+    );
+    let v = api.list_images(std::time::Duration::from_secs(3)).unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].0, v[0].1, "an untagged image is named by its id");
+    h.docker.fault(
+        Some("GET"),
+        "/images/json",
+        1,
+        Fault::Respond(200, "[{\"Id\":\"sha256:aa\",\"Labels\":null}]".into()),
+    );
+    assert!(api.list_images(std::time::Duration::from_secs(3)).is_err());
 }

@@ -108,25 +108,34 @@ pub enum CleanupOutcome {
     Failed(String),
     /// An object with this identity exists but is not provably Harpoon's: it was not touched.
     Refused(String),
+    /// Ownership was shown but the deletion did not happen because of a conflict (see
+    /// [`ConflictCause`]). Nothing was deleted. Only a retained image with a receipt may carry this
+    /// outcome; the ledger rejects it anywhere else.
+    Conflict(ConflictCause, String),
 }
 
-/// Reserved start of a `CleanupOutcome::Failed` message that records a **conflict**: Harpoon verified
-/// the image is its own, and either Docker refused the deletion with its documented "conflict"
-/// status (HTTP 409) or Harpoon's own pre-delete check found the image is no longer exclusively
-/// removable (another tag or digest, a container, an unknown container image). Nothing was deleted.
+/// Why a deletion that Harpoon was entitled to attempt did not happen. Only two causes exist, and
+/// each is established from structured facts, never from message text:
+/// - `DockerRefused`: Docker answered the deletion with HTTP status 409 (its documented "conflict");
+/// - `NotExclusive`: Harpoon's own read-only check found that the image is no longer exclusively
+///   removable (another tag or digest, a container, a container whose image is unreported).
 ///
-/// The classification is made from structured facts (an HTTP status code, Harpoon's own checks),
-/// never from Docker's human-readable text, and it is written only by [`image_conflict_message`].
-/// It lives in the existing failure message so the journal format is unchanged and old and new
-/// readers agree; because it is a convention in free text, it is honoured only under the narrow
-/// conditions of [`Ledger::deferred_image_conflict`], so a forged or misplaced marker cannot relax
-/// anything else. Every other failure (timeouts, disconnects, 5xx, a lost reply) carries no marker
-/// and stays blocking.
-pub const IMAGE_CONFLICT_MARKER: &str = "image-conflict: ";
+/// A conflict is a **typed journal outcome**, not a kind of failure message: it has its own
+/// serialized token, so an arbitrary `Failed` message can never become one, and a build that does
+/// not know the token refuses the journal as corrupt instead of reading it as anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictCause {
+    DockerRefused,
+    NotExclusive,
+}
 
-/// The failure message for a conflict (see [`IMAGE_CONFLICT_MARKER`]).
-pub fn image_conflict_message(detail: &str) -> String {
-    format!("{IMAGE_CONFLICT_MARKER}{detail}")
+impl ConflictCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConflictCause::DockerRefused => "docker-refused",
+            ConflictCause::NotExclusive => "not-exclusive",
+        }
+    }
 }
 
 /// One durable write. The journal persists these in order; [`Ledger::apply`] is the only
@@ -188,6 +197,9 @@ pub enum EntryState {
     Created,
     Released(Released),
     CleanupFailed(String),
+    /// A deletion was refused as a conflict (see [`ConflictCause`]). Not released; still needs
+    /// attention (it blocks by default) unless [`Ledger::deferred_image_conflict`] says otherwise.
+    CleanupConflict(ConflictCause, String),
     Refused(String),
 }
 
@@ -216,7 +228,11 @@ pub struct Entry {
 impl Entry {
     /// Needs the user's attention: cleanup failed, was refused, or was attempted with no recorded result. Never silently dropped.
     pub fn needs_attention(&self) -> bool {
-        self.cleanup_outstanding || matches!(self.state, EntryState::CleanupFailed(_) | EntryState::Refused(_))
+        self.cleanup_outstanding
+            || matches!(
+                self.state,
+                EntryState::CleanupFailed(_) | EntryState::CleanupConflict(..) | EntryState::Refused(_)
+            )
     }
     pub fn is_released(&self) -> bool {
         matches!(self.state, EntryState::Released(_))
@@ -278,12 +294,12 @@ impl Ledger {
 
     /// True only for the one narrow case in which a failed cleanup does not block other work: the
     /// retained image of a deployment that ended without succeeding, whose removal was refused as a
-    /// conflict (see [`IMAGE_CONFLICT_MARKER`]), where everything else that deployment owns is
+    /// conflict (see [`ConflictCause`]), where everything else that deployment owns is
     /// already released. All of these must hold, and all come from the replayed journal:
     ///
     /// - the entry is an `Image` with disposition `Retain` and a receipt (its identity is known);
-    /// - its state is `CleanupFailed` with the conflict marker, and no later attempt is outstanding
-    ///   (an attempt without a result is an ambiguous outcome);
+    /// - its state is the typed `CleanupConflict` (never a `CleanupFailed`, whatever its text), and
+    ///   no later attempt is outstanding (an attempt without a result is an ambiguous outcome);
     /// - the deployment is known to have ended `NotSucceeded`;
     /// - every other entry of that deployment is released (nothing active, refused or failed).
     ///
@@ -293,7 +309,7 @@ impl Ledger {
             && e.disposition == Disposition::Retain
             && e.id.is_some()
             && !e.cleanup_outstanding
-            && matches!(&e.state, EntryState::CleanupFailed(m) if m.starts_with(IMAGE_CONFLICT_MARKER))
+            && matches!(e.state, EntryState::CleanupConflict(..))
             && end == Some(EndState::NotSucceeded)
             && self
                 .entries
@@ -423,12 +439,21 @@ impl Ledger {
                         "cleanup result without an outstanding attempt",
                     ));
                 }
+                if matches!(outcome, CleanupOutcome::Conflict(..))
+                    && !(e.key.kind == ResourceKind::Image && e.disposition == Disposition::Retain && e.id.is_some())
+                {
+                    return Err(LedgerError::OutOfOrder(
+                        key.clone(),
+                        "a conflict outcome belongs only to a retained image that has a receipt",
+                    ));
+                }
                 e.cleanup_outstanding = false;
                 e.state = match outcome {
                     CleanupOutcome::Removed => EntryState::Released(Released::Removed),
                     CleanupOutcome::AlreadyAbsent => EntryState::Released(Released::AlreadyAbsent),
                     CleanupOutcome::Failed(m) => EntryState::CleanupFailed(m.clone()),
                     CleanupOutcome::Refused(m) => EntryState::Refused(m.clone()),
+                    CleanupOutcome::Conflict(c, m) => EntryState::CleanupConflict(*c, m.clone()),
                 };
             }
         }
@@ -502,6 +527,9 @@ pub enum RemoveResult {
     AlreadyAbsent,
     /// The labels no longer match what the ledger recorded; the object was left alone.
     Refused(String),
+    /// The object is Harpoon's but removing it now would conflict (see [`ConflictCause`]). Nothing
+    /// was removed. Only the retained-image cleanup produces this.
+    Conflict(ConflictCause, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,6 +711,16 @@ pub mod codec {
     }
 
     /// One record as a single line **without** the trailing newline.
+    /// The serialized token of a conflict outcome. Any other token this build does not know is a
+    /// decode error, so a journal written by a build that knows more outcomes is refused (as
+    /// corrupt), never partly understood.
+    fn conflict_token(c: ConflictCause) -> &'static str {
+        match c {
+            ConflictCause::DockerRefused => "conflict-docker-refused",
+            ConflictCause::NotExclusive => "conflict-not-exclusive",
+        }
+    }
+
     pub fn encode(r: &LedgerRecord) -> String {
         let key = |k: &ResourceKey| format!("{}\t{}", k.kind.as_str(), esc(&k.name));
         let body = match r {
@@ -724,6 +762,7 @@ pub mod codec {
                     CleanupOutcome::AlreadyAbsent => ("absent", String::new()),
                     CleanupOutcome::Failed(m) => ("failed", esc(m)),
                     CleanupOutcome::Refused(m) => ("refused", esc(m)),
+                    CleanupOutcome::Conflict(c, m) => (conflict_token(*c), esc(m)),
                 };
                 format!("result\t{}\t{}\t{}\t{}\t{}", key(k), deployment, o, m, at_ms)
             }
@@ -782,6 +821,8 @@ pub mod codec {
                     "absent" => CleanupOutcome::AlreadyAbsent,
                     "failed" => CleanupOutcome::Failed(un(f[5])?),
                     "refused" => CleanupOutcome::Refused(un(f[5])?),
+                    "conflict-docker-refused" => CleanupOutcome::Conflict(ConflictCause::DockerRefused, un(f[5])?),
+                    "conflict-not-exclusive" => CleanupOutcome::Conflict(ConflictCause::NotExclusive, un(f[5])?),
                     _ => return Err(DecodeError("bad outcome")),
                 },
                 at_ms: num(f[6])?,

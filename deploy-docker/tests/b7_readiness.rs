@@ -370,7 +370,10 @@ fn docker_answering_for_a_different_image_than_the_one_asked_about_is_refused() 
         1,
         Action::Respond(
             200,
-            format!(r#"{{"Id":"{}","Config":{{"Labels":{{}}}}}}"#, fake_iid(99)),
+            format!(
+                r#"{{"Id":"{}","RepoTags":[],"RepoDigests":[],"Config":{{"Labels":{{}}}}}}"#,
+                fake_iid(99)
+            ),
         ),
     );
     let mut b = backend_with(&h, ok200(), |_| {});

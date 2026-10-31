@@ -248,6 +248,26 @@ fn message_of(r: &Response) -> String {
         .unwrap_or_else(|| r.text().chars().take(300).collect())
 }
 
+/// A JSON array of strings that Docker documents as always present (`null` means empty). A missing
+/// key, a non-array or a non-string element is **malformed**, never an empty list: callers use these
+/// lists to decide that nothing else references an image.
+fn string_list(v: Option<&Json>, op: &'static str, field: &str) -> Result<Vec<String>, ApiError> {
+    let bad = |detail: String| ApiError::Malformed { op, detail };
+    match v {
+        None => Err(bad(format!("{field} is missing"))),
+        Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Arr(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| bad(format!("{field} holds a non-string")))
+            })
+            .collect(),
+        Some(_) => Err(bad(format!("{field} is not an array"))),
+    }
+}
+
 fn labels_of(j: Option<&Json>, op: &'static str) -> Result<Labels, ApiError> {
     match j {
         None | Some(Json::Null) => Ok(Vec::new()),
@@ -380,35 +400,12 @@ impl DockerApi {
                             })
                         }
                     },
-                    tags: j
-                        .get("RepoTags")
-                        .and_then(Json::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|t| t.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    repo_digests: match j.get("RepoDigests") {
-                        None | Some(Json::Null) => Vec::new(),
-                        Some(Json::Arr(a)) => a
-                            .iter()
-                            .map(|d| {
-                                d.as_str()
-                                    .map(str::to_string)
-                                    .ok_or_else(|| ApiError::Malformed {
-                                        op: "image inspect",
-                                        detail: "RepoDigests holds a non-string".into(),
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        Some(_) => {
-                            return Err(ApiError::Malformed {
-                                op: "image inspect",
-                                detail: "RepoDigests is not an array".into(),
-                            })
-                        }
-                    },
+                    tags: string_list(j.get("RepoTags"), "image inspect", "RepoTags")?,
+                    repo_digests: string_list(
+                        j.get("RepoDigests"),
+                        "image inspect",
+                        "RepoDigests",
+                    )?,
                 }))
             }
             404 => Ok(None),
@@ -461,15 +458,7 @@ impl DockerApi {
         for i in arr {
             let id = req_str(i, "Id", "image list")?.to_string();
             let labels = labels_of(i.get("Labels"), "image list")?;
-            let tags: Vec<String> = i
-                .get("RepoTags")
-                .and_then(Json::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|t| t.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let tags = string_list(i.get("RepoTags"), "image list", "RepoTags")?;
             if tags.is_empty() {
                 out.push((id.clone(), id, labels));
             } else {
