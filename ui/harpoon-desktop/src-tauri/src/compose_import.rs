@@ -4,9 +4,11 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::io::Read;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use crate::{docker_command, off_main, run_command_bounded};
@@ -144,9 +146,62 @@ fn compose_command(root: &Path, files: &[PathBuf], project: &str, command: &[&st
     Ok(cmd)
 }
 
+
+// Unlike the legacy short-output helper, Compose can emit more than a pipe
+// buffer. Drain both streams concurrently so a verbose CLI cannot deadlock
+// the UI. Only retain bounded output; never return raw CLI output to the UI.
+fn drain_capped<R: Read>(mut reader: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut buf)?;
+        if count == 0 { break; }
+        let available = cap.saturating_sub(kept.len());
+        kept.extend_from_slice(&buf[..count.min(available)]);
+        if count > available { truncated = true; }
+    }
+    Ok((kept, truncated))
+}
+
+fn run_compose_bounded(command: &mut Command, timeout: Duration, cap: usize) -> Result<(String, i32), String> {
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|_| "Could not launch Docker Compose".to_owned())?;
+    let stdout = child.stdout.take().ok_or("Missing Compose stdout")?;
+    let stderr = child.stderr.take().ok_or("Missing Compose stderr")?;
+    let out_thread = thread::spawn(move || drain_capped(stdout, cap));
+    let err_thread = thread::spawn(move || drain_capped(stderr, 8192));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err("Docker Compose operation timed out. Docker state may be partial; inspect before retrying".to_owned());
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err("Could not determine Docker Compose status".to_owned());
+            }
+        }
+    };
+    let (out, truncated) = out_thread.join().map_err(|_| "Compose output reader failed")?
+        .map_err(|_| "Could not read Compose output")?;
+    let _ = err_thread.join().map_err(|_| "Compose error reader failed")?
+        .map_err(|_| "Could not read Compose diagnostics")?;
+    let status = status?;
+    if truncated && cap == CONFIG_LIMIT {
+        return Err("Compose configuration exceeds the 2 MB preview limit".into());
+    }
+    Ok((String::from_utf8_lossy(&out).into_owned(), status.code().unwrap_or(-1)))
+}
+
 fn config_value(root: &Path, files: &[PathBuf], project: &str) -> Result<(Value, String), String> {
     let mut cmd = compose_command(root, files, project, &["config", "--format", "json"])?;
-    let (output, _, code) = run_command_bounded(&mut cmd, CONFIG_TIMEOUT)?;
+    let (output, code) = run_compose_bounded(&mut cmd, CONFIG_TIMEOUT, CONFIG_LIMIT)?;
     if code != 0 { return Err("Compose configuration invalid. Check required variables, referenced files and Compose syntax; no changes made".into()); }
     if output.len() > CONFIG_LIMIT { return Err("Compose configuration exceeds the 2 MB preview limit".into()); }
     let config: Value = serde_json::from_str(&output).map_err(|_| "Compose did not return valid JSON configuration".to_owned())?;
@@ -258,7 +313,7 @@ pub async fn launch_compose_project(folder: String, files: Vec<String>, expected
         // --no-recreate is a final defensive layer; no force, prune, down or -v.
         // Build/pull is an explicit side effect of the user's Create and Start action.
         let mut command = compose_command(&root, &paths, &project, &["up", "-d", "--build", "--no-recreate", "--quiet-pull", "--quiet-build"])?;
-        let (_, _, code) = run_command_bounded(&mut command, LAUNCH_TIMEOUT)?;
+        let (_, code) = run_compose_bounded(&mut command, LAUNCH_TIMEOUT, 16384)?;
         if code != 0 {
             return Err("Compose did not complete successfully. Some resources may have been created or started. Inspect this stack in Containers; nothing was automatically removed or retried".into());
         }
