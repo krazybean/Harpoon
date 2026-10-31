@@ -3002,3 +3002,7 @@ mod b11;
 // Recovery hardening (offline; simulated Docker only).
 #[path = "b12/mod.rs"]
 mod b12;
+
+// Explicit manual rollback (offline; simulated Docker only).
+#[path = "rollback/mod.rs"]
+mod rollback;

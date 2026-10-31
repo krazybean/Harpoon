@@ -198,10 +198,13 @@ pub fn encode_snapshot(d: &Deployment) -> String {
     }
     // Optional trailing fields, appended only when set so a snapshot without them is byte-identical
     // to what earlier builds wrote: the pin (`-` when only `replaces` is set), then the replaced release.
-    if d.pinned.is_some() || d.replaces.is_some() {
+    if d.pinned.is_some() || d.replaces.is_some() || d.rollback_to.is_some() {
         f.push(d.pinned.as_ref().map(|p| p.encode()).unwrap_or_else(|| "-".into()));
     }
-    if let Some(r) = &d.replaces {
+    if d.replaces.is_some() || d.rollback_to.is_some() {
+        f.push(d.replaces.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "-".into()));
+    }
+    if let Some(r) = &d.rollback_to {
         f.push(r.to_string());
     }
     frame(&f.join("\t"))
@@ -334,9 +337,9 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         }
         None => return err("snapshot has no version"),
     }
-    if f.len() < SNAPSHOT_FIELDS || f.len() > SNAPSHOT_FIELDS + 2 {
+    if f.len() < SNAPSHOT_FIELDS || f.len() > SNAPSHOT_FIELDS + 3 {
         return err(format!(
-            "snapshot has {} fields, expected {SNAPSHOT_FIELDS} (plus up to two optional trailing fields: the pinned configuration, the replaced release)",
+            "snapshot has {} fields, expected {SNAPSHOT_FIELDS} (plus up to three optional trailing fields: the pinned configuration, the replaced release, the rollback target)",
             f.len()
         ));
     }
@@ -350,8 +353,15 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         })?),
     };
     let replaces = match f.get(SNAPSHOT_FIELDS + 1) {
-        None => None,
+        None | Some(&"-") => None,
         Some(r) => Some(r.parse::<ReleaseId>().or_else(|_| err("bad replaced release id"))?),
+    };
+    let rollback_to = match f.get(SNAPSHOT_FIELDS + 2) {
+        None => None,
+        Some(r) => Some(
+            r.parse::<ReleaseId>()
+                .or_else(|_| err("bad rollback target release id"))?,
+        ),
     };
     let mut it = Fields(f[2..SNAPSHOT_FIELDS].iter());
     let id: DeploymentId = it.next("id")?.parse().or_else(|_| err("bad deployment id"))?;
@@ -463,6 +473,7 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         release,
         pinned,
         replaces,
+        rollback_to,
     })
 }
 
@@ -632,7 +643,8 @@ fn recovery_attached(old: &Deployment, new: &Deployment) -> bool {
         && old.failure == new.failure
         && old.release == new.release
         && old.pinned == new.pinned
-        && old.replaces == new.replaces;
+        && old.replaces == new.replaces
+        && old.rollback_to == new.rollback_to;
     if !same_identity {
         return false;
     }

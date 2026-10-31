@@ -244,6 +244,9 @@ pub struct CutoverPlan {
     /// Whether the release being replaced has a pinned configuration. Without one, a failed
     /// cutover cannot be restored and the plan says so.
     pub restorable: bool,
+    /// Set when this is a developer-initiated rollback: `candidate` is then the earlier release
+    /// being re-served from its retained image, and nothing was built.
+    pub rollback: bool,
 }
 
 impl CutoverPlan {
@@ -264,11 +267,15 @@ impl CutoverPlan {
                 .saturating_add(cfg.budgets.final_ms),
             restore_budget_ms: cfg.policy.restore_budget_ms,
             restorable: cfg.previous.is_some(),
+            rollback: false,
         }
     }
 
     /// Plain statement of what will happen. It promises neither zero downtime nor recovery.
     pub fn lines(&self) -> Vec<String> {
+        if self.rollback {
+            return self.rollback_lines();
+        }
         vec![
             format!(
                 "cutover plan for application {}: replace release {} with {}",
@@ -287,6 +294,41 @@ impl CutoverPlan {
         .chain((!self.restorable).then(|| {
             format!(
                 "  WARNING: release {} has no pinned configuration, so if this cutover fails it cannot be restored and the application stays down",
+                self.previous
+            )
+        }))
+        .collect()
+    }
+}
+
+impl CutoverPlan {
+    fn rollback_lines(&self) -> Vec<String> {
+        vec![
+            "WARNING: Application rollback only. Data, volumes and database schema are NOT rolled back.".to_string(),
+            format!(
+                "rollback plan for application {}: replace the serving release {} with the earlier release {}",
+                self.application, self.previous, self.candidate
+            ),
+            format!(
+                "  1. release {}'s retained image and pinned configuration were verified and a preliminary check passed while {} kept running; nothing was rebuilt",
+                self.candidate, self.previous
+            ),
+            format!("  2. Harpoon stops release {}: the application is down from this moment", self.previous),
+            format!("  3. Harpoon starts release {} and runs its final health check", self.candidate),
+            format!(
+                "  anticipated interruption: unmeasured; at most {} ms by the configured time budgets (published ports cannot be held by two containers)",
+                self.max_interruption_ms
+            ),
+            format!(
+                "  if the cutover fails, Harpoon makes one bounded attempt ({} ms) to bring {} back from its pinned configuration",
+                self.restore_budget_ms, self.previous
+            ),
+            "  automatic triggers for this application stay paused after a successful rollback; no zero-downtime claim".to_string(),
+        ]
+        .into_iter()
+        .chain((!self.restorable).then(|| {
+            format!(
+                "  WARNING: release {} has no pinned configuration, so if this rollback fails it cannot be restored and the application stays down",
                 self.previous
             )
         }))
@@ -1309,7 +1351,11 @@ pub fn run_deployment_confirmed(
             finish(run)
         }
         Some(previous) => {
-            let plan = CutoverPlan::new(&run.d.application_id, previous, &run.d.id, cfg);
+            let mut plan = CutoverPlan::new(&run.d.application_id, previous, &run.d.id, cfg);
+            if let Some(target) = &run.d.rollback_to {
+                plan.candidate = target.clone();
+                plan.rollback = true;
+            }
             let why = if !run.backend.supports_cutover() {
                 Some(NotCutOver::Unsupported)
             } else if !confirm(&plan) {

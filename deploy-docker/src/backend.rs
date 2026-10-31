@@ -144,6 +144,9 @@ struct State {
     restoring: Option<PreviousRelease>,
     /// The application port reserved by `plan_release`, used by the next `start_new`.
     planned_lease: Option<PortLease>,
+    /// A developer-initiated rollback: the earlier release's deployment and exact pinned
+    /// configuration. The run builds nothing; it re-serves that retained image.
+    rollback: Option<(DeploymentId, ReleaseConfig)>,
 }
 
 type CopyHook = Box<dyn FnMut(&Path)>;
@@ -308,6 +311,21 @@ impl<T: HttpTransport> DockerBackend<T> {
     /// Called with each source path just before the snapshot opens it. For tests that need to
     /// change a file at the worst moment.
     #[doc(hidden)]
+    /// Make this a rollback to the release built by `deployment`: the run builds nothing and
+    /// serves that release's retained image (by its pinned id) with its pinned container port,
+    /// health check and limits. Only the host port is chosen afresh, through the ledger.
+    pub fn with_rollback(mut self, deployment: DeploymentId, pinned: ReleaseConfig) -> Self {
+        self.cfg.container_port = pinned.container_port;
+        self.cfg.health = pinned.health.clone();
+        self.cfg.limits = Limits {
+            memory_bytes: pinned.memory_bytes,
+            nano_cpus: pinned.nano_cpus,
+            pids: pinned.pids,
+        };
+        self.st.rollback = Some((deployment, pinned));
+        self
+    }
+
     pub fn with_snapshot_hook(mut self, f: impl FnMut(&Path) + 'static) -> Self {
         self.copy_hook = Some(Box::new(f));
         self
@@ -400,7 +418,12 @@ impl<T: HttpTransport> DockerBackend<T> {
                     .image_tag
                     .clone()
                     .unwrap_or_else(|| image_id.clone());
-                (image_id, tag, io.deployment().clone(), self.cfg.limits)
+                let owner = self
+                    .st
+                    .rollback
+                    .as_ref()
+                    .map_or_else(|| io.deployment().clone(), |(d, _)| d.clone());
+                (image_id, tag, owner, self.cfg.limits)
             }
         };
         let mut lbl = all_labels(io.app(), io.deployment());
@@ -673,6 +696,52 @@ impl<T: HttpTransport> DockerBackend<T> {
             StepError::new(msg)
         }
         .with_evidence(ev))
+    }
+}
+
+impl<T: HttpTransport> DockerBackend<T> {
+    /// A rollback's source step: prove the earlier release's retained image is there, is exactly
+    /// the pinned id, and carries that release's own labels. Nothing is created or changed, and the
+    /// image is never addressed by a tag.
+    fn prepare_rollback_image(
+        &mut self,
+        io: &mut StepIo<'_>,
+        b: &Budget,
+        dep: &DeploymentId,
+        c: &ReleaseConfig,
+    ) -> Result<(), StepError> {
+        if !c.image_id.starts_with("sha256:") {
+            return Err(StepError::new(format!(
+                "the pinned image {:?} is not an immutable image id; nothing was changed",
+                c.image_id
+            )));
+        }
+        self.api
+            .ping(b.left("pinging Docker")?)
+            .map_err(|e| api_err("Docker is not reachable on the configured socket", e))?;
+        let img = self
+            .api
+            .image_inspect(&c.image_id, b.left("checking the retained image")?)
+            .map_err(|e| api_err("checking the retained image", e))?
+            .ok_or_else(|| {
+                StepError::new(format!(
+                    "the retained image {} of the target release no longer exists; nothing was changed",
+                    short(&c.image_id)
+                ))
+            })?;
+        if img.id != c.image_id || !has_labels(&img.labels, io.app(), dep) {
+            return Err(StepError::new(format!(
+                "image {} is not the image pinned for the target release, or does not carry its Harpoon labels; nothing was changed",
+                short(&c.image_id)
+            )));
+        }
+        io.log.push_line(&format!(
+            "rollback: retained image {} verified for deployment {dep}",
+            short(&c.image_id)
+        ));
+        self.st.image_id = Some(c.image_id.clone());
+        self.st.image_tag = Some(c.image_tag.clone());
+        Ok(())
     }
 }
 
@@ -953,6 +1022,9 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
                 )));
             }
         }
+        if let Some((dep, c)) = self.st.rollback.clone() {
+            return self.prepare_rollback_image(io, &b, &dep, &c);
+        }
         let src = self.confined_source()?;
         let ctx = src.context.clone();
         let text = src.dockerfile_text.clone();
@@ -1031,6 +1103,11 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
     }
 
     fn build(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
+        if self.st.rollback.is_some() {
+            io.log
+                .push_line("rollback: nothing is built; the retained image is used as it is");
+            return Ok(());
+        }
         let b = Budget::new(io.budget_ms);
         let nonce = random_hex(&mut *self.entropy)?;
         let tag = image_tag(io.app(), io.deployment(), &nonce);

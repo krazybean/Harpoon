@@ -323,6 +323,11 @@ pub struct Deployment {
     /// The release this deployment replaces, recorded in the same write that begins the cutover so
     /// a crash can still say what was stopped and what an explicit recovery must restore.
     pub replaces: Option<ReleaseId>,
+    /// Set on a developer-initiated rollback: the earlier release this deployment re-serves from
+    /// its retained image and pinned configuration. Recorded when the deployment is created, so a
+    /// crash at any point still says what was being rolled back to. `replaces` is then the release
+    /// that was serving.
+    pub rollback_to: Option<ReleaseId>,
 }
 
 impl Deployment {
@@ -352,6 +357,7 @@ impl Deployment {
             release: None,
             pinned: None,
             replaces: None,
+            rollback_to: None,
         }
     }
 
@@ -627,6 +633,8 @@ pub struct TriggerPause {
     pub deployment: DeploymentId,
     pub recovery: Option<RecoveryOutcome>,
     pub incomplete: bool,
+    /// Set when the pause is the record of a **successful** manual rollback to this release.
+    pub rollback: Option<ReleaseId>,
 }
 
 pub fn trigger_pauses(deployments: &[Deployment]) -> Vec<TriggerPause> {
@@ -634,7 +642,8 @@ pub fn trigger_pauses(deployments: &[Deployment]) -> Vec<TriggerPause> {
     for d in deployments {
         let incomplete = matches!(d.cutover, CutoverState::Begun { .. });
         let failed = matches!(d.cutover, CutoverState::Failed { .. });
-        if !(incomplete || failed) || out.iter().any(|p| p.application == d.application_id) {
+        let rolled_back = d.status == DeploymentStatus::Succeeded && d.rollback_to.is_some();
+        if !(incomplete || failed || rolled_back) || out.iter().any(|p| p.application == d.application_id) {
             continue;
         }
         out.push(TriggerPause {
@@ -642,6 +651,7 @@ pub fn trigger_pauses(deployments: &[Deployment]) -> Vec<TriggerPause> {
             deployment: d.id.clone(),
             recovery: d.recovery.map(|r| r.outcome),
             incomplete,
+            rollback: d.rollback_to.clone().filter(|_| rolled_back),
         });
     }
     out
