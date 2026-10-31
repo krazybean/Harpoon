@@ -92,6 +92,8 @@ pub struct St {
     pub taken_ports: BTreeSet<u16>,
     /// Names of volumes that exist (inventory only; the backend never creates or removes any).
     pub volumes: Vec<String>,
+    /// What `GET /info` reports: (hostname, data root, kernel version); all empty = defaults.
+    pub info: (String, String, String),
     pub unexpected: Vec<Req>,
     seq: usize,
 }
@@ -490,6 +492,26 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
     match (method, seg.as_slice()) {
         ("GET", ["_ping"]) => (200, "OK".into()),
+        ("GET", ["info"]) => {
+            let (name, root, kernel) = if s.info.0.is_empty() {
+                (
+                    "harpoon-guest".to_string(),
+                    "/var/lib/docker".to_string(),
+                    "6.12.0-test".to_string(),
+                )
+            } else {
+                s.info.clone()
+            };
+            (
+                200,
+                obj(vec![
+                    ("Name", Json::Str(name)),
+                    ("DockerRootDir", Json::Str(root)),
+                    ("KernelVersion", Json::Str(kernel)),
+                ])
+                .to_json(),
+            )
+        }
         ("GET", ["volumes"]) => (
             200,
             obj(vec![(
@@ -594,6 +616,7 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                         ("Id", Json::Str(c.id.clone())),
                         ("Names", Json::Arr(vec![Json::Str(format!("/{}", c.name))])),
                         ("Image", Json::Str(c.image.clone())),
+                        ("ImageID", Json::Str(c.image.clone())),
                         (
                             "State",
                             Json::Str(if c.running { "running" } else { "exited" }.into()),

@@ -29,6 +29,7 @@ const SPECS: &[Spec] = &[
             "health-path",
             "resources-dir",
             "docker-socket",
+            "mgmt-socket",
         ],
         switches: &[],
     },
@@ -70,6 +71,7 @@ const SPECS: &[Spec] = &[
             "docker-socket",
             "app",
             "health-timeout-secs",
+            "mgmt-socket",
             "forwarder-pid",
             "forwarder-command",
             "lsof-path",
@@ -81,6 +83,17 @@ const SPECS: &[Spec] = &[
         command: "export-journal",
         values: &["runtime-dir", "to"],
         switches: &[],
+    },
+    Spec {
+        command: "teardown",
+        values: &[
+            "runtime-dir",
+            "deployment",
+            "docker-socket",
+            "resources-dir",
+            AUTH_FLAG,
+        ],
+        switches: &["apply"],
     },
     Spec {
         command: "inventory",
@@ -167,6 +180,7 @@ COMMANDS
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
   export-journal  copy the journal to a new file for investigation (--to FILE)
+  teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
   inventory       read-only listing of containers, images, volumes, port mappings and host listeners (no --runtime-dir)
 
 EVERY COMMAND EXCEPT inventory NEEDS --runtime-dir. One runtime directory = one journal (DIR/deploy-journal, mode 0700).

@@ -210,3 +210,127 @@ fn the_fixture_directory_holds_only_what_the_build_needs() {
     names.sort();
     assert_eq!(names, ["Dockerfile", "README.md", "srv.sh"]);
 }
+
+// ------------------------------------------------------------------ the whole contract, without a Docker build
+
+mod support;
+use support::fake_docker::St;
+use support::*;
+
+static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serve the real fixture script on `port`; its `HARPOON_DEPLOYMENT_MARKER` is whatever the fake
+/// Docker recorded in the environment of the container published on that port — exactly how the
+/// real container would get it.
+fn serve_fixture_for(port: u16, st: std::sync::Arc<std::sync::Mutex<St>>) -> Option<()> {
+    let l = TcpListener::bind(("127.0.0.1", port)).ok()?;
+    let script = fixture().join("srv.sh");
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let (script, st) = (script.clone(), st.clone());
+            std::thread::spawn(move || {
+                let marker = {
+                    let s = st.lock().unwrap();
+                    s.containers.iter().find_map(|k| {
+                        (k.host_port == Some(port))
+                            .then(|| {
+                                k.create_body
+                                    .get("Env")
+                                    .and_then(harpoon_deploy_docker::json::Json::as_array)
+                                    .and_then(|a| {
+                                        a.iter().filter_map(|e| e.as_str()).find_map(|e| {
+                                            e.strip_prefix("HARPOON_DEPLOYMENT_MARKER=")
+                                                .map(str::to_string)
+                                        })
+                                    })
+                            })
+                            .flatten()
+                    })
+                };
+                let leaked: &'static str = Box::leak(marker.unwrap_or_default().into_boxed_str());
+                run_script(
+                    c,
+                    &script,
+                    if leaked.is_empty() {
+                        None
+                    } else {
+                        Some(leaked)
+                    },
+                );
+            });
+        }
+    });
+    Some(())
+}
+
+#[test]
+fn a_full_deployment_succeeds_against_the_real_fixture_script_with_real_http_and_per_container_markers(
+) {
+    use harpoon_deploy::state::DeploymentStatus;
+    use harpoon_deploy_docker::backend::{Attribution, DockerBackend};
+    let _g = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let (a, b) = (
+        serve_fixture_for(39000, h.docker.st.clone()),
+        serve_fixture_for(38000, h.docker.st.clone()),
+    );
+    if a.is_none() || b.is_none() {
+        eprintln!("ports 38000/39000 are busy on this machine: skipped");
+        return;
+    }
+    let mut cfg = config(&h.ws, &h.docker);
+    cfg.attribution = Attribution::PerContainer;
+    cfg.health.startup_deadline_ms = 3000;
+    let mut backend = DockerBackend::with_transport(cfg, Some(&h.ws.resources()), TcpHttp)
+        .unwrap()
+        .with_entropy(test_entropy())
+        .with_port_probe(NoListeners)
+        .with_disk_probe(FakeDisk(10 << 30));
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut backend, &mut j);
+    assert_eq!(
+        r.status,
+        DeploymentStatus::Succeeded,
+        "{:?} {:?}",
+        h.dep.failure,
+        r.evidence
+    );
+    assert!(
+        r.evidence.iter().all(|(_, e)| !e.simulated),
+        "the evidence is from real HTTP, not a simulation"
+    );
+    assert_eq!(r.evidence.len(), 2);
+}
+
+#[test]
+fn the_fixture_with_a_marker_that_does_not_match_the_containers_is_not_accepted() {
+    use harpoon_deploy::state::DeploymentStatus;
+    use harpoon_deploy_docker::backend::{Attribution, DockerBackend};
+    let _g = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = Harness::new();
+    h.seed_built_image();
+    // the test port is answered by a fixture that was started with some OTHER marker (a stale instance)
+    let l = match TcpListener::bind(("127.0.0.1", 39000)) {
+        Ok(l) => l,
+        Err(_) => return eprintln!("port 39000 is busy on this machine: skipped"),
+    };
+    let script = fixture().join("srv.sh");
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let s = script.clone();
+            std::thread::spawn(move || run_script(c, &s, Some("deadbeefdeadbeefdeadbeefdeadbeef")));
+        }
+    });
+    let mut cfg = config(&h.ws, &h.docker);
+    cfg.attribution = Attribution::PerContainer;
+    cfg.health.startup_deadline_ms = 600;
+    let mut backend = DockerBackend::with_transport(cfg, Some(&h.ws.resources()), TcpHttp)
+        .unwrap()
+        .with_entropy(test_entropy())
+        .with_port_probe(NoListeners)
+        .with_disk_probe(FakeDisk(10 << 30));
+    let mut j = StampedJournal::new();
+    assert_eq!(h.run(&mut backend, &mut j).status, DeploymentStatus::Failed);
+    assert!(h.dep.failure.clone().unwrap().message.contains("marker"));
+}

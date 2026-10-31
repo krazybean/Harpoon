@@ -84,9 +84,16 @@ Mandatory B7 gates carried forward (all still open):
 
 ## B7 phase 1 changes to the CLI
 - `deploy` (live path) now sets `live_gates` and per-container attribution and requires `--forwarder-pid N` (optional `--forwarder-command`, default `Harpoon`; `--lsof-path`, default `/usr/sbin/lsof`);
-  it attaches the host-listener check and a guest free-space probe. **No guest probe exists**, so a live deployment stops at `source` ("no guest-side free-space probe is implemented") even with the gate open;
+  it attaches the host-listener check and a guest free-space probe. *(phase 1 text, superseded below: the probe now exists)* No guest probe existed, so a live deployment stopped at `source` ("no guest-side free-space probe is implemented") even with the gate open;
   `Gate::guest_free_override` lets tests stand in for it and is `None` in the shipping build.
 - New read-only `inventory --docker-socket S [--lsof-path P] [--to FILE]`: sorted, timestamp-free lines for containers, images, volumes, Docker port mappings and (with `--lsof-path`) host listeners in 38000–39099,
   for before/after `diff`s. `--to` creates a new `0600` file and never overwrites.
 - The image tag printed by `deploy` is now a pattern; the real tag (with 128 random bits) is chosen at build and recorded in the journal.
 - B7 hand-off: replaced by `docs/results/DEPLOY_B7_LIVE_ACCEPTANCE.md`; the invocation there needs the added flags. The seven carried-forward gates: 1 (image identity) and 2 (marker) and the source-swap window are implemented offline; 3 (forwarder ownership) and 4 (loopback/LAN) have an offline verifier and an audit but are unproven live; 5 (guest disk) has a rule and no probe; 6 and 7 are live-only.
+
+## B7 final offline blockers — CLI changes
+- **`--mgmt-socket PATH`** (absolute): required by a live `deploy`, optional for `doctor`. Guest free space is measured through Harpoon's existing management channel (host unix socket → vsock 2377 → `harpoon-mgmt`), cross-checked against Docker's `/info`
+  (hostname, kernel, data root); the old test-only `Gate::guest_free_override` is gone — tests use a fake guest. `doctor --docker-socket S --mgmt-socket M` reports `guest free space` (exit 5 when short or unverifiable).
+- **`teardown --deployment dep_… --docker-socket S --resources-dir RES [--apply --authorize-live-docker-changes=…]`**: dry run by default; dismantles ONE succeeded deployment as described in `DEPLOY_B7_LIVE_ACCEPTANCE.md` §4.
+  Exit codes: 0 done/nothing to do, 5 runtime unreachable (no writes), 6 refused (unknown/unsuccessful deployment, earlier refusal, simulated runtime, missing opt-in), 7 incomplete (state recorded).
+- Live `deploy` remains closed in the shipping build (`Gate::shipping()`); `teardown` needs a succeeded deployment, which only a live deployment can produce.

@@ -18,25 +18,25 @@ use support::Harness;
 
 const OPEN: Gate = Gate {
     live_deploy_enabled: true,
-    guest_free_override: Some(100 << 30),
-};
-/// The gate open but, as in a real build today, with no guest free-space probe.
-const OPEN_NO_PROBE: Gate = Gate {
-    live_deploy_enabled: true,
-    guest_free_override: None,
 };
 const SHIPPING: Gate = Gate::shipping();
 
 struct T {
     h: Harness,
     rt: PathBuf,
+    /// The fake guest management channel (roomy by default).
+    mgmt: support::fake_mgmt::FakeMgmt,
 }
 
 impl T {
     fn new() -> T {
         let h = Harness::new();
         let rt = h.ws.root.join("runtime");
-        T { h, rt }
+        T {
+            h,
+            rt,
+            mgmt: support::fake_mgmt::FakeMgmt::start(),
+        }
     }
     fn go(&self, gate: &Gate, args: &[&str]) -> Outcome {
         let mut a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -797,6 +797,8 @@ fn live_args(t: &T) -> Vec<String> {
         "1".into(),
         "--forwarder-pid".into(),
         "4242".into(),
+        "--mgmt-socket".into(),
+        t.mgmt.path().display().to_string(),
     ];
     v.extend(t.src());
     v
@@ -1292,34 +1294,74 @@ fn a_live_deployment_names_the_forwarder_process_it_expects_before_anything_else
 }
 
 #[test]
-fn without_a_guest_free_space_probe_a_live_deployment_stops_at_its_first_step() {
+fn a_live_deployment_names_its_guest_channel_and_stops_when_the_guest_is_short_unsure_or_not_the_same(
+) {
+    // no --mgmt-socket at all: configuration error before anything happens
     let t = T::new();
-    let a = live_args(&t);
-    let o = go(&t, &OPEN_NO_PROBE, &a);
+    let mut a = live_args(&t);
+    let i = a.iter().position(|x| x == "--mgmt-socket").unwrap();
+    a.drain(i..i + 2);
+    let o = go(&t, &OPEN, &a);
+    assert_exit(&o, 3);
+    assert!(o.stderr.contains("--mgmt-socket"), "{}", o.stderr);
+    assert!(!t.rt.exists() && t.docker_requests() == 0);
+    let mut rel = live_args(&t);
+    let i = rel.iter().position(|x| x == "--mgmt-socket").unwrap();
+    rel[i + 1] = "relative.sock".into();
+    assert_exit(&go(&t, &OPEN, &rel), 3);
+
+    // a guest with too little room, an impostor, an unreachable channel: first step fails, nothing changes
+    for (what, setup, want) in [
+        (
+            "short",
+            Box::new(|m: &mut support::fake_mgmt::Model| {
+                m.total = 3_000_000_000;
+                m.used = 2_500_000_000;
+                m.avail = 500_000_000;
+            }) as Box<dyn Fn(&mut support::fake_mgmt::Model)>,
+            "MB free in the guest",
+        ),
+        (
+            "impostor",
+            Box::new(|m| m.hostname = "someone-else".into()),
+            "not the same guest",
+        ),
+    ] {
+        let t = T::new();
+        t.mgmt.set(|m| setup(m));
+        let o = go(&t, &OPEN, &live_args(&t));
+        assert_exit(&o, 7);
+        assert!(
+            o.stdout.contains("failure at source") && o.stdout.contains(want),
+            "{what}: {}",
+            o.stdout
+        );
+        assert!(
+            t.h.ws.buildx_record("args.txt").is_empty(),
+            "{what}: no build"
+        );
+        assert!(
+            t.h.docker.requests().iter().all(|r| r.method == "GET"),
+            "{what}: no Docker change of any kind"
+        );
+        let s = t.cli(&["status"]);
+        assert!(
+            s.stdout.contains("failed") && s.stdout.contains("unresolved cleanup: none"),
+            "{what}: {}",
+            s.stdout
+        );
+    }
+    let t = T::new();
+    let mut a = live_args(&t);
+    let i = a.iter().position(|x| x == "--mgmt-socket").unwrap();
+    a[i + 1] = "/nonexistent/mgmt.sock".into();
+    let o = go(&t, &OPEN, &a);
     assert_exit(&o, 7);
     assert!(
-        o.stdout.contains("failure at source")
-            && o.stdout.contains("guest free space could not be verified"),
+        o.stdout
+            .contains("cannot reach the guest management channel"),
         "{}",
         o.stdout
-    );
-    assert!(
-        o.stdout
-            .contains("no guest-side free-space probe is implemented"),
-        "{}",
-        o.stdout
-    );
-    assert!(t.h.ws.buildx_record("args.txt").is_empty(), "no build");
-    assert!(
-        t.h.docker.requests().iter().all(|r| r.method == "GET"),
-        "no Docker change of any kind"
-    );
-    // and the journal says what happened
-    let s = t.cli(&["status"]);
-    assert!(
-        s.stdout.contains("failed") && s.stdout.contains("unresolved cleanup: none"),
-        "{}",
-        s.stdout
     );
 }
 
@@ -1481,4 +1523,750 @@ fn the_inventory_needs_an_explicit_socket_and_reports_an_unreachable_one() {
         "{}",
         o.stderr
     );
+}
+
+// ------------------------------------------------------------------ B7 final: teardown
+
+struct Done {
+    app: ApplicationId,
+    dep: DeploymentId,
+    cid: String,
+    img: String,
+    tag: String,
+}
+
+/// A docker-kind runtime holding one SUCCEEDED deployment whose serving container is running in the
+/// fake Docker, together with its retained image and its application-port lease.
+fn succeeded_deployment(t: &T) -> Done {
+    t.docker_runtime();
+    let (app, dep) = ids(41);
+    let tag = format!(
+        "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+        app.as_str().to_ascii_lowercase(),
+        dep
+    );
+    let img = support::fake_iid(7);
+    let name = format!("hp-{dep}");
+    let lbl = harpoon_deploy::backend::harpoon_labels(&app, &dep);
+    let (cid, img2) = t.h.docker.with(|s| {
+        s.add_image_with_id(&img, &[&tag], lbl.clone(), vec![]);
+        let cid = s.add_container(&name, lbl.clone(), true);
+        let c = s.containers.last_mut().unwrap();
+        c.host_port = Some(38000);
+        c.image = img.clone();
+        (cid, img.clone())
+    });
+    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    j.persist(&finished(&app, &dep, DeploymentStatus::Succeeded))
+        .unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::Image,
+        &tag,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::Image, &tag, &img2))
+        .unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::PortLease,
+        "38000",
+        Disposition::RemoveOnFailure,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::PortLease, "38000", "38000"))
+        .unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::Container,
+        &name,
+        Disposition::RemoveOnFailure,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::Container, &name, &cid))
+        .unwrap();
+    Done {
+        app,
+        dep,
+        cid,
+        img: img2,
+        tag,
+    }
+}
+
+fn td_args(t: &T, d: &Done, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "teardown".into(),
+        "--deployment".into(),
+        d.dep.to_string(),
+        "--docker-socket".into(),
+        t.socket(),
+        "--resources-dir".into(),
+        t.resources(),
+    ];
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v
+}
+
+fn apply_args(t: &T, d: &Done) -> Vec<String> {
+    td_args(t, d, &["--apply", &format!("--{AUTH_FLAG}={AUTH_PHRASE}")])
+}
+
+fn mutating(t: &T) -> Vec<(String, String)> {
+    t.h.docker
+        .requests()
+        .into_iter()
+        .filter(|r| r.method != "GET")
+        .map(|r| (r.method, r.path))
+        .collect()
+}
+
+fn entry_state(t: &T, d: &Done, kind: ResourceKind, name: &str) -> String {
+    let r = read_only(&t.journal_dir()).unwrap();
+    let e = r
+        .ledger
+        .find(&d.dep, &ResourceKey::new(kind, name))
+        .unwrap();
+    format!("{:?}", e.state)
+}
+
+#[test]
+fn teardown_is_a_dry_run_by_default_and_needs_the_exact_opt_in_to_change_anything() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    let before = t.journal_bytes();
+    let o = go(&t, &SHIPPING, &td_args(&t, &d, &[]));
+    assert_exit(&o, 0);
+    for want in [
+        "dry run: nothing will be changed",
+        &format!("would: remove container hp-{} (id {})", d.dep, d.cid),
+        "would: remove image",
+        "only once its containers are gone and no other container uses it",
+        "would: release port lease 38000 only once the containers are verified absent",
+        "dry run: nothing was changed",
+    ] {
+        assert!(o.stdout.contains(want), "{want}\n{}", o.stdout);
+    }
+    assert!(mutating(&t).is_empty(), "a dry run only reads");
+    assert_eq!(t.journal_bytes(), before);
+
+    // --apply without the exact phrase is refused before Docker is contacted
+    let n = t.docker_requests();
+    let mut a = td_args(&t, &d, &["--apply"]);
+    assert_exit(&go(&t, &SHIPPING, &a), 6);
+    a.push(format!("--{AUTH_FLAG}=yes"));
+    assert_exit(&go(&t, &SHIPPING, &a), 6);
+    assert_eq!(t.docker_requests(), n);
+    assert_eq!(t.journal_bytes(), before);
+}
+
+#[test]
+fn teardown_removes_the_container_then_the_image_then_releases_the_lease_each_by_verified_id() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    let foreign_c =
+        t.h.docker
+            .with(|s| s.add_container("bystander", vec![], true));
+    let foreign_i = t.h.docker.with(|s| {
+        s.add_image_with_id(&support::fake_iid(99), &["redis:7"], vec![], vec![]);
+        support::fake_iid(99)
+    });
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("teardown: complete"), "{}", o.stdout);
+
+    let m = mutating(&t);
+    let stop = m
+        .iter()
+        .position(|(me, p)| me == "POST" && p.contains(&format!("{}/stop", d.cid)))
+        .expect("stopped first");
+    let del_c = m
+        .iter()
+        .position(|(me, p)| me == "DELETE" && p.starts_with(&format!("/containers/{}", d.cid)))
+        .expect("container removed");
+    let del_i = m
+        .iter()
+        .position(|(me, p)| me == "DELETE" && p.starts_with(&format!("/images/{}", d.img)))
+        .expect("image removed");
+    assert!(
+        stop < del_c && del_c < del_i,
+        "stop, remove container, remove image: {m:?}"
+    );
+    assert_eq!(m.len(), 3, "nothing else changed: {m:?}");
+    assert!(
+        m[del_c].1.contains("force=false") && m[del_c].1.contains("v=false"),
+        "{:?}",
+        m[del_c]
+    );
+    assert!(
+        m[del_i].1.contains("force=false") && m[del_i].1.contains("noprune=true"),
+        "{:?}",
+        m[del_i]
+    );
+    assert!(
+        m.iter()
+            .all(|(_, p)| !p.contains("prune=") || p.contains("noprune=true"))
+            && m.iter()
+                .all(|(_, p)| !p.contains("harpoon/") && !p.contains(&d.tag)),
+        "never by tag or name: {m:?}"
+    );
+
+    // the journal says all three are released, and records an attempt and a result for each
+    for (kind, name) in [
+        (ResourceKind::Container, format!("hp-{}", d.dep)),
+        (ResourceKind::Image, d.tag.clone()),
+        (ResourceKind::PortLease, "38000".to_string()),
+    ] {
+        assert!(
+            entry_state(&t, &d, kind, &name).starts_with("Released"),
+            "{kind:?}"
+        );
+    }
+    let r = read_only(&t.journal_dir()).unwrap();
+    for e in r.ledger.entries().iter().filter(|e| e.deployment == d.dep) {
+        assert_eq!(e.cleanup_attempts, 1, "{}", e.key.name);
+        assert!(!e.cleanup_outstanding);
+    }
+    assert!(r.outstanding_leases().is_empty());
+    // foreign things untouched
+    t.h.docker.with(|s| {
+        assert!(s.containers.iter().any(|c| c.id == foreign_c && c.running));
+        assert!(s.images.iter().any(|i| i.id == foreign_i));
+        assert!(
+            !s.containers.iter().any(|c| c.id == d.cid) && !s.images.iter().any(|i| i.id == d.img)
+        );
+    });
+    let s = t.cli(&["status"]);
+    assert!(
+        s.stdout.contains("unresolved cleanup: none"),
+        "{}",
+        s.stdout
+    );
+}
+
+#[test]
+fn a_repeated_teardown_changes_nothing_further() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 0);
+    let (bytes, n) = (t.journal_bytes(), mutating(&t).len());
+    for args in [apply_args(&t, &d), td_args(&t, &d, &[])] {
+        let o = go(&t, &SHIPPING, &args);
+        assert_exit(&o, 0);
+        assert!(o.stdout.contains("nothing to do"), "{}", o.stdout);
+    }
+    assert_eq!(t.journal_bytes(), bytes);
+    assert_eq!(mutating(&t).len(), n);
+}
+
+#[test]
+fn a_failed_removal_is_recorded_leaves_everything_else_alone_and_is_retried_by_the_next_run() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/containers/",
+        1,
+        Action::Respond(500, "{\"message\":\"driver failed\"}".into()),
+    );
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("teardown: incomplete") && o.stdout.contains("driver failed"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("the image and the port leases were left alone"),
+        "{}",
+        o.stdout
+    );
+    // the container was stopped but not removed; the image and the lease are exactly as they were
+    t.h.docker.with(|s| {
+        assert!(s.containers.iter().any(|c| c.id == d.cid), "still there");
+        assert!(s.images.iter().any(|i| i.id == d.img));
+    });
+    assert!(!mutating(&t)
+        .iter()
+        .any(|(me, p)| me == "DELETE" && p.starts_with("/images/")));
+    assert!(
+        entry_state(&t, &d, ResourceKind::Container, &format!("hp-{}", d.dep))
+            .contains("CleanupFailed")
+    );
+    assert!(entry_state(&t, &d, ResourceKind::PortLease, "38000").contains("Created"));
+    let s = t.cli(&["status"]);
+    assert!(
+        s.stdout.contains("state=cleanup-failed") && s.stdout.contains("unresolved cleanup (1)"),
+        "{}",
+        s.stdout
+    );
+
+    // the next run retries only what is left, and finishes
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("teardown: complete"), "{}", o.stdout);
+    let r = read_only(&t.journal_dir()).unwrap();
+    let c = r
+        .ledger
+        .find(
+            &d.dep,
+            &ResourceKey::new(ResourceKind::Container, format!("hp-{}", d.dep)),
+        )
+        .unwrap();
+    assert_eq!(
+        c.cleanup_attempts, 2,
+        "the failed attempt is kept in the record"
+    );
+    assert!(r
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == d.dep)
+        .all(|e| e.is_released()));
+}
+
+#[test]
+fn an_interrupted_removal_attempt_is_retried_and_not_forgotten() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // a previous run recorded its intent to remove the container and died before the result
+    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    j.record(&LedgerRecord::CleanupAttempt {
+        key: ResourceKey::new(ResourceKind::Container, format!("hp-{}", d.dep)),
+        deployment: d.dep.clone(),
+        at_ms: 9,
+    })
+    .unwrap();
+    drop(j);
+    let s = t.cli(&["status"]);
+    assert!(
+        s.stdout
+            .contains("attempted and its result was never recorded"),
+        "{}",
+        s.stdout
+    );
+    assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 0);
+    let r = read_only(&t.journal_dir()).unwrap();
+    assert!(r.cleanup_problems().is_empty());
+}
+
+#[test]
+fn a_container_that_is_not_provably_the_recorded_one_is_never_touched_and_stays_refused() {
+    for (what, relabel) in [
+        (
+            "labels differ",
+            Box::new(|c: &mut support::fake_docker::Ctr| {
+                c.labels = vec![("io.harpoon.managed".into(), "true".into())]
+            }) as Box<dyn Fn(&mut support::fake_docker::Ctr)>,
+        ),
+        ("no labels at all", Box::new(|c| c.labels = vec![])),
+    ] {
+        let t = T::new();
+        let d = succeeded_deployment(&t);
+        t.h.docker
+            .with(|s| relabel(s.containers.iter_mut().find(|c| c.id == d.cid).unwrap()));
+        let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+        assert_exit(&o, 7);
+        assert!(
+            o.stdout.contains("REFUSE container") && o.stdout.contains("not touched"),
+            "{what}: {}",
+            o.stdout
+        );
+        assert!(
+            mutating(&t).is_empty(),
+            "{what}: not a single change to Docker: {:?}",
+            mutating(&t)
+        );
+        assert!(
+            entry_state(&t, &d, ResourceKind::Container, &format!("hp-{}", d.dep))
+                .contains("Refused")
+        );
+        // image and lease untouched; and a second run refuses to go on
+        assert!(
+            entry_state(&t, &d, ResourceKind::Image, &d.tag).contains("Created"),
+            "{what}"
+        );
+        let before = t.journal_bytes();
+        let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("refused earlier") && o.stderr.contains("will not touch it"),
+            "{what}: {}",
+            o.stderr
+        );
+        assert_eq!(t.journal_bytes(), before);
+        assert!(mutating(&t).is_empty());
+    }
+}
+
+#[test]
+fn a_same_named_container_with_a_different_id_is_refused_not_adopted() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // the recorded container vanished and something else took its name
+    t.h.docker.with(|s| {
+        s.containers.retain(|c| c.id != d.cid);
+        s.add_container(
+            &format!("hp-{}", d.dep),
+            harpoon_deploy::backend::harpoon_labels(&d.app, &d.dep),
+            true,
+        );
+    });
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("its id is not the recorded"),
+        "{}",
+        o.stdout
+    );
+    assert!(mutating(&t).is_empty());
+    assert!(t.h.docker.with(|s| s
+        .containers
+        .iter()
+        .any(|c| c.name == format!("hp-{}", d.dep) && c.running)));
+}
+
+#[test]
+fn a_container_already_gone_is_recorded_absent_and_the_rest_proceeds() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    t.h.docker.with(|s| s.containers.retain(|c| c.id != d.cid));
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("is not in the runtime: record it as absent"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        entry_state(&t, &d, ResourceKind::Container, &format!("hp-{}", d.dep))
+            .contains("AlreadyAbsent")
+    );
+    assert!(entry_state(&t, &d, ResourceKind::Image, &d.tag).starts_with("Released"));
+    assert!(entry_state(&t, &d, ResourceKind::PortLease, "38000").starts_with("Released"));
+}
+
+#[test]
+fn an_unreachable_or_failing_runtime_changes_nothing_and_assumes_nothing() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    let before = t.journal_bytes();
+    for apply in [false, true] {
+        let mut a = if apply {
+            apply_args(&t, &d)
+        } else {
+            td_args(&t, &d, &[])
+        };
+        a[4] = "/nonexistent/docker.sock".into();
+        let o = go(&t, &SHIPPING, &a);
+        assert_exit(&o, 5);
+        assert!(
+            o.stderr.contains("Nothing was assumed absent"),
+            "{}",
+            o.stderr
+        );
+    }
+    t.h.docker.fault(
+        Some("GET"),
+        "/containers/json",
+        1_000,
+        Action::Respond(500, "{\"message\":\"boom\"}".into()),
+    );
+    assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 5);
+    assert_eq!(
+        t.journal_bytes(),
+        before,
+        "not even a failed attempt was recorded"
+    );
+    assert!(mutating(&t).is_empty());
+    // a socket is mandatory
+    let mut a = apply_args(&t, &d);
+    a.drain(3..5);
+    assert_exit(&go(&t, &SHIPPING, &a), 5);
+}
+
+#[test]
+fn only_a_succeeded_recorded_deployment_can_be_torn_down() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // unknown id
+    let (_, other) = ids(77);
+    let mut a = apply_args(&t, &d);
+    a[2] = other.to_string();
+    let o = go(&t, &SHIPPING, &a);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("is not in the journal"));
+    // not an id at all
+    a[2] = "hp-whatever".into();
+    assert_exit(&go(&t, &SHIPPING, &a), 2);
+    assert_exit(&go(&t, &SHIPPING, &["teardown".to_string()]), 2);
+    // failed and running deployments are for reconcile/recover
+    for (st, want) in [
+        (DeploymentStatus::Failed, "failed"),
+        (DeploymentStatus::Running, "running"),
+    ] {
+        let t2 = T::new();
+        t2.docker_runtime();
+        let (app, dep) = ids(55);
+        let (mut j, _) = FileJournal::open(&t2.journal_dir()).unwrap();
+        j.persist(&finished(&app, &dep, st)).unwrap();
+        drop(j);
+        let dd = Done {
+            app,
+            dep,
+            cid: String::new(),
+            img: String::new(),
+            tag: String::new(),
+        };
+        let o = go(&t2, &SHIPPING, &apply_args(&t2, &dd));
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains(want) && o.stderr.contains("succeeded"),
+            "{}",
+            o.stderr
+        );
+        assert!(mutating(&t2).is_empty());
+    }
+    // a simulated runtime has nothing real to tear down; a runtime with no journal has nothing recorded
+    let t3 = T::new();
+    assert_exit(&t3.sim_deploy(), 0);
+    let dd = Done {
+        app: d.app.clone(),
+        dep: d.dep.clone(),
+        cid: String::new(),
+        img: String::new(),
+        tag: String::new(),
+    };
+    assert_exit(&go(&t3, &SHIPPING, &apply_args(&t3, &dd)), 6);
+    let t4 = T::new();
+    assert_exit(&go(&t4, &SHIPPING, &apply_args(&t4, &dd)), 6);
+}
+
+#[test]
+fn an_image_something_else_still_uses_is_kept_and_a_port_docker_still_maps_keeps_its_lease() {
+    // image in use by a foreign container
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    let user = t.h.docker.with(|s| {
+        let id = s.add_container("someone-elses-app", vec![], true);
+        s.containers.last_mut().unwrap().image = support::fake_iid(7);
+        id
+    });
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("kept: image") && o.stdout.contains("someone-elses-app"),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("an image was kept"), "{}", o.stdout);
+    t.h.docker.with(|s| {
+        assert!(
+            s.images.iter().any(|i| i.id == d.img),
+            "the shared image stays"
+        );
+        assert!(
+            s.containers.iter().any(|c| c.id == user && c.running),
+            "and so does its user"
+        );
+    });
+    assert!(entry_state(&t, &d, ResourceKind::Image, &d.tag).contains("Created"));
+    assert!(entry_state(&t, &d, ResourceKind::PortLease, "38000").starts_with("Released"));
+    // repeating it is stable
+    let bytes = t.journal_bytes();
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("kept: image"));
+    assert_eq!(
+        mutating(&t).len(),
+        2,
+        "stop + container removal only; no further change"
+    );
+    let _ = bytes;
+
+    // an image whose users cannot be identified is kept too
+    let t2 = T::new();
+    let d2 = succeeded_deployment(&t2);
+    t2.h.docker.with(|s| {
+        s.add_container("mystery", vec![], false);
+        s.containers.last_mut().unwrap().image = String::new();
+    });
+    let o = go(&t2, &SHIPPING, &apply_args(&t2, &d2));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("mystery (image unknown)"), "{}", o.stdout);
+    assert!(t2
+        .h
+        .docker
+        .with(|s| s.images.iter().any(|i| i.id == d2.img)));
+
+    // a port that Docker still maps (a foreign container publishes it) is not released
+    let t3 = T::new();
+    let d3 = succeeded_deployment(&t3);
+    t3.h.docker
+        .fault(Some("DELETE"), "/containers/", 1, Action::Disconnect);
+    let o = go(&t3, &SHIPPING, &apply_args(&t3, &d3));
+    assert_exit(&o, 7);
+    assert!(
+        entry_state(&t3, &d3, ResourceKind::PortLease, "38000").contains("Created"),
+        "the lease stays while the container is not verified gone"
+    );
+}
+
+#[test]
+fn teardown_does_not_touch_other_deployments_of_the_same_application() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // a second deployment of the same app, also succeeded, with its own container
+    let (_, dep2) = ids(88);
+    let name2 = format!("hp-{dep2}");
+    let lbl2 = harpoon_deploy::backend::harpoon_labels(&d.app, &dep2);
+    let cid2 = t.h.docker.with(|s| {
+        let id = s.add_container(&name2, lbl2, true);
+        s.containers.last_mut().unwrap().host_port = Some(38001);
+        id
+    });
+    let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+    j.persist(&finished(&d.app, &dep2, DeploymentStatus::Succeeded))
+        .unwrap();
+    j.record(&intent(
+        &d.app,
+        &dep2,
+        ResourceKind::Container,
+        &name2,
+        Disposition::RemoveOnFailure,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep2, ResourceKind::Container, &name2, &cid2))
+        .unwrap();
+    drop(j);
+    assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 0);
+    assert!(
+        t.h.docker
+            .with(|s| s.containers.iter().any(|c| c.id == cid2 && c.running)),
+        "the other deployment's container is untouched"
+    );
+    assert!(mutating(&t).iter().all(|(_, p)| !p.contains(&cid2)));
+    let r = read_only(&t.journal_dir()).unwrap();
+    assert!(!r
+        .ledger
+        .find(&dep2, &ResourceKey::new(ResourceKind::Container, &name2))
+        .unwrap()
+        .is_released());
+}
+
+#[test]
+fn doctor_reports_guest_free_space_through_the_management_channel_read_only() {
+    let t = T::new();
+    let src = t.src();
+    let mut a: Vec<String> = vec![
+        "doctor".into(),
+        "--docker-socket".into(),
+        t.socket(),
+        "--mgmt-socket".into(),
+        t.mgmt.path().display().to_string(),
+    ];
+    a.extend(src);
+    let o = go(&t, &SHIPPING, &a);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("[ok]   guest free space")
+            && o.stdout.contains("read-only: hostname, uname -r, df"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        t.mgmt.requests(),
+        ["hostname", "uname -r", "df -B1 /var/lib/docker"]
+    );
+    assert!(t.h.docker.requests().iter().all(|r| r.method == "GET"));
+    t.mgmt.set(|m| {
+        m.total = 1_000_000_000;
+        m.used = 900_000_000;
+        m.avail = 100_000_000;
+    });
+    let o = go(&t, &SHIPPING, &a);
+    assert_exit(&o, 5);
+    assert!(
+        o.stdout.contains("[FAIL] guest free space") && o.stdout.contains("MB required"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_lease_is_kept_while_docker_still_maps_its_port() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // after our container is gone, something else is found publishing the same host port
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/containers/",
+        1,
+        Action::Race(std::sync::Arc::new(|s| {
+            s.add_container("squatter", vec![], true);
+            s.containers.last_mut().unwrap().host_port = Some(38000);
+        })),
+    );
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout
+            .contains("port 38000 is still mapped by a container; lease kept"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        entry_state(&t, &d, ResourceKind::Container, &format!("hp-{}", d.dep))
+            .starts_with("Released")
+    );
+    assert!(entry_state(&t, &d, ResourceKind::PortLease, "38000").contains("Created"));
+    assert!(
+        t.h.docker.with(|s| s
+            .containers
+            .iter()
+            .any(|c| c.name == "squatter" && c.running)),
+        "and the squatter is untouched"
+    );
+    // once the port is free, the next run releases the lease
+    t.h.docker
+        .with(|s| s.containers.retain(|c| c.name != "squatter"));
+    assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 0);
+    assert!(entry_state(&t, &d, ResourceKind::PortLease, "38000").starts_with("Released"));
+}
+
+#[test]
+fn a_lease_stays_while_its_container_is_not_verified_gone_even_if_docker_shows_no_mapping() {
+    let t = T::new();
+    let d = succeeded_deployment(&t);
+    // Docker reports nothing published for the container, so only the container's own state can keep the lease
+    t.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .find(|c| c.id == d.cid)
+            .unwrap()
+            .host_port = None
+    });
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/containers/",
+        1,
+        Action::Respond(500, "{\"message\":\"busy\"}".into()),
+    );
+    let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+    assert_exit(&o, 7);
+    assert!(
+        entry_state(&t, &d, ResourceKind::Container, &format!("hp-{}", d.dep))
+            .contains("CleanupFailed")
+    );
+    assert!(
+        entry_state(&t, &d, ResourceKind::PortLease, "38000").contains("Created"),
+        "the lease is not released on a guess"
+    );
+    assert!(entry_state(&t, &d, ResourceKind::Image, &d.tag).contains("Created"));
 }

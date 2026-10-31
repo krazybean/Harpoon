@@ -58,6 +58,10 @@ jobs:
             echo "unexpected dependencies in deploy-cli/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
           fi
           live='/tmp/harpoon-docker''.sock'
+          livemgmt='/tmp/harpoon-mgmt''.sock'
+          if grep -rnF "$livemgmt" src tests; then
+            echo "the live Harpoon management socket must never appear in this crate" >&2; exit 1
+          fi
           if grep -rnF "$live" src tests; then
             echo "the live Harpoon socket must never appear in this crate" >&2; exit 1
           fi

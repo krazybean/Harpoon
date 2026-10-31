@@ -32,16 +32,12 @@ pub mod exit {
 #[derive(Debug, Clone, Copy)]
 pub struct Gate {
     pub live_deploy_enabled: bool,
-    /// Stands in for the guest free-space probe that does not exist yet. `None` (always, in the
-    /// shipping build) makes a live deployment refuse at its first step; only tests set a value.
-    pub guest_free_override: Option<u64>,
 }
 
 impl Gate {
     pub const fn shipping() -> Gate {
         Gate {
             live_deploy_enabled: false,
-            guest_free_override: None,
         }
     }
 }

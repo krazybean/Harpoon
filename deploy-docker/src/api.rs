@@ -66,6 +66,16 @@ impl From<HttpError> for ApiError {
 
 pub type Labels = Vec<(String, String)>;
 
+/// The few `GET /info` fields Harpoon relies on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerInfo {
+    /// The daemon host's hostname.
+    pub name: String,
+    /// Where Docker keeps its data (`DockerRootDir`).
+    pub root_dir: String,
+    pub kernel_version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageInfo {
     pub id: String,
@@ -106,6 +116,8 @@ pub struct ContainerSummary {
     pub labels: Labels,
     pub state: String,
     pub host_ports: Vec<u16>,
+    /// `ImageID` from the list; empty when Docker did not say (callers must treat that as unknown).
+    pub image_id: String,
 }
 
 /// Resource limits applied to every container Harpoon creates for a test deployment.
@@ -297,6 +309,21 @@ impl DockerApi {
         }
     }
 
+    /// `GET /info`: which daemon this is. Read-only. Every field is required; a missing or
+    /// mistyped one is an error, because the caller uses them to decide it is talking to the right guest.
+    pub fn info(&self, left: Duration) -> Result<DockerInfo, ApiError> {
+        let r = self.call("GET", "/info", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("info", &r));
+        }
+        let j = parse(&r, "info")?;
+        Ok(DockerInfo {
+            name: req_str(&j, "Name", "info")?.to_string(),
+            root_dir: req_str(&j, "DockerRootDir", "info")?.to_string(),
+            kernel_version: req_str(&j, "KernelVersion", "info")?.to_string(),
+        })
+    }
+
     /// The step deadline caps every call: `left` is what the step has remaining.
     pub fn ping(&self, left: Duration) -> Result<(), ApiError> {
         let r = self.call("GET", "/_ping", None, left)?;
@@ -466,6 +493,11 @@ impl DockerApi {
                     .unwrap_or("")
                     .to_string(),
                 host_ports,
+                image_id: c
+                    .get("ImageID")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             });
         }
         Ok(out)
