@@ -1180,3 +1180,56 @@ fn an_invalid_source_stops_every_deploy_before_the_journal_is_touched() {
         "no runtime directory was created for an invalid request"
     );
 }
+
+#[test]
+fn health_paths_with_control_characters_are_rejected_and_normal_paths_kept() {
+    let t = T::new();
+    for (path, what) in [
+        ("/ok\r\nHost: evil", "CR LF"),
+        ("/ok\n", "LF"),
+        ("/ok\r", "CR"),
+        ("/a\tb", "tab"),
+        ("/a\0b", "NUL"),
+        ("/a\u{7f}b", "DEL"),
+        ("/a\u{1b}[0m", "ESC"),
+        ("/a\u{85}b", "C1 control"),
+        ("/a b", "space"),
+    ] {
+        for cmd in [vec!["plan"], vec!["deploy", "--simulate"]] {
+            let mut a: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
+            a.extend(["--health-path".to_string(), path.to_string()]);
+            a.extend(t.src());
+            let o = go(&t, &SHIPPING, &a);
+            assert_exit(&o, 3);
+            assert!(
+                o.stderr.contains("--health-path") && o.stderr.contains("control"),
+                "{what}: {}",
+                o.stderr
+            );
+        }
+    }
+    assert!(!t.rt.exists(), "a rejected request creates nothing");
+    for path in [
+        "/",
+        "/health",
+        "/api/v1/ready",
+        "/health?x=1&y=2",
+        "/a-b_c.d~e/%20ok",
+        "/caf%C3%A9",
+    ] {
+        let mut a: Vec<String> = vec!["plan".to_string(), "--health-path".into(), path.into()];
+        a.extend(t.src());
+        let o = go(&t, &SHIPPING, &a);
+        assert_exit(&o, 0);
+        assert!(
+            o.stdout.contains(&format!("GET {path} ")),
+            "{path}: {}",
+            o.stdout
+        );
+    }
+    let mut a: Vec<String> = vec!["plan".to_string(), "--health-path".into(), "health".into()];
+    a.extend(t.src());
+    let o = go(&t, &SHIPPING, &a);
+    assert_exit(&o, 3);
+    assert!(o.stderr.contains("must start with '/'"));
+}

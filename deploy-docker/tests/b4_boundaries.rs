@@ -743,6 +743,142 @@ fn a_stopped_containers_unreadable_port_bindings_fail_allocation_instead_of_bein
         .any(|r| r.path.starts_with("/containers/create")));
 }
 
+fn run_with_stopped_container_reporting(body: &str) -> (Harness, Result<(), (Step, String)>) {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let id = h
+        .docker
+        .with(|s| s.add_container("stopped-one", vec![], false));
+    h.docker.fault(
+        Some("GET"),
+        &format!("/containers/{id}/json"),
+        1_000,
+        Action::Respond(200, body.to_string()),
+    );
+    let mut b = backend_with(&h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    let res = if r.status == DeploymentStatus::Succeeded {
+        Ok(())
+    } else {
+        let f = h.dep.failure.clone().unwrap();
+        Err((f.step, f.message))
+    };
+    (h, res)
+}
+
+#[test]
+fn malformed_port_binding_entries_fail_allocation_closed() {
+    for (what, body) in [
+        (
+            "non-numeric HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"abc"}]}}}"#,
+        ),
+        (
+            "out-of-range HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"70000"}]}}}"#,
+        ),
+        (
+            "negative HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"-1"}]}}}"#,
+        ),
+        (
+            "port range",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"38000-38010"}]}}}"#,
+        ),
+        (
+            "padded HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":" 38000"}]}}}"#,
+        ),
+        (
+            "numeric HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":38000}]}}}"#,
+        ),
+        (
+            "binding is a string",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":["38000"]}}}"#,
+        ),
+        (
+            "binding is a number",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[38000]}}}"#,
+        ),
+        (
+            "binding is null",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[null]}}}"#,
+        ),
+        (
+            "a later binding is bad",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"38000"},{"HostPort":"x"}]}}}"#,
+        ),
+    ] {
+        let (h, res) = run_with_stopped_container_reporting(body);
+        let (step, msg) = res.expect_err(what);
+        assert_eq!(step, Step::PreliminaryCheck, "{what}");
+        assert!(msg.contains("port mappings"), "{what}: {msg}");
+        assert!(
+            !h.docker
+                .requests()
+                .iter()
+                .any(|r| r.path.starts_with("/containers/create")),
+            "{what}: nothing was created on a guess"
+        );
+    }
+}
+
+#[test]
+fn unassigned_port_bindings_are_valid_and_hold_no_port() {
+    for (what, body) in [
+        (
+            "empty HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"","HostPort":""}]}}}"#,
+        ),
+        (
+            "zero HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":"0"}]}}}"#,
+        ),
+        (
+            "absent HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1"}]}}}"#,
+        ),
+        (
+            "null HostPort",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":null}]}}}"#,
+        ),
+        (
+            "empty list",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":[]}}}"#,
+        ),
+        (
+            "null list",
+            r#"{"HostConfig":{"PortBindings":{"8080/tcp":null}}}"#,
+        ),
+        ("no bindings", r#"{"HostConfig":{"PortBindings":{}}}"#),
+        ("null bindings", r#"{"HostConfig":{"PortBindings":null}}"#),
+        ("no HostConfig", r#"{}"#),
+    ] {
+        let (h, res) = run_with_stopped_container_reporting(body);
+        res.unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(
+            host_port_of(&h, &preliminary_name(&h.dep.id)),
+            Some(39000),
+            "{what}"
+        );
+        assert_eq!(
+            host_port_of(&h, &serving_name(&h.dep.id)),
+            Some(38000),
+            "{what}: nothing was reserved"
+        );
+    }
+}
+
+#[test]
+fn valid_bindings_still_reserve_their_ports_next_to_unassigned_ones() {
+    let body = r#"{"HostConfig":{"PortBindings":{"8080/tcp":[{"HostPort":""},{"HostPort":"38000"}],"9090/tcp":[{"HostPort":"38001"}]}}}"#;
+    let (h, res) = run_with_stopped_container_reporting(body);
+    res.unwrap();
+    assert_eq!(host_port_of(&h, &serving_name(&h.dep.id)), Some(38002));
+}
+
 #[test]
 fn two_collisions_fail_the_deployment_instead_of_looping_or_borrowing_a_port() {
     let mut h = Harness::new();

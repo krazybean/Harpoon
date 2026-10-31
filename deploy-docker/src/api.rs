@@ -462,10 +462,37 @@ impl DockerApi {
                                 Json::Null => {}
                                 Json::Arr(list) => {
                                     for b in list {
-                                        let hp =
-                                            b.get("HostPort").and_then(Json::as_str).unwrap_or("");
-                                        if let Ok(n) = hp.parse::<u16>() {
-                                            ports.insert(n);
+                                        if !matches!(b, Json::Obj(_)) {
+                                            return Err(ApiError::Malformed {
+                                                op: "container inspect",
+                                                detail: "a PortBindings binding is not an object"
+                                                    .into(),
+                                            });
+                                        }
+                                        // Absent, null, "" and "0" are unassigned and hold no port;
+                                        // anything else must be a valid port number.
+                                        match b.get("HostPort") {
+                                            None | Some(Json::Null) => {}
+                                            Some(Json::Str(hp)) if hp.is_empty() || hp == "0" => {}
+                                            Some(Json::Str(hp)) => match hp.parse::<u16>() {
+                                                Ok(n) if n != 0 => {
+                                                    ports.insert(n);
+                                                }
+                                                _ => {
+                                                    return Err(ApiError::Malformed {
+                                                        op: "container inspect",
+                                                        detail: format!(
+                                                            "HostPort {hp:?} is not a port number"
+                                                        ),
+                                                    })
+                                                }
+                                            },
+                                            Some(_) => {
+                                                return Err(ApiError::Malformed {
+                                                    op: "container inspect",
+                                                    detail: "HostPort is not a string".into(),
+                                                })
+                                            }
                                         }
                                     }
                                 }

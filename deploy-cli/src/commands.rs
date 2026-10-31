@@ -113,6 +113,14 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
     if !path.starts_with('/') {
         return Err(Fail::config("--health-path must start with '/'"));
     }
+    // The path becomes the request target: CR, LF or any other control character (or a space)
+    // could split or alter the request.
+    if let Some(c) = path.chars().find(|c| c.is_control() || *c == ' ') {
+        return Err(Fail::config(format!(
+            "--health-path contains a control or space character (U+{:04X}); use a plain absolute path such as /health",
+            c as u32
+        )));
+    }
     cfg.health = harpoon_deploy::health::HealthSpec::first_test(path);
     if let Some(t) = p.value("health-timeout-secs") {
         let secs: u64 = t
