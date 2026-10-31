@@ -1159,18 +1159,6 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::deployment_config;
-    use harpoon_deploy::ledger::Ledger;
-
-    #[test]
-    fn health_timeout_also_extends_the_engine_preliminary_budget() {
-        let cfg = deployment_config(125_000, Ledger::new());
-        assert_eq!(cfg.budgets.preliminary_ms, 125_000);
-    }
-}
-
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     let _ = writeln!(out, "result: {}", r.status);
     for s in &d.steps {
@@ -2126,5 +2114,17 @@ fn cleanup_image(p: &Parsed, out: &mut String) -> R {
             let _ = writeln!(out, "cleanup-image: incomplete — the state was not settled");
             Ok(exit::FAILED)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deployment_config;
+    use harpoon_deploy::ledger::Ledger;
+
+    #[test]
+    fn health_timeout_also_extends_the_engine_preliminary_budget() {
+        let cfg = deployment_config(125_000, Ledger::new());
+        assert_eq!(cfg.budgets.preliminary_ms, 125_000);
     }
 }
