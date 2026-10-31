@@ -1301,6 +1301,9 @@ fn a_file_swapped_for_a_link_while_it_is_being_copied_stops_the_copy_and_leaves_
     std::fs::remove_file(&target).unwrap();
     std::fs::write(&target, "harmless").unwrap();
     let t2 = target.clone();
+    // keep the old inode alive elsewhere, so the replacement cannot be handed the same inode
+    // number (file systems reuse freed inodes at once, which made this check pass on Linux CI)
+    let keep_alive = h.ws.root.join("old-inode");
     let mut done = false;
     let r = snapshot::create_with(
         &src,
@@ -1311,6 +1314,7 @@ fn a_file_swapped_for_a_link_while_it_is_being_copied_stops_the_copy_and_leaves_
         &mut |p| {
             if p.ends_with("config.txt") && !done {
                 done = true;
+                std::fs::hard_link(&t2, &keep_alive).unwrap();
                 std::fs::remove_file(&t2).unwrap();
                 std::fs::write(&t2, "different file").unwrap();
             }

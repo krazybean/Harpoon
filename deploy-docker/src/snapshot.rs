@@ -8,7 +8,10 @@
 //! The copy itself is the only remaining window, and it is narrowed per file: the entry is
 //! `lstat`ed, opened, and the *open handle* is `fstat`ed; the device and inode must still match
 //! and the handle must be a regular file, otherwise the copy stops. Symlinks are recreated as
-//! symlinks (never followed); sockets, FIFOs and devices are skipped and reported. The total is
+//! symlinks (never followed). A file deleted and recreated under the same name may be handed the
+//! same inode number by the file system, so the check cannot tell that apart from no change; what it
+//! does guarantee is that the bytes copied come from a regular file at that path inside the context,
+//! never from something a link led to. Sockets, FIFOs and devices are skipped and reported. The total is
 //! capped at the context limit. Paths the `.dockerignore` rules Harpoon understands exclude are
 //! not copied (the Dockerfile and ignore files always are).
 
