@@ -1,0 +1,75 @@
+name: Deploy CLI
+
+# Milestone B6. Runs the CLI's tests against a fake Docker on a test-owned Unix socket and a fake
+# Buildx script, on temporary directories. It never contacts a real Docker endpoint, builds an
+# image, or starts a container.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy-cli/**"
+      - "deploy-journal/**"
+      - "deploy-docker/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-cli.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "deploy-cli/**"
+      - "deploy-journal/**"
+      - "deploy-docker/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-cli.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: deploy-cli
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Path dependencies only; no environment, process, live-socket or prune references in the sources
+        run: |
+          deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
+          if echo "$deps" | grep -vE '^harpoon-deploy(-docker|-journal)? = \{ path = "\.\./deploy(-docker|-journal)?" \}$' | grep -q .; then
+            echo "unexpected dependencies in deploy-cli/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
+          fi
+          live='/tmp/harpoon-docker''.sock'
+          if grep -rnF "$live" src tests; then
+            echo "the live Harpoon socket must never appear in this crate" >&2; exit 1
+          fi
+          if grep -rnE 'env::var|DOCKER_HOST|DOCKER_CONTEXT|Command::new|prune' src; then
+            echo "the CLI must not read the environment, spawn processes or prune" >&2; exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --offline --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --offline

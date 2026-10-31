@@ -1,0 +1,1136 @@
+use crate::args::{Parsed, AUTH_FLAG, AUTH_PHRASE};
+use crate::store::{self, Kind, Runtime};
+use crate::{exit, Fail, Gate};
+use harpoon_deploy::backend::{FakeBackend, FakeRuntime, ResourceOps};
+use harpoon_deploy::buildx;
+use harpoon_deploy::engine::{
+    end_state, reconcile, run_deployment_with, Context, Report, RunConfig,
+};
+use harpoon_deploy::ids::{ApplicationId, IdGenerator};
+use harpoon_deploy::ledger::{
+    plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger,
+};
+use harpoon_deploy::ports::{self, Occupancy, Purpose};
+use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
+use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
+use harpoon_deploy_docker::api::DockerApi;
+use harpoon_deploy_docker::backend::{image_tag, DockerBackend, DockerConfig};
+use harpoon_deploy_docker::buildx_run::StdFileProbe;
+use harpoon_deploy_docker::confine::{confine, Source};
+use harpoon_deploy_docker::dockerfile::required_images;
+use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
+use harpoon_deploy_docker::preflight::context_size_with;
+use harpoon_deploy_journal::{lock_status, LockStatus, Restored};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+type R = Result<i32, Fail>;
+
+pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    match p.command.as_str() {
+        "status" => status(p, out),
+        "doctor" => doctor(p, out),
+        "plan" => plan(p, out),
+        "recover" => recover(p, out),
+        "reconcile" => reconcile_cmd(p, out),
+        "deploy" => deploy(p, gate, out),
+        "export-journal" => export_journal(p, out),
+        other => Err(Fail::usage(format!("unknown command {other:?}"))),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemClock.now_ms()
+}
+
+// ------------------------------------------------------------------ shared pieces
+
+fn socket_flag(p: &Parsed) -> Result<Option<PathBuf>, Fail> {
+    match p.value("docker-socket") {
+        None => Ok(None),
+        Some("") => Err(Fail::usage("--docker-socket must not be empty")),
+        Some(s) if !s.starts_with('/') => Err(Fail::usage(
+            "--docker-socket must be an absolute path (unix:// and tcp:// are not accepted)",
+        )),
+        Some(s) => Ok(Some(PathBuf::from(s))),
+    }
+}
+
+fn api(socket: &Path) -> DockerApi {
+    DockerApi::new(socket, Duration::from_secs(10))
+}
+
+fn authorized(p: &Parsed) -> Result<(), Fail> {
+    match p.value(AUTH_FLAG) {
+        Some(v) if v == AUTH_PHRASE => Ok(()),
+        Some(_) => Err(Fail::refused(format!(
+            "--{AUTH_FLAG} must be given exactly as --{AUTH_FLAG}={AUTH_PHRASE}"
+        ))),
+        None => Err(Fail::refused(format!(
+            "this changes Docker state and needs the explicit opt-in --{AUTH_FLAG}={AUTH_PHRASE}"
+        ))),
+    }
+}
+
+struct SourceCfg {
+    cfg: DockerConfig,
+    src: Source,
+    images: BTreeSet<String>,
+    size: u64,
+    notes: Vec<String>,
+}
+
+fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Result<SourceCfg, Fail> {
+    let project = p
+        .value("project-dir")
+        .ok_or_else(|| Fail::config("--project-dir DIR is required"))?;
+    let project = PathBuf::from(project);
+    let context = match p.value("context") {
+        None => project.clone(),
+        Some(c) if Path::new(c).is_absolute() => PathBuf::from(c),
+        Some(c) => project.join(c),
+    };
+    let port: u16 =
+        match (p.value("container-port"), need_port) {
+            (Some(v), _) => v.parse().ok().filter(|n| *n != 0).ok_or_else(|| {
+                Fail::config(format!("--container-port {v:?} is not a port number"))
+            })?,
+            (None, true) => {
+                return Err(Fail::config(
+                    "--container-port N is required (the port the application listens on)",
+                ))
+            }
+            (None, false) => 8080,
+        };
+    let mut cfg = DockerConfig::first_test(socket, &context, rt.scratch_dir(), port);
+    cfg.project_root = Some(project.clone());
+    if let Some(d) = p.value("dockerfile") {
+        cfg.dockerfile = d.to_string();
+    }
+    let path = p.value("health-path").unwrap_or("/");
+    if !path.starts_with('/') {
+        return Err(Fail::config("--health-path must start with '/'"));
+    }
+    // The path becomes the request target: CR, LF or any other control character (or a space)
+    // could split or alter the request.
+    if let Some(c) = path.chars().find(|c| c.is_control() || *c == ' ') {
+        return Err(Fail::config(format!(
+            "--health-path contains a control or space character (U+{:04X}); use a plain absolute path such as /health",
+            c as u32
+        )));
+    }
+    cfg.health = harpoon_deploy::health::HealthSpec::first_test(path);
+    if let Some(t) = p.value("health-timeout-secs") {
+        let secs: u64 = t
+            .parse()
+            .ok()
+            .filter(|n| (1..=600).contains(n))
+            .ok_or_else(|| Fail::config("--health-timeout-secs must be 1..=600"))?;
+        cfg.health.startup_deadline_ms = secs * 1000;
+    }
+    let src =
+        confine(&project, &context, &cfg.dockerfile).map_err(|e| Fail::config(e.to_string()))?;
+    let images = required_images(&src.dockerfile_text).map_err(|e| Fail::config(e.to_string()))?;
+    let rules = src
+        .ignore
+        .as_ref()
+        .map(|(_, t)| IgnoreRules::parse(t))
+        .unwrap_or_default();
+    let size = context_size_with(
+        &src.context,
+        cfg.max_context_bytes,
+        &rules,
+        &always_sent(&src.dockerfile_rel()),
+    )
+    .map_err(|e| {
+        Fail::config(format!(
+            "cannot measure the build context {}: {e}",
+            src.context.display()
+        ))
+    })?;
+    if size > cfg.max_context_bytes {
+        return Err(Fail::config(format!(
+            "the build context is larger than the {} MB limit (counted after .dockerignore where Harpoon can interpret it)",
+            cfg.max_context_bytes / 1_000_000
+        )));
+    }
+    let notes = rules.notes.clone();
+    Ok(SourceCfg {
+        cfg,
+        src,
+        images,
+        size,
+        notes,
+    })
+}
+
+fn find_dep<'a>(
+    deps: &'a [Deployment],
+    id: &harpoon_deploy::ids::DeploymentId,
+) -> Option<&'a Deployment> {
+    deps.iter().find(|d| &d.id == id)
+}
+
+/// Everything in the ledger that still needs a decision. Entries a finished deployment deliberately
+/// keeps (a retained image, the serving container of a successful deployment) are not unresolved.
+fn unresolved(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
+    let mut v = Vec::new();
+    for e in ledger.entries() {
+        let what = format!(
+            "{} {} (deployment {})",
+            e.key.kind.as_str(),
+            e.key.name,
+            e.deployment
+        );
+        if e.needs_attention() {
+            let why = match &e.state {
+                EntryState::CleanupFailed(m) => format!("cleanup failed: {m}"),
+                EntryState::Refused(m) => format!("not touched, ownership not proven: {m}"),
+                _ => "a removal was attempted and its result was never recorded".to_string(),
+            };
+            v.push(format!("{what}: {why}"));
+            continue;
+        }
+        if e.is_released() {
+            continue;
+        }
+        if matches!(e.state, EntryState::Intended) {
+            v.push(format!(
+                "{what}: creation was intended but no receipt exists (it may or may not exist)"
+            ));
+            continue;
+        }
+        match find_dep(deps, &e.deployment).and_then(|d| end_state(d.status)) {
+            None => v.push(format!("{what}: its deployment is not finished")),
+            Some(end) => {
+                let keep = e.disposition == Disposition::Retain
+                    || (e.disposition == Disposition::RemoveOnFailure
+                        && end == EndState::Succeeded);
+                if !keep {
+                    v.push(format!("{what}: should have been cleaned and was not"));
+                }
+            }
+        }
+    }
+    v
+}
+
+fn unfinished(deps: &[Deployment]) -> Vec<String> {
+    deps.iter()
+        .filter(|d| !d.status.is_terminal())
+        .map(|d| {
+            format!(
+                "deployment {} is {} (run `recover` to mark it interrupted)",
+                d.id, d.status
+            )
+        })
+        .collect()
+}
+
+fn ended(deps: &[Deployment]) -> Vec<(harpoon_deploy::ids::DeploymentId, EndState)> {
+    deps.iter()
+        .filter_map(|d| end_state(d.status).map(|e| (d.id.clone(), e)))
+        .collect()
+}
+
+fn print_lease_and_problems(out: &mut String, r: &Restored) {
+    let leases = r.outstanding_leases();
+    if leases.is_empty() {
+        let _ = writeln!(out, "outstanding leases: none");
+    } else {
+        let _ = writeln!(out, "outstanding leases:");
+        for e in r.ledger.entries().iter().filter(|e| {
+            e.key.kind == harpoon_deploy::ledger::ResourceKind::PortLease && !e.is_released()
+        }) {
+            let _ = writeln!(
+                out,
+                "  port {} held by deployment {} ({:?})",
+                e.key.name, e.deployment, e.state
+            );
+        }
+    }
+    let u = unresolved(&r.ledger, &r.deployments);
+    if u.is_empty() {
+        let _ = writeln!(out, "unresolved cleanup: none");
+    } else {
+        let _ = writeln!(out, "unresolved cleanup ({}):", u.len());
+        for l in u {
+            let _ = writeln!(out, "  {l}");
+        }
+    }
+}
+
+// ------------------------------------------------------------------ status
+
+fn status(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let _ = writeln!(out, "runtime: {}", rt.dir.display());
+    let Some(r) = store::read_restored(&rt)? else {
+        let _ = writeln!(
+            out,
+            "journal: not initialised (nothing has been deployed; nothing was created)"
+        );
+        return Ok(exit::OK);
+    };
+    let kind = rt
+        .kind()?
+        .map(Kind::as_str)
+        .unwrap_or("unmarked (treated as docker)");
+    let lock = match lock_status(&rt.journal_dir()) {
+        Ok(LockStatus::Held) => "held by a writer",
+        Ok(LockStatus::Free) => "free",
+        Ok(LockStatus::NotInitialized) => "absent",
+        Err(_) => "unknown",
+    };
+    let _ = writeln!(out, "kind: {kind}");
+    let _ = writeln!(
+        out,
+        "journal: {} (lock: {lock})",
+        rt.journal_file().display()
+    );
+    if r.discarded_tail_bytes > 0 {
+        let _ = writeln!(
+            out,
+            "note: {} trailing bytes are an incomplete write; they are ignored here and removed by the next writer",
+            r.discarded_tail_bytes
+        );
+    }
+    let mut deps = r.deployments.clone();
+    deps.sort_by(|a, b| {
+        b.created_ms
+            .cmp(&a.created_ms)
+            .then(b.id.as_str().cmp(a.id.as_str()))
+    });
+    let _ = writeln!(out, "deployments: {}", deps.len());
+    if let Some(d) = deps.first() {
+        let _ = writeln!(out, "latest: {} {}", d.id, d.status);
+    }
+    for d in &deps {
+        let _ = writeln!(
+            out,
+            "  {} {} app={} created_ms={}",
+            d.id, d.status, d.application_id, d.created_ms
+        );
+        if let Some(f) = &d.failure {
+            let _ = writeln!(
+                out,
+                "    failed at {}: {}",
+                f.step.as_str(),
+                f.message.lines().next().unwrap_or("")
+            );
+        }
+        if d.status == DeploymentStatus::Interrupted && d.application_may_be_down() {
+            let _ = writeln!(
+                out,
+                "    cutover began and was never confirmed: the application may be down"
+            );
+        }
+        for e in r.ledger.entries().iter().filter(|e| e.deployment == d.id) {
+            let _ = writeln!(
+                out,
+                "    {} {} id={} state={} keep={}",
+                e.key.kind.as_str(),
+                e.key.name,
+                e.id.as_deref().unwrap_or("-"),
+                state_word(&e.state),
+                disposition_word(e.disposition)
+            );
+        }
+    }
+    print_lease_and_problems(out, &r);
+    let nf = unfinished(&r.deployments);
+    for l in nf {
+        let _ = writeln!(out, "attention: {l}");
+    }
+    Ok(exit::OK)
+}
+
+fn state_word(s: &EntryState) -> &'static str {
+    match s {
+        EntryState::Intended => "intended",
+        EntryState::Created => "created",
+        EntryState::Released(_) => "released",
+        EntryState::CleanupFailed(_) => "cleanup-failed",
+        EntryState::Refused(_) => "refused",
+    }
+}
+
+fn disposition_word(d: Disposition) -> &'static str {
+    match d {
+        Disposition::Retain => "retain",
+        Disposition::RemoveOnFailure => "remove-on-failure",
+        Disposition::RemoveAlways => "remove-always",
+    }
+}
+
+// ------------------------------------------------------------------ doctor
+
+struct Checks {
+    lines: Vec<String>,
+    ok: usize,
+    warn: usize,
+    fail: usize,
+    code: i32,
+}
+
+impl Checks {
+    fn ok(&mut self, name: &str, d: impl AsRef<str>) {
+        self.ok += 1;
+        self.lines.push(format!("[ok]   {name}: {}", d.as_ref()));
+    }
+    fn warn(&mut self, name: &str, d: impl AsRef<str>) {
+        self.warn += 1;
+        self.lines.push(format!("[warn] {name}: {}", d.as_ref()));
+    }
+    fn fail(&mut self, code: i32, name: &str, d: impl AsRef<str>) {
+        self.fail += 1;
+        if self.code == exit::OK {
+            self.code = code;
+        }
+        self.lines.push(format!("[FAIL] {name}: {}", d.as_ref()));
+    }
+}
+
+fn doctor(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let socket = socket_flag(p)?;
+    let mut c = Checks {
+        lines: vec![],
+        ok: 0,
+        warn: 0,
+        fail: 0,
+        code: exit::OK,
+    };
+
+    let mut source: Option<SourceCfg> = None;
+    if p.value("project-dir").is_some() {
+        match source_cfg(
+            p,
+            &rt,
+            socket.as_deref().unwrap_or(Path::new("/nonexistent")),
+            false,
+        ) {
+            Ok(s) => {
+                c.ok(
+                    "source",
+                    format!(
+                        "{} (Dockerfile {}, {} bytes counted of {} allowed, base images: {})",
+                        s.src.context.display(),
+                        s.src.dockerfile_rel().display(),
+                        s.size,
+                        s.cfg.max_context_bytes,
+                        if s.images.is_empty() {
+                            "none".to_string()
+                        } else {
+                            s.images.iter().cloned().collect::<Vec<_>>().join(", ")
+                        }
+                    ),
+                );
+                for n in &s.notes {
+                    c.warn("source", format!(".dockerignore: {n}"));
+                }
+                source = Some(s);
+            }
+            Err(f) => c.fail(f.code, "source", f.message),
+        }
+    } else {
+        c.warn("source", "no --project-dir given; source not checked");
+    }
+
+    match p.value("resources-dir") {
+        Some(d) => match buildx::resolve(Some(Path::new(d)), &StdFileProbe) {
+            Ok(b) => c.ok(
+                "bundled Buildx",
+                format!("{} (the only Buildx Harpoon will run)", b.path.display()),
+            ),
+            Err(e) => c.fail(exit::CONFIG, "bundled Buildx", e.to_string()),
+        },
+        None => c.warn("bundled Buildx", "no --resources-dir given; not checked"),
+    }
+
+    match store::private_dir(&rt.dir, false).and_then(|exists| {
+        if exists {
+            store::private_dir(&rt.journal_dir(), false)
+        } else {
+            Ok(false)
+        }
+    }) {
+        Err(f) => c.fail(f.code, "journal location", f.message),
+        Ok(false) => c.ok(
+            "journal location",
+            format!(
+                "{} does not exist yet; the first writing command creates it privately (0700)",
+                rt.dir.display()
+            ),
+        ),
+        Ok(true) => match store::read_restored(&rt) {
+            Err(f) => c.fail(f.code, "journal", f.message),
+            Ok(None) => c.ok("journal", "directory exists, no journal yet"),
+            Ok(Some(r)) => {
+                let lock = match lock_status(&rt.journal_dir()) {
+                    Ok(LockStatus::Held) => "a writer holds it right now",
+                    Ok(_) => "no writer holds it",
+                    Err(_) => "lock state unknown",
+                };
+                c.ok(
+                    "journal",
+                    format!(
+                        "readable: {} deployments, {} ledger entries; {lock}",
+                        r.deployments.len(),
+                        r.ledger.entries().len()
+                    ),
+                );
+                let u =
+                    unresolved(&r.ledger, &r.deployments).len() + unfinished(&r.deployments).len();
+                if u > 0 {
+                    c.warn("journal", format!("{u} item(s) need recovery or reconciliation before a deploy is allowed (see `status`)"));
+                }
+            }
+        },
+    }
+
+    match &socket {
+        None => c.warn("runtime", "no --docker-socket given; Docker was not contacted (the environment and Docker contexts are never consulted)"),
+        Some(s) => {
+            let a = api(s);
+            match a.ping(Duration::from_secs(5)) {
+                Err(e) => c.fail(exit::RUNTIME, "runtime", format!("{} did not answer: {e}", s.display())),
+                Ok(()) => {
+                    c.ok("runtime", format!("{} answered a ping (read-only; nothing was changed)", s.display()));
+                    if let Some(src) = &source {
+                        for img in &src.images {
+                            match a.image_inspect(img, Duration::from_secs(5)) {
+                                Ok(Some(_)) => c.ok("base image", format!("{img} is present locally")),
+                                Ok(None) => c.fail(exit::CONFIG, "base image", format!("{img} is not present locally and Harpoon never pulls")),
+                                Err(e) => c.fail(exit::RUNTIME, "base image", format!("cannot inspect {img}: {e}")),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for l in &c.lines {
+        let _ = writeln!(out, "{l}");
+    }
+    let _ = writeln!(
+        out,
+        "doctor: {} ok, {} warnings, {} failures",
+        c.ok, c.warn, c.fail
+    );
+    Ok(c.code)
+}
+
+// ------------------------------------------------------------------ plan
+
+fn plan(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let socket = socket_flag(p)?;
+    let s = source_cfg(
+        p,
+        &rt,
+        socket.as_deref().unwrap_or(Path::new("/nonexistent")),
+        true,
+    )?;
+    let restored = store::read_restored(&rt)?;
+    let (ledger, deps) = match &restored {
+        Some(r) => (r.ledger.clone(), r.deployments.clone()),
+        None => (Ledger::new(), vec![]),
+    };
+
+    let _ = writeln!(
+        out,
+        "plan — nothing is built, created or started by this command"
+    );
+    let _ = writeln!(
+        out,
+        "source: {} (Dockerfile {})",
+        s.src.context.display(),
+        s.src.dockerfile_rel().display()
+    );
+    let _ = writeln!(
+        out,
+        "context: {} bytes counted of {} allowed",
+        s.size, s.cfg.max_context_bytes
+    );
+    for n in &s.notes {
+        let _ = writeln!(out, "  .dockerignore: {n}");
+    }
+
+    let mut docker_ports = BTreeSet::new();
+    let mut socket_note = "not contacted (no --docker-socket)".to_string();
+    let mut missing: Vec<String> = Vec::new();
+    if let Some(sock) = &socket {
+        let a = api(sock);
+        match a.ping(Duration::from_secs(5)) {
+            Err(e) => {
+                return Err(Fail::runtime(format!(
+                    "{} did not answer: {e}",
+                    sock.display()
+                )))
+            }
+            Ok(()) => {
+                docker_ports = a.published_ports(Duration::from_secs(10)).map_err(|e| {
+                    Fail::runtime(format!("cannot read Docker's port mappings: {e}"))
+                })?;
+                for img in &s.images {
+                    match a.image_inspect(img, Duration::from_secs(5)) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => missing.push(img.clone()),
+                        Err(e) => return Err(Fail::runtime(format!("cannot inspect {img}: {e}"))),
+                    }
+                }
+                socket_note = format!("{} (read-only queries)", sock.display());
+            }
+        }
+    }
+    let _ = writeln!(
+        out,
+        "base images (local only, never pulled): {}{}",
+        if s.images.is_empty() {
+            "none".to_string()
+        } else {
+            s.images.iter().cloned().collect::<Vec<_>>().join(", ")
+        },
+        if socket.is_none() {
+            " — presence not checked"
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(out, "runtime: {socket_note}");
+
+    let occ = |purpose| {
+        let _ = purpose;
+        Occupancy {
+            docker_mappings: docker_ports.clone(),
+            ..Occupancy::default()
+        }
+        .with_ledger(&ledger)
+    };
+    let test_port = ports::allocate(
+        Purpose::Test,
+        s.cfg.container_port,
+        &occ(Purpose::Test),
+        None,
+        &[],
+    );
+    let app_port = ports::allocate(
+        Purpose::Application,
+        s.cfg.container_port,
+        &occ(Purpose::Application),
+        None,
+        &[],
+    );
+    let app = p.value("app").unwrap_or("<new application id>");
+    let _ = writeln!(
+        out,
+        "proposed operations, in order (first deployment only):"
+    );
+    let _ = writeln!(
+        out,
+        "  1 source        confine and measure the build context (done above)"
+    );
+    let _ = writeln!(out, "  2 build         bundled Buildx → image harpoon/{}:<deployment id>, labelled with the three ownership labels; fails if that tag exists", app.to_ascii_lowercase());
+    let _ = writeln!(out, "  3 preliminary   test container on host port {} → container port {}; removed before cutover", port_word(&test_port), s.cfg.container_port);
+    let _ = writeln!(
+        out,
+        "  4 start         serving container on host port {} → container port {}",
+        port_word(&app_port),
+        s.cfg.container_port
+    );
+    let _ = writeln!(
+        out,
+        "  5 final check   GET {} expecting 2xx, {} consecutive within {} s (no deployment-specific marker yet: B7 gate)",
+        s.cfg.health.path,
+        s.cfg.health.consecutive_ok,
+        s.cfg.health.startup_deadline_ms / 1000
+    );
+    let _ = writeln!(
+        out,
+        "limits: 256 MiB memory, 0.5 CPU, 64 PIDs, no swap, no restart policy, no volumes"
+    );
+    let _ = writeln!(
+        out,
+        "host listeners on candidate ports are checked at deploy time"
+    );
+    let _ = writeln!(out, "live execution: disabled in this build until B7");
+
+    let mut blockers: Vec<String> = Vec::new();
+    for m in &missing {
+        blockers.push(format!(
+            "base image {m} is not present locally (Harpoon never pulls)"
+        ));
+    }
+    if let Some(Kind::Simulated) = rt.kind()? {
+        blockers.push(
+            "this runtime directory is simulated; a real deployment needs its own".to_string(),
+        );
+    }
+    blockers.extend(unfinished(&deps));
+    blockers.extend(unresolved(&ledger, &deps));
+    if test_port.is_err() || app_port.is_err() {
+        blockers.push("no free port in a range".to_string());
+    }
+    if let Some(a) = p.value("app") {
+        blockers.extend(existing_release_blocker(&ledger, a));
+    }
+    if blockers.is_empty() {
+        let _ = writeln!(out, "blockers: none");
+        Ok(exit::OK)
+    } else {
+        let _ = writeln!(out, "blockers — `deploy` would refuse:");
+        for b in blockers {
+            let _ = writeln!(out, "  {b}");
+        }
+        Ok(exit::REFUSED)
+    }
+}
+
+fn port_word(r: &Result<ports::PortLease, ports::PortError>) -> String {
+    match r {
+        Ok(l) => l.host_port.to_string(),
+        Err(e) => format!("(none: {e})"),
+    }
+}
+
+fn existing_release_blocker(ledger: &Ledger, app: &str) -> Option<String> {
+    ledger
+        .entries()
+        .iter()
+        .find(|e| {
+            e.app.as_str() == app && e.key.kind == harpoon_deploy::ledger::ResourceKind::Container && !e.is_released()
+        })
+        .map(|e| {
+            format!(
+                "container {} of application {app} is already recorded; replacing a release is not implemented in the first slice",
+                e.key.name
+            )
+        })
+}
+
+// ------------------------------------------------------------------ recover
+
+fn recover(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    if !rt.initialised() {
+        let _ = writeln!(
+            out,
+            "nothing to recover: no journal exists at {}",
+            rt.journal_dir().display()
+        );
+        return Ok(exit::OK);
+    }
+    let kind = rt.kind()?.unwrap_or(Kind::Docker);
+    let (_j, r) = store::open_writer_recovered(&rt, kind, now_ms())?;
+    if r.discarded_tail_bytes > 0 {
+        let _ = writeln!(
+            out,
+            "removed {} bytes of an incomplete trailing write",
+            r.discarded_tail_bytes
+        );
+    }
+    if r.startup.interrupted.is_empty() {
+        let _ = writeln!(out, "no deployment needed to be marked interrupted");
+    } else {
+        for id in &r.startup.interrupted {
+            let _ = writeln!(out, "marked interrupted: {id}");
+        }
+    }
+    for id in &r.startup.incomplete_cutovers {
+        let _ = writeln!(
+            out,
+            "WARNING: {id} began a cutover that was never confirmed; the application may be down"
+        );
+    }
+    print_lease_and_problems(out, &r);
+    let _ = writeln!(out, "recover changed deployment status only. Docker was not contacted; nothing was removed, adopted, released or redeployed.");
+    if !unresolved(&r.ledger, &r.deployments).is_empty() {
+        let _ = writeln!(out, "next: harpoon-deploy reconcile --runtime-dir {} --docker-socket <path> --resources-dir <dir>", rt.dir.display());
+    }
+    Ok(exit::OK)
+}
+
+// ------------------------------------------------------------------ reconcile
+
+fn describe(a: &Action) -> String {
+    match a {
+        Action::Remove {
+            entry,
+            observed,
+            adopt,
+        } => format!(
+            "remove {} {} (id {}) of {}{}",
+            observed.kind.as_str(),
+            observed.name,
+            observed.id,
+            entry.0,
+            if *adopt {
+                ", recording its id first"
+            } else {
+                ""
+            }
+        ),
+        Action::Adopt { entry, observed } => format!(
+            "record the id {} of {} {} for {} and keep it",
+            observed.id,
+            observed.kind.as_str(),
+            observed.name,
+            entry.0
+        ),
+        Action::ReleaseLease { entry } => format!(
+            "release port lease {} of {} (ledger only)",
+            entry.1.name, entry.0
+        ),
+        Action::MarkAbsent { entry } => format!(
+            "{} {} of {} is not in the runtime: record it as absent",
+            entry.1.kind.as_str(),
+            entry.1.name,
+            entry.0
+        ),
+        Action::Refuse { entry, reason } => format!(
+            "REFUSE {} {} of {}: {reason}",
+            entry.1.kind.as_str(),
+            entry.1.name,
+            entry.0
+        ),
+        Action::ReportOnly { observed, reason } => format!(
+            "report only: {} {} (id {}): {reason}",
+            observed.kind.as_str(),
+            observed.name,
+            observed.id
+        ),
+    }
+}
+
+fn docker_backend(p: &Parsed, rt: &Runtime, socket: &Path) -> Result<DockerBackend, Fail> {
+    let resources = p.value("resources-dir").ok_or_else(|| {
+        Fail::config(
+            "--resources-dir DIR is required (the bundled-resources directory holding Buildx)",
+        )
+    })?;
+    let cfg = DockerConfig::first_test(socket, rt.dir.clone(), rt.scratch_dir(), 8080);
+    DockerBackend::new(cfg, Some(Path::new(resources))).map_err(|e| Fail::config(e.to_string()))
+}
+
+fn reconcile_cmd(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        authorized(p)?;
+    }
+    let socket = socket_flag(p)?
+        .ok_or_else(|| Fail::runtime("reconcile needs an explicit --docker-socket PATH; nothing is assumed about the runtime"))?;
+    if !rt.initialised() {
+        let _ = writeln!(
+            out,
+            "nothing to reconcile: no journal exists at {}",
+            rt.journal_dir().display()
+        );
+        return Ok(exit::OK);
+    }
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused(
+            "this is a simulated runtime; there is nothing real to reconcile",
+        ));
+    }
+    let mut backend = docker_backend(p, &rt, &socket)?;
+
+    // Dry run reads the journal without locking or writing; apply takes the writer lock first.
+    let (mut writer, restored) = if apply {
+        let (j, r) = store::open_writer(&rt, Kind::Docker)?;
+        (Some(j), r)
+    } else {
+        let r = store::read_restored(&rt)?.expect("initialised above");
+        (None, r)
+    };
+    let deps = &restored.deployments;
+    let nf = unfinished(deps);
+    if apply && !nf.is_empty() {
+        return Err(Fail::refused(format!(
+            "{}\nreconcile --apply only acts on finished deployments",
+            nf.join("\n")
+        )));
+    }
+    for l in &nf {
+        let _ = writeln!(out, "note: {l}");
+    }
+    let observed = match backend.list_resources() {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(Fail::runtime(format!(
+            "cannot list the runtime ({}): {}\nNothing was assumed absent and nothing was changed.",
+            socket.display(),
+            e.message
+        )))
+        }
+    };
+    let ended_list = ended(deps);
+    let actions = ledger_plan(&restored.ledger, &observed, &ended_list);
+    if actions.is_empty() {
+        let _ = writeln!(out, "reconcile: nothing to do");
+    }
+    for a in &actions {
+        let _ = writeln!(out, "{}{}", if apply { "" } else { "would: " }, describe(a));
+    }
+    if !apply {
+        let _ = writeln!(out, "dry run: nothing was changed. Add --apply and --{AUTH_FLAG}=… to carry these out; every removal is re-verified (id, name and all three ownership labels) at the moment it happens.");
+        return Ok(exit::OK);
+    }
+    let mut ledger = restored.ledger.clone();
+    let j = writer.as_mut().expect("apply holds the writer");
+    let unaccounted =
+        reconcile(&mut ledger, &ended_list, j, &mut backend, &SystemClock).map_err(|e| {
+            Fail::failed(format!(
+                "journal write failed during reconcile: {e}; run `recover` and retry"
+            ))
+        })?;
+    for o in &unaccounted {
+        let _ = writeln!(
+            out,
+            "reported, not touched: {} {} (id {})",
+            o.kind.as_str(),
+            o.name,
+            o.id
+        );
+    }
+    let left = unresolved(&ledger, deps);
+    if left.is_empty() {
+        let _ = writeln!(out, "reconcile: complete; nothing unresolved");
+        Ok(exit::OK)
+    } else {
+        let _ = writeln!(out, "reconcile: {} item(s) still unresolved:", left.len());
+        for l in left {
+            let _ = writeln!(out, "  {l}");
+        }
+        Ok(exit::FAILED)
+    }
+}
+
+// ------------------------------------------------------------------ deploy
+
+fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let simulate = p.switch("simulate");
+    let socket = socket_flag(p)?;
+
+    // ---- gates, before anything is read or written
+    if !simulate {
+        if !gate.live_deploy_enabled {
+            return Err(Fail::refused(
+                "live deployment is disabled in this build (Milestone B7 gate). Nothing was read, written or contacted.\n\
+                 Use `plan` to validate a deployment, or `deploy --simulate` against a separate runtime directory for an offline run.",
+            ));
+        }
+        authorized(p)?;
+        if socket.is_none() {
+            return Err(Fail::runtime(
+                "deploy needs an explicit --docker-socket PATH",
+            ));
+        }
+    }
+    let sock = socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    let s = source_cfg(p, &rt, &sock, true)?;
+
+    let kind = if simulate {
+        Kind::Simulated
+    } else {
+        Kind::Docker
+    };
+    let (mut journal, restored) = store::open_writer(&rt, kind)?;
+    let deps = restored.deployments.clone();
+
+    let mut blockers = unfinished(&deps);
+    blockers.extend(unresolved(&restored.ledger, &deps));
+    let mut gen = IdGenerator::new(SystemClock, OsEntropy::new());
+    let app: ApplicationId = match p.value("app") {
+        Some(a) => a
+            .parse()
+            .map_err(|e| Fail::usage(format!("--app {a:?} is not an application id: {e}")))?,
+        None => gen
+            .application()
+            .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?,
+    };
+    blockers.extend(existing_release_blocker(&restored.ledger, app.as_str()));
+    if !blockers.is_empty() {
+        let mut m = String::from(
+            "deploy refused: unresolved ownership or journal state makes execution unsafe:\n",
+        );
+        for b in &blockers {
+            let _ = writeln!(m, "  {b}");
+        }
+        m.push_str("Nothing was built or started. Use `status`, `recover` and `reconcile` to resolve this.");
+        return Err(Fail::refused(m));
+    }
+
+    let dep_id = gen
+        .deployment()
+        .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?;
+    let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
+    d.transition(DeploymentStatus::Queued, now_ms())
+        .map_err(|e| Fail::failed(e.to_string()))?;
+    let _ = writeln!(
+        out,
+        "deployment {} (application {}) — {}",
+        d.id,
+        d.application_id,
+        if simulate {
+            "SIMULATED, no Docker"
+        } else {
+            "Docker"
+        }
+    );
+    if !simulate {
+        let _ = writeln!(out, "image tag: {}", image_tag(&d.application_id, &d.id));
+    }
+    let cfg = RunConfig {
+        prior_ledger: restored.ledger.clone(),
+        ..RunConfig::default()
+    };
+    let ctx = Context {
+        previous_release: None,
+    };
+
+    let report = if simulate {
+        let clock = ManualClock::new(now_ms());
+        let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+        run_deployment_with(&mut d, &ctx, &mut b, &mut journal, &clock, &cfg, &|| false)
+    } else {
+        let resources = p
+            .value("resources-dir")
+            .ok_or_else(|| Fail::config("--resources-dir DIR is required"))?;
+        store::private_dir(&rt.scratch_dir(), true)?;
+        let mut b = DockerBackend::new(s.cfg.clone(), Some(Path::new(resources)))
+            .map_err(|e| Fail::config(e.to_string()))?;
+        run_deployment_with(
+            &mut d,
+            &ctx,
+            &mut b,
+            &mut journal,
+            &SystemClock,
+            &cfg,
+            &|| false,
+        )
+    };
+    let report = report.map_err(|e| {
+        Fail::failed(format!(
+            "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
+        ))
+    })?;
+    print_report(out, &d, &report);
+    Ok(
+        if report.status == DeploymentStatus::Succeeded && report.is_clean() {
+            exit::OK
+        } else {
+            exit::FAILED
+        },
+    )
+}
+
+fn print_report(out: &mut String, d: &Deployment, r: &Report) {
+    let _ = writeln!(out, "result: {}", r.status);
+    for s in &d.steps {
+        let _ = writeln!(out, "  {:<17} {:?}", s.step.as_str(), s.status);
+    }
+    if let Some(f) = &d.failure {
+        let _ = writeln!(out, "failure at {}: {}", f.step.as_str(), f.message);
+    }
+    for (step, ev) in &r.evidence {
+        let _ = writeln!(
+            out,
+            "evidence {}: {:?}{} — {}",
+            step.as_str(),
+            ev.verdict,
+            if ev.simulated { " (simulated)" } else { "" },
+            ev.summary()
+        );
+    }
+    for w in &r.warnings {
+        let _ = writeln!(out, "warning: {w}");
+    }
+    for e in r.cleanup_problems() {
+        let _ = writeln!(
+            out,
+            "cleanup problem: {} {} — {}",
+            e.key.kind.as_str(),
+            e.key.name,
+            state_word(&e.state)
+        );
+    }
+    for o in &r.unaccounted {
+        let _ = writeln!(
+            out,
+            "unaccounted object (not removed): {} {}",
+            o.kind.as_str(),
+            o.name
+        );
+    }
+}
+
+// ------------------------------------------------------------------ export-journal
+
+fn export_journal(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let to = PathBuf::from(
+        p.value("to")
+            .ok_or_else(|| Fail::usage("--to FILE is required"))?,
+    );
+    let src = rt.journal_file();
+    if !src.exists() {
+        return Err(Fail::journal(format!(
+            "there is no journal at {}",
+            src.display()
+        )));
+    }
+    // Compare real locations, so a symlinked or differently spelled path cannot land inside the journal.
+    let parent = to
+        .parent()
+        .filter(|x| !x.as_os_str().is_empty())
+        .ok_or_else(|| Fail::usage("--to must be a file path with an existing parent directory"))?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| Fail::usage(format!("the directory for --to does not exist: {e}")))?;
+    let jdir = std::fs::canonicalize(rt.journal_dir()).unwrap_or_else(|_| rt.journal_dir());
+    if parent.starts_with(&jdir) {
+        return Err(Fail::usage("--to must be outside the journal directory"));
+    }
+    let bytes = std::fs::read(&src)
+        .map_err(|e| Fail::journal(format!("cannot read {}: {e}", src.display())))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode_0600()
+        .open(&to)
+        .map_err(|e| {
+            Fail::journal(format!(
+                "cannot create {} (it must not exist yet): {e}",
+                to.display()
+            ))
+        })?;
+    use std::io::Write as _;
+    f.write_all(&bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| Fail::journal(format!("cannot write {}: {e}", to.display())))?;
+    let _ = writeln!(
+        out,
+        "copied {} bytes of {} to {} (mode 0600). The journal itself was not modified.",
+        bytes.len(),
+        src.display(),
+        to.display()
+    );
+    Ok(exit::OK)
+}
+
+trait Mode0600 {
+    fn mode_0600(&mut self) -> &mut Self;
+}
+impl Mode0600 for std::fs::OpenOptions {
+    fn mode_0600(&mut self) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.mode(0o600)
+    }
+}
