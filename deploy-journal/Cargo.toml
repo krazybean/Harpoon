@@ -1,0 +1,10 @@
+[package]
+name = "harpoon-deploy-journal"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Durable, crash-recoverable append-only write-ahead journal for the Harpoon deploy engine's first slice (Milestone B5). Local files only."
+
+# No registry dependencies; the format and the engine live in `harpoon-deploy`.
+[dependencies]
+harpoon-deploy = { path = "../deploy" }

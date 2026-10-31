@@ -495,7 +495,7 @@ impl Deployment {
 // ------------------------------------------------------------------ startup recovery
 
 /// What [`recover_on_start`] found. It never resumes or repairs anything.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupReport {
     /// Deployments newly marked `Interrupted`.
     pub interrupted: Vec<DeploymentId>,
