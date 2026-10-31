@@ -23,7 +23,7 @@ use crate::probe::{
     BindProbe, ContainerProbe, HttpTransport, PortProbe, ResponseMarker, SleepWaiter, TcpHttp,
 };
 use crate::snapshot;
-use harpoon_deploy::backend::{Backend, ResourceOps, RestoreResult, StepError};
+use harpoon_deploy::backend::{Backend, PreviousRelease, ResourceOps, RestoreResult, StepError};
 use harpoon_deploy::buildx::{self, BuildxBinary, BuildxError};
 use harpoon_deploy::engine::StepIo;
 use harpoon_deploy::health::{run_health, CheckEvidence, HealthSpec, Verdict};
@@ -32,6 +32,7 @@ use harpoon_deploy::ledger::{
     CleanupOutcome, Disposition, Observed, RemoveRequest, RemoveResult, ResourceKey, ResourceKind,
 };
 use harpoon_deploy::ports::{self, Occupancy, PortLease, PortRange, Purpose};
+use harpoon_deploy::release::ReleaseConfig;
 use harpoon_deploy::state::Reason;
 use harpoon_deploy::time::{Entropy, OsEntropy, SystemClock};
 use std::collections::BTreeSet;
@@ -50,6 +51,8 @@ pub enum Attribution {
 
 pub const MARKER_ENV: &str = "HARPOON_DEPLOYMENT_MARKER";
 pub const MARKER_HEADER: &str = "X-Harpoon-Deployment-Marker";
+/// Extra label on a container recreated by a restoration: the deployment whose release it restores.
+pub const RESTORES_LABEL: &str = "io.harpoon.restores";
 
 #[derive(Debug, Clone)]
 pub struct DockerConfig {
@@ -83,6 +86,11 @@ pub struct DockerConfig {
     pub cleanup_timeout: Duration,
     pub log_tail_lines: u32,
     pub log_max_bytes: usize,
+    /// Allow this backend to replace a running release (stop it, start the new one, restore the old
+    /// one on failure). **Off, and never switched on by the CLI**: live replacement stays disabled
+    /// until the evidence listed in `DEPLOY_B11_RECOVERY.md` exists. Tests turn it on against a
+    /// simulated Docker only.
+    pub enable_replacement: bool,
 }
 
 impl DockerConfig {
@@ -113,6 +121,7 @@ impl DockerConfig {
             cleanup_timeout: Duration::from_secs(60),
             log_tail_lines: 200,
             log_max_bytes: 256 * 1024,
+            enable_replacement: false,
         }
     }
 }
@@ -130,6 +139,9 @@ struct State {
     pre: Option<(String, u16)>, // container name, test port
     app: Option<(String, u16)>, // container name, application port
     replaced_from: Option<u16>,
+    /// Set only while the one restoration attempt runs: creation and the health check use the
+    /// previous release's pinned configuration instead of this attempt's.
+    restoring: Option<PreviousRelease>,
 }
 
 type CopyHook = Box<dyn FnMut(&Path)>;
@@ -357,17 +369,42 @@ impl<T: HttpTransport> DockerBackend<T> {
         disposition: Disposition,
         lease: &PortLease,
     ) -> Result<String, StepError> {
-        let image_id = self
+        // Normally the image this attempt built. While restoring, the previous release's pinned
+        // image, which carries that release's own deployment label.
+        let (image_id, tag, image_owner, limits) = match self
             .st
-            .image_id
-            .clone()
-            .ok_or_else(|| StepError::new("no verified image was built"))?;
-        let tag = self
-            .st
-            .image_tag
-            .clone()
-            .unwrap_or_else(|| image_id.clone());
-        let lbl = all_labels(io.app(), io.deployment());
+            .restoring
+            .as_ref()
+            .and_then(|p| p.config.as_ref().map(|c| (p, c)))
+        {
+            Some((p, c)) => (
+                c.image_id.clone(),
+                c.image_tag.clone(),
+                p.deployment.clone(),
+                Limits {
+                    memory_bytes: c.memory_bytes,
+                    nano_cpus: c.nano_cpus,
+                    pids: c.pids,
+                },
+            ),
+            None => {
+                let image_id = self
+                    .st
+                    .image_id
+                    .clone()
+                    .ok_or_else(|| StepError::new("no verified image was built"))?;
+                let tag = self
+                    .st
+                    .image_tag
+                    .clone()
+                    .unwrap_or_else(|| image_id.clone());
+                (image_id, tag, io.deployment().clone(), self.cfg.limits)
+            }
+        };
+        let mut lbl = all_labels(io.app(), io.deployment());
+        if let Some(p) = &self.st.restoring {
+            lbl.push((RESTORES_LABEL.to_string(), p.deployment.to_string()));
+        }
         // Docker creates an anonymous volume per declared image volume (inherited ones included)
         // even with no mounts in the request, and this ledger does not manage volumes. Refuse
         // before recording any container intent, so nothing is created. The image is addressed by
@@ -382,7 +419,7 @@ impl<T: HttpTransport> DockerBackend<T> {
                     short(&image_id)
                 ))
             })?;
-        if img.id != image_id || !has_labels(&img.labels, io.app(), io.deployment()) {
+        if img.id != image_id || !has_labels(&img.labels, io.app(), &image_owner) {
             return Err(StepError::new(format!(
                 "image {tag} is no longer the image that was built and verified; no container was created"
             )));
@@ -406,7 +443,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             env: &env,
             container_port: lease.container_port,
             host_port: lease.host_port,
-            limits: self.cfg.limits,
+            limits,
         };
         match self
             .api
@@ -536,13 +573,19 @@ impl<T: HttpTransport> DockerBackend<T> {
         port: u16,
         what: &str,
     ) -> Result<CheckEvidence, StepError> {
+        let base = match self.st.restoring.as_ref().and_then(|p| p.config.as_ref()) {
+            Some(c) => c.health.clone(),
+            None => self.cfg.health.clone(),
+        };
+        let container_port = self
+            .st
+            .restoring
+            .as_ref()
+            .and_then(|p| p.config.as_ref())
+            .map_or(self.cfg.container_port, |c| c.container_port);
         let spec = HealthSpec {
-            startup_deadline_ms: self
-                .cfg
-                .health
-                .startup_deadline_ms
-                .min(b.total.as_millis() as u64),
-            ..self.cfg.health.clone()
+            startup_deadline_ms: base.startup_deadline_ms.min(b.total.as_millis() as u64),
+            ..base
         };
         let target = format!("http://127.0.0.1:{port}{}", spec.path);
         // Which answer counts: this container's own marker, or (library use only) a fixed one.
@@ -572,13 +615,12 @@ impl<T: HttpTransport> DockerBackend<T> {
             .container_inspect(id, b.left("reading the port mapping")?)
             .map_err(|e| api_err("reading the container's port mapping", e))?
         {
-            Some(info) if info.running => {
-                Self::verify_mapping(&info, self.cfg.container_port, port).map_err(|m| {
+            Some(info) if info.running => Self::verify_mapping(&info, container_port, port)
+                .map_err(|m| {
                     StepError::new(format!(
                         "{what}: the port mapping is not what was leased: {m}"
                     ))
-                })?
-            }
+                })?,
             _ => {}
         }
         let mut probe = ContainerProbe {
@@ -601,7 +643,7 @@ impl<T: HttpTransport> DockerBackend<T> {
                 .map_err(|e| api_err("re-reading the container's port mapping", e))?;
             let problem = match post {
                 Some(info) if info.running => {
-                    Self::verify_mapping(&info, self.cfg.container_port, port).err()
+                    Self::verify_mapping(&info, container_port, port).err()
                 }
                 _ => Some("the container is not running after the health probe".to_string()),
             }
@@ -1064,17 +1106,75 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         self.health(io, &b, &id, &name, lease.host_port, "the preliminary check")
     }
 
-    /// Replacing a running release stays disabled here until the bounded restoration exists
-    /// (`restore_previous`). The engine then stops after the preliminary check, before anything is
+    /// Replacing a running release is off unless a test turns it on (`enable_replacement`); the
+    /// CLI never does. The engine then stops after the preliminary check, before anything is
     /// stopped, and reports the candidate as prepared.
     fn supports_cutover(&self) -> bool {
-        false
+        self.cfg.enable_replacement
     }
 
-    fn stop_current(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
-        Err(StepError::new(
-            "replacing a running release is not implemented in this backend (B3 covers the first deployment only)",
-        ))
+    fn pinned_config(&self) -> Option<ReleaseConfig> {
+        let (_, host_port) = self.st.app.clone()?;
+        Some(ReleaseConfig {
+            image_id: self.st.image_id.clone()?,
+            image_tag: self.st.image_tag.clone()?,
+            container_port: self.cfg.container_port,
+            host_port,
+            health: self.cfg.health.clone(),
+            memory_bytes: self.cfg.limits.memory_bytes,
+            nano_cpus: self.cfg.limits.nano_cpus,
+            pids: self.cfg.limits.pids,
+        })
+    }
+
+    /// Stop the previous release's container: found in the ledger by the previous deployment,
+    /// re-read by id and re-checked against its name and all three labels before it is touched.
+    /// Nothing is removed; the stopped container stays as the previous release's record.
+    fn stop_current(
+        &mut self,
+        io: &mut StepIo<'_>,
+        previous: &PreviousRelease,
+    ) -> Result<(), StepError> {
+        let b = Budget::new(io.budget_ms);
+        let entry = io
+            .ledger()
+            .entries()
+            .iter()
+            .find(|e| {
+                e.deployment == previous.deployment
+                    && e.app == *io.app()
+                    && e.key.kind == ResourceKind::Container
+                    && !e.is_released()
+                    && e.id.is_some()
+            })
+            .cloned()
+            .ok_or_else(|| {
+                StepError::new(
+                    "the previous release has no recorded container; nothing was stopped",
+                )
+            })?;
+        let req = RemoveRequest {
+            kind: ResourceKind::Container,
+            id: entry.id.clone().unwrap_or_default(),
+            name: entry.key.name.clone(),
+            app: entry.app.clone(),
+            deployment: previous.deployment.clone(),
+        };
+        match self.verify_container(&req, b.left("re-checking the current release")?)? {
+            Verified::Absent => Err(StepError::new(
+                "the current release's container is gone; nothing was stopped",
+            )),
+            Verified::Refused(why) => Err(StepError::new(why)),
+            Verified::Ok(info) if !info.running => Err(StepError::new(
+                "the current release is not running; nothing was stopped",
+            )),
+            Verified::Ok(_) => {
+                self.api
+                    .stop_container(&req.id, 10, b.left("stopping the current release")?)
+                    .map_err(|e| api_err("stopping the current release", e))?;
+                Ok(())
+            }
+        }
     }
 
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
@@ -1181,8 +1281,142 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         }
     }
 
-    fn restore_previous(&mut self, _budget_ms: u64) -> RestoreResult {
-        RestoreResult::NotAttempted(Reason::NoPreviousRelease)
+    /// One bounded attempt, never retried: recreate the previous release from its pinned image id
+    /// and configuration, start it, and run its own health check, all inside `budget_ms`. The
+    /// failed candidate and every unrelated object are left alone; the recreated container is new,
+    /// labelled for this deployment plus `io.harpoon.restores`, and recorded through the ledger.
+    fn restore_previous(
+        &mut self,
+        io: &mut StepIo<'_>,
+        previous: &PreviousRelease,
+        budget_ms: u64,
+    ) -> Result<RestoreResult, StepError> {
+        let Some(cfg) = previous.config.clone() else {
+            return Ok(RestoreResult::NotAttempted(Reason::ConfigUnavailable));
+        };
+        let b = Budget::new(budget_ms);
+        self.st.restoring = Some(previous.clone());
+        let out = self.restore_inner(io, &b, previous, &cfg);
+        self.st.restoring = None;
+        out
+    }
+}
+
+impl<T: HttpTransport> DockerBackend<T> {
+    fn restore_inner(
+        &mut self,
+        io: &mut StepIo<'_>,
+        b: &Budget,
+        previous: &PreviousRelease,
+        cfg: &ReleaseConfig,
+    ) -> Result<RestoreResult, StepError> {
+        // A journal failure aborts the run; anything else is a failed or impossible restoration.
+        fn judged(
+            io: &mut StepIo<'_>,
+            e: StepError,
+            fallback: Reason,
+        ) -> Result<RestoreResult, StepError> {
+            if e.fatal.is_none() {
+                io.log.push_line(&format!("restoration: {}", e.message));
+            }
+            if e.fatal.is_some() {
+                Err(e)
+            } else if e.timed_out {
+                Ok(RestoreResult::Failed(Reason::Timeout))
+            } else {
+                Ok(RestoreResult::Failed(fallback))
+            }
+        }
+        let img = match self.api.image_inspect(
+            &cfg.image_id,
+            b.left("checking the previous release's image")?,
+        ) {
+            Ok(img) => img,
+            Err(e) if e.is_timeout() => return Ok(RestoreResult::Failed(Reason::Timeout)),
+            Err(ApiError::Transport(_)) => {
+                return Ok(RestoreResult::NotAttempted(Reason::DockerUnreachable))
+            }
+            Err(e) => {
+                io.log.push_line(&format!("restoration: {e}"));
+                return Ok(RestoreResult::Failed(Reason::StartFailed));
+            }
+        };
+        match img {
+            Some(i)
+                if i.id == cfg.image_id
+                    && has_labels(&i.labels, io.app(), &previous.deployment) => {}
+            Some(_) => {
+                io.log.push_line("restoration: the pinned image id no longer carries the previous release's Harpoon labels");
+                return Ok(RestoreResult::NotAttempted(Reason::ImageMissing));
+            }
+            None => {
+                io.log
+                    .push_line("restoration: the previous release's image no longer exists");
+                return Ok(RestoreResult::NotAttempted(Reason::ImageMissing));
+            }
+        }
+        let lease = PortLease {
+            host_port: cfg.host_port,
+            container_port: cfg.container_port,
+            purpose: Purpose::Application,
+        };
+        // The previous release still holds its port lease in the ledger, which is what kept the port
+        // reserved while it was stopped; the restored container serves on that same lease. A lease
+        // held by anyone else is not ours to use; a free one is taken the usual way.
+        let holder = io
+            .ledger()
+            .entries()
+            .iter()
+            .find(|e| {
+                e.key.kind == ResourceKind::PortLease
+                    && e.key.name == cfg.host_port.to_string()
+                    && !e.is_released()
+            })
+            .map(|e| e.deployment.clone());
+        match holder {
+            Some(d) if d == previous.deployment => {}
+            Some(d) => {
+                io.log.push_line(&format!(
+                    "restoration: port {} is leased by deployment {d}; it was not used",
+                    cfg.host_port
+                ));
+                return Ok(RestoreResult::Failed(Reason::StartFailed));
+            }
+            None => {
+                if let Err(e) = io.lease_port(lease) {
+                    return judged(io, e, Reason::StartFailed);
+                }
+            }
+        }
+        let name = format!("hp-{}-restored", io.deployment());
+        let id = match self.create_container(io, b, &name, Disposition::Retain, &lease) {
+            Ok(id) => id,
+            Err(e) => return judged(io, e, Reason::StartFailed),
+        };
+        if let Err(e) = self
+            .api
+            .start_container(&id, b.left("starting the restored container")?)
+        {
+            self.attach_logs(io, b, &id);
+            return Ok(RestoreResult::Failed(if e.is_timeout() {
+                Reason::Timeout
+            } else {
+                Reason::StartFailed
+            }));
+        }
+        match self.health(io, b, &id, &name, cfg.host_port, "the restoration check") {
+            Ok(ev) => {
+                io.log
+                    .push_line(&format!("restoration check: {}", ev.summary()));
+                Ok(RestoreResult::Healthy)
+            }
+            Err(e) if e.fatal.is_some() => Err(e),
+            Err(e) => {
+                io.log
+                    .push_line(&format!("restoration check: {}", e.message));
+                Ok(RestoreResult::StartedUnverified)
+            }
+        }
     }
 }
 

@@ -2,9 +2,7 @@
 #![allow(dead_code)]
 
 use harpoon_deploy::backend::{harpoon_labels, FakeBackend, FakeRuntime, World};
-use harpoon_deploy::engine::{
-    end_state, reconcile, run_deployment, Context, EngineError, MemoryJournal, Policy, Report,
-};
+use harpoon_deploy::engine::{end_state, reconcile, Context, EngineError, MemoryJournal, Report};
 use harpoon_deploy::ids::{ApplicationId, DeploymentId, IdGenerator, ReleaseId};
 use harpoon_deploy::ledger::{EndState, Ledger, Observed, ResourceKind};
 use harpoon_deploy::state::{recover_on_start, Deployment, DeploymentStatus, Trigger};
@@ -78,7 +76,12 @@ pub fn run(
     b: &mut FakeBackend,
     j: &mut MemoryJournal,
 ) -> Result<Report, EngineError> {
-    run_deployment(d, ctx, b, j, &fx.clock, &Policy::default(), &never)
+    // The previous release (if any) has its pinned configuration, so a failed cutover can restore it.
+    let cfg = harpoon_deploy::engine::RunConfig {
+        previous: Some(harpoon_deploy::release::ReleaseConfig::simulated(38000)),
+        ..harpoon_deploy::engine::RunConfig::default()
+    };
+    harpoon_deploy::engine::run_deployment_with(d, ctx, b, j, &fx.clock, &cfg, &never)
 }
 
 pub fn labelled_for(fx: &Fx, d: &Deployment) -> Vec<Observed> {

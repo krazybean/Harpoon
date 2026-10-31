@@ -205,6 +205,11 @@ impl T {
     fn docker_requests(&self) -> usize {
         self.h.docker.requests().len()
     }
+    /// A simulated-kind runtime directory prepared by hand (as `deploy --simulate` leaves it).
+    fn docker_runtime_sim(&self) {
+        self.docker_runtime();
+        std::fs::write(self.rt.join("runtime-kind"), "simulated\n").unwrap();
+    }
     /// A docker-kind runtime directory prepared by hand (as a previous real deployment would leave it).
     fn docker_runtime(&self) {
         std::fs::create_dir_all(&self.rt).unwrap();
@@ -2989,3 +2994,7 @@ mod b8_2;
 // Health-gated replacement (offline; simulated only).
 #[path = "b9/mod.rs"]
 mod b9;
+
+// Bounded cutover recovery (offline; simulated only).
+#[path = "b11/mod.rs"]
+mod b11;

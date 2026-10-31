@@ -508,6 +508,9 @@ pub enum EndState {
     Succeeded,
     /// Failed, cancelled or interrupted.
     NotSucceeded,
+    /// A cutover began and the replacement failed. The failed candidate's own containers and
+    /// leases are kept for inspection; only what is removed in every case is removed.
+    FailedCutover,
 }
 
 /// Everything the runtime must be told to remove one object, including the labels it must

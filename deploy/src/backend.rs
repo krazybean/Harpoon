@@ -7,9 +7,10 @@
 
 use crate::engine::{JournalError, StepIo};
 use crate::health::{CheckEvidence, HealthSpec};
-use crate::ids::{labels, ApplicationId, DeploymentId};
+use crate::ids::{labels, ApplicationId, DeploymentId, ReleaseId};
 use crate::ledger::{Disposition, LedgerRecord, Observed, RemoveRequest, RemoveResult, ResourceKey, ResourceKind};
 use crate::ports::{self, Occupancy, Purpose};
+use crate::release::ReleaseConfig;
 use crate::state::{CutoverState, DeploymentStatus, Reason, Step};
 use crate::time::ManualClock;
 use std::cell::RefCell;
@@ -114,6 +115,15 @@ pub enum RestoreResult {
     NotAttempted(Reason),
 }
 
+/// The release a cutover replaces, as the engine knows it. `config` is the pinned configuration
+/// stored when that release started serving; `None` means it was never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousRelease {
+    pub release: ReleaseId,
+    pub deployment: DeploymentId,
+    pub config: Option<ReleaseConfig>,
+}
+
 /// What the engine needs to look at and remove runtime objects. Separate from [`Backend`] so
 /// startup recovery can use it without a deployment in flight.
 pub trait ResourceOps {
@@ -132,7 +142,12 @@ pub trait Backend: ResourceOps {
     /// Check the new release while the old one is still running (nothing stopped yet).
     fn preliminary_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError>;
     /// Stop the previous, healthy release. After this, Harpoon owns the interruption.
-    fn stop_current(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
+    fn stop_current(&mut self, io: &mut StepIo<'_>, previous: &PreviousRelease) -> Result<(), StepError>;
+    /// The configuration the release just started with, to be pinned in the durable record before
+    /// its final check. `None` when the backend cannot say.
+    fn pinned_config(&self) -> Option<ReleaseConfig> {
+        None
+    }
     /// Start the new release on its real address.
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
     /// Check the new release after the switch.
@@ -151,9 +166,17 @@ pub trait Backend: ResourceOps {
     fn supports_cutover(&self) -> bool {
         true
     }
-    /// One bounded attempt to bring the previous release back. `budget_ms` is a limit the
-    /// backend must respect; it must not retry.
-    fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult;
+    /// One bounded attempt to bring the previous release back from its retained image and
+    /// `previous.config` (never `None` here: the engine reports that case itself). `budget_ms` is
+    /// a limit the backend must respect; it must not retry. Every object it creates goes through
+    /// the ledger protocol on `io`. An `Err` with a journal failure aborts the run; any other `Err`
+    /// is a failed restoration.
+    fn restore_previous(
+        &mut self,
+        io: &mut StepIo<'_>,
+        previous: &PreviousRelease,
+        budget_ms: u64,
+    ) -> Result<RestoreResult, StepError>;
 }
 
 // ------------------------------------------------------------------ the fake
@@ -265,6 +288,9 @@ pub struct FakeBackend {
     list_fails: bool,
     final_evidence: Option<CheckEvidence>,
     cutover_supported: bool,
+    /// What the last restoration attempt was told to restore.
+    pub restored: Option<PreviousRelease>,
+    restore_error: Option<StepError>,
 }
 
 impl FakeBackend {
@@ -290,6 +316,8 @@ impl FakeBackend {
             list_fails: false,
             final_evidence: None,
             cutover_supported: true,
+            restored: None,
+            restore_error: None,
         }
     }
 
@@ -377,6 +405,12 @@ impl FakeBackend {
     }
     pub fn restore_with(mut self, result: RestoreResult, takes_ms: u64) -> Self {
         self.restore = VecDeque::from([(result, takes_ms)]);
+        self
+    }
+    /// The restoration call itself fails (for example the budget ran out inside the backend).
+    pub fn restore_errors(mut self, e: StepError, takes_ms: u64) -> Self {
+        self.restore_error = Some(e);
+        self.restore = VecDeque::from([(RestoreResult::Healthy, takes_ms)]);
         self
     }
     pub fn final_check_takes(mut self, ms: u64) -> Self {
@@ -510,8 +544,11 @@ impl Backend for FakeBackend {
             &HealthSpec::first_test("/"),
         ))
     }
-    fn stop_current(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
+    fn stop_current(&mut self, _io: &mut StepIo<'_>, _previous: &PreviousRelease) -> Result<(), StepError> {
         self.run(Call::StopCurrent, |b| b.stop_current.clone())
+    }
+    fn pinned_config(&self) -> Option<ReleaseConfig> {
+        Some(ReleaseConfig::simulated(39000))
     }
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         if let Some(world) = self.world.clone() {
@@ -542,15 +579,24 @@ impl Backend for FakeBackend {
     fn stop_new(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.run(Call::StopNew, |b| b.stop_new.clone())
     }
-    fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult {
+    fn restore_previous(
+        &mut self,
+        _io: &mut StepIo<'_>,
+        previous: &PreviousRelease,
+        budget_ms: u64,
+    ) -> Result<RestoreResult, StepError> {
         let c = Call::RestorePrevious { budget_ms };
         self.note(&c);
         self.calls.push(c);
+        self.restored = Some(previous.clone());
         let (r, takes) = self
             .restore
             .pop_front()
             .unwrap_or((RestoreResult::NotAttempted(Reason::ImageMissing), 0));
         self.clock.advance(takes);
-        r
+        match self.restore_error.take() {
+            Some(e) => Err(e),
+            None => Ok(r),
+        }
     }
 }

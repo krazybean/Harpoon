@@ -161,12 +161,36 @@ pub enum CutoverState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     NoPreviousRelease,
+    /// The previous release's pinned configuration was never stored (it predates pinning, or the
+    /// release never reached its serving container).
+    ConfigUnavailable,
+    /// The process died while the restoration was running; what it did is unknown.
+    Interrupted,
     ImageMissing,
     SecretUnavailable,
     DockerUnreachable,
     Timeout,
     StartFailed,
     Cancelled,
+}
+
+impl Reason {
+    /// Plain words for the developer; says what happened, not what is guaranteed.
+    pub fn as_str_for_humans(self) -> &'static str {
+        match self {
+            Reason::NoPreviousRelease => "there was no previous release to restore",
+            Reason::ConfigUnavailable => {
+                "the previous release's pinned configuration was never stored (config_unavailable)"
+            }
+            Reason::Interrupted => "the restoration was interrupted and its result is unknown (interrupted)",
+            Reason::ImageMissing => "the previous release's image is unavailable (image_missing)",
+            Reason::SecretUnavailable => "a pinned secret version is unavailable (secret_unavailable)",
+            Reason::DockerUnreachable => "Docker could not be reached (docker_unreachable)",
+            Reason::Timeout => "the time budget ran out (timeout)",
+            Reason::StartFailed => "the previous release could not be started (start_failed)",
+            Reason::Cancelled => "it was cancelled (cancelled)",
+        }
+    }
 }
 
 /// Outcome of the one bounded restoration attempt (D5). Never "guaranteed".
@@ -289,6 +313,8 @@ pub struct Deployment {
     pub interruption: Option<Interruption>,
     /// Set when the build succeeds; always `ReleaseId::from_deployment(&id)`.
     pub release: Option<ReleaseId>,
+    /// The non-secret configuration needed to recreate this release, pinned when it started serving.
+    pub pinned: Option<crate::release::ReleaseConfig>,
 }
 
 impl Deployment {
@@ -316,6 +342,7 @@ impl Deployment {
             recovery: None,
             interruption: None,
             release: None,
+            pinned: None,
         }
     }
 
@@ -461,6 +488,30 @@ impl Deployment {
         }
     }
 
+    /// Start the one explicit restoration of an interrupted cutover (D10). Only an `Interrupted`
+    /// deployment whose cutover began and which has no recovery yet may do this; the interrupted
+    /// status itself never changes, and the `Recovery` step (skipped when the deployment was
+    /// marked interrupted) runs now.
+    pub fn begin_explicit_recovery(&mut self, budget_ms: u64, now_ms: u64) -> Result<(), TransitionError> {
+        let ok = self.status == DeploymentStatus::Interrupted
+            && matches!(self.cutover, CutoverState::Begun { .. })
+            && self.recovery.is_none()
+            && self.step(Step::Recovery).status == StepStatus::Skipped;
+        if !ok {
+            return Err(TransitionError::Cutover {
+                from: self.cutover,
+                attempted:
+                    "explicit recovery (needs an interrupted deployment whose cutover began and has no recovery yet)",
+            });
+        }
+        self.fail_cutover(now_ms)?;
+        let r = self.step_mut(Step::Recovery);
+        r.status = StepStatus::Running;
+        r.started_ms = Some(now_ms);
+        r.finished_ms = None;
+        self.start_recovery(budget_ms, now_ms)
+    }
+
     /// Record the final recovery outcome. If service is back, the interruption ends now.
     pub fn finish_recovery(&mut self, outcome: RecoveryOutcome, now_ms: u64) -> Result<(), TransitionError> {
         match &mut self.recovery {
@@ -511,6 +562,11 @@ pub fn recover_on_start(deployments: &mut [Deployment], now_ms: u64) -> StartupR
     let mut report = StartupReport::default();
     for d in deployments.iter_mut() {
         if d.status.is_terminal() {
+            // An explicit restoration that died part-way: its attempt was made and its result is
+            // unknown. Say so, once; it is never repeated automatically.
+            if d.status == DeploymentStatus::Interrupted {
+                close_unfinished_recovery(d, now_ms);
+            }
             continue;
         }
         for r in &mut d.steps {
@@ -519,6 +575,7 @@ pub fn recover_on_start(deployments: &mut [Deployment], now_ms: u64) -> StartupR
                 r.finished_ms = Some(now_ms);
             }
         }
+        close_unfinished_recovery(d, now_ms);
         d.transition(DeploymentStatus::Interrupted, now_ms)
             .expect("every non-terminal status may be interrupted");
         report.interrupted.push(d.id.clone());
@@ -527,6 +584,53 @@ pub fn recover_on_start(deployments: &mut [Deployment], now_ms: u64) -> StartupR
         }
     }
     report
+}
+
+fn close_unfinished_recovery(d: &mut Deployment, now_ms: u64) {
+    if let Some(r) = &mut d.recovery {
+        if r.outcome == RecoveryOutcome::InProgress {
+            r.outcome = RecoveryOutcome::RestoreFailed(Reason::Interrupted);
+            r.finished_ms = Some(now_ms);
+        }
+    }
+    for s in &mut d.steps {
+        if s.step == Step::Recovery && s.status == StepStatus::Running {
+            s.status = StepStatus::Interrupted;
+            s.finished_ms = Some(now_ms);
+        }
+    }
+}
+
+/// Why automatic triggers for an application are paused (spec D5). Derived from the durable
+/// deployment records, so it survives restarts. Only a cutover that began and did not end in a
+/// confirmed new release causes one: a failed cutover, or one interrupted part-way (the
+/// application may be down). A failed build or preliminary check never does, because nothing was
+/// stopped. There is no `resume` yet and no automatic trigger to consume the pause; it is recorded
+/// and shown so that none can be added without honouring it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerPause {
+    pub application: ApplicationId,
+    pub deployment: DeploymentId,
+    pub recovery: Option<RecoveryOutcome>,
+    pub incomplete: bool,
+}
+
+pub fn trigger_pauses(deployments: &[Deployment]) -> Vec<TriggerPause> {
+    let mut out: Vec<TriggerPause> = Vec::new();
+    for d in deployments {
+        let incomplete = matches!(d.cutover, CutoverState::Begun { .. });
+        let failed = matches!(d.cutover, CutoverState::Failed { .. });
+        if !(incomplete || failed) || out.iter().any(|p| p.application == d.application_id) {
+            continue;
+        }
+        out.push(TriggerPause {
+            application: d.application_id.clone(),
+            deployment: d.id.clone(),
+            recovery: d.recovery.map(|r| r.outcome),
+            incomplete,
+        });
+    }
+    out
 }
 
 #[cfg(test)]

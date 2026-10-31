@@ -161,6 +161,10 @@ impl ReleaseId {
     pub fn from_deployment(d: &DeploymentId) -> ReleaseId {
         ReleaseId::from_raw(d.raw())
     }
+    /// The deployment whose successful build is this release.
+    pub fn deployment(&self) -> DeploymentId {
+        DeploymentId::from_raw(self.raw())
+    }
 }
 
 /// Generates identifiers. Monotonic: two identifiers from one generator always sort in

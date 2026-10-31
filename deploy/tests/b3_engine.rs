@@ -97,8 +97,8 @@ impl Backend for RealisticFake {
     fn preliminary_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError> {
         self.0.preliminary_check(io)
     }
-    fn stop_current(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
-        self.0.stop_current(io)
+    fn stop_current(&mut self, io: &mut StepIo<'_>, p: &PreviousRelease) -> Result<(), StepError> {
+        self.0.stop_current(io, p)
     }
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.0.start_new(io)
@@ -109,8 +109,13 @@ impl Backend for RealisticFake {
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.0.stop_new(io)
     }
-    fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult {
-        self.0.restore_previous(budget_ms)
+    fn restore_previous(
+        &mut self,
+        io: &mut StepIo<'_>,
+        p: &PreviousRelease,
+        budget_ms: u64,
+    ) -> Result<RestoreResult, StepError> {
+        self.0.restore_previous(io, p, budget_ms)
     }
     // accepts_simulated_evidence: the trait default (false)
 }
@@ -163,8 +168,8 @@ impl Backend for Collider {
     fn preliminary_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError> {
         self.0.preliminary_check(io)
     }
-    fn stop_current(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
-        self.0.stop_current(io)
+    fn stop_current(&mut self, io: &mut StepIo<'_>, p: &PreviousRelease) -> Result<(), StepError> {
+        self.0.stop_current(io, p)
     }
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         let lease = |p| PortLease {
@@ -183,8 +188,13 @@ impl Backend for Collider {
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.0.stop_new(io)
     }
-    fn restore_previous(&mut self, budget_ms: u64) -> RestoreResult {
-        self.0.restore_previous(budget_ms)
+    fn restore_previous(
+        &mut self,
+        io: &mut StepIo<'_>,
+        p: &PreviousRelease,
+        budget_ms: u64,
+    ) -> Result<RestoreResult, StepError> {
+        self.0.restore_previous(io, p, budget_ms)
     }
     fn accepts_simulated_evidence(&self) -> bool {
         true

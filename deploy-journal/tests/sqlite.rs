@@ -171,3 +171,56 @@ fn the_writer_lock_is_visible_to_readers_without_taking_it() {
     assert_eq!(writer_lock_status(&dir).unwrap(), LockStatus::Free);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_pinned_configuration_and_the_single_explicit_recovery_survive_restarts_and_nothing_else_may_change(
+) {
+    use harpoon_deploy::release::ReleaseConfig;
+    use harpoon_deploy::state::{CutoverState, Reason, RecoveryOutcome, Step};
+    let dir = temp_dir();
+    let (app, dep) = ids();
+    let mut d = Deployment::new(dep, app, Trigger::Cli, 10);
+    d.transition(DeploymentStatus::Queued, 11).unwrap();
+    d.transition(DeploymentStatus::Running, 12).unwrap();
+    d.pinned = Some(ReleaseConfig::simulated(38042));
+    d.start_step(Step::Cutover, 13).unwrap();
+    d.begin_cutover(14).unwrap();
+    {
+        let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&d).unwrap();
+    }
+    // restart: interrupted, pin intact, application possibly down
+    let (mut db, restored) = SqliteJournal::open_recovered(&dir, 20).unwrap();
+    let mut got = restored.deployments[0].clone();
+    assert_eq!(got.status, DeploymentStatus::Interrupted);
+    assert_eq!(got.pinned, Some(ReleaseConfig::simulated(38042)));
+    assert!(got.application_may_be_down());
+    // the one explicit restoration: in progress, then its outcome
+    got.begin_explicit_recovery(60_000, 30).unwrap();
+    db.persist(&got).unwrap();
+    got.finish_recovery(RecoveryOutcome::Restored, 31).unwrap();
+    got.finish_step(Step::Recovery, true, "restored", 31)
+        .unwrap();
+    db.persist(&got).unwrap();
+    drop(db);
+    let r = SqliteJournal::read_only(&dir).unwrap();
+    assert_eq!(
+        r.deployments[0].recovery.unwrap().outcome,
+        RecoveryOutcome::Restored
+    );
+    assert!(matches!(
+        r.deployments[0].cutover,
+        CutoverState::Failed { .. }
+    ));
+    assert!(!r.deployments[0].application_may_be_down());
+    // a second, different outcome is not accepted: the store refuses to open (fail closed)
+    let mut again = r.deployments[0].clone();
+    again.recovery.as_mut().unwrap().outcome = RecoveryOutcome::RestoreFailed(Reason::StartFailed);
+    {
+        let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&again).unwrap();
+    }
+    assert!(SqliteJournal::open(&dir).is_err());
+    assert!(SqliteJournal::read_only(&dir).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}

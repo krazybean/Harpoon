@@ -1529,13 +1529,16 @@ fn a_crash_at_every_write_of_a_failed_removal_is_recovered_once_docker_cooperate
 // ---------------------------------------------------------------- scope
 
 #[test]
-fn release_replacement_is_explicitly_not_implemented() {
+fn release_replacement_is_disabled_unless_a_test_turns_it_on() {
     let h = Harness::new();
-    let mut b = backend_with(&h, ok200(), |_| {});
-    assert_eq!(
-        b.restore_previous(1_000),
-        harpoon_deploy::backend::RestoreResult::NotAttempted(Reason::NoPreviousRelease)
+    let b = backend_with(&h, ok200(), |_| {});
+    assert!(
+        !b.supports_cutover(),
+        "the default configuration never replaces a running release"
     );
+    assert!(!DockerConfig::first_test("/x", "/y", "/z", 8080).enable_replacement);
+    let b = backend_with(&h, ok200(), |c| c.enable_replacement = true);
+    assert!(b.supports_cutover());
 }
 
 #[test]
