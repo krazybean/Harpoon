@@ -212,6 +212,12 @@ pub enum LedgerError {
     ReceiptConflict(ResourceKey),
     /// A result without a preceding attempt, or an attempt on an entry that is settled.
     OutOfOrder(ResourceKey, &'static str),
+    /// A port lease whose port another deployment still holds (not released). The ledger is the
+    /// single authority on leases, so the same port can never be reserved twice.
+    LeaseHeld {
+        port: String,
+        holder: DeploymentId,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -221,6 +227,12 @@ impl fmt::Display for LedgerError {
             LedgerError::UnknownEntry(k) => write!(f, "ledger: no entry for {} {}", k.kind.as_str(), k.name),
             LedgerError::ReceiptConflict(k) => {
                 write!(f, "ledger: conflicting receipt for {} {}", k.kind.as_str(), k.name)
+            }
+            LedgerError::LeaseHeld { port, holder } => {
+                write!(
+                    f,
+                    "ledger: port {port} is already leased by deployment {holder} and not released"
+                )
             }
             LedgerError::OutOfOrder(k, what) => {
                 write!(f, "ledger: {what} (out of order) for {} {}", k.kind.as_str(), k.name)
@@ -296,6 +308,18 @@ impl Ledger {
             } => {
                 if self.find(deployment, key).is_some() {
                     return Err(LedgerError::DuplicateIntent(key.clone()));
+                }
+                if key.kind == ResourceKind::PortLease {
+                    if let Some(h) = self
+                        .entries
+                        .iter()
+                        .find(|e| e.key == *key && e.deployment != *deployment && !e.is_released())
+                    {
+                        return Err(LedgerError::LeaseHeld {
+                            port: key.name.clone(),
+                            holder: h.deployment.clone(),
+                        });
+                    }
                 }
                 self.entries.push(Entry {
                     key: key.clone(),
@@ -565,7 +589,7 @@ pub fn plan(ledger: &Ledger, observed: &[Observed], ended: &[(DeploymentId, EndS
 pub mod codec {
     use super::*;
 
-    fn crc32(data: &[u8]) -> u32 {
+    pub(crate) fn crc32(data: &[u8]) -> u32 {
         let mut crc = 0xFFFF_FFFFu32;
         for &b in data {
             crc ^= b as u32;
@@ -580,7 +604,7 @@ pub mod codec {
         !crc
     }
 
-    fn esc(s: &str) -> String {
+    pub(crate) fn esc(s: &str) -> String {
         let mut o = String::with_capacity(s.len());
         for c in s.chars() {
             match c {
@@ -594,7 +618,7 @@ pub mod codec {
         o
     }
 
-    fn unesc(s: &str) -> Option<String> {
+    pub(crate) fn unesc(s: &str) -> Option<String> {
         let mut o = String::with_capacity(s.len());
         let mut it = s.chars();
         while let Some(c) = it.next() {

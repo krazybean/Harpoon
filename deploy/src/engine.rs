@@ -189,6 +189,9 @@ pub struct RunConfig {
     pub budgets: Budgets,
     pub log_limits: LogLimits,
     pub redactor: Redactor,
+    /// The ledger as restored from the durable journal. The run starts from it, so leases and
+    /// unsettled entries of other deployments are visible to port allocation. Empty by default.
+    pub prior_ledger: Ledger,
 }
 
 impl Default for RunConfig {
@@ -198,6 +201,7 @@ impl Default for RunConfig {
             budgets: Budgets::default(),
             log_limits: LogLimits::default(),
             redactor: Redactor::none(),
+            prior_ledger: Ledger::new(),
         }
     }
 }
@@ -219,6 +223,7 @@ pub enum PauseReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
+    pub deployment: DeploymentId,
     pub status: DeploymentStatus,
     pub pause: Option<PauseReason>,
     /// The ledger as it ended. Failed or refused cleanups are in here and stay there.
@@ -234,10 +239,14 @@ pub struct Report {
 }
 
 impl Report {
-    /// Entries of **this** ledger whose cleanup failed or was refused. A deployment can be
+    /// Entries of **this deployment** whose cleanup failed or was refused. A deployment can be
     /// `Succeeded` or `Failed` and still have these; they are never dropped from the report.
     pub fn cleanup_problems(&self) -> Vec<&crate::ledger::Entry> {
-        self.ledger.needing_attention()
+        self.ledger
+            .needing_attention()
+            .into_iter()
+            .filter(|e| e.deployment == self.deployment)
+            .collect()
     }
     pub fn is_clean(&self) -> bool {
         self.cleanup_problems().is_empty() && self.unaccounted.is_empty() && self.warnings.is_empty()
@@ -958,7 +967,7 @@ pub fn run_deployment_with(
         clock,
         cancel,
         cfg,
-        ledger: Ledger::new(),
+        ledger: cfg.prior_ledger.clone(),
         evidence: Vec::new(),
         logs: Vec::new(),
         warnings: Vec::new(),
@@ -1078,6 +1087,7 @@ fn finish(mut run: Run<'_>) -> Result<Report, EngineError> {
         _ => None,
     };
     Ok(Report {
+        deployment: run.d.id.clone(),
         status: run.d.status,
         pause,
         ledger: run.ledger,

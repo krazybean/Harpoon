@@ -17,6 +17,7 @@ pub mod buildx;
 pub mod engine;
 pub mod health;
 pub mod ids;
+pub mod journal_format;
 pub mod ledger;
 pub mod logs;
 pub mod ports;

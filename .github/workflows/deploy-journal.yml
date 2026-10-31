@@ -1,0 +1,67 @@
+name: Deploy journal
+
+# Milestone B5. The durable journal's tests use temporary directories and real file operations
+# (create, append, fsync, truncate, flock) and, for the lock tests, re-run the test binary as a
+# child process. They use no Docker, VM, Buildx or network.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy-journal/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-journal.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "deploy-journal/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-journal.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-journal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: deploy-journal
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Only the engine crate as a dependency, no database or network in the sources
+        run: |
+          deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
+          if [ "$deps" != 'harpoon-deploy = { path = "../deploy" }' ]; then
+            echo "unexpected dependencies in deploy-journal/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
+          fi
+          if grep -rnE 'std::net|std::process|UnixStream|rusqlite|sqlite|tokio|docker' src | grep -vE ':[0-9]+:[[:space:]]*//'; then
+            echo "the journal is local files only: no network, process, database or Docker access" >&2; exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --offline --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --offline
