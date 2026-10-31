@@ -2270,3 +2270,106 @@ fn a_lease_stays_while_its_container_is_not_verified_gone_even_if_docker_shows_n
     );
     assert!(entry_state(&t, &d, ResourceKind::Image, &d.tag).contains("Created"));
 }
+
+#[test]
+fn the_first_container_that_does_not_come_out_clean_stops_the_rest() {
+    for (what, trouble) in [("a failed removal", 0), ("a refusal", 1)] {
+        let t = T::new();
+        let d = succeeded_deployment(&t);
+        // a second recorded container of the same deployment (a replacement), journaled after the first
+        let name2 = format!("hp-{}-r2", d.dep);
+        let lbl = harpoon_deploy::backend::harpoon_labels(&d.app, &d.dep);
+        let cid2 = t.h.docker.with(|s| {
+            let id = s.add_container(&name2, lbl, true);
+            s.containers.last_mut().unwrap().image = d.img.clone();
+            id
+        });
+        let (mut j, _) = FileJournal::open(&t.journal_dir()).unwrap();
+        j.record(&intent(
+            &d.app,
+            &d.dep,
+            ResourceKind::Container,
+            &name2,
+            Disposition::RemoveOnFailure,
+        ))
+        .unwrap();
+        j.record(&receipt(&d.dep, ResourceKind::Container, &name2, &cid2))
+            .unwrap();
+        drop(j);
+        if trouble == 0 {
+            t.h.docker.fault(
+                Some("DELETE"),
+                "/containers/",
+                1,
+                Action::Respond(500, "{\"message\":\"driver failed\"}".into()),
+            );
+        } else {
+            t.h.docker.with(|s| {
+                s.containers
+                    .iter_mut()
+                    .find(|c| c.id == d.cid)
+                    .unwrap()
+                    .labels = vec![]
+            });
+        }
+        let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+        assert_exit(&o, 7);
+        assert!(
+            o.stdout
+                .contains(&format!("not attempted: container {name2}")),
+            "{what}: {}",
+            o.stdout
+        );
+        // the second container: not stopped, not removed, not even looked at by a removal — and no journal attempt
+        assert!(
+            mutating(&t).iter().all(|(_, p)| !p.contains(&cid2)),
+            "{what}: {:?}",
+            mutating(&t)
+        );
+        assert!(
+            t.h.docker
+                .with(|s| s.containers.iter().any(|c| c.id == cid2 && c.running)),
+            "{what}"
+        );
+        let r = read_only(&t.journal_dir()).unwrap();
+        let e2 = r
+            .ledger
+            .find(&d.dep, &ResourceKey::new(ResourceKind::Container, &name2))
+            .unwrap();
+        assert_eq!(
+            e2.cleanup_attempts, 0,
+            "{what}: no attempt was recorded for it"
+        );
+        assert!(!e2.is_released());
+        // image and lease untouched as before
+        assert!(
+            entry_state(&t, &d, ResourceKind::Image, &d.tag).contains("Created"),
+            "{what}"
+        );
+        assert!(
+            entry_state(&t, &d, ResourceKind::PortLease, "38000").contains("Created"),
+            "{what}"
+        );
+        if trouble == 0 {
+            // the next run retries from the failed one and then continues
+            let o = go(&t, &SHIPPING, &apply_args(&t, &d));
+            assert_exit(&o, 0);
+            assert!(t
+                .h
+                .docker
+                .with(|s| !s.containers.iter().any(|c| c.id == cid2 || c.id == d.cid)));
+        }
+    }
+}
+
+#[test]
+fn the_cli_sources_never_call_a_prune_endpoint_or_force_a_removal() {
+    // the same prohibition the CI scan makes, as a test: operations, not the word in a message
+    for e in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")).unwrap() {
+        let p = e.unwrap().path();
+        let text = std::fs::read_to_string(&p).unwrap();
+        for bad in ["/prune", "force=true", "Command::new", "env::var"] {
+            assert!(!text.contains(bad), "{} contains {bad}", p.display());
+        }
+    }
+}

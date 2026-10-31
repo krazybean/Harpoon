@@ -1577,7 +1577,42 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
             "journal write failed during teardown: {e}; run `recover`, then `status`, and retry"
         ))
     };
-    execute_actions(&c_actions, &mut ledger, j, &mut backend, &SystemClock).map_err(journal_err)?;
+    // One container at a time, and the first one that does not come out clean (a failed removal or a
+    // refusal) stops the rest: nothing further is touched on top of an unexplained failure, and the
+    // containers not reached are reported and retried by the next run.
+    let mut not_reached: Vec<String> = Vec::new();
+    for (i, a) in c_actions.iter().enumerate() {
+        execute_actions(
+            std::slice::from_ref(a),
+            &mut ledger,
+            j,
+            &mut backend,
+            &SystemClock,
+        )
+        .map_err(journal_err)?;
+        let key = match a {
+            Action::Remove { entry, .. }
+            | Action::Refuse { entry, .. }
+            | Action::MarkAbsent { entry } => entry,
+            _ => continue,
+        };
+        let clean = ledger.find(&key.0, &key.1).is_some_and(|e| e.is_released());
+        if !clean {
+            not_reached = c_actions[i + 1..]
+                .iter()
+                .filter_map(|n| match n {
+                    Action::Remove { entry, .. }
+                    | Action::Refuse { entry, .. }
+                    | Action::MarkAbsent { entry } => Some(entry.1.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            break;
+        }
+    }
+    for n in &not_reached {
+        let _ = writeln!(out, "not attempted: container {n} — an earlier container did not come out clean, so nothing further was touched");
+    }
     let released = |ledger: &Ledger, es: &[harpoon_deploy::ledger::Entry]| {
         es.iter().all(|e| {
             ledger

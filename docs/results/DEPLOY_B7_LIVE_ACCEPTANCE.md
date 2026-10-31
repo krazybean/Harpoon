@@ -10,6 +10,9 @@ Nothing in this document has been run. Phase 1 (this PR) is offline only. **No s
 - [ ] `cargo fmt/clippy/test` green for `deploy`, `deploy-docker`, `deploy-journal`, `deploy-cli` on the exact commit used.
 - [ ] A fresh runtime directory (`0700`) used for nothing else; `runtime-kind` = docker.
 
+## 0a. The invocation the fixture needs
+The fixture answers `/health` only (404 elsewhere), and the CLI's default health path is `/`. A live deployment of the fixture therefore **must** pass `--health-path /health`, plus `--mgmt-socket M --forwarder-pid N` (and `--forwarder-command` if the app's process is not called `Harpoon`). (An offline test found this: deploying the fixture with the default path never becomes healthy.)
+
 ## 1. Inventories — before and after (read-only)
 Capture each twice (before, after) into files that do not already exist:
 | Inventory | How | Compare |
@@ -42,7 +45,7 @@ Any of: `doctor` or `plan` not exit 0 · `status` shows anything unresolved · i
 - **Successful run:** `harpoon-deploy teardown --runtime-dir R --deployment dep_… --docker-socket S --resources-dir RES` is a **dry run** that prints exactly what would happen. With `--apply --authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE` it
   1. refuses unless the deployment is in the journal and `succeeded`, nothing about it was refused earlier, and every recorded container/image has a receipt;
   2. lists the runtime (an unlistable runtime stops everything with exit 5 and **no journal write**);
-  3. for each recorded container: located by its recorded ID, with its name and **all three ownership labels** matching; a mismatch (labels differ, or the name is held by a different ID) is **recorded as refused and never touched**; absent is recorded as absent; otherwise it is journaled (attempt), stopped, removed with `force=false&v=false`, and the result journaled;
+  3. one container at a time, in the order they were journaled — **the first that does not come out clean (a failed removal or a refusal) stops the rest**, which are reported as not attempted and get no journal record; located by its recorded ID, with its name and **all three ownership labels** matching; a mismatch (labels differ, or the name is held by a different ID) is **recorded as refused and never touched**; absent is recorded as absent; otherwise it is journaled (attempt), stopped, removed with `force=false&v=false`, and the result journaled;
   4. only if every container is verified gone: re-lists, and removes the image **by ID** (`force=false&noprune=true`) unless any container still references that image ID or its user cannot be identified (then the image is kept and said so);
   5. only if every container is verified gone **and** Docker no longer maps the lease's port: releases the lease (a ledger-only attempt + result).
   A failure at any step is recorded as a failed cleanup, later steps are not attempted, the exit code is 7, and a repeat run retries only what is left; a repeat after success prints "nothing to do". It never prunes, never forces, never matches by name pattern, never adopts.
