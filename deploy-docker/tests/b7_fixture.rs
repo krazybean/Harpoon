@@ -303,18 +303,12 @@ fn fixture_listeners() -> FixturePorts {
                                     .then(|| {
                                         k.create_body
                                             .get("Env")
-                                            .and_then(
-                                                harpoon_deploy_docker::json::Json::as_array,
-                                            )
+                                            .and_then(harpoon_deploy_docker::json::Json::as_array)
                                             .and_then(|a| {
-                                                a.iter().filter_map(|e| e.as_str()).find_map(
-                                                    |e| {
-                                                        e.strip_prefix(
-                                                            "HARPOON_DEPLOYMENT_MARKER=",
-                                                        )
+                                                a.iter().filter_map(|e| e.as_str()).find_map(|e| {
+                                                    e.strip_prefix("HARPOON_DEPLOYMENT_MARKER=")
                                                         .map(str::to_string)
-                                                    },
-                                                )
+                                                })
                                             })
                                     })
                                     .flatten()
@@ -342,11 +336,12 @@ fn deploy_against_the_fixture(
     // the fixture answers /health only; a deployment of it must be told so (`--health-path /health`)
     cfg.health.path = "/health".into();
     cfg.health.startup_deadline_ms = deadline_ms;
-    let mut backend = DockerBackend::with_transport(cfg, Some(&h.ws.resources()), RoutedHttp(ports))
-        .unwrap()
-        .with_entropy(test_entropy())
-        .with_port_probe(NoListeners)
-        .with_disk_probe(FakeDisk(10 << 30));
+    let mut backend =
+        DockerBackend::with_transport(cfg, Some(&h.ws.resources()), RoutedHttp(ports))
+            .unwrap()
+            .with_entropy(test_entropy())
+            .with_port_probe(NoListeners)
+            .with_disk_probe(FakeDisk(10 << 30));
     let mut j = StampedJournal::new();
     h.run(&mut backend, &mut j)
 }
@@ -355,7 +350,10 @@ fn deploy_against_the_fixture(
 fn the_real_fixture_script_is_healthy_only_with_its_own_containers_marker_over_real_http() {
     use harpoon_deploy::state::DeploymentStatus;
     let ports = fixture_listeners();
-    assert_ne!(ports.app, ports.pre, "the two test listeners must be distinct");
+    assert_ne!(
+        ports.app, ports.pre,
+        "the two test listeners must be distinct"
+    );
     // 1. a stale instance (some other marker) answers on the test port: the deployment must not pass
     let mut h = Harness::new();
     h.seed_built_image();
