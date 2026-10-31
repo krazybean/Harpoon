@@ -32,6 +32,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+mod sqlite;
+pub use sqlite::{SqliteJournal, SqliteOpenError, SQLITE_FILE};
+
 pub const JOURNAL_FILE: &str = "journal.wal";
 pub const LOCK_FILE: &str = "journal.lock";
 

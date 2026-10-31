@@ -2,8 +2,7 @@
 //! simulated/docker marker, and the translation of journal errors into actionable diagnostics.
 
 use crate::Fail;
-use harpoon_deploy::journal_format::FormatError;
-use harpoon_deploy_journal::{FileJournal, OpenError, Restored, JOURNAL_FILE};
+use harpoon_deploy_journal::{Restored, SqliteJournal, SQLITE_FILE};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -56,10 +55,10 @@ impl Runtime {
         self.dir.join("scratch")
     }
     pub fn journal_file(&self) -> PathBuf {
-        self.journal_dir().join(JOURNAL_FILE)
+        self.journal_dir().join(SQLITE_FILE)
     }
     pub fn initialised(&self) -> bool {
-        self.journal_file().exists()
+        self.journal_file().exists() || self.journal_dir().join("journal.wal").exists()
     }
 
     /// `None` when unmarked (a journal that predates the marker is treated as a docker runtime).
@@ -177,44 +176,20 @@ pub fn prepare_for_writing(rt: &Runtime, want: Kind) -> Result<(), Fail> {
     Ok(())
 }
 
-pub fn open_error(rt: &Runtime, e: OpenError) -> Fail {
-    match e {
-        OpenError::Locked(p) => Fail::journal(format!(
-            "another Harpoon process holds the journal ({}). Nothing waits and nothing was changed; retry when it has finished. \
-             Do not create a second journal directory: that would bypass lease coordination.",
-            p.display()
-        )),
-        OpenError::Format(f) => corrupt(rt, &f),
-        OpenError::NotAJournal(p) => Fail::journal(format!(
-            "{} is not a Harpoon journal and was left untouched. Move it away yourself if it should not be there.",
-            p.display()
-        )),
-        OpenError::Io { path, op, error } => Fail::journal(format!("{op} {}: {error}", path.display())),
-    }
-}
-
-fn corrupt(rt: &Runtime, f: &FormatError) -> Fail {
-    Fail::journal(format!(
-        "the journal is not usable: {f}.\n\
-         Nothing was changed, repaired or discarded, and deployments are refused until you resolve this.\n\
-         To keep a copy for investigation: harpoon-deploy export-journal --runtime-dir {} --to <new file>\n\
-         Do not delete or reset the journal: it is the record of what Harpoon created.",
-        rt.dir.display()
-    ))
-}
-
-pub fn open_writer(rt: &Runtime, kind: Kind) -> Result<(FileJournal, Restored), Fail> {
+pub fn open_writer(rt: &Runtime, kind: Kind) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    FileJournal::open(&rt.journal_dir()).map_err(|e| open_error(rt, e))
+    SqliteJournal::open(&rt.journal_dir())
+        .map_err(|e| Fail::journal(format!("cannot open {}: {e}", rt.journal_file().display())))
 }
 
 pub fn open_writer_recovered(
     rt: &Runtime,
     kind: Kind,
     now_ms: u64,
-) -> Result<(FileJournal, Restored), Fail> {
+) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    FileJournal::open_recovered(&rt.journal_dir(), now_ms).map_err(|e| open_error(rt, e))
+    SqliteJournal::open_recovered(&rt.journal_dir(), now_ms)
+        .map_err(|e| Fail::journal(format!("cannot open {}: {e}", rt.journal_file().display())))
 }
 
 /// Read-only restore; `None` when there is no journal yet. Never creates or writes anything.
@@ -222,7 +197,7 @@ pub fn read_restored(rt: &Runtime) -> Result<Option<Restored>, Fail> {
     if !rt.initialised() {
         return Ok(None);
     }
-    harpoon_deploy_journal::read_only(&rt.journal_dir())
+    SqliteJournal::read_only(&rt.journal_dir())
         .map(Some)
-        .map_err(|e| open_error(rt, e))
+        .map_err(|e| Fail::journal(format!("cannot read {}: {e}", rt.journal_file().display())))
 }

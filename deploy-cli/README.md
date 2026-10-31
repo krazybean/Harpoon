@@ -1,6 +1,7 @@
 # harpoon-deploy-cli
 
-Gated developer CLI (`harpoon-deploy`) over the deploy engine, `DockerBackend` and the durable journal.
+Gated developer CLI (`harpoon-deploy`) over the deploy engine, `DockerBackend` and the durable SQLite
+state store (`deployments.sqlite3`). Existing first-slice `journal.wal` state is imported once.
 Commands: `status`, `doctor`, `plan`, `recover`, `reconcile`, `deploy`, `export-journal`. Run `harpoon-deploy help`.
 
 * Every command needs `--runtime-dir DIR` (absolute). One runtime directory = one canonical journal
