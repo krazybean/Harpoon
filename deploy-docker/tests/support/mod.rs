@@ -351,6 +351,42 @@ impl Harness {
         )
     }
 
+    /// Run as a replacement of `previous` (a running release). `confirm` is asked for the cutover.
+    pub fn run_replacing<T: HttpTransport>(
+        &mut self,
+        b: &mut DockerBackend<T>,
+        j: &mut dyn Journal,
+        previous: &harpoon_deploy::ids::ReleaseId,
+        confirm: &dyn Fn(&harpoon_deploy::engine::CutoverPlan) -> bool,
+    ) -> Report {
+        harpoon_deploy::engine::run_deployment_confirmed(
+            &mut self.dep,
+            &harpoon_deploy::engine::Context {
+                previous_release: Some(previous.clone()),
+            },
+            b,
+            j,
+            &SystemClock,
+            &RunConfig::default(),
+            &|| false,
+            confirm,
+        )
+        .expect("the engine itself did not error")
+    }
+
+    /// A healthy release of this application, as a previous deployment left it running.
+    pub fn seed_current_release(&self) -> (String, harpoon_deploy::ids::ReleaseId) {
+        let mut gen = harpoon_deploy::ids::IdGenerator::new(
+            harpoon_deploy::time::SystemClock,
+            harpoon_deploy::time::OsEntropy::new(),
+        );
+        let prev = gen.deployment().unwrap();
+        let name = format!("hp-current-{}", prev.as_str().to_ascii_lowercase());
+        let l = labels(&self.dep.application_id, &prev);
+        let id = self.docker.with(|s| s.add_container(&name, l, true));
+        (id, harpoon_deploy::ids::ReleaseId::from_deployment(&prev))
+    }
+
     pub fn objects_for_dep(&self) -> Vec<Observed> {
         let (app, dep) = (self.dep.application_id.clone(), self.dep.id.clone());
         self.docker.with(|s| {

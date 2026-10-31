@@ -44,8 +44,8 @@ recovery; a gated CLI (`status`, `doctor`, `plan`, `recover`, `reconcile`, `depl
 Evidence: `docs/results/DEPLOY_B7_LIVE_RESULTS.md` (B7 first-deployment acceptance: PASS — not
 general production readiness).
 
-**Not implemented — the full control plane:** permanent SQLite state, health-gated replacement of a
-running release, bounded cutover recovery, explicit rollback (the engine's state machine exists and is
+**Not implemented — the full control plane:** live health-gated replacement of a running release
+(an offline slice exists, see below), bounded cutover recovery, explicit rollback (the engine's state machine exists and is
 tested against a fake backend only; the Docker backend and CLI refuse replacement), and everything in
 Milestones C–E. Milestone B's acceptance criteria are therefore **not yet met**.
 
@@ -79,23 +79,27 @@ separately authorized binary and is never part of a merge.
 | B8.1 | Offline failure/recovery coverage (crash sweeps, interrupted-deploy CLI regression) | Complete | #120 | `docs/results/DEPLOY_CLI.md` (B8.1) |
 | B8.2 | Retained-image cleanup (`cleanup-image`, typed conflict outcome) | Complete (offline; simulated Docker only) | #121 | `docs/results/DEPLOY_CLI.md` (B8.2) |
 | **B8.3** | **Controlled live failure and recovery validation** | **Complete — CONDITIONAL PASS: user-reported L1–L4 live results, exact inventory restoration; live Docker HTTP 409 observed, typed `DockerRefused` journal transition remains untested** | — | `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md` |
-| — | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **In progress — first usable offline slice** | B9 (working branch) | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
-| — | Health-gated replacement of a running release | Not started | — | requirements D5, Milestone B criteria 2–3 |
+| B9 | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **Complete (offline; includes legacy-journal import)** | #124 | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
+| **NEXT** | **Health-gated replacement of a running release** | **Offline slice in review** (PR pending merge): candidate build and preliminary check beside the running release, cutover plan and anticipated interruption shown and confirmed before anything is stopped, measured interruption recorded; `replace --simulate` only — **live replacement is refused** until the next row exists | this branch | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
 | — | Bounded cutover recovery | Not started | — | requirements D5, criterion 4 |
 | — | Explicit rollback | Not started | — | requirements D5, criterion 5 |
 
-The four unnumbered rows run in the order shown, after B8.3. Milestone B is accepted only when its
+The unnumbered rows run in the order shown, after B9. Milestone B is accepted only when its
 requirements criteria 1–7 pass with no stop condition triggered.
 
-### Next executable milestone: Permanent SQLite state
+### Next executable milestone: Health-gated replacement
 
-The B8.3 live evidence is recorded in `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md`. The permanent-state
-slice is now in progress: SQLite schema, ordered replay, transactional writes, one-writer locking,
-legacy journal import, and interrupted-operation recovery are implemented and offline-tested; cutover
-replacement and rollback remain out of scope until this milestone is completed.
-The remaining typed `DockerRefused` live-engine transition is explicitly untested;
-it does not open the shipping gate or claim production readiness. The next work is
-the permanent SQLite state required before replacement or rollback.
+Permanent SQLite state is complete (#124). The replacement slice is implemented offline: the engine
+builds and checks a candidate while the running release keeps running, shows the cutover plan and its
+anticipated interruption before anything is stopped, cuts over only when the plan is confirmed, and
+records the measured interruption in the durable store. A failed build or preliminary check, or an
+unconfirmed plan, leaves the current release running and retains the candidate image and failure
+evidence. **Live replacement stays disabled** (`replace` refuses without `--simulate`; the Docker
+backend reports that it cannot cut over) until **bounded cutover recovery** — the milestone after
+this one — restores the previous release from its retained image and pinned configuration. Pinned
+non-secret configuration snapshots belong to that milestone. The remaining typed `DockerRefused`
+live-engine transition from B8.3 is still untested; nothing here opens the shipping gate or claims
+production readiness.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,

@@ -1064,6 +1064,13 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         self.health(io, &b, &id, &name, lease.host_port, "the preliminary check")
     }
 
+    /// Replacing a running release stays disabled here until the bounded restoration exists
+    /// (`restore_previous`). The engine then stops after the preliminary check, before anything is
+    /// stopped, and reports the candidate as prepared.
+    fn supports_cutover(&self) -> bool {
+        false
+    }
+
     fn stop_current(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         Err(StepError::new(
             "replacing a running release is not implemented in this backend (B3 covers the first deployment only)",

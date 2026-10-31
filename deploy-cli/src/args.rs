@@ -80,6 +80,27 @@ const SPECS: &[Spec] = &[
         switches: &["simulate"],
     },
     Spec {
+        command: "replace",
+        values: &[
+            "runtime-dir",
+            "project-dir",
+            "context",
+            "dockerfile",
+            "container-port",
+            "health-path",
+            "resources-dir",
+            "docker-socket",
+            "app",
+            "health-timeout-secs",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+        ],
+        switches: &["simulate", "confirm-cutover"],
+    },
+    Spec {
         command: "export-journal",
         values: &["runtime-dir", "to"],
         switches: &[],
@@ -191,6 +212,7 @@ COMMANDS
   recover         mark interrupted deployments (writes the journal); never touches Docker
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
+  replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; --simulate only (live replacement is not enabled)
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
   cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)
