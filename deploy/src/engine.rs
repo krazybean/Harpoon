@@ -196,6 +196,8 @@ pub struct RunConfig {
     /// The pinned configuration of the release being replaced, from its durable record. Without it
     /// a failed cutover cannot attempt a restoration and says why.
     pub previous: Option<ReleaseConfig>,
+    /// Where the release being replaced actually serves from, when that is not its own container.
+    pub previous_container: Option<crate::backend::ContainerRef>,
 }
 
 impl Default for RunConfig {
@@ -207,6 +209,7 @@ impl Default for RunConfig {
             redactor: Redactor::none(),
             prior_ledger: Ledger::new(),
             previous: None,
+            previous_container: None,
         }
     }
 }
@@ -238,6 +241,9 @@ pub struct CutoverPlan {
     /// budget, and the final check follows. The application can be down for all of it.
     pub max_interruption_ms: u64,
     pub restore_budget_ms: u64,
+    /// Whether the release being replaced has a pinned configuration. Without one, a failed
+    /// cutover cannot be restored and the plan says so.
+    pub restorable: bool,
 }
 
 impl CutoverPlan {
@@ -257,6 +263,7 @@ impl CutoverPlan {
                 .saturating_mul(2)
                 .saturating_add(cfg.budgets.final_ms),
             restore_budget_ms: cfg.policy.restore_budget_ms,
+            restorable: cfg.previous.is_some(),
         }
     }
 
@@ -276,6 +283,14 @@ impl CutoverPlan {
             ),
             "  no zero-downtime claim; data, volumes and schema are not touched".to_string(),
         ]
+        .into_iter()
+        .chain((!self.restorable).then(|| {
+            format!(
+                "  WARNING: release {} has no pinned configuration, so if this cutover fails it cannot be restored and the application stays down",
+                self.previous
+            )
+        }))
+        .collect()
     }
 }
 
@@ -299,6 +314,8 @@ pub struct Report {
     pub deployment: DeploymentId,
     /// Set when the candidate was built and checked but the cutover was deliberately not begun.
     pub prepared: Option<Prepared>,
+    /// Why an explicit recovery was not started (nothing was recorded or changed).
+    pub blocked: Vec<String>,
     pub status: DeploymentStatus,
     pub pause: Option<PauseReason>,
     /// The ledger as it ended. Failed or refused cleanups are in here and stay there.
@@ -642,10 +659,15 @@ pub fn reconcile(
                 let Action::ReleaseLease { entry } = &action else {
                     unreachable!()
                 };
+                // A container a restoration recreated serves on the *previous* release's lease, not on
+                // this deployment's, so it does not hold this deployment's leases.
+                let restored = crate::serving::restored_container_name(&entry.0);
                 let containers_settled = ledger
                     .entries()
                     .iter()
-                    .filter(|e| e.deployment == entry.0 && e.key.kind == ResourceKind::Container)
+                    .filter(|e| {
+                        e.deployment == entry.0 && e.key.kind == ResourceKind::Container && e.key.name != restored
+                    })
                     .all(|e| e.is_released());
                 if containers_settled {
                     unaccounted.extend(execute_actions(
@@ -998,11 +1020,45 @@ impl Run<'_> {
         self.save()
     }
 
-    /// Pin the configuration the new release started with, durably, before its final check. A
-    /// release that never gets a pin simply cannot be restored later, and says so.
-    fn pin(&mut self) -> R<()> {
-        self.d.pinned = self.backend.pinned_config();
-        self.save()
+    /// Decide the new release's configuration and pin it durably **before** anything is created or
+    /// stopped, so a release that serves always has its pin on disk. `Ok(false)` = the plan could
+    /// not be made; the deployment has ended `Failed` with nothing stopped (no cutover began).
+    fn plan_and_pin(&mut self) -> R<bool> {
+        let budget = self.cfg.budgets.cutover_ms;
+        let (res, elapsed) = self.exec(Step::Cutover, budget, |b, io| b.plan_release(io))?;
+        match res {
+            Ok(Some(config)) => {
+                self.d.pinned = Some(config);
+                self.save()?;
+                Ok(true)
+            }
+            Ok(None) => Ok(true), // the backend cannot plan: the release is not pinned, and says so later
+            Err(e) => {
+                let message = self.describe(Step::Cutover, &e, elapsed, budget);
+                let now = self.now();
+                self.d.failure = Some(Failure {
+                    step: Step::Cutover,
+                    kind: FailureKind::Cutover,
+                    message,
+                    timed_out: e.timed_out,
+                });
+                self.d.transition(DeploymentStatus::Failed, now)?;
+                self.save()?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// After the new release started: if what it actually runs with differs from the plan (a port
+    /// collision moved it), correct the pin at once.
+    fn repin(&mut self) -> R<()> {
+        if let Some(actual) = self.backend.pinned_config() {
+            if self.d.pinned.as_ref() != Some(&actual) {
+                self.d.pinned = Some(actual);
+                self.save()?;
+            }
+        }
+        Ok(())
     }
 
     /// The one bounded restoration attempt. Never retried; reports exactly what happened.
@@ -1013,6 +1069,22 @@ impl Run<'_> {
         };
         if prev.config.is_none() {
             return Ok(RecoveryOutcome::NotAttempted(Reason::ConfigUnavailable));
+        }
+        // Read-only: is something already running on the port? Then nothing is created.
+        let mut found = Vec::new();
+        let (checked, _) = self.exec(Step::Recovery, budget_ms, |b, io| {
+            found = b.restore_blockers(io, &prev)?;
+            Ok(())
+        })?;
+        if let Err(e) = checked {
+            let m = self.cfg.redactor.apply(&e.message).0;
+            self.warnings
+                .push(format!("could not check what holds the previous release's port: {m}"));
+        }
+        if !found.is_empty() {
+            self.warnings
+                .extend(found.into_iter().map(|f| format!("restoration blocked: {f}")));
+            return Ok(RecoveryOutcome::NotAttempted(Reason::PortInUse));
         }
         let mut got = None;
         let (res, _) = self.exec(Step::Recovery, budget_ms, |b, io| {
@@ -1157,6 +1229,7 @@ pub fn run_deployment_confirmed(
             release: r.clone(),
             deployment: r.deployment(),
             config: cfg.previous.clone(),
+            container: cfg.previous_container.clone(),
         }),
     };
     let now = run.now();
@@ -1187,6 +1260,9 @@ pub fn run_deployment_confirmed(
     match &ctx.previous_release {
         None => {
             // First deployment: nothing to stop, nothing to restore.
+            if !run.plan_and_pin()? {
+                return finish(run);
+            }
             run.d.cutover_not_required()?;
             let now = run.now();
             run.d.start_step(Step::Cutover, now)?;
@@ -1207,7 +1283,8 @@ pub fn run_deployment_confirmed(
             }
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
-            run.pin()?;
+            run.repin()?;
+            run.save()?;
             let chk = run.final_check()?;
             let now = run.now();
             match chk {
@@ -1246,8 +1323,14 @@ pub fn run_deployment_confirmed(
                 run.end_cancelled()?;
                 return finish(run);
             }
-            // The journal entry goes to disk BEFORE the healthy release is stopped.
+            // The new release's configuration is pinned before anything is stopped or created.
+            if !run.plan_and_pin()? {
+                return finish(run);
+            }
+            // The journal entry goes to disk BEFORE the healthy release is stopped, and it says
+            // which release that is.
             let now = run.now();
+            run.d.replaces = Some(previous.clone());
             run.d.begin_cutover(now)?;
             run.d.start_step(Step::Cutover, now)?;
             run.save()?;
@@ -1261,7 +1344,7 @@ pub fn run_deployment_confirmed(
                 run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, m, to, false, budget)?;
                 return finish(run);
             }
-            run.pin()?;
+            run.repin()?;
             let now = run.now();
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
@@ -1295,6 +1378,15 @@ pub fn recover_cutover(
     clock: &dyn Clock,
     cfg: &RunConfig,
 ) -> Result<Report, EngineError> {
+    // Eligibility first, before anything is read from the runtime: a second attempt is refused
+    // without contacting Docker.
+    if !d.can_recover_explicitly() {
+        return Err(EngineError::Transition(TransitionError::Cutover {
+            from: d.cutover,
+            attempted:
+                "explicit recovery (needs an interrupted deployment whose cutover began and has no recovery yet)",
+        }));
+    }
     let never = || false;
     let mut run = Run {
         d,
@@ -1315,6 +1407,45 @@ pub fn recover_cutover(
         }),
     };
     let budget = cfg.policy.restore_budget_ms;
+    // The deployment must say what it replaced, and the caller must mean that release.
+    let recorded = run.d.replaces.clone();
+    let wanted = run.previous.as_ref().map(|p| p.release.clone());
+    if recorded.is_none() || recorded != wanted {
+        return Err(EngineError::Transition(TransitionError::Cutover {
+            from: run.d.cutover,
+            attempted: "explicit recovery (the deployment does not record replacing that release)",
+        }));
+    }
+    // Read-only precheck: an occupied port blocks before anything is recorded, so the one attempt
+    // is not spent on a conflict the developer can clear.
+    let prev = run.previous.clone().expect("set above");
+    if prev.config.is_some() {
+        let mut found = Vec::new();
+        let (checked, _) = run.exec(Step::Recovery, budget, |b, io| {
+            found = b.restore_blockers(io, &prev)?;
+            Ok(())
+        })?;
+        if let Err(e) = checked {
+            found.push(format!(
+                "could not check what holds the previous release's port: {}",
+                e.message
+            ));
+        }
+        if !found.is_empty() {
+            return Ok(Report {
+                deployment: run.d.id.clone(),
+                prepared: None,
+                blocked: found,
+                status: run.d.status,
+                pause: Some(PauseReason::FailedCutover),
+                ledger: run.ledger,
+                evidence: run.evidence,
+                logs: run.logs,
+                warnings: run.warnings,
+                unaccounted: run.unaccounted,
+            });
+        }
+    }
     let now = run.now();
     run.d.begin_explicit_recovery(budget, now)?;
     run.save()?; // the attempt is on disk before anything is touched
@@ -1327,6 +1458,7 @@ pub fn recover_cutover(
     Ok(Report {
         deployment: run.d.id.clone(),
         prepared: None,
+        blocked: Vec::new(),
         status: run.d.status,
         pause: Some(PauseReason::FailedCutover),
         ledger: run.ledger,
@@ -1346,6 +1478,7 @@ fn finish(mut run: Run<'_>) -> Result<Report, EngineError> {
     Ok(Report {
         deployment: run.d.id.clone(),
         prepared: run.prepared,
+        blocked: Vec::new(),
         status: run.d.status,
         pause,
         ledger: run.ledger,

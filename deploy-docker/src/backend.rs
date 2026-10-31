@@ -142,6 +142,8 @@ struct State {
     /// Set only while the one restoration attempt runs: creation and the health check use the
     /// previous release's pinned configuration instead of this attempt's.
     restoring: Option<PreviousRelease>,
+    /// The application port reserved by `plan_release`, used by the next `start_new`.
+    planned_lease: Option<PortLease>,
 }
 
 type CopyHook = Box<dyn FnMut(&Path)>;
@@ -1113,6 +1115,124 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         self.cfg.enable_replacement
     }
 
+    fn plan_release(&mut self, io: &mut StepIo<'_>) -> Result<Option<ReleaseConfig>, StepError> {
+        let b = Budget::new(io.budget_ms);
+        let (Some(image_id), Some(image_tag)) =
+            (self.st.image_id.clone(), self.st.image_tag.clone())
+        else {
+            return Err(StepError::new(
+                "no verified image was built; there is nothing to plan",
+            ));
+        };
+        let occ = self.occupancy(io, Purpose::Application, &b)?;
+        let lease = ports::allocate(
+            Purpose::Application,
+            self.cfg.container_port,
+            &occ,
+            None,
+            &[],
+        )
+        .map_err(|e| StepError::new(e.to_string()))?;
+        io.lease_port(lease)?;
+        self.st.planned_lease = Some(lease);
+        Ok(Some(ReleaseConfig {
+            image_id,
+            image_tag,
+            container_port: self.cfg.container_port,
+            host_port: lease.host_port,
+            health: self.cfg.health.clone(),
+            memory_bytes: self.cfg.limits.memory_bytes,
+            nano_cpus: self.cfg.limits.nano_cpus,
+            pids: self.cfg.limits.pids,
+        }))
+    }
+
+    /// Read-only: running containers that already publish the previous release's port, with who
+    /// owns them. The previous release's own recorded container is not a blocker. Nothing is
+    /// stopped, created or removed to answer this.
+    fn restore_blockers(
+        &mut self,
+        io: &mut StepIo<'_>,
+        previous: &PreviousRelease,
+    ) -> Result<Vec<String>, StepError> {
+        let Some(cfg) = previous.config.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let b = Budget::new(io.budget_ms);
+        let own: Vec<String> = io
+            .ledger()
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.key.kind == ResourceKind::Container
+                    && (e.deployment == previous.deployment
+                        || previous
+                            .container
+                            .as_ref()
+                            .is_some_and(|c| c.owner == e.deployment && c.name == e.key.name))
+            })
+            .filter_map(|e| e.id.clone())
+            .collect();
+        let list = self
+            .api
+            .list_containers(b.left("listing containers for the previous release's port")?)
+            .map_err(|e| api_err("listing containers for the previous release's port", e))?;
+        let mut out = Vec::new();
+        for c in list {
+            if own.contains(&c.id) {
+                continue;
+            }
+            let publishes = if c.state == "running" {
+                c.host_ports.contains(&cfg.host_port)
+            } else {
+                self.api
+                    .configured_host_ports(
+                        &c.id,
+                        b.left("reading a container's port configuration")?,
+                    )
+                    .map_err(|e| api_err("reading a container's port configuration", e))?
+                    .contains(&cfg.host_port)
+            };
+            if !publishes {
+                continue;
+            }
+            let owner = if c
+                .labels
+                .iter()
+                .any(|(k, v)| k == labels::APP && *v == io.app().to_string())
+            {
+                let dep = c
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == labels::DEPLOYMENT)
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("?");
+                format!("it carries this application's Harpoon labels (deployment {dep}); if it is the failed candidate, `reconcile` removes it after verifying that ownership")
+            } else if c.labels.iter().any(|(k, _)| k == labels::MANAGED) {
+                "it carries another application's Harpoon labels and is not touched".to_string()
+            } else {
+                "it carries no Harpoon labels and is not touched; free the port yourself"
+                    .to_string()
+            };
+            if c.state == "running" {
+                out.push(format!(
+                    "port {} is published by the running container {} ({}): {owner}",
+                    cfg.host_port,
+                    c.name,
+                    short(&c.id)
+                ));
+            } else {
+                io.log.push_line(&format!(
+                    "port {} is configured on the stopped container {} ({}), which does not bind it: {owner}",
+                    cfg.host_port,
+                    c.name,
+                    short(&c.id)
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     fn pinned_config(&self) -> Option<ReleaseConfig> {
         let (_, host_port) = self.st.app.clone()?;
         Some(ReleaseConfig {
@@ -1141,7 +1261,14 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             .entries()
             .iter()
             .find(|e| {
-                e.deployment == previous.deployment
+                // The container that actually serves it: after a restoration that is the restored
+                // one, recorded under the deployment that restored it.
+                let (owner, name) = match &previous.container {
+                    Some(c) => (&c.owner, Some(&c.name)),
+                    None => (&previous.deployment, None),
+                };
+                e.deployment == *owner
+                    && name.is_none_or(|n| e.key.name == *n)
                     && e.app == *io.app()
                     && e.key.kind == ResourceKind::Container
                     && !e.is_released()
@@ -1158,7 +1285,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             id: entry.id.clone().unwrap_or_default(),
             name: entry.key.name.clone(),
             app: entry.app.clone(),
-            deployment: previous.deployment.clone(),
+            deployment: entry.deployment.clone(),
         };
         match self.verify_container(&req, b.left("re-checking the current release")?)? {
             Verified::Absent => Err(StepError::new(
@@ -1179,16 +1306,23 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
 
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         let b = Budget::new(io.budget_ms);
-        let occ = self.occupancy(io, Purpose::Application, &b)?;
-        let mut lease = ports::allocate(
-            Purpose::Application,
-            self.cfg.container_port,
-            &occ,
-            None,
-            &[],
-        )
-        .map_err(|e| StepError::new(e.to_string()))?;
-        io.lease_port(lease)?;
+        // The port was reserved (and the configuration pinned) before this step by `plan_release`.
+        let mut lease = match self.st.planned_lease.take() {
+            Some(l) => l,
+            None => {
+                let occ = self.occupancy(io, Purpose::Application, &b)?;
+                let l = ports::allocate(
+                    Purpose::Application,
+                    self.cfg.container_port,
+                    &occ,
+                    None,
+                    &[],
+                )
+                .map_err(|e| StepError::new(e.to_string()))?;
+                io.lease_port(l)?;
+                l
+            }
+        };
         let mut name = serving_name(io.deployment());
         let mut id = self.create_container(io, &b, &name, Disposition::RemoveOnFailure, &lease)?;
         self.st.app = Some((name.clone(), lease.host_port));
@@ -1363,6 +1497,27 @@ impl<T: HttpTransport> DockerBackend<T> {
         // The previous release still holds its port lease in the ledger, which is what kept the port
         // reserved while it was stopped; the restored container serves on that same lease. A lease
         // held by anyone else is not ours to use; a free one is taken the usual way.
+        let leased_by_previous: Vec<String> = io
+            .ledger()
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.key.kind == ResourceKind::PortLease
+                    && e.deployment == previous.deployment
+                    && !e.is_released()
+            })
+            .map(|e| e.key.name.clone())
+            .collect();
+        if !leased_by_previous.is_empty()
+            && !leased_by_previous.contains(&cfg.host_port.to_string())
+        {
+            io.log.push_line(&format!(
+                "restoration: the pinned port {} is not the port the previous release leased ({}); the pin cannot be trusted, so nothing was created",
+                cfg.host_port,
+                leased_by_previous.join(", ")
+            ));
+            return Ok(RestoreResult::NotAttempted(Reason::ConfigUnavailable));
+        }
         let holder = io
             .ledger()
             .entries()
@@ -1388,7 +1543,7 @@ impl<T: HttpTransport> DockerBackend<T> {
                 }
             }
         }
-        let name = format!("hp-{}-restored", io.deployment());
+        let name = harpoon_deploy::serving::restored_container_name(io.deployment());
         let id = match self.create_container(io, b, &name, Disposition::Retain, &lease) {
             Ok(id) => id,
             Err(e) => return judged(io, e, Reason::StartFailed),

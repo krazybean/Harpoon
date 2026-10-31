@@ -164,6 +164,8 @@ pub enum Reason {
     /// The previous release's pinned configuration was never stored (it predates pinning, or the
     /// release never reached its serving container).
     ConfigUnavailable,
+    /// A running container already publishes the previous release's port, so nothing was created.
+    PortInUse,
     /// The process died while the restoration was running; what it did is unknown.
     Interrupted,
     ImageMissing,
@@ -181,6 +183,9 @@ impl Reason {
             Reason::NoPreviousRelease => "there was no previous release to restore",
             Reason::ConfigUnavailable => {
                 "the previous release's pinned configuration was never stored (config_unavailable)"
+            }
+            Reason::PortInUse => {
+                "a running container already publishes the previous release's port; nothing was created (port_in_use)"
             }
             Reason::Interrupted => "the restoration was interrupted and its result is unknown (interrupted)",
             Reason::ImageMissing => "the previous release's image is unavailable (image_missing)",
@@ -315,6 +320,9 @@ pub struct Deployment {
     pub release: Option<ReleaseId>,
     /// The non-secret configuration needed to recreate this release, pinned when it started serving.
     pub pinned: Option<crate::release::ReleaseConfig>,
+    /// The release this deployment replaces, recorded in the same write that begins the cutover so
+    /// a crash can still say what was stopped and what an explicit recovery must restore.
+    pub replaces: Option<ReleaseId>,
 }
 
 impl Deployment {
@@ -343,6 +351,7 @@ impl Deployment {
             interruption: None,
             release: None,
             pinned: None,
+            replaces: None,
         }
     }
 
@@ -492,12 +501,17 @@ impl Deployment {
     /// deployment whose cutover began and which has no recovery yet may do this; the interrupted
     /// status itself never changes, and the `Recovery` step (skipped when the deployment was
     /// marked interrupted) runs now.
-    pub fn begin_explicit_recovery(&mut self, budget_ms: u64, now_ms: u64) -> Result<(), TransitionError> {
-        let ok = self.status == DeploymentStatus::Interrupted
+    /// Whether the explicit restoration may still be made: an interrupted deployment whose cutover
+    /// began and which has no recorded attempt. Pure; contacts nothing.
+    pub fn can_recover_explicitly(&self) -> bool {
+        self.status == DeploymentStatus::Interrupted
             && matches!(self.cutover, CutoverState::Begun { .. })
             && self.recovery.is_none()
-            && self.step(Step::Recovery).status == StepStatus::Skipped;
-        if !ok {
+            && self.step(Step::Recovery).status == StepStatus::Skipped
+    }
+
+    pub fn begin_explicit_recovery(&mut self, budget_ms: u64, now_ms: u64) -> Result<(), TransitionError> {
+        if !self.can_recover_explicitly() {
             return Err(TransitionError::Cutover {
                 from: self.cutover,
                 attempted:
