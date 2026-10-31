@@ -9,6 +9,7 @@
 
 use crate::ids::{ApplicationId, DeploymentId, ReleaseId};
 use crate::ledger::{Ledger, ResourceKind};
+use crate::release::ReleaseConfig;
 use crate::state::{Deployment, DeploymentStatus, RecoveryOutcome};
 
 /// The name of the container a restoration creates for the deployment `failed`.
@@ -22,6 +23,8 @@ pub enum ServedBy {
     Original,
     /// A container recreated by the bounded restoration of this failed deployment.
     Restored { by: DeploymentId },
+    /// A container a developer-initiated rollback created from the release's retained image.
+    RolledBack { by: DeploymentId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +38,9 @@ pub struct Serving {
     pub container_name: String,
     pub via: ServedBy,
     pub since_ms: u64,
+    /// The configuration this container actually serves with (what a later replacement or rollback
+    /// would have to restore), when one was pinned.
+    pub config: Option<ReleaseConfig>,
 }
 
 /// The release `app` serves now, or `None` when nothing is recorded as serving.
@@ -66,14 +72,24 @@ pub fn serving_release(ledger: &Ledger, deployments: &[Deployment], app: &Applic
     for d in deployments.iter().filter(|d| d.application_id == *app) {
         if d.status == DeploymentStatus::Succeeded {
             if let (Some(rel), Some(name)) = (d.release.clone(), live_container(&d.id, None)) {
+                // A rollback serves the *earlier* release, from a container of its own.
+                let (release, deployment, via) = match &d.rollback_to {
+                    Some(target) => (
+                        target.clone(),
+                        target.deployment(),
+                        ServedBy::RolledBack { by: d.id.clone() },
+                    ),
+                    None => (rel, d.id.clone(), ServedBy::Original),
+                };
                 consider(Serving {
                     application: app.clone(),
-                    release: rel,
-                    deployment: d.id.clone(),
+                    release,
+                    deployment,
                     container_owner: d.id.clone(),
                     container_name: name,
-                    via: ServedBy::Original,
+                    via,
                     since_ms: d.finished_ms.unwrap_or(d.created_ms),
+                    config: d.pinned.clone(),
                 });
             }
         }
@@ -86,6 +102,10 @@ pub fn serving_release(ledger: &Ledger, deployments: &[Deployment], app: &Applic
         if let (Some(rec), Some(rel)) = (restored, d.replaces.clone()) {
             if let Some(name) = live_container(&d.id, Some(&restored_container_name(&d.id))) {
                 consider(Serving {
+                    config: deployments
+                        .iter()
+                        .find(|x| x.id == rel.deployment())
+                        .and_then(|x| x.pinned.clone()),
                     application: app.clone(),
                     deployment: rel.deployment(),
                     release: rel,
@@ -114,6 +134,11 @@ pub fn containers_of_release<'a>(
         .filter(|e| e.key.kind == ResourceKind::Container)
         .filter(|e| {
             e.deployment == *release_dep
+                || deployments.iter().any(|f| {
+                    f.id == e.deployment
+                        && f.rollback_to.as_ref() == Some(&release)
+                        && f.status == DeploymentStatus::Succeeded
+                })
                 || deployments.iter().any(|f| {
                     f.id == e.deployment
                         && f.replaces.as_ref() == Some(&release)

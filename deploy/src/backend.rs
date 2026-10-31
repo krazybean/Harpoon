@@ -321,6 +321,7 @@ pub struct FakeBackend {
     restore_error: Option<StepError>,
     blockers: Vec<String>,
     plan_error: Option<StepError>,
+    rollback: Option<ReleaseConfig>,
 }
 
 impl FakeBackend {
@@ -350,6 +351,7 @@ impl FakeBackend {
             restore_error: None,
             blockers: Vec::new(),
             plan_error: None,
+            rollback: None,
         }
     }
 
@@ -448,6 +450,12 @@ impl FakeBackend {
     /// A restoration would find these problems (for example an occupied port) before creating anything.
     pub fn restore_blocked_by(mut self, problems: &[&str]) -> Self {
         self.blockers = problems.iter().map(|p| p.to_string()).collect();
+        self
+    }
+    /// A rollback to the release pinned as `target`: nothing is built, no image is created, and the
+    /// release serves with the target's pinned configuration (only the port is chosen afresh).
+    pub fn with_rollback(mut self, target: ReleaseConfig) -> Self {
+        self.rollback = Some(target);
         self
     }
     /// Deciding the new release's configuration fails, before anything is created or stopped.
@@ -574,6 +582,9 @@ impl Backend for FakeBackend {
         let r = self.run(Call::Build, |b| b.build.clone());
         io.log.push_line("fake build output");
         r?;
+        if self.rollback.is_some() {
+            return Ok(());
+        }
         let tag = format!("harpoon/{}:{}", io.app(), io.deployment());
         self.create(io, ResourceKind::Image, &tag, Disposition::Retain)
     }
@@ -593,10 +604,16 @@ impl Backend for FakeBackend {
         if let Some(e) = self.plan_error.clone() {
             return Err(e);
         }
-        Ok(Some(ReleaseConfig::simulated(39000)))
+        Ok(self.pinned_config())
     }
     fn pinned_config(&self) -> Option<ReleaseConfig> {
-        Some(ReleaseConfig::simulated(39000))
+        Some(match &self.rollback {
+            Some(t) => ReleaseConfig {
+                host_port: 39000,
+                ..t.clone()
+            },
+            None => ReleaseConfig::simulated(39000),
+        })
     }
     fn restore_blockers(
         &mut self,

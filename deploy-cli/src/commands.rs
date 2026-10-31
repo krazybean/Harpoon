@@ -43,6 +43,8 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "deploy" => deploy(p, gate, out),
         "replace" => replace(p, out),
         "restore" => restore(p, out),
+        "releases" => releases(p, out),
+        "rollback" => rollback(p, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
@@ -395,6 +397,16 @@ fn status(p: &Parsed, out: &mut String) -> R {
             "  {} {} app={} created_ms={}",
             d.id, d.status, d.application_id, d.created_ms
         );
+        if let Some(t) = &d.rollback_to {
+            let _ = writeln!(
+                out,
+                "    rollback to release {t}{}",
+                d.replaces
+                    .as_ref()
+                    .map(|r| format!(", replacing {r}"))
+                    .unwrap_or_default()
+            );
+        }
         if let Some(f) = &d.failure {
             let _ = writeln!(
                 out,
@@ -454,11 +466,20 @@ fn status(p: &Parsed, out: &mut String) -> R {
                 match &sv.via {
                     harpoon_deploy::serving::ServedBy::Original => String::new(),
                     harpoon_deploy::serving::ServedBy::Restored { by } => format!(" (restored by {by})"),
+                    harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
                 }
             );
         }
     }
     for pz in trigger_pauses(&r.deployments) {
+        if let Some(t) = &pz.rollback {
+            let _ = writeln!(
+                out,
+                "automatic triggers paused for application {}: deployment {} rolled the application back to release {t}; automatic deployment does not resume by itself and there is no `resume` yet",
+                pz.application, pz.deployment,
+            );
+            continue;
+        }
         let _ = writeln!(
             out,
             "automatic triggers paused for application {}: deployment {} {} ({}); there is no `resume` yet",
@@ -1291,7 +1312,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
     d.transition(DeploymentStatus::Queued, now_ms())
         .map_err(|e| Fail::failed(e.to_string()))?;
     let mut cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
-    cfg.previous = find_dep(&deps, &cur_dep).and_then(|d| d.pinned.clone());
+    cfg.previous = serving.config.clone();
     cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
         owner: serving.container_owner.clone(),
         name: serving.container_name.clone(),
@@ -1307,6 +1328,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         match &serving.via {
             harpoon_deploy::serving::ServedBy::Original => String::new(),
             harpoon_deploy::serving::ServedBy::Restored { by } => format!(" (restored by {by})"),
+            harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
         }
     );
     for l in plan.lines() {
@@ -1415,6 +1437,243 @@ fn print_recovery(out: &mut String, d: &Deployment) {
             "the application may be down; the failed candidate was kept for inspection"
         );
     }
+}
+
+// ------------------------------------------------------------------ releases and rollback
+
+/// Why an application cannot be changed right now, whatever the change: an unfinished deployment,
+/// an unresolved resource, or a cutover that was never confirmed.
+fn operation_blockers(ledger: &Ledger, deps: &[Deployment], what: &str) -> Vec<String> {
+    let mut blockers = unfinished(deps);
+    blockers.extend(unresolved(ledger, deps));
+    blockers.extend(deps.iter().filter(|d| d.application_may_be_down()).map(|d| {
+        format!(
+            "deployment {} began a cutover that was never confirmed: the application may be down. {what} is blocked until it is resolved (see `status`)",
+            d.id
+        )
+    }));
+    blockers
+}
+
+/// The retained releases of one application, read from the journal. Reads only: no Docker, no
+/// writer lock, nothing created.
+fn releases(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let app: ApplicationId = p
+        .value("app")
+        .ok_or_else(|| Fail::usage("releases needs --app APPLICATION_ID"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?;
+    let Some(r) = store::read_restored(&rt)? else {
+        return Err(Fail::refused(
+            "there is no journal; no releases are recorded",
+        ));
+    };
+    let list = harpoon_deploy::rollback::retained_releases(&r.ledger, &r.deployments, &app);
+    let serving = harpoon_deploy::serving::serving_release(&r.ledger, &r.deployments, &app);
+    match &serving {
+        Some(s) => {
+            let _ = writeln!(
+                out,
+                "application {app} serves release {} (deployment {}) in container {}",
+                s.release, s.deployment, s.container_name
+            );
+        }
+        None => {
+            let _ = writeln!(out, "application {app} has no serving release recorded");
+        }
+    }
+    if list.is_empty() {
+        let _ = writeln!(out, "no succeeded releases are recorded");
+    }
+    for rel in &list {
+        let state = if rel.serving {
+            "SERVING"
+        } else if rel.eligible() {
+            "rollback-target"
+        } else {
+            "not a rollback target"
+        };
+        let _ = writeln!(
+            out,
+            "  {} deployment {} finished_ms={} {state}",
+            rel.release, rel.deployment, rel.finished_ms
+        );
+        if let Some(c) = &rel.config {
+            let _ = writeln!(out, "    pinned image {} (tag {})", c.image_id, c.image_tag);
+        }
+        if !rel.eligible() && !rel.serving {
+            for pr in &rel.problems {
+                let _ = writeln!(out, "    - {pr}");
+            }
+        }
+    }
+    let _ = writeln!(
+        out,
+        "roll back with: harpoon-deploy rollback --app {app} --to RELEASE_ID --simulate [--confirm-rollback] (the exact release id, nothing is guessed)"
+    );
+    Ok(exit::OK)
+}
+
+/// Developer-initiated rollback to one named earlier release, offline only. The target's retained
+/// image and pinned configuration are used as they are (nothing is rebuilt); the serving release
+/// keeps running until the target is prepared and has passed its preliminary check; the plan, the
+/// interruption and the data warning are printed before anything is stopped; the cutover needs
+/// `--confirm-rollback`. A failed cutover gets the same one bounded restoration as a replacement.
+fn rollback(p: &Parsed, out: &mut String) -> R {
+    if !p.switch("simulate") {
+        return Err(Fail::refused(
+            "live rollback is not enabled in this build: live replacement, which a rollback is, is not enabled. \
+             Nothing was read, written or contacted. Use `rollback --simulate` against a separate runtime directory for an offline run.",
+        ));
+    }
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let app: ApplicationId = p
+        .value("app")
+        .ok_or_else(|| Fail::usage("rollback needs --app APPLICATION_ID"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?;
+    let target: harpoon_deploy::ids::ReleaseId = p
+        .value("to")
+        .ok_or_else(|| Fail::usage("rollback needs --to RELEASE_ID (see `releases`)"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--to is not a release id: {e}")))?;
+    // Look before opening the writer: a refusal must not create a journal.
+    let Some(existing) = store::read_restored(&rt)? else {
+        return Err(rollback_refused(&[format!(
+            "application {app} has no releases recorded"
+        )]));
+    };
+    harpoon_deploy::rollback::select_target(&existing.ledger, &existing.deployments, &app, &target)
+        .map_err(|why| rollback_refused(&why))?;
+    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let deps = restored.deployments.clone();
+    let blockers = operation_blockers(&restored.ledger, &deps, "A rollback");
+    if !blockers.is_empty() {
+        return Err(rollback_refused(&blockers));
+    }
+    // Decided again from the writer's own view, which is what the run will use.
+    let chosen = harpoon_deploy::rollback::select_target(&restored.ledger, &deps, &app, &target)
+        .map_err(|why| rollback_refused(&why))?;
+    let target_config = chosen.config.expect("an eligible target has a pin");
+    let Some(serving) = current_release(&restored.ledger, &deps, &app) else {
+        return Err(rollback_refused(&[format!(
+            "application {app} has no serving release recorded"
+        )]));
+    };
+
+    let mut gen = IdGenerator::new(SystemClock, OsEntropy::new());
+    let dep_id = gen
+        .deployment()
+        .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?;
+    let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
+    d.rollback_to = Some(target.clone());
+    d.transition(DeploymentStatus::Queued, now_ms())
+        .map_err(|e| Fail::failed(e.to_string()))?;
+    let mut cfg = deployment_config(
+        target_config.health.startup_deadline_ms,
+        restored.ledger.clone(),
+    );
+    cfg.previous = serving.config.clone();
+    cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: serving.container_owner.clone(),
+        name: serving.container_name.clone(),
+    });
+    let mut plan = CutoverPlan::new(&d.application_id, &serving.release, &d.id, &cfg);
+    plan.candidate = target.clone();
+    plan.rollback = true;
+    let _ = writeln!(
+        out,
+        "rollback deployment {} (application {}) — SIMULATED, no Docker",
+        d.id, d.application_id
+    );
+    let _ = writeln!(
+        out,
+        "serving now: release {} (deployment {}), container {} of deployment {}",
+        serving.release, serving.deployment, serving.container_name, serving.container_owner
+    );
+    let _ = writeln!(
+        out,
+        "rolling back to: release {target} (deployment {}), pinned image {}",
+        target.deployment(),
+        target_config.image_id
+    );
+    for l in plan.lines() {
+        let _ = writeln!(out, "{l}");
+    }
+    let confirmed = p.switch("confirm-rollback");
+    if !confirmed {
+        let _ = writeln!(
+            out,
+            "rollback not confirmed: the target will be prepared and checked, then the run stops with the serving release untouched"
+        );
+    }
+
+    let ctx = Context {
+        previous_release: Some(serving.release.clone()),
+    };
+    let clock = ManualClock::new(now_ms());
+    let mut b = FakeBackend::new(clock.clone())
+        .with_runtime(FakeRuntime::world())
+        .with_rollback(target_config);
+    let report = run_deployment_confirmed(
+        &mut d,
+        &ctx,
+        &mut b,
+        &mut journal,
+        &clock,
+        &cfg,
+        &|| false,
+        &|_: &CutoverPlan| confirmed,
+    )
+    .map_err(|e| {
+        Fail::failed(format!(
+            "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`. A rollback is never repeated automatically."
+        ))
+    })?;
+    print_report(out, &d, &report);
+    if let Some(i) = &d.interruption {
+        let _ = match i.duration_ms() {
+            Some(ms) => writeln!(
+                out,
+                "measured interruption: {ms} ms (simulated clock; a real cutover has not been measured)"
+            ),
+            None => writeln!(
+                out,
+                "interruption still open: the application may be down; run `recover`"
+            ),
+        };
+    }
+    if report.prepared.is_some() {
+        let _ = writeln!(
+            out,
+            "target prepared, serving release untouched. Re-run with --confirm-rollback to perform the (simulated) rollback."
+        );
+        return Ok(exit::OK);
+    }
+    if d.status == DeploymentStatus::Succeeded && report.is_clean() {
+        let _ = writeln!(
+            out,
+            "rolled back: application {} serves release {target}, verified by its final health check. Application rollback only; data, volumes and database schema were NOT rolled back.",
+            d.application_id
+        );
+        let _ = writeln!(
+            out,
+            "automatic triggers are paused for application {}; they do not resume by themselves",
+            d.application_id
+        );
+        return Ok(exit::OK);
+    }
+    Ok(exit::FAILED)
+}
+
+fn rollback_refused(blockers: &[String]) -> Fail {
+    let mut m = String::from("rollback refused:\n");
+    for b in blockers {
+        let _ = writeln!(m, "  {b}");
+    }
+    m.push_str("Nothing was prepared, stopped or changed. Use `releases`, `status`, `recover` and `reconcile`.");
+    Fail::refused(m)
 }
 
 // ------------------------------------------------------------------ restore
@@ -1844,10 +2103,24 @@ fn targets_of(
         .into_iter()
         .cloned()
         .collect();
+    // A rollback serves the release from a container (and port lease) of its own deployment.
+    let release = harpoon_deploy::ids::ReleaseId::from_deployment(dep);
+    let mut leases = mine(ResourceKind::PortLease);
+    for f in deps.iter().filter(|f| {
+        f.rollback_to.as_ref() == Some(&release) && f.status == DeploymentStatus::Succeeded
+    }) {
+        leases.extend(
+            ledger
+                .entries()
+                .iter()
+                .filter(|e| e.deployment == f.id && e.key.kind == ResourceKind::PortLease)
+                .cloned(),
+        );
+    }
     Targets {
         containers,
         images: mine(ResourceKind::Image),
-        leases: mine(ResourceKind::PortLease),
+        leases,
     }
 }
 

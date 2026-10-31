@@ -23,6 +23,7 @@ pub mod logs;
 pub mod ports;
 pub mod queue;
 pub mod release;
+pub mod rollback;
 pub mod serving;
 pub mod state;
 pub mod time;

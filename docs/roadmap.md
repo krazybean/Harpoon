@@ -45,8 +45,8 @@ Evidence: `docs/results/DEPLOY_B7_LIVE_RESULTS.md` (B7 first-deployment acceptan
 general production readiness).
 
 **Not implemented — the full control plane:** live health-gated replacement of a running release
-and live cutover recovery (offline slices exist, see below), explicit rollback (the engine's state machine exists and is
-tested against a fake backend only; the Docker backend and CLI refuse replacement), and everything in
+and live cutover recovery (offline slices exist, see below), explicit rollback (offline slice in review; the Docker backend and CLI refuse live
+replacement and live rollback), and everything in
 Milestones C–E. Milestone B's acceptance criteria are therefore **not yet met**.
 
 **Shipping gate: closed.** `Gate::shipping()` refuses live `deploy`; the experimental gate-opening
@@ -58,7 +58,7 @@ separately authorized binary and is never part of a merge.
 | Milestone | Scope | Status |
 |---|---|---|
 | A | Specification and UX discovery | Approved (decisions 2026-10-30; B1 authorized) |
-| B | Deployment engine and lifecycle — see the step table below | **In progress**: first-deployment slice implemented and live-accepted; replacement and rollback not started |
+| B | Deployment engine and lifecycle — see the step table below | **In progress**: first-deployment slice implemented and live-accepted; live replacement and rollback not enabled |
 | C | Builds, environments, and secrets (best-effort redaction with leakage tests) | Not started; prerequisite: Milestone B accepted |
 | Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | Not started; follows C; must precede any "unattended" claim |
 | D | Git integration and automation (polling, signed-fixture webhooks); attended unless Gate U passed | Not started; follows Gate U |
@@ -81,28 +81,30 @@ separately authorized binary and is never part of a merge.
 | **B8.3** | **Controlled live failure and recovery validation** | **Complete — CONDITIONAL PASS: user-reported L1–L4 live results, exact inventory restoration; live Docker HTTP 409 observed, typed `DockerRefused` journal transition remains untested** | — | `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md` |
 | B9 | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **Complete (offline; includes legacy-journal import)** | #124 | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
 | B10 | Health-gated replacement of a running release (offline slice) | **Complete (offline; `replace --simulate` only)** | #125 | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
-| **NEXT** | **Bounded cutover recovery** | **Offline slice complete (#126), hardening in review**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening after #126: pin before any side effect, serving release/container derived from the records (restored container handled by replace, status, reconcile, teardown), occupied ports detected before a restoration; **live replacement stays disabled** | #126, this branch (hardening) | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
-| — | Explicit rollback | Not started | — | requirements D5, criterion 5 |
+| B11 | Bounded cutover recovery (offline slice and hardening) | **Complete (offline; `replace --simulate` / `restore --simulate` only)**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; **live replacement stays disabled** | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
+| **NEXT** | **B12 — Explicit manual rollback** | **Offline slice in review**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; **live rollback stays disabled** | this branch | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
 
 The unnumbered rows run in the order shown, after B9. Milestone B is accepted only when its
 requirements criteria 1–7 pass with no stop condition triggered.
 
-### Next executable milestone: Bounded cutover recovery
+### Next executable milestone: Explicit manual rollback (B12)
 
-Health-gated replacement (B10, #125) is complete as an offline slice. The recovery slice is implemented
-offline: each serving release pins its non-secret configuration (exact image id, port binding, health
-check, limits) in its durable record; a confirmed cutover that fails after the previous release was
-stopped makes **one** bounded restoration attempt (default 60 s) from the retained image and that
-pinned configuration, and records `restored`, `restored_unverified`, `restore_failed` or
-`not_attempted` with a reason, plus the measured interruption and restoration duration. A failed
-cutover pauses the application's automatic triggers (derived from the durable record; a failed build
-or preliminary check does not); the failed candidate is kept for inspection. A cutover interrupted by
-a crash is marked interrupted, shown as "application may be down", never resumed, and offered an
-explicit bounded `restore` that can run once. **Live replacement stays disabled**: the Docker backend
-only replaces when a test switches it on, and `replace` / `restore` refuse without `--simulate`. The
-evidence required before enabling it is listed in `docs/results/DEPLOY_B11_RECOVERY.md`. Explicit
-manual rollback is the milestone after this one. Nothing here opens the shipping gate or claims
-production readiness.
+Bounded cutover recovery (B11, #126 and #127) is complete as an offline slice. Explicit manual rollback is
+implemented offline in review: a developer lists an application's retained releases (`releases`),
+sees which one serves, and names an earlier release by its exact id (`rollback --to`). A target is
+accepted only when its pinned configuration (an immutable image id) and a retained image are
+recorded; it is then re-served from that image and configuration with nothing rebuilt. The serving
+release keeps running until the target has passed its preliminary check; the plan, the anticipated
+interruption and "Application rollback only. Data, volumes and database schema are NOT rolled back."
+are printed first, and the cutover needs `--confirm-rollback`. A failed cutover gets the same single
+bounded restoration of the release that was serving. The rollback is a durable deployment operation
+(source, target, pin, interruption, outcome); the serving release is derived from the records; a
+successful rollback pauses the application's automatic triggers, shown by `status`, with no
+`resume` yet. **Live replacement and live rollback stay disabled** and the shipping gate stays closed.
+Nothing here claims production readiness. The evidence required before enabling either live is
+listed in `docs/results/DEPLOY_B12_ROLLBACK.md` and `DEPLOY_B11_RECOVERY.md`.
+
+The separate Harpoon 2.0 track is unchanged by this milestone.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,

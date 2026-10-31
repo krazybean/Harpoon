@@ -224,3 +224,43 @@ fn a_pinned_configuration_and_the_single_explicit_recovery_survive_restarts_and_
     assert!(SqliteJournal::read_only(&dir).is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_rollback_record_survives_restarts_and_its_target_cannot_be_rewritten() {
+    use harpoon_deploy::ids::ReleaseId;
+    use harpoon_deploy::release::ReleaseConfig;
+    let dir = temp_dir();
+    let (app, dep) = ids();
+    let target: ReleaseId = "rel_00000000000000000000000007".parse().unwrap();
+    let source: ReleaseId = "rel_00000000000000000000000008".parse().unwrap();
+    let mut d = Deployment::new(dep, app, Trigger::Cli, 10);
+    d.rollback_to = Some(target.clone());
+    d.transition(DeploymentStatus::Queued, 11).unwrap();
+    d.transition(DeploymentStatus::Running, 12).unwrap();
+    d.replaces = Some(source.clone());
+    d.pinned = Some(ReleaseConfig::simulated(38077));
+    {
+        let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&d).unwrap();
+    }
+    // the process died mid-run: the record still says what it was rolling back to
+    let (mut db, restored) = SqliteJournal::open_recovered(&dir, 20).unwrap();
+    let got = restored.deployments[0].clone();
+    assert_eq!(got.status, DeploymentStatus::Interrupted);
+    assert_eq!(got.rollback_to, Some(target.clone()));
+    assert_eq!(got.replaces, Some(source));
+    assert_eq!(got.pinned, Some(ReleaseConfig::simulated(38077)));
+    db.persist(&got).unwrap();
+    drop(db);
+    let r = SqliteJournal::read_only(&dir).unwrap();
+    assert_eq!(r.deployments[0].rollback_to, Some(target));
+    // a terminal record cannot be turned into a different operation: the store fails closed
+    let mut forged = r.deployments[0].clone();
+    forged.rollback_to = None;
+    {
+        let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&forged).unwrap();
+    }
+    assert!(SqliteJournal::open(&dir).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
