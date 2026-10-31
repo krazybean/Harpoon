@@ -78,7 +78,7 @@ separately authorized binary and is never part of a merge.
 | B7 | First live disposable deployment, LAN isolation, ownership-verified teardown | **Complete — first-deployment acceptance PASS** (not production readiness) | #114–#118 | `docs/results/DEPLOY_B7_LIVE_RESULTS.md` |
 | B8.1 | Offline failure/recovery coverage (crash sweeps, interrupted-deploy CLI regression) | Complete | #120 | `docs/results/DEPLOY_CLI.md` (B8.1) |
 | B8.2 | Retained-image cleanup (`cleanup-image`, typed conflict outcome) | Complete (offline; simulated Docker only) | #121 | `docs/results/DEPLOY_CLI.md` (B8.2) |
-| **B8.3** | **Controlled live failure and recovery validation** | **NEXT** | — | gaps listed in `docs/results/DEPLOY_CLI.md` |
+| **B8.3** | **Controlled live failure and recovery validation** | **Complete — CONDITIONAL PASS: user-reported L1–L4 live results, exact inventory restoration; live Docker HTTP 409 observed, typed `DockerRefused` journal transition remains untested** | — | `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md` |
 | — | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | Not started | — | `docs/deployment-first-slice-boundary.md` decision 1 |
 | — | Health-gated replacement of a running release | Not started | — | requirements D5, Milestone B criteria 2–3 |
 | — | Bounded cutover recovery | Not started | — | requirements D5, criterion 4 |
@@ -87,19 +87,12 @@ separately authorized binary and is never part of a merge.
 The four unnumbered rows run in the order shown, after B8.3. Milestone B is accepted only when its
 requirements criteria 1–7 pass with no stop condition triggered.
 
-### Next executable milestone: B8.3 — controlled live failure and recovery validation
+### Next executable milestone: Permanent SQLite state
 
-Validate against the real Engine what B8.1 and B8.2 proved only against a simulated one: a failing
-build; a deployment whose health check never passes (cleanup of its container and lease, the image
-retained); an interrupted deployment (kill during a run) followed by `recover`, `reconcile` and
-`cleanup-image`; and the real Docker behaviour that the simulated server only models (image-deletion
-conflicts, a container that ignores the stop signal, what the BuildKit daemon does after a killed
-build). Each live step needs its own explicit written authorization and runs with the isolation rules
-and stop conditions of `docs/deployment-first-slice-boundary.md` §4–5 (nothing unlabelled changes;
-final inventory identical to the baseline; Harpoon's process untouched). B8.3 does not open the
-shipping gate and does not claim production readiness. It is done when each scenario's observed
-outcome is recorded in a results file under `docs/results/` and any divergence from the documented
-behaviour is either fixed or listed as a gap.
+The B8.3 live evidence is recorded in `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md`.
+The remaining typed `DockerRefused` live-engine transition is explicitly untested;
+it does not open the shipping gate or claim production readiness. The next work is
+the permanent SQLite state required before replacement or rollback.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,

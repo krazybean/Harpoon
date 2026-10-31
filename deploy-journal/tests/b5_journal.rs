@@ -731,8 +731,8 @@ fn status_cleanup_failures_ids_and_leases_survive_a_restart_exactly() {
     );
     assert_eq!(r.outstanding_leases(), report.ledger.leased_ports());
     assert!(
-        r.outstanding_leases().is_empty(),
-        "a lease is ledger-only: it was released although the container could not be removed"
+        !r.outstanding_leases().is_empty(),
+        "the lease remains held while the container cleanup is unresolved"
     );
 
     // and through a writer's open as well, with nothing newly interrupted
