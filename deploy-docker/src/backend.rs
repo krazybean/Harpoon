@@ -15,11 +15,14 @@ use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, 
 use crate::buildx_run::{run_build, BuildRequest, BuildRunError, StdFileProbe};
 use crate::confine::{confine, Source};
 use crate::dockerfile::required_images;
+use crate::forwarder::HostListenerCheck;
+use crate::guest::{check_guest_free, GuestDiskProbe};
 use crate::ignore::{always_sent, IgnoreRules};
 use crate::preflight::{context_size_with, DfProbe, DiskProbe};
 use crate::probe::{
     BindProbe, ContainerProbe, HttpTransport, PortProbe, ResponseMarker, SleepWaiter, TcpHttp,
 };
+use crate::snapshot;
 use harpoon_deploy::backend::{Backend, ResourceOps, RestoreResult, StepError};
 use harpoon_deploy::buildx::{self, BuildxBinary, BuildxError};
 use harpoon_deploy::engine::StepIo;
@@ -30,10 +33,23 @@ use harpoon_deploy::ledger::{
 };
 use harpoon_deploy::ports::{self, Occupancy, PortLease, PortRange, Purpose};
 use harpoon_deploy::state::Reason;
-use harpoon_deploy::time::SystemClock;
+use harpoon_deploy::time::{Entropy, OsEntropy, SystemClock};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// How a health response is tied to the container that gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attribution {
+    /// No marker (only `DockerConfig::health_marker`, if set). Not acceptable for a live deployment.
+    Off,
+    /// Each container gets its own random marker in `HARPOON_DEPLOYMENT_MARKER`; a response counts
+    /// only if it carries the same value in the `X-Harpoon-Deployment-Marker` header.
+    PerContainer,
+}
+
+pub const MARKER_ENV: &str = "HARPOON_DEPLOYMENT_MARKER";
+pub const MARKER_HEADER: &str = "X-Harpoon-Deployment-Marker";
 
 #[derive(Debug, Clone)]
 pub struct DockerConfig {
@@ -50,6 +66,12 @@ pub struct DockerConfig {
     pub scratch_dir: PathBuf,
     pub container_port: u16,
     pub health: HealthSpec,
+    /// Whether health responses must prove which container answered (see [`Attribution`]).
+    pub attribution: Attribution,
+    /// Live-execution requirements: when set, the backend refuses to start unless attribution is on,
+    /// a host-listener check and a guest free-space probe are configured. The CLI sets it for every
+    /// non-simulated deployment; unit tests of the library leave it off.
+    pub live_gates: bool,
     /// When set, a health response only counts if it carries this marker (see [`ResponseMarker`]).
     pub health_marker: Option<ResponseMarker>,
     pub env: Vec<String>,
@@ -80,6 +102,8 @@ impl DockerConfig {
             scratch_dir: scratch_dir.into(),
             container_port,
             health: HealthSpec::first_test("/"),
+            attribution: Attribution::Off,
+            live_gates: false,
             health_marker: None,
             env: Vec::new(),
             limits: Limits::FIRST_TEST,
@@ -96,10 +120,19 @@ impl DockerConfig {
 #[derive(Debug, Default)]
 struct State {
     image_tag: Option<String>,
+    /// The verified ID of the image this attempt built; containers are created from it, never from the tag.
+    image_id: Option<String>,
+    /// Base images the preflight checked, to detect a Dockerfile that changed afterwards.
+    required_images: Option<BTreeSet<String>>,
+    context_bytes: u64,
+    /// Per-container response markers (container name → value).
+    markers: std::collections::BTreeMap<String, String>,
     pre: Option<(String, u16)>, // container name, test port
     app: Option<(String, u16)>, // container name, application port
     replaced_from: Option<u16>,
 }
+
+type CopyHook = Box<dyn FnMut(&Path)>;
 
 pub struct DockerBackend<T: HttpTransport = TcpHttp> {
     cfg: DockerConfig,
@@ -108,6 +141,10 @@ pub struct DockerBackend<T: HttpTransport = TcpHttp> {
     transport: T,
     ports: Box<dyn PortProbe>,
     disk: Box<dyn DiskProbe>,
+    entropy: Box<dyn Entropy>,
+    forwarder: Option<Box<dyn HostListenerCheck>>,
+    guest_disk: Option<Box<dyn GuestDiskProbe>>,
+    copy_hook: Option<CopyHook>,
     st: State,
 }
 
@@ -166,8 +203,30 @@ fn has_labels(
 }
 
 /// Docker repository names must be lower-case; the identifier alphabet is upper-case.
-pub fn image_tag(app: &harpoon_deploy::ids::ApplicationId, dep: &DeploymentId) -> String {
-    format!("harpoon/{}:{}", app.as_str().to_ascii_lowercase(), dep)
+/// The tag of one build attempt. `nonce` is 128 random bits per attempt, so a name that did not
+/// exist when the intent was written cannot be created by anyone else in the meantime.
+pub fn image_tag(
+    app: &harpoon_deploy::ids::ApplicationId,
+    dep: &DeploymentId,
+    nonce: &str,
+) -> String {
+    format!(
+        "harpoon/{}:{}-{}",
+        app.as_str().to_ascii_lowercase(),
+        dep,
+        nonce
+    )
+}
+
+/// 128 random bits as 32 lower-case hex digits.
+pub fn random_hex(e: &mut dyn Entropy) -> Result<String, StepError> {
+    let mut b = [0u8; 16];
+    e.fill(&mut b).map_err(|err| {
+        StepError::new(format!(
+            "no randomness available ({err}); nothing was started"
+        ))
+    })?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 pub fn preliminary_name(dep: &DeploymentId) -> String {
@@ -206,6 +265,10 @@ impl<T: HttpTransport> DockerBackend<T> {
             transport,
             ports: Box::new(BindProbe),
             disk: Box::new(DfProbe),
+            entropy: Box::new(OsEntropy::new()),
+            forwarder: None,
+            guest_disk: None,
+            copy_hook: None,
             st: State::default(),
         })
     }
@@ -216,6 +279,27 @@ impl<T: HttpTransport> DockerBackend<T> {
     }
     pub fn with_disk_probe(mut self, d: impl DiskProbe + 'static) -> Self {
         self.disk = Box::new(d);
+        self
+    }
+    /// Randomness for image tags and response markers. Tests inject a deterministic source.
+    pub fn with_entropy(mut self, e: impl Entropy + 'static) -> Self {
+        self.entropy = Box::new(e);
+        self
+    }
+    /// Checked after a healthy response: the host listener for the port must be the forwarder's.
+    pub fn with_forwarder_check(mut self, c: impl HostListenerCheck + 'static) -> Self {
+        self.forwarder = Some(Box::new(c));
+        self
+    }
+    /// Called with each source path just before the snapshot opens it. For tests that need to
+    /// change a file at the worst moment.
+    #[doc(hidden)]
+    pub fn with_snapshot_hook(mut self, f: impl FnMut(&Path) + 'static) -> Self {
+        self.copy_hook = Some(Box::new(f));
+        self
+    }
+    pub fn with_guest_disk(mut self, p: impl GuestDiskProbe + 'static) -> Self {
+        self.guest_disk = Some(Box::new(p));
         self
     }
     pub fn buildx_path(&self) -> &Path {
@@ -273,31 +357,53 @@ impl<T: HttpTransport> DockerBackend<T> {
         disposition: Disposition,
         lease: &PortLease,
     ) -> Result<String, StepError> {
+        let image_id = self
+            .st
+            .image_id
+            .clone()
+            .ok_or_else(|| StepError::new("no verified image was built"))?;
         let tag = self
             .st
             .image_tag
             .clone()
-            .ok_or_else(|| StepError::new("no image was built"))?;
+            .unwrap_or_else(|| image_id.clone());
         let lbl = all_labels(io.app(), io.deployment());
         // Docker creates an anonymous volume per declared image volume (inherited ones included)
         // even with no mounts in the request, and this ledger does not manage volumes. Refuse
-        // before recording any container intent, so nothing is created.
+        // before recording any container intent, so nothing is created. The image is addressed by
+        // its verified ID, so a tag that moves cannot change which image is checked or run.
         let img = self
             .api
-            .image_inspect(&tag, b.left("checking the image's declared volumes")?)
+            .image_inspect(&image_id, b.left("checking the image's declared volumes")?)
             .map_err(|e| api_err("checking the image's declared volumes", e))?
-            .ok_or_else(|| StepError::new(format!("image {tag} no longer exists")))?;
+            .ok_or_else(|| {
+                StepError::new(format!(
+                    "image {tag} ({}) no longer exists",
+                    short(&image_id)
+                ))
+            })?;
+        if img.id != image_id || !has_labels(&img.labels, io.app(), io.deployment()) {
+            return Err(StepError::new(format!(
+                "image {tag} is no longer the image that was built and verified; no container was created"
+            )));
+        }
         if !img.volumes.is_empty() {
             return Err(StepError::new(format!(
                 "image {tag} declares volumes ({}); Harpoon's first slice does not manage volumes, so no container was created. Remove the VOLUME instruction (including any inherited from the base image).",
                 img.volumes.join(", ")
             )));
         }
+        let mut env = self.cfg.env.clone();
+        if self.cfg.attribution == Attribution::PerContainer {
+            let value = random_hex(&mut *self.entropy)?;
+            env.push(format!("{MARKER_ENV}={value}"));
+            self.st.markers.insert(name.to_string(), value);
+        }
         let intent = io.intend(ResourceKey::new(ResourceKind::Container, name), disposition)?;
         let spec = CreateSpec {
-            image: &tag,
+            image: &image_id,
             labels: &lbl,
-            env: &self.cfg.env,
+            env: &env,
             container_port: lease.container_port,
             host_port: lease.host_port,
             limits: self.cfg.limits,
@@ -372,11 +478,61 @@ impl<T: HttpTransport> DockerBackend<T> {
         }
     }
 
+    /// The container must be publishing exactly its one container port on exactly this host port
+    /// (and nothing else), on an unspecified address as Docker reports it for a port published
+    /// without a `HostIp`. Anything else — another host port, an extra published port, a specific
+    /// non-loopback address — is a refusal.
+    fn verify_mapping(
+        info: &ContainerInfo,
+        container_port: u16,
+        host_port: u16,
+    ) -> Result<(), String> {
+        let tcp: Vec<_> = info.published.iter().filter(|p| p.proto == "tcp").collect();
+        if tcp.is_empty() {
+            return Err(format!(
+                "Docker reports no published port for container port {container_port}"
+            ));
+        }
+        for p in &tcp {
+            if p.container_port != container_port {
+                return Err(format!(
+                    "Docker reports container port {} published; only {container_port} may be",
+                    p.container_port
+                ));
+            }
+            if p.host_port != host_port {
+                return Err(format!(
+                    "Docker reports container port {container_port} published on host port {}, not the leased {host_port}",
+                    p.host_port
+                ));
+            }
+            if !matches!(p.host_ip.as_str(), "" | "0.0.0.0" | "::" | "127.0.0.1") {
+                return Err(format!("Docker reports the port bound to {}", p.host_ip));
+            }
+        }
+        Ok(())
+    }
+
+    fn live_gate_problems(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.cfg.attribution != Attribution::PerContainer {
+            v.push("per-container health attribution is off");
+        }
+        if self.forwarder.is_none() {
+            v.push("no host-listener (forwarder) check is configured");
+        }
+        if self.guest_disk.is_none() {
+            v.push("no guest-side free-space probe is configured");
+        }
+        v
+    }
+
     fn health(
         &mut self,
         io: &mut StepIo<'_>,
         b: &Budget,
         id: &str,
+        name: &str,
         port: u16,
         what: &str,
     ) -> Result<CheckEvidence, StepError> {
@@ -389,19 +545,81 @@ impl<T: HttpTransport> DockerBackend<T> {
             ..self.cfg.health.clone()
         };
         let target = format!("http://127.0.0.1:{port}{}", spec.path);
+        // Which answer counts: this container's own marker, or (library use only) a fixed one.
+        let marker = match self.cfg.attribution {
+            Attribution::PerContainer => {
+                let value = self.st.markers.get(name).ok_or_else(|| {
+                    StepError::new(format!(
+                        "container {name} has no response marker; its health cannot be attributed"
+                    ))
+                })?;
+                Some(
+                    ResponseMarker::header(MARKER_HEADER, value)
+                        .map_err(|e| StepError::new(format!("bad response marker: {e}")))?,
+                )
+            }
+            Attribution::Off => self.cfg.health_marker.clone(),
+        };
+        if self.cfg.live_gates && marker.is_none() {
+            return Err(StepError::new(
+                "a live health check needs a response marker; none is configured",
+            ));
+        }
+        // Mapping, before: a running container must publish exactly the leased port. (A container
+        // that is not running is left to the probe, which reports the exit.)
+        match self
+            .api
+            .container_inspect(id, b.left("reading the port mapping")?)
+            .map_err(|e| api_err("reading the container's port mapping", e))?
+        {
+            Some(info) if info.running => {
+                Self::verify_mapping(&info, self.cfg.container_port, port).map_err(|m| {
+                    StepError::new(format!(
+                        "{what}: the port mapping is not what was leased: {m}"
+                    ))
+                })?
+            }
+            _ => {}
+        }
         let mut probe = ContainerProbe {
             api: &self.api,
             container_id: id,
             port,
             path: &spec.path,
             transport: &self.transport,
-            marker: self.cfg.health_marker.as_ref(),
+            marker: marker.as_ref(),
             attempt_timeout: Duration::from_secs(2).min(self.cfg.api_timeout),
         };
         let mut ev = run_health(&spec, &target, &mut probe, &SystemClock, &SleepWaiter);
         ev.simulated = self.transport.is_simulated();
         if ev.verdict == Verdict::Healthy && ev.validate().is_ok() {
-            return Ok(ev);
+            // Mapping, after, and the host listener: the response was this container's, and the
+            // path it came by is the one that was verified.
+            let post = self
+                .api
+                .container_inspect(id, b.left("re-reading the port mapping")?)
+                .map_err(|e| api_err("re-reading the container's port mapping", e))?;
+            let problem = match post {
+                Some(info) if info.running => {
+                    Self::verify_mapping(&info, self.cfg.container_port, port).err()
+                }
+                _ => Some("the container is not running after the health probe".to_string()),
+            }
+            .or_else(|| {
+                self.forwarder
+                    .as_ref()
+                    .and_then(|f| f.verify(port).err().map(|e| format!("host listener: {e}")))
+            });
+            match problem {
+                None => return Ok(ev),
+                Some(m) => {
+                    self.attach_logs(io, b, id);
+                    return Err(StepError::new(format!(
+                        "{what}: a healthy response was seen but could not be trusted: {m}"
+                    ))
+                    .with_evidence(ev));
+                }
+            }
         }
         self.attach_logs(io, b, id);
         let msg = format!("{what} did not pass: {}", ev.summary());
@@ -411,6 +629,155 @@ impl<T: HttpTransport> DockerBackend<T> {
             StepError::new(msg)
         }
         .with_evidence(ev))
+    }
+}
+
+impl<T: HttpTransport> DockerBackend<T> {
+    #[allow(clippy::too_many_arguments)]
+    fn build_from_snapshot(
+        &mut self,
+        io: &mut StepIo<'_>,
+        b: &Budget,
+        tag: &str,
+        nonce: &str,
+        lbl: &[(String, String)],
+        intent: &harpoon_deploy::engine::Intent,
+        snap: &snapshot::Snapshot,
+        src: &Source,
+    ) -> Result<(), StepError> {
+        for s in &snap.skipped {
+            io.log.push_line(&format!(
+                "context: skipped {s} (not a regular file, folder or link)"
+            ));
+        }
+        io.log.push_line(&format!(
+            "context snapshot: {} files, {} bytes, private copy",
+            snap.files, snap.bytes
+        ));
+        // The Dockerfile Buildx will read must be the one that was checked.
+        let text = std::fs::read_to_string(&snap.dockerfile)
+            .map_err(|e| StepError::new(format!("cannot read the snapshot's Dockerfile: {e}")))?;
+        let images = required_images(&text).map_err(|p| StepError::new(p.to_string()))?;
+        if text != src.dockerfile_text
+            || self
+                .st
+                .required_images
+                .as_ref()
+                .is_some_and(|prev| *prev != images)
+        {
+            return Err(StepError::new(
+                "the Dockerfile changed after the preflight checked it; nothing was built",
+            ));
+        }
+        let iidfile = self.cfg.scratch_dir.join(format!("iid-{nonce}"));
+        if iidfile.exists() {
+            return Err(StepError::new(format!(
+                "{} already exists; nothing was built",
+                iidfile.display()
+            )));
+        }
+        let req = BuildRequest {
+            binary: &self.buildx,
+            context: &snap.dir,
+            dockerfile: &snap.dockerfile,
+            tag,
+            labels: lbl,
+            iidfile: &iidfile,
+            socket: &self.cfg.socket,
+            scratch: &self.cfg.scratch_dir,
+        };
+        let log = &mut *io.log;
+        let outcome = run_build(&req, b.left("starting the build")?, &mut |line| {
+            log.push_line(line)
+        });
+        let iid_text = std::fs::read_to_string(&iidfile);
+        let _ = std::fs::remove_file(&iidfile);
+        match outcome {
+            Ok(()) => {}
+            Err(BuildRunError::Timeout) => {
+                return Err(StepError::timeout(
+                    "the build ran past its time budget and was killed",
+                ))
+            }
+            Err(BuildRunError::Spawn(m)) => {
+                return Err(StepError::new(format!(
+                    "could not start the bundled Buildx: {m}"
+                )))
+            }
+            Err(BuildRunError::Failed(c)) => {
+                return Err(StepError::new(format!(
+                    "the build failed (Buildx exit {})",
+                    c.map(|c| c.to_string())
+                        .unwrap_or_else(|| "by signal".into())
+                )))
+            }
+        }
+        // The image's identity is what Buildx reported through --iidfile, in a file only this
+        // attempt knew the name of. Everything below addresses the image by that ID.
+        let iid = iid_text.map_err(|e| {
+            StepError::new(format!(
+                "the build reported success but wrote no image ID file: {e}"
+            ))
+        })?;
+        let iid = iid.trim().to_string();
+        let well_formed = iid.strip_prefix("sha256:").is_some_and(|h| {
+            h.len() == 64 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        });
+        if !well_formed {
+            return Err(StepError::new(format!(
+                "the image ID file does not hold a sha256 ID ({iid:?})"
+            )));
+        }
+        let img = self
+            .api
+            .image_inspect(&iid, b.left("checking the built image")?)
+            .map_err(|e| api_err("checking the built image", e))?
+            .ok_or_else(|| {
+                StepError::new(format!(
+                    "the build reported image {} but Docker has no such image",
+                    short(&iid)
+                ))
+            })?;
+        if img.id != iid {
+            return Err(StepError::new(format!(
+                "Docker answered for a different image than the reported {}",
+                short(&iid)
+            )));
+        }
+        if !has_labels(&img.labels, io.app(), io.deployment()) {
+            return Err(StepError::new(format!(
+                "image {} does not carry this deployment's Harpoon labels; it was not recorded as ours",
+                short(&iid)
+            )));
+        }
+        // It is ours and its ID is known: record it now, so it is tracked whatever happens next.
+        io.receipt(intent, &iid)?;
+        self.st.image_id = Some(iid.clone());
+        // The tag must still lead to that same image; if it was moved, nothing runs from it.
+        let tagged = self
+            .api
+            .image_inspect(tag, b.left("checking the tag still names the built image")?)
+            .map_err(|e| api_err("checking the tag", e))?;
+        match tagged {
+            Some(t) if t.id == iid => {}
+            Some(_) => {
+                return Err(StepError::new(format!(
+                    "tag {tag} now names a different image than the one built ({}); the built image was recorded and nothing will run",
+                    short(&iid)
+                )))
+            }
+            None => {
+                return Err(StepError::new(format!(
+                    "tag {tag} no longer exists; the built image {} was recorded and nothing will run",
+                    short(&iid)
+                )))
+            }
+        }
+        io.log.push_line(&format!(
+            "image {tag} = {}",
+            short(iid.trim_start_matches("sha256:"))
+        ));
+        Ok(())
     }
 }
 
@@ -533,6 +900,15 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
 
     fn prepare_source(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         let b = Budget::new(io.budget_ms);
+        if self.cfg.live_gates {
+            let missing = self.live_gate_problems();
+            if !missing.is_empty() {
+                return Err(StepError::new(format!(
+                    "live execution requirements are not met: {}. Nothing was built.",
+                    missing.join("; ")
+                )));
+            }
+        }
         let src = self.confined_source()?;
         let ctx = src.context.clone();
         let text = src.dockerfile_text.clone();
@@ -575,7 +951,18 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
                 self.cfg.min_free_bytes / 1_000_000
             )));
         }
+        if let Some(g) = &self.guest_disk {
+            let required = self.cfg.min_free_bytes.saturating_add(size);
+            let free = check_guest_free(&**g, required).map_err(StepError::new)?;
+            io.log.push_line(&format!(
+                "guest free space: {} MB (required {} MB)",
+                free / 1_000_000,
+                required / 1_000_000
+            ));
+        }
         let images = required_images(&text).map_err(|p| StepError::new(p.to_string()))?;
+        self.st.required_images = Some(images.clone());
+        self.st.context_bytes = size;
 
         self.api
             .ping(b.left("pinging Docker")?)
@@ -601,12 +988,12 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
 
     fn build(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         let b = Budget::new(io.budget_ms);
-        let tag = image_tag(io.app(), io.deployment());
+        let nonce = random_hex(&mut *self.entropy)?;
+        let tag = image_tag(io.app(), io.deployment(), &nonce);
         let lbl = all_labels(io.app(), io.deployment());
-        // Fail closed if the tag is taken. A build would move the tag to the new image and the old
-        // image would silently lose it — even a Harpoon-labelled one; replacing an image needs a
-        // separately approved recovery mechanism, so this slice never does it. Nothing is recorded
-        // for a tag this deployment does not own.
+        // Fail closed if the tag is taken. With 128 random bits this only happens through a bug or
+        // a broken randomness source, but the check costs one read and keeps the promise that a
+        // build never moves someone else's tag.
         if let Some(existing) = self
             .api
             .image_inspect(&tag, b.left("checking the image tag is unused")?)
@@ -629,60 +1016,32 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             Disposition::Retain,
         )?;
         self.st.image_tag = Some(tag.clone());
-        // Confined again right before the build, and the canonical paths are what Buildx gets.
+        // Confined again right before the build; then copied once into a private directory so
+        // nothing the user changes afterwards can reach the builder.
         let src = self.confined_source()?;
-        let req = BuildRequest {
-            binary: &self.buildx,
-            context: &src.context,
-            dockerfile: &src.dockerfile,
-            tag: &tag,
-            labels: &lbl,
-            socket: &self.cfg.socket,
-            scratch: &self.cfg.scratch_dir,
-        };
-        let log = &mut *io.log;
-        match run_build(&req, b.left("starting the build")?, &mut |line| {
-            log.push_line(line)
-        }) {
-            Ok(()) => {}
-            Err(BuildRunError::Timeout) => {
-                return Err(StepError::timeout(
-                    "the build ran past its time budget and was killed",
-                ))
-            }
-            Err(BuildRunError::Spawn(m)) => {
-                return Err(StepError::new(format!(
-                    "could not start the bundled Buildx: {m}"
-                )))
-            }
-            Err(BuildRunError::Failed(c)) => {
-                return Err(StepError::new(format!(
-                    "the build failed (Buildx exit {})",
-                    c.map(|c| c.to_string())
-                        .unwrap_or_else(|| "by signal".into())
-                )))
-            }
-        }
-        let img = self
-            .api
-            .image_inspect(&tag, b.left("checking the built image")?)
-            .map_err(|e| api_err("checking the built image", e))?
-            .ok_or_else(|| {
-                StepError::new(format!(
-                    "the build reported success but image {tag} does not exist"
-                ))
-            })?;
-        if !has_labels(&img.labels, io.app(), io.deployment()) {
-            return Err(StepError::new(format!(
-                "image {tag} exists but does not carry this deployment's Harpoon labels; it was not recorded as ours"
-            )));
-        }
-        io.receipt(&intent, &img.id)?;
-        io.log.push_line(&format!(
-            "image {tag} = {}",
-            short(img.id.trim_start_matches("sha256:"))
-        ));
-        Ok(())
+        let rules = src
+            .ignore
+            .as_ref()
+            .map(|(_, t)| IgnoreRules::parse(t))
+            .unwrap_or_default();
+        let mut hook = self.copy_hook.take();
+        let snap = snapshot::create_with(
+            &src,
+            &rules,
+            self.cfg.max_context_bytes,
+            &self.cfg.scratch_dir,
+            &nonce,
+            &mut |p| {
+                if let Some(h) = hook.as_mut() {
+                    h(p)
+                }
+            },
+        );
+        self.copy_hook = hook;
+        let snap = snap.map_err(|e| StepError::new(e.to_string()))?;
+        let result = self.build_from_snapshot(io, &b, &tag, &nonce, &lbl, &intent, &snap, &src);
+        let _ = snapshot::remove(&snap, &self.cfg.scratch_dir);
+        result
     }
 
     fn preliminary_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError> {
@@ -698,11 +1057,11 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         io.receipt(&lease_intent, &lease.host_port.to_string())?;
         let name = preliminary_name(io.deployment());
         let id = self.create_container(io, &b, &name, Disposition::RemoveAlways, &lease)?;
-        self.st.pre = Some((name, lease.host_port));
+        self.st.pre = Some((name.clone(), lease.host_port));
         self.api
             .start_container(&id, b.left("starting the preliminary container")?)
             .map_err(|e| api_err("starting the preliminary container", e))?;
-        self.health(io, &b, &id, lease.host_port, "the preliminary check")
+        self.health(io, &b, &id, &name, lease.host_port, "the preliminary check")
     }
 
     fn stop_current(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
@@ -783,7 +1142,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         let id = Self::receipted_id(io, ResourceKind::Container, &name).ok_or_else(|| {
             StepError::new(format!("container {name} has no receipt in the ledger"))
         })?;
-        self.health(io, &b, &id, port, "the final check")
+        self.health(io, &b, &id, &name, port, "the final check")
     }
 
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {

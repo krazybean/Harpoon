@@ -32,6 +32,8 @@ pub struct Ctr {
     pub running: bool,
     pub exit_code: i64,
     pub host_port: Option<u16>,
+    /// When set, `NetworkSettings.Ports` is exactly this (to model odd mappings) instead of the usual one.
+    pub ports_override: Option<Json>,
     pub create_body: Json,
     pub logs: Vec<u8>,
 }
@@ -88,6 +90,8 @@ pub struct St {
     pub faults: Vec<Fault>,
     /// Host ports another process "holds": starting a container on one fails like Docker does.
     pub taken_ports: BTreeSet<u16>,
+    /// Names of volumes that exist (inventory only; the backend never creates or removes any).
+    pub volumes: Vec<String>,
     pub unexpected: Vec<Req>,
     seq: usize,
 }
@@ -112,6 +116,21 @@ impl St {
         });
         id
     }
+    /// An image with a chosen ID (what a fake Buildx reports through `--iidfile`).
+    pub fn add_image_with_id(
+        &mut self,
+        id: &str,
+        tags: &[&str],
+        labels: Labels,
+        volumes: Vec<String>,
+    ) {
+        self.images.push(Img {
+            id: id.to_string(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            labels,
+            volumes,
+        });
+    }
     pub fn add_container(&mut self, name: &str, labels: Labels, running: bool) -> String {
         let id = self.next_id();
         self.containers.push(Ctr {
@@ -122,6 +141,7 @@ impl St {
             running,
             exit_code: 0,
             host_port: None,
+            ports_override: None,
             create_body: Json::Null,
             logs: Vec::new(),
         });
@@ -418,6 +438,29 @@ pub fn container_inspect_json(c: &Ctr) -> String {
             ]),
         ),
         (
+            "NetworkSettings",
+            obj(vec![(
+                "Ports",
+                match (c.running, c.host_port) {
+                    _ if c.ports_override.is_some() => c.ports_override.clone().unwrap(),
+                    (true, Some(p)) => obj(vec![(
+                        "8080/tcp",
+                        Json::Arr(vec![
+                            obj(vec![
+                                ("HostIp", Json::Str("0.0.0.0".into())),
+                                ("HostPort", Json::Str(p.to_string())),
+                            ]),
+                            obj(vec![
+                                ("HostIp", Json::Str("::".into())),
+                                ("HostPort", Json::Str(p.to_string())),
+                            ]),
+                        ]),
+                    )]),
+                    _ => obj(vec![]),
+                },
+            )]),
+        ),
+        (
             "HostConfig",
             obj(vec![(
                 "PortBindings",
@@ -447,6 +490,24 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
     match (method, seg.as_slice()) {
         ("GET", ["_ping"]) => (200, "OK".into()),
+        ("GET", ["volumes"]) => (
+            200,
+            obj(vec![(
+                "Volumes",
+                Json::Arr(
+                    s.volumes
+                        .iter()
+                        .map(|v| {
+                            obj(vec![
+                                ("Name", Json::Str(v.clone())),
+                                ("Driver", Json::Str("local".into())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )])
+            .to_json(),
+        ),
         ("GET", ["images", "json"]) => {
             let arr: Vec<Json> = s
                 .images
@@ -590,6 +651,7 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                 running: false,
                 exit_code: 0,
                 host_port,
+                ports_override: None,
                 create_body: j,
                 logs: Vec::new(),
             });

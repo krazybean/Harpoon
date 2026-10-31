@@ -81,3 +81,12 @@ Mandatory B7 gates carried forward (all still open):
 - `reconcile` needs `--resources-dir` only because the backend constructor resolves Buildx; it never builds.
 - `doctor` and `status` take the writer lock shared/not at all, so a writer starting in that instant can see `Locked` once and retry.
 - Everything from the B5 risk list still applies (no power-loss testing, no journal salvage beyond export, one writer per runtime directory).
+
+## B7 phase 1 changes to the CLI
+- `deploy` (live path) now sets `live_gates` and per-container attribution and requires `--forwarder-pid N` (optional `--forwarder-command`, default `Harpoon`; `--lsof-path`, default `/usr/sbin/lsof`);
+  it attaches the host-listener check and a guest free-space probe. **No guest probe exists**, so a live deployment stops at `source` ("no guest-side free-space probe is implemented") even with the gate open;
+  `Gate::guest_free_override` lets tests stand in for it and is `None` in the shipping build.
+- New read-only `inventory --docker-socket S [--lsof-path P] [--to FILE]`: sorted, timestamp-free lines for containers, images, volumes, Docker port mappings and (with `--lsof-path`) host listeners in 38000–39099,
+  for before/after `diff`s. `--to` creates a new `0600` file and never overwrites.
+- The image tag printed by `deploy` is now a pattern; the real tag (with 128 random bits) is chosen at build and recorded in the journal.
+- B7 hand-off: replaced by `docs/results/DEPLOY_B7_LIVE_ACCEPTANCE.md`; the invocation there needs the added flags. The seven carried-forward gates: 1 (image identity) and 2 (marker) and the source-swap window are implemented offline; 3 (forwarder ownership) and 4 (loopback/LAN) have an offline verifier and an audit but are unproven live; 5 (guest disk) has a rule and no probe; 6 and 7 are live-only.

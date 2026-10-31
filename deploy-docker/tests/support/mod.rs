@@ -14,7 +14,7 @@ use harpoon_deploy::ledger::LedgerRecord;
 use harpoon_deploy::ledger::Observed;
 use harpoon_deploy::state::{Deployment, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, SeqEntropy, SystemClock};
-use harpoon_deploy_docker::backend::{image_tag, DockerBackend, DockerConfig};
+use harpoon_deploy_docker::backend::{image_tag, random_hex, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::preflight::DiskProbe;
 use harpoon_deploy_docker::probe::{HttpTransport, PortProbe};
 use std::cell::RefCell;
@@ -91,7 +91,7 @@ impl Workspace {
         let p = self.buildx_path();
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         let script = format!(
-            "#!/bin/sh\nD=\"$(dirname \"$0\")\"\necho \"$@\" > \"$D/args.txt\"\nenv | sort > \"$D/env.txt\"\npwd > \"$D/cwd.txt\"\n{body}\n"
+            "#!/bin/sh\nD=\"$(dirname \"$0\")\"\necho \"$@\" > \"$D/args.txt\"\nenv | sort > \"$D/env.txt\"\npwd > \"$D/cwd.txt\"\nfor a in \"$@\"; do if [ \"$p\" = \"--iidfile\" ]; then n=$(cat \"$D/counter\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$D/counter\"; printf 'sha256:%064x' $n > \"$a\"; fi; p=\"$a\"; done\n{body}\n"
         );
         std::fs::write(&p, script).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -105,6 +105,28 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// The ID the fake Buildx reports for its `n`-th build (it counts invocations in a file).
+pub fn fake_iid(n: u64) -> String {
+    format!("sha256:{n:064x}")
+}
+
+/// Backends in the tests draw randomness from `SeqEntropy::new(TEST_SEED)`, so the first draw (the
+/// image-tag nonce) is known.
+pub const TEST_SEED: u8 = 7;
+
+pub fn test_entropy() -> SeqEntropy {
+    SeqEntropy::new(TEST_SEED)
+}
+
+pub fn test_nonce() -> String {
+    random_hex(&mut test_entropy()).unwrap()
+}
+
+/// The tag a test backend will choose for this deployment's build.
+pub fn tag_for(app: &ApplicationId, dep: &harpoon_deploy::ids::DeploymentId) -> String {
+    image_tag(app, dep, &test_nonce())
 }
 
 pub struct FakeDisk(pub u64);
@@ -238,24 +260,44 @@ impl Harness {
     }
 
     pub fn seed_built_image_with(&self, image_labels: Vec<(String, String)>, volumes: Vec<String>) {
-        let tag = image_tag(&self.dep.application_id, &self.dep.id);
+        // The image appears when the backend first asks about the ID the fake Buildx reported; its
+        // tag is whatever the backend pre-checked a moment earlier.
         self.docker.fault_after(
             Some("GET"),
-            "/images/harpoon/",
-            1,
+            "/images/sha256:",
+            0,
             1,
             fake_docker::Action::Race(std::sync::Arc::new(move |s| {
-                let id = s.add_image(&tag, image_labels.clone());
-                if let Some(i) = s.images.iter_mut().find(|i| i.id == id) {
-                    i.volumes = volumes.clone();
-                }
+                let tag = s
+                    .requests
+                    .iter()
+                    .rev()
+                    .find(|r| r.method == "GET" && r.path.starts_with("/images/harpoon/"))
+                    .map(|r| {
+                        r.path
+                            .trim_start_matches("/images/")
+                            .trim_end_matches("/json")
+                            .to_string()
+                    })
+                    .expect("the tag was checked before the build");
+                let id = s
+                    .requests
+                    .last()
+                    .map(|r| {
+                        r.path
+                            .trim_start_matches("/images/")
+                            .trim_end_matches("/json")
+                            .to_string()
+                    })
+                    .expect("the ID was just asked about");
+                s.add_image_with_id(&id, &[&tag], image_labels.clone(), volumes.clone());
             })),
         );
     }
 
     /// An image that already holds the deployment's tag before the backend runs.
     pub fn preexisting_image(&self, image_labels: Vec<(String, String)>) -> String {
-        let tag = image_tag(&self.dep.application_id, &self.dep.id);
+        let tag = tag_for(&self.dep.application_id, &self.dep.id);
         self.docker.with(|s| s.add_image(&tag, image_labels))
     }
 
@@ -266,6 +308,7 @@ impl Harness {
             t,
         )
         .expect("bundled buildx resolves")
+        .with_entropy(test_entropy())
         .with_port_probe(NoListeners)
         .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
     }

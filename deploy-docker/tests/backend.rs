@@ -15,7 +15,7 @@ use harpoon_deploy::ledger::{
 use harpoon_deploy::logs::Redactor;
 use harpoon_deploy::state::*;
 use harpoon_deploy_docker::backend::{
-    image_tag, preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig,
+    preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig,
 };
 use harpoon_deploy_docker::json::Json;
 use harpoon_deploy_docker::probe::{HttpTransport, TcpHttp};
@@ -50,6 +50,7 @@ fn backend_with<T: HttpTransport>(
     f(&mut cfg);
     DockerBackend::with_transport(cfg, Some(&h.ws.resources()), t)
         .expect("bundled buildx resolves")
+        .with_entropy(test_entropy())
         .with_port_probe(NoListeners)
         .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
 }
@@ -121,9 +122,10 @@ fn a_first_deployment_succeeds_and_records_intent_before_and_receipt_after_every
         .expect("serving container exists");
     assert!(serving.running);
     assert!(h.docker.container(&name_of(&h, preliminary_name)).is_none());
-    assert!(h.docker.with(|s| s.images.iter().any(|i| i
-        .tags
-        .contains(&image_tag(&h.dep.application_id, &h.dep.id)))));
+    assert!(h.docker.with(|s| s
+        .images
+        .iter()
+        .any(|i| i.tags.contains(&tag_for(&h.dep.application_id, &h.dep.id)))));
     let port = serving.host_port.unwrap();
     assert!((38000..=38999).contains(&port), "application range: {port}");
 
@@ -155,7 +157,7 @@ fn a_first_deployment_succeeds_and_records_intent_before_and_receipt_after_every
     // the image: intent before the build ran, receipt with the inspected image id
     let image_key = ResourceKey::new(
         ResourceKind::Image,
-        image_tag(&h.dep.application_id, &h.dep.id),
+        tag_for(&h.dep.application_id, &h.dep.id),
     );
     let img_intent = j
         .stamps
@@ -307,7 +309,7 @@ fn only_the_bundled_buildx_runs_with_an_isolated_environment() {
         "--pull=false",
         "--progress=plain",
         "-t",
-        &image_tag(&h.dep.application_id, &h.dep.id),
+        &tag_for(&h.dep.application_id, &h.dep.id),
         "io.harpoon.managed=true",
     ] {
         assert!(args.contains(want), "buildx args lack {want}: {args}");
@@ -332,10 +334,22 @@ fn only_the_bundled_buildx_runs_with_an_isolated_environment() {
             "the user's environment leaked into buildx ({canary}): {env}"
         );
     }
+    // the snapshot is gone once the build ends, so compare the recorded path's parent
+    let rec = h.ws.buildx_record("cwd.txt");
+    let cwd = std::path::PathBuf::from(rec.trim());
     assert_eq!(
-        std::fs::canonicalize(h.ws.buildx_record("cwd.txt").trim()).unwrap(),
-        std::fs::canonicalize(h.ws.context()).unwrap(),
-        "builds run in the context directory"
+        std::fs::canonicalize(cwd.parent().unwrap()).unwrap(),
+        std::fs::canonicalize(h.ws.scratch()).unwrap(),
+        "builds run in a private snapshot inside the scratch directory, not in the user's folder"
+    );
+    assert!(cwd
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("ctx-"));
+    assert!(
+        args.contains("--iidfile") && args.contains("/iid-"),
+        "{args}"
     );
 }
 
@@ -400,7 +414,7 @@ fn a_failed_build_is_reported_with_its_output_and_leaves_nothing_behind() {
             &h.dep.id,
             &ResourceKey::new(
                 ResourceKind::Image,
-                image_tag(&h.dep.application_id, &h.dep.id),
+                tag_for(&h.dep.application_id, &h.dep.id),
             ),
         )
         .unwrap();
@@ -485,13 +499,13 @@ fn a_build_that_reports_success_but_produced_no_image_fails() {
         .as_ref()
         .unwrap()
         .message
-        .contains("does not exist"));
+        .contains("has no such image"));
 }
 
 #[test]
 fn an_image_without_harpoons_labels_is_not_recorded_as_ours() {
     let mut h = Harness::new();
-    let tag = image_tag(&h.dep.application_id, &h.dep.id);
+    let tag = tag_for(&h.dep.application_id, &h.dep.id);
     // the build "produces" an image with only one of the three labels
     h.seed_built_image_with(vec![("io.harpoon.managed".into(), "true".into())], vec![]);
     let mut b = backend_with(&h, ok200(), |_| {});
@@ -696,9 +710,10 @@ fn a_final_check_failure_removes_the_new_container_and_releases_its_port_but_kee
         h.objects_for_dep().is_empty(),
         "no container of this deployment remains"
     );
-    assert!(h.docker.with(|s| s.images.iter().any(|i| i
-        .tags
-        .contains(&image_tag(&h.dep.application_id, &h.dep.id)))));
+    assert!(h.docker.with(|s| s
+        .images
+        .iter()
+        .any(|i| i.tags.contains(&tag_for(&h.dep.application_id, &h.dep.id)))));
     assert!(r.ledger.leased_ports().is_empty(), "every lease released");
     assert!(r.cleanup_problems().is_empty());
 }
@@ -1381,7 +1396,7 @@ fn image_id_of(h: &Harness, tag: &str) -> Option<String> {
 #[test]
 fn a_foreign_image_already_holding_the_tag_stops_the_build_before_buildx_runs() {
     let mut h = Harness::new();
-    let tag = image_tag(&h.dep.application_id, &h.dep.id);
+    let tag = tag_for(&h.dep.application_id, &h.dep.id);
     let foreign = h.preexisting_image(vec![]);
     let (r, j) = tag_collision_run(&mut h);
     assert_eq!(r.status, DeploymentStatus::Failed);
@@ -1418,7 +1433,7 @@ fn an_existing_harpoon_owned_tag_is_not_silently_overwritten() {
         ("only the managed label", Some(())),
     ] {
         let mut h = Harness::new();
-        let tag = image_tag(&h.dep.application_id, &h.dep.id);
+        let tag = tag_for(&h.dep.application_id, &h.dep.id);
         let existing_labels = match what {
             "this deployment's labels" => labels(&h.dep.application_id, &h.dep.id),
             "another deployment's labels" => {
@@ -1472,7 +1487,7 @@ fn the_tag_check_precedes_the_build_and_the_intent_precedes_the_build() {
     assert!(inspects.len() >= 2, "once before the build, once after");
     let key = ResourceKey::new(
         ResourceKind::Image,
-        image_tag(&h.dep.application_id, &h.dep.id),
+        tag_for(&h.dep.application_id, &h.dep.id),
     );
     let intent = j
         .stamps
