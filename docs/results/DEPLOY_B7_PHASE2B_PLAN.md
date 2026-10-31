@@ -1,5 +1,7 @@
 # B7 Phase 2B — preparation and the proposed (NOT executed) invocation
 
+> **Final results:** the first live deployment, LAN-isolation test and teardown are recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) (**B7 first-deployment acceptance: PASS**; not general production readiness). The text below is the historical Phase 2B preparation and proposed invocation and is kept as written.
+
 Status: **prepared, not executed.** Phase 2B (the first real build and deployment of the disposable fixture) needs the user's separate, explicit authorization. This document records the two local prerequisites,
 the exact proposed command, the procedure around it, and what is still unknown. Nothing here touched the live runtime beyond the read-only commands listed under "Evidence".
 

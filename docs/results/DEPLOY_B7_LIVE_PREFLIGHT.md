@@ -1,5 +1,7 @@
 # B7 Phase 2A — read-only live preflight
 
+> **Final results:** the first live deployment, LAN-isolation test and teardown are recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) (**B7 first-deployment acceptance: PASS**; not general production readiness). The text below is the historical Phase 2A preflight record and is kept as written.
+
 Date (UTC): 2026-10-31 ~07:20–07:40. Repository: `main` at `89b609c` (includes #115). Authorization: read-only inspection of the running Harpoon through its Docker and management
 sockets (Phase 2A only). **Nothing was built, created, started, stopped, removed, pruned, restarted, repaired or modified.** Raw sanitized evidence is kept outside the repository and outside every
 Harpoon runtime/journal directory, at `…/scratchpad/b7-preflight/` of the working session (paths below are relative to it). A before/after inventory is identical (`cli/53` vs `cli/54`), the proposed B7 runtime directory

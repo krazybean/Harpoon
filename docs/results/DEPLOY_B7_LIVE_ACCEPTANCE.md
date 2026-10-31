@@ -1,5 +1,7 @@
 # B7 live acceptance checklist (Phase 2 — requires the user's separate authorization)
 
+> **Final results:** the first live deployment, LAN-isolation test and teardown are recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) (**B7 first-deployment acceptance: PASS**; not general production readiness). The text below is the historical checklist and plan and is kept as written.
+
 Nothing in this document has been run. Phase 1 (this PR) is offline only. **No step below may be performed without the user's explicit, separate authorization for that step.**
 
 ## 0. Preconditions — all must hold before step 1

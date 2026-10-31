@@ -98,3 +98,7 @@ Mandatory B7 gates carried forward (all still open):
   Exit codes: 0 done/nothing to do, 5 runtime unreachable (no writes), 6 refused (unknown/unsuccessful deployment, earlier refusal, simulated runtime, missing opt-in), 7 incomplete (state recorded).
 - Live `deploy` remains closed in the shipping build (`Gate::shipping()`); `teardown` needs a succeeded deployment, which only a live deployment can produce.
 - `teardown` handles containers one at a time and stops at the first one that does not come out clean (failed removal or refusal); the rest are reported "not attempted" and get no journal record. (The shared engine's `execute_actions` would otherwise carry on with later actions; teardown calls it per action rather than changing the engine.)
+
+## B7 live acceptance
+The CLI's first live use (one `deploy` with the separately built experimental binary, `teardown` with the shipping binary, read-only `status`/`doctor`/`plan`/`inventory` throughout) is recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md). The shipping gate remains closed.
+
