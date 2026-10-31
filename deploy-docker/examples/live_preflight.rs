@@ -119,8 +119,7 @@ fn main() {
         "guest free space (MgmtDfProbe)",
         probe
             .measure()
-            .map(|(free, what)| format!("{free} bytes free on {what}"))
-            .map_err(|e| e),
+            .map(|(free, what)| format!("{free} bytes free on {what}")),
     );
     println!(
         "{}",
