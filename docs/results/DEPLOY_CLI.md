@@ -102,3 +102,26 @@ Mandatory B7 gates carried forward (all still open):
 ## B7 live acceptance
 The CLI's first live use (one `deploy` with the separately built experimental binary, `teardown` with the shipping binary, read-only `status`/`doctor`/`plan`/`inventory` throughout) is recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md). The shipping gate remains closed.
 
+
+## B8.1 — recovery behaviour, known limits and test fidelity
+Offline only: no code in the CLI, engine, backend or journal was changed, the shipping gate is still closed, and nothing here was run against a Docker Engine. Background: the B8 failure and recovery audit.
+
+### Ownership refusal is terminal (F1)
+- When a cleanup is **refused** because ownership cannot be proven (the recorded id, name or any of the three `io.harpoon.*` labels no longer match), the ledger entry becomes `Refused`. `reconcile` and `teardown` never re-evaluate it, even if the labels later reappear, and `status` keeps listing it as "not touched, ownership not proven".
+- While any entry is unresolved, `deploy` is refused for the **whole runtime directory** (exit 6). A refusal therefore blocks every further deployment from that directory.
+- **No acknowledgement, forget, force or override command exists and none is authorized.** The object is never touched. The only way forward today is to investigate it by hand in Docker and use a new runtime directory.
+- This is deliberate fail-closed behaviour, pinned by `a_refused_ownership_stays_terminal_and_blocks_the_runtime_directory`. Whether a future, explicitly authorized acknowledgement should exist is an open design question and is not part of B8.1.
+
+### Retained images of failed deployments (F2)
+- The image a deployment builds is `Retain`. After a **failed or interrupted** deployment it is kept, still labelled, and is **not** reported as unresolved cleanup; `deploy` for another application is not blocked by it.
+- There is **no automated removal path** for it: `reconcile` skips retained entries, and `teardown` accepts only a `succeeded` deployment. Until a cleanup operation exists, it stays in Docker (disk use grows with each failed deployment) and can only be removed by hand.
+- **Proposed, not implemented in B8.1:** an explicitly authorized, ownership-verified operation that removes the retained image of one named failed or interrupted deployment — by recorded image id, only if all three labels still match and no container uses it, with a dry run by default, an exact authorization phrase, a journal attempt/result record, no force, no prune and no name patterns. It needs its own review before any code.
+
+### What the new tests exercise
+| Kind | Tests | What it is |
+|---|---|---|
+| Real `DockerBackend` + real engine against a **simulated** Docker server and a fake Buildx | `deploy-docker/tests/backend.rs`: `a_crash_at_every_write_is_recovered_by_label_with_the_real_backend` (healthy), `…_of_a_failed_preliminary_check_…`, `…_of_a_failed_final_check_…`, `…_of_a_port_collision_…`, `…_of_a_failed_removal_…` | A crash at every journal write of each scenario, then restart: the deployment is marked interrupted, a new backend reconciles by label, and the tests assert that no unrelated container or image (nor the base image) is touched, no request is forced or a prune, a ledger entry recorded as released really is gone, no entry is left "intended", and replaying every record written before and after the restart reproduces the final accounting. The failed-removal case keeps Docker refusing removals after the restart (nothing may be recorded as released that still exists), then lets Docker recover. |
+| Real **CLI**, real journal files, real `DockerBackend`, **simulated** Docker server | `deploy-cli/tests/cli.rs`: `an_interrupted_deployment_is_recovered_reconciled_and_only_then_lets_the_next_one_run`, `a_reconcile_that_cannot_finish_…`, `a_refused_ownership_stays_terminal_…` | A gate-open `deploy` runs in a separate process and is killed with SIGKILL while it starts its preliminary container. Then: `deploy` refused → `recover` (Docker not contacted) → still refused → `reconcile` dry run (writes nothing) → `reconcile --apply` (only the recorded id, `force=false`, no image deleted) → `status` clean → the next deployment is permitted. The second and third tests show a reconcile that cannot finish, and a refused ownership, keep the runtime blocked. |
+| Against a **real Docker Engine** | none of the above | The only real-engine evidence remains the B7 live acceptance. Failure and interrupted-recovery paths have not been run against a real engine. |
+
+Remaining gaps after B8.1 (unchanged by it): live failure and interrupted-recovery behaviour against a real engine; the BuildKit daemon's behaviour after a build is killed at its deadline; a container that ignores the stop signal; guest private-NAT exposure; intermittent forwarder startup lag; release replacement and rollback (engine state machine only, no Docker implementation); F1 and F2 above.

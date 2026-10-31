@@ -617,6 +617,354 @@ fn an_unreceipted_creation_keeps_blocking_deploy_after_recover() {
     );
 }
 
+// ------------------------------------------------------------------ B8.1: interruption end to end
+//
+// These tests run the real CLI and the real `DockerBackend` against the *simulated* Docker server
+// of this crate's tests. No Docker Engine, VM or socket outside the temporary directory is
+// involved, and no real container or image exists at any point.
+
+const CHILD_ENV: &str = "HARPOON_B81_CHILD_ARGS";
+
+/// Child role: when launched by `interrupt_a_live_deploy` this runs one gate-open `deploy` and is
+/// killed by its parent mid-run. In an ordinary test run it does nothing.
+#[test]
+fn b8_child_live_deploy_to_be_killed() {
+    let Ok(raw) = std::env::var(CHILD_ENV) else {
+        return;
+    };
+    let args: Vec<String> = raw.split('\u{1f}').map(String::from).collect();
+    let o = cli_run(&args, &OPEN);
+    std::process::exit(if o.code == 0 { 99 } else { o.code });
+}
+
+/// Start a live deployment in a separate process, hold it inside the start of its preliminary
+/// container, and SIGKILL it. What remains is exactly what an interrupted run leaves: a journal
+/// with a running deployment, leases and a receipted container, and that container in Docker.
+fn interrupt_a_live_deploy(t: &T) {
+    use std::time::{Duration, Instant};
+    image_appears_after_build(t);
+    t.h.docker.fault(
+        Some("POST"),
+        "/start",
+        1,
+        Action::Delay(Duration::from_millis(2000)),
+    );
+    let mut args = live_args(t);
+    args.push("--runtime-dir".into());
+    args.push(t.rt.display().to_string());
+    let exe = std::env::current_exe().unwrap();
+    let mut child = spawning(|| {
+        std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "b8_child_live_deploy_to_be_killed",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, args.join("\u{1f}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    });
+    let t0 = Instant::now();
+    loop {
+        if t.h
+            .docker
+            .requests()
+            .iter()
+            .any(|r| r.method == "POST" && r.path.contains("/start"))
+        {
+            break;
+        }
+        if let Some(st) = child.try_wait().unwrap() {
+            panic!("the deploy ended before it could be interrupted: {st}");
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "the deploy never reached a start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "still running when interrupted"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // The start request that was already in flight finishes inside the simulated Docker.
+    std::thread::sleep(Duration::from_millis(2600));
+}
+
+struct Foreign {
+    container: String,
+    image: String,
+}
+
+fn add_foreign(t: &T) -> Foreign {
+    t.h.docker.with(|s| Foreign {
+        container: s.add_container("someone-elses", vec![], true),
+        image: s.add_image("someone-elses:1", vec![]),
+    })
+}
+
+fn assert_foreign_untouched(t: &T, f: &Foreign) {
+    t.h.docker.with(|s| {
+        assert!(
+            s.containers
+                .iter()
+                .any(|c| c.id == f.container && c.running),
+            "the foreign container was touched"
+        );
+        assert!(
+            s.images.iter().any(|i| i.id == f.image),
+            "the foreign image was touched"
+        );
+    });
+    for r in t.h.docker.requests() {
+        assert!(
+            !r.path.contains(&f.container) || r.method == "GET",
+            "a request other than a read named the foreign container: {} {}",
+            r.method,
+            r.path
+        );
+        assert!(
+            !r.path.contains(&f.image) || r.method == "GET",
+            "a request other than a read named the foreign image: {} {}",
+            r.method,
+            r.path
+        );
+    }
+}
+
+fn writes(t: &T) -> usize {
+    t.h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method != "GET")
+        .count()
+}
+
+fn harpoon_containers(t: &T) -> Vec<String> {
+    t.h.docker.with(|s| {
+        s.containers
+            .iter()
+            .filter(|c| c.labels.iter().any(|(k, _)| k == "io.harpoon.managed"))
+            .map(|c| c.id.clone())
+            .collect()
+    })
+}
+
+fn refs(v: &[String]) -> Vec<&str> {
+    v.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn an_interrupted_deployment_is_recovered_reconciled_and_only_then_lets_the_next_one_run() {
+    let t = T::new();
+    let foreign = add_foreign(&t);
+    interrupt_a_live_deploy(&t);
+    let ours = harpoon_containers(&t);
+    assert!(
+        !ours.is_empty(),
+        "the interruption left Harpoon's container in Docker"
+    );
+
+    // 1. Nothing may deploy while the journal still says a deployment is running.
+    let n = writes(&t);
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("recover"), "{}", o.stderr);
+    assert_eq!(writes(&t), n, "a refused deploy changed Docker");
+
+    // 2. recover changes the journal only: Docker is not contacted at all.
+    let before = t.h.docker.requests().len();
+    let o = t.cli(&["recover"]);
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("marked interrupted"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("Docker was not contacted"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(t.h.docker.requests().len(), before);
+
+    // 3. Recovered is not reconciled: the container and leases are still unresolved.
+    let s = t.cli(&["status"]);
+    assert!(s.stdout.contains("unresolved cleanup ("), "{}", s.stdout);
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("reconcile"), "{}", o.stderr);
+    assert_eq!(harpoon_containers(&t), ours, "still there");
+
+    // 4. The dry run reads and proposes; it writes nothing, to Docker or to the journal.
+    let journal = t.journal_bytes();
+    let n = writes(&t);
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("would: remove container hp-"),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("dry run"), "{}", o.stdout);
+    assert_eq!(writes(&t), n);
+    assert_eq!(t.journal_bytes(), journal);
+    assert_eq!(harpoon_containers(&t), ours);
+
+    // 5. Apply: only what is provably ours, each by its recorded id, never forced.
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("nothing unresolved"), "{}", o.stdout);
+    assert!(
+        harpoon_containers(&t).is_empty(),
+        "Harpoon's container was removed"
+    );
+    for r in t.h.docker.requests() {
+        if r.method == "DELETE" {
+            assert!(r.path.contains("force=false"), "{}", r.path);
+            assert!(
+                r.path.starts_with("/containers/"),
+                "only containers were deleted: {}",
+                r.path
+            );
+            assert!(ours.iter().any(|id| r.path.contains(id)), "{}", r.path);
+        }
+        if r.method == "POST" && r.path.ends_with("/stop") {
+            assert!(ours.iter().any(|id| r.path.contains(id)), "{}", r.path);
+        }
+    }
+    assert_foreign_untouched(&t, &foreign);
+    // The built image of an interrupted run is retained, not removed and not "unresolved" (F2).
+    assert!(t.h.docker.with(|s| s
+        .images
+        .iter()
+        .any(|i| i.tags.iter().any(|g| g.starts_with("harpoon/")))));
+    let s = t.cli(&["status"]);
+    assert!(
+        s.stdout.contains("unresolved cleanup: none"),
+        "{}",
+        s.stdout
+    );
+    assert!(s.stdout.contains("interrupted"), "{}", s.stdout);
+
+    // 6. Now, and only now, the next deployment is permitted.
+    image_appears_after_build(&t);
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 7); // it ran (nothing listens on the port); it was not refused
+    assert!(
+        o.stdout.contains("failure at preliminary_check"),
+        "{}",
+        o.stdout
+    );
+    assert_foreign_untouched(&t, &foreign);
+    assert!(harpoon_containers(&t).is_empty());
+}
+
+#[test]
+fn a_reconcile_that_cannot_finish_leaves_the_runtime_blocked_until_it_does() {
+    let t = T::new();
+    let foreign = add_foreign(&t);
+    interrupt_a_live_deploy(&t);
+    let ours = harpoon_containers(&t);
+    assert_exit(&t.cli(&["recover"]), 0);
+
+    // Docker refuses every removal.
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/containers/",
+        10_000,
+        Action::Respond(500, "{\"message\":\"device or resource busy\"}".into()),
+    );
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 7);
+    assert!(o.stdout.contains("still unresolved"), "{}", o.stdout);
+    assert_eq!(
+        harpoon_containers(&t),
+        ours,
+        "the container really is still there"
+    );
+    let s = t.cli(&["status"]);
+    assert!(s.stdout.contains("cleanup failed"), "{}", s.stdout);
+    let n = writes(&t);
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 6);
+    assert_eq!(writes(&t), n, "a refused deploy changed Docker");
+
+    // Docker recovers; the next reconcile finishes, and the runtime is open again.
+    t.h.docker.with(|s| s.faults.clear());
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(harpoon_containers(&t).is_empty());
+    image_appears_after_build(&t);
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("failure at preliminary_check"),
+        "{}",
+        o.stdout
+    );
+    assert_foreign_untouched(&t, &foreign);
+}
+
+#[test]
+fn a_refused_ownership_stays_terminal_and_blocks_the_runtime_directory() {
+    // F1, documented in DEPLOY_CLI.md: there is deliberately no acknowledgement or override.
+    let t = T::new();
+    let foreign = add_foreign(&t);
+    interrupt_a_live_deploy(&t);
+    let ours = harpoon_containers(&t);
+    assert_exit(&t.cli(&["recover"]), 0);
+
+    // Something else takes over the recorded container: same id, no Harpoon labels.
+    let original: Vec<(String, Vec<(String, String)>)> = t.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .filter(|c| ours.contains(&c.id))
+            .map(|c| (c.id.clone(), std::mem::take(&mut c.labels)))
+            .collect()
+    });
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let n = writes(&t);
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 7);
+    assert!(o.stdout.contains("still unresolved"), "{}", o.stdout);
+    assert_eq!(writes(&t), n, "the unlabelled container was not touched");
+    assert!(t.h.docker.with(|s| ours
+        .iter()
+        .all(|id| s.containers.iter().any(|c| &c.id == id))));
+
+    // Repeating it, or even putting the labels back, does not reopen the entry; deploy stays refused.
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 7);
+    assert_eq!(writes(&t), n);
+    t.h.docker.with(|s| {
+        for (id, labels) in &original {
+            s.containers
+                .iter_mut()
+                .find(|c| &c.id == id)
+                .unwrap()
+                .labels = labels.clone();
+        }
+    });
+    let o = go(&t, &SHIPPING, &reconcile_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 7);
+    assert_eq!(
+        writes(&t),
+        n,
+        "restored labels did not reopen a refused entry"
+    );
+    let o = t.go(&OPEN, &refs(&live_args(&t)));
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("ownership not proven"), "{}", o.stderr);
+    let s = t.cli(&["status"]);
+    assert!(s.stdout.contains("ownership not proven"), "{}", s.stdout);
+    assert_eq!(writes(&t), n);
+    assert_foreign_untouched(&t, &foreign);
+}
+
 // ------------------------------------------------------------------ corrupt journal, lock contention, permissions
 
 #[test]
