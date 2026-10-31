@@ -15,6 +15,7 @@ mod resource_sampler;
 mod context_discovery;
 mod cli_path;
 mod bootstrap;
+mod compose_import;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -1307,7 +1308,7 @@ fn main() {
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
             get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
-            list_containers, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
+            list_containers, compose_import::pick_compose_folder, compose_import::preview_compose_project, compose_import::launch_compose_project, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
