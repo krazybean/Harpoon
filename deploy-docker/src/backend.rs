@@ -1217,3 +1217,164 @@ impl<T: HttpTransport> DockerBackend<T> {
         }
     }
 }
+
+// ------------------------------------------------------------------ B8.2: retained-image cleanup
+
+/// What is known about a retained image right now. Ownership and exclusivity are different
+/// questions on purpose: an ownership failure is the terminal F1 class (the object is not
+/// provably Harpoon's), while "not exclusively removable" is an ordinary, retryable conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageVerdict {
+    /// Harpoon's image by id and labels, carrying no other tag or digest, used by no container.
+    Eligible,
+    /// Docker has no image with this id.
+    Absent,
+    /// The id or the ownership labels do not match: not provably Harpoon's. Never removed.
+    Ownership(String),
+    /// Ownership is shown, but removal would not be exclusive (another tag or digest, a container,
+    /// or a container whose image Docker does not report). Nothing is removed.
+    NotExclusive(String),
+}
+
+impl<T: HttpTransport> DockerBackend<T> {
+    /// Read-only: inspect the image by its immutable id and list every container (running and
+    /// stopped). An unreachable or malformed answer is an error, never "absent" and never
+    /// "eligible".
+    pub fn assess_retained_image(
+        &self,
+        id: &str,
+        tag: &str,
+        app: &harpoon_deploy::ids::ApplicationId,
+        dep: &DeploymentId,
+    ) -> Result<ImageVerdict, StepError> {
+        let budget = Budget {
+            start: Instant::now(),
+            total: self.cfg.cleanup_timeout,
+        };
+        let Some(img) = self
+            .api
+            .image_inspect(id, budget.left("inspecting the retained image")?)
+            .map_err(|e| api_err("inspecting the retained image", e))?
+        else {
+            return Ok(ImageVerdict::Absent);
+        };
+        if img.id != id {
+            return Ok(ImageVerdict::Ownership(format!(
+                "Docker answered for image {} when asked about {}; not touched",
+                short(&img.id),
+                short(id)
+            )));
+        }
+        if !has_labels(&img.labels, app, dep) {
+            return Ok(ImageVerdict::Ownership(format!(
+                "image {} does not carry this deployment's Harpoon labels (managed, app, deployment); not touched",
+                short(id)
+            )));
+        }
+        let other_tags: Vec<&str> = img
+            .tags
+            .iter()
+            .map(String::as_str)
+            .filter(|t| *t != tag)
+            .collect();
+        if !other_tags.is_empty() {
+            return Ok(ImageVerdict::NotExclusive(format!(
+                "image {} is also tagged {}; Harpoon removes only an image it exclusively owns",
+                short(id),
+                other_tags.join(", ")
+            )));
+        }
+        if !img.repo_digests.is_empty() {
+            return Ok(ImageVerdict::NotExclusive(format!(
+                "image {} is known by registry digest {}; it may be referenced elsewhere",
+                short(id),
+                img.repo_digests.join(", ")
+            )));
+        }
+        let containers = self
+            .api
+            .list_containers(budget.left("listing containers")?)
+            .map_err(|e| api_err("listing containers", e))?;
+        let mut users = Vec::new();
+        let mut unknown = Vec::new();
+        for c in &containers {
+            if c.image_id.is_empty() {
+                unknown.push(c.name.clone());
+            } else if c.image_id == id {
+                users.push(format!("{} ({})", c.name, c.state));
+            }
+        }
+        if !users.is_empty() {
+            return Ok(ImageVerdict::NotExclusive(format!(
+                "container {} was created from this image",
+                users.join(", ")
+            )));
+        }
+        if !unknown.is_empty() {
+            return Ok(ImageVerdict::NotExclusive(format!(
+                "Docker does not report which image container {} uses, so it cannot be shown not to use this one",
+                unknown.join(", ")
+            )));
+        }
+        Ok(ImageVerdict::Eligible)
+    }
+
+    /// The only image-removal path of `cleanup-image`: re-assesses immediately before deleting and
+    /// then deletes **by id** with `force=false&noprune=true`, leaving the final say to Docker.
+    pub fn retained_image_ops(&mut self) -> RetainedImageOps<'_, T> {
+        RetainedImageOps { backend: self }
+    }
+}
+
+/// [`ResourceOps`] for removing one retained image. Outcomes map onto the journal like this:
+///
+/// - removed / 404 → `Removed` / `AlreadyAbsent`;
+/// - id or labels no longer match → `Refused` (terminal, F1, unchanged);
+/// - not exclusive any more, or Docker's HTTP 409 → `Err` carrying the conflict marker
+///   (`CleanupFailed`, retryable, does not block other deployments under the narrow rule);
+/// - any other error (timeout, disconnect, 5xx, malformed) → `Err` without the marker: the outcome
+///   is ambiguous and stays blocking.
+pub struct RetainedImageOps<'a, T: HttpTransport> {
+    backend: &'a mut DockerBackend<T>,
+}
+
+impl<T: HttpTransport> ResourceOps for RetainedImageOps<'_, T> {
+    fn list_resources(&mut self) -> Result<Vec<Observed>, StepError> {
+        self.backend.list_resources()
+    }
+
+    fn remove_resource(&mut self, req: &RemoveRequest) -> Result<RemoveResult, StepError> {
+        if req.kind != ResourceKind::Image {
+            return Ok(RemoveResult::Refused(
+                "this operation removes a retained image only".into(),
+            ));
+        }
+        match self
+            .backend
+            .assess_retained_image(&req.id, &req.name, &req.app, &req.deployment)?
+        {
+            ImageVerdict::Absent => return Ok(RemoveResult::AlreadyAbsent),
+            ImageVerdict::Ownership(why) => return Ok(RemoveResult::Refused(why)),
+            ImageVerdict::NotExclusive(why) => {
+                return Err(StepError::new(
+                    harpoon_deploy::ledger::image_conflict_message(&format!(
+                        "{why}; nothing was deleted"
+                    )),
+                ))
+            }
+            ImageVerdict::Eligible => {}
+        }
+        let left = self.backend.cfg.cleanup_timeout;
+        match self.backend.api.remove_image(&req.id, left) {
+            Ok(true) => Ok(RemoveResult::Removed),
+            Ok(false) => Ok(RemoveResult::AlreadyAbsent),
+            Err(e) if e.is_conflict() => Err(StepError::new(
+                harpoon_deploy::ledger::image_conflict_message(&format!(
+                    "Docker refused to delete image {} (HTTP 409: it is still referenced); nothing was deleted",
+                    short(&req.id)
+                )),
+            )),
+            Err(e) => Err(api_err(&format!("removing image {}", req.name), e)),
+        }
+    }
+}

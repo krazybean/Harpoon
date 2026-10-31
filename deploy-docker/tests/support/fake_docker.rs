@@ -44,6 +44,10 @@ pub struct Img {
     pub tags: Vec<String>,
     pub labels: Labels,
     pub volumes: Vec<String>,
+    /// `RepoDigests`; empty for a locally built image.
+    pub digests: Vec<String>,
+    /// The image this one was built on top of (a "dependent child image" of it).
+    pub parent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +119,8 @@ impl St {
             tags: vec![tag.to_string()],
             labels,
             volumes: Vec::new(),
+            digests: Vec::new(),
+            parent: None,
         });
         id
     }
@@ -131,6 +137,8 @@ impl St {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             labels,
             volumes,
+            digests: Vec::new(),
+            parent: None,
         });
     }
     pub fn add_container(&mut self, name: &str, labels: Labels, running: bool) -> String {
@@ -560,6 +568,10 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                             Json::Arr(i.tags.iter().map(|t| Json::Str(t.clone())).collect()),
                         ),
                         (
+                            "RepoDigests",
+                            Json::Arr(i.digests.iter().map(|t| Json::Str(t.clone())).collect()),
+                        ),
+                        (
                             "Config",
                             obj(vec![
                                 ("Labels", labels_json(&i.labels)),
@@ -585,18 +597,81 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
             }
         }
         ("DELETE", ["images", rest @ ..]) => {
+            // Docker's documented semantics, not "always succeeds": without `force`, an image that
+            // is used by any container (running: cannot be forced; stopped: must be forced), that
+            // has dependent child images, or that is addressed by id while several tags point at
+            // it, is a 409 conflict and nothing is removed. Addressed by one of several tags it is
+            // only untagged. `noprune` changes nothing here (there are no untagged parents).
             let r = rest.join("/");
-            match s
+            let force = q("force").as_deref() == Some("true");
+            let Some(pos) = s
                 .images
                 .iter()
                 .position(|i| i.id == r || i.tags.contains(&r))
-            {
-                Some(pos) => {
-                    let i = s.images.remove(pos);
-                    (200, format!("[{{\"Deleted\":\"{}\"}}]", i.id))
-                }
-                None => not_found("image", &r),
+            else {
+                return not_found("image", &r);
+            };
+            let by_id = s.images[pos].id == r;
+            let id = s.images[pos].id.clone();
+            let short_of = |x: &str| {
+                x.trim_start_matches("sha256:")
+                    .chars()
+                    .take(12)
+                    .collect::<String>()
+            };
+            let conflict = |how: &str, why: String| {
+                (
+                    409,
+                    format!(
+                        "{{\"message\":\"conflict: unable to delete {} ({how}) - {why}\"}}",
+                        short_of(&id)
+                    ),
+                )
+            };
+            if by_id && !force && s.images[pos].tags.len() > 1 {
+                return conflict(
+                    "must be forced",
+                    "image is referenced in multiple repositories".into(),
+                );
             }
+            if !by_id && s.images[pos].tags.len() > 1 {
+                s.images[pos].tags.retain(|t| *t != r);
+                return (200, format!("[{{\"Untagged\":\"{r}\"}}]"));
+            }
+            if let Some(c) = s.containers.iter().find(|c| c.image == id && c.running) {
+                return conflict(
+                    "cannot be forced",
+                    format!(
+                        "image is being used by running container {}",
+                        short_of(&c.id)
+                    ),
+                );
+            }
+            if !force {
+                if let Some(c) = s.containers.iter().find(|c| c.image == id) {
+                    return conflict(
+                        "must be forced",
+                        format!(
+                            "image is being used by stopped container {}",
+                            short_of(&c.id)
+                        ),
+                    );
+                }
+            }
+            if s.images
+                .iter()
+                .any(|i| i.parent.as_deref() == Some(id.as_str()))
+            {
+                return conflict(
+                    "cannot be forced",
+                    "image has dependent child images".into(),
+                );
+            }
+            let i = s.images.remove(pos);
+            (
+                200,
+                format!("[{{\"Untagged\":\"{}\"}},{{\"Deleted\":\"{}\"}}]", r, i.id),
+            )
         }
         ("GET", ["containers", "json"]) => {
             let arr: Vec<Json> = s

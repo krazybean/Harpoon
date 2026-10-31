@@ -117,6 +117,8 @@ Offline only: no code in the CLI, engine, backend or journal was changed, the sh
 - There is **no automated removal path** for it: `reconcile` skips retained entries, and `teardown` accepts only a `succeeded` deployment. Until a cleanup operation exists, it stays in Docker (disk use grows with each failed deployment) and can only be removed by hand.
 - **Proposed, not implemented in B8.1:** an explicitly authorized, ownership-verified operation that removes the retained image of one named failed or interrupted deployment — by recorded image id, only if all three labels still match and no container uses it, with a dry run by default, an exact authorization phrase, a journal attempt/result record, no force, no prune and no name patterns. It needs its own review before any code.
 
+> **Update (B8.2):** the missing removal path described above now exists as `cleanup-image`; see "B8.2 — `cleanup-image`" below. The F2 text above is kept as the B8.1 record of the gap.
+
 ### What the new tests exercise
 | Kind | Tests | What it is |
 |---|---|---|
@@ -125,3 +127,46 @@ Offline only: no code in the CLI, engine, backend or journal was changed, the sh
 | Against a **real Docker Engine** | none of the above | The only real-engine evidence remains the B7 live acceptance. Failure and interrupted-recovery paths have not been run against a real engine. |
 
 Remaining gaps after B8.1 (unchanged by it): live failure and interrupted-recovery behaviour against a real engine; the BuildKit daemon's behaviour after a build is killed at its deadline; a container that ignores the stop signal; guest private-NAT exposure; intermittent forwarder startup lag; release replacement and rollback (engine state machine only, no Docker implementation); F1 and F2 above.
+
+## B8.2 — `cleanup-image`
+Offline only: implemented and tested against a *simulated* Docker server. It has **not** been run against a real Docker Engine, the shipping deploy gate is unchanged, and `teardown` for successful deployments is unchanged.
+
+```
+harpoon-deploy cleanup-image --deployment dep_… --image sha256:<64 hex> --docker-socket PATH --resources-dir DIR
+    [--runtime-dir DIR] [--apply --authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE]
+```
+Dry run by default; `--apply` needs the same exact authorization phrase as `reconcile --apply` and `teardown --apply`, and takes the journal's single-writer lock. `--image` is a typed confirmation: a full id that must equal the id recorded for that deployment (a tag, a prefix or upper case is a usage error). There is no force, prune or pattern option. Exit codes: 0 done or nothing to do; 2 usage; 4 journal (corrupt, locked); 5 Docker unreachable or ambiguous answer (nothing written); 6 refused (nothing written, except where stated below); 7 attempted and incomplete (the state is recorded).
+
+### Eligibility (all must hold; otherwise it refuses and, except for an ownership mismatch, writes nothing)
+Journal, checked before Docker is read:
+1. The runtime is a Docker (not simulated) runtime with a journal; the deployment is in it.
+2. The deployment finished without succeeding (`failed`, `cancelled` or `interrupted`). A running or queued one is told to `recover`; a succeeded one is told to use `teardown`.
+3. It records exactly this image id, with disposition `Retain` and a receipt. An image with no receipt is resolved by `reconcile` (which adopts it), not here.
+4. The entry is not already released (then: "nothing to do") and was not refused earlier (terminal, F1 — see below).
+5. Every other resource of that deployment is released (containers and leases: run `reconcile` first).
+6. No other deployment has an unreleased entry for the same image id.
+
+Docker, read-only, and checked again immediately before the deletion:
+7. `GET /images/{id}/json` returns that exact id, and it carries all three `io.harpoon.*` labels with this deployment's values.
+8. Its tags are a subset of the recorded tag (none at all is fine), and it has no registry digest.
+9. `GET /containers/json?all=true` shows no container, running or stopped, created from it, and no container whose image Docker does not report.
+
+Then `DELETE /images/<id>?force=false&noprune=true`, by id only. Docker has the last word: it re-checks container references, other tags and child images at that moment and answers HTTP 409 if any exist.
+
+### What is recorded, and what blocks
+- The existing journal records are used; **the journal format is unchanged**. `CleanupAttempt` (the durable intent) is written before Docker is asked, `CleanupResult` after. A crash in between leaves an outstanding attempt; a repeat re-checks everything and either deletes or finds the image gone (recorded as already absent). A deletion is never recorded as released unless Docker removed it or reports it gone.
+- **Ownership mismatch** (the id Docker returns differs, or a label is missing or different) is the terminal F1 refusal, recorded exactly as `reconcile` and `teardown` record it. It stays blocking, a repeat of the command or restored labels do not reopen it, and nothing deletes the image. F1 is unchanged.
+- **Not exclusive** problems found by the command's own checks (another tag, a digest, a container, a shared ledger entry, other resources of the deployment not released) are refused **before any journal write**: nothing is recorded, nothing blocks, and a repeat works once the cause is gone.
+- **A conflict at deletion time** — Docker answers HTTP 409, or the command's own pre-delete re-check finds a new cause after the attempt was journaled — is recorded as a failed cleanup with a reserved prefix on the message (`image-conflict: `, in `deploy::ledger`). The image is not released and the command exits 7. Under the narrowest rule, **this does not block other deployments**: it applies only to a `Retain` image with a receipt, of a deployment known to have finished without succeeding, whose every other entry is released, with no later attempt outstanding. `status` then lists it as a "retained image" with the reason, and a repeat of `cleanup-image` retries it (a second attempt, never a force). The classification comes from the HTTP status code and the command's own structured checks, never from Docker's message text; it is re-derived from the replayed journal on every command, so it survives a restart.
+- **Everything else stays blocking**: a timeout, a disconnect, a 5xx, a malformed answer, a reply lost after the delete, an attempt with no recorded result, any ownership mismatch, an unreceipted intent, an active container or lease of the deployment, a succeeded deployment. These are recorded as an ordinary failed cleanup (no prefix) and block `deploy` in that runtime directory until a repeat settles them.
+- `status` and `recover` list retained images of unsuccessful deployments ("they do not block deployments; remove one with `cleanup-image`").
+
+### Fake versus real Docker
+The test Docker server's image deletion now follows Docker's *documented* behaviour instead of always succeeding: without `force`, an image used by a running or stopped container, with dependent child images, or addressed by id while several tags point at it, is a 409 and nothing is removed; addressed by one of several tags it is only untagged. **That behaviour has not been observed on a real Engine in this repository** (the only real deletion seen is the B7 teardown's success path). Whether the real daemon answers 409 in each of these cases, and what it does for images in the containerd image store, is unverified until a separately authorized live validation.
+
+### Design question left for review
+The conflict classification is a reserved prefix inside the existing failure message, so that the journal format and old readers are unaffected. It is honoured only under the conditions above, so a forged or misplaced prefix cannot relax anything else, but it is a convention in free text. A typed `CleanupOutcome` variant would be cleaner and would change the journal format; that decision is deferred to review.
+
+### Remaining gaps after B8.2
+No live validation of any of this; real 409 behaviour (including child images and the containerd image store) unobserved; `teardown` of a successful deployment does not yet apply the exclusivity checks (tags, digests) that `cleanup-image` applies; a retained image cannot be removed while another tag points at it (by design — remove that tag yourself); the F1 terminal refusal still has no acknowledgement or override.
+

@@ -96,6 +96,18 @@ const SPECS: &[Spec] = &[
         switches: &["apply"],
     },
     Spec {
+        command: "cleanup-image",
+        values: &[
+            "runtime-dir",
+            "deployment",
+            "image",
+            "docker-socket",
+            "resources-dir",
+            AUTH_FLAG,
+        ],
+        switches: &["apply"],
+    },
+    Spec {
         command: "inventory",
         values: &["docker-socket", "lsof-path", "to"],
         switches: &[],
@@ -181,6 +193,7 @@ COMMANDS
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
+  cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)
   inventory       read-only listing of containers, images, volumes, port mappings and host listeners (no --runtime-dir)
 
 EVERY COMMAND EXCEPT inventory NEEDS --runtime-dir. One runtime directory = one journal (DIR/deploy-journal, mode 0700).

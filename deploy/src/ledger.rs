@@ -110,6 +110,25 @@ pub enum CleanupOutcome {
     Refused(String),
 }
 
+/// Reserved start of a `CleanupOutcome::Failed` message that records a **conflict**: Harpoon verified
+/// the image is its own, and either Docker refused the deletion with its documented "conflict"
+/// status (HTTP 409) or Harpoon's own pre-delete check found the image is no longer exclusively
+/// removable (another tag or digest, a container, an unknown container image). Nothing was deleted.
+///
+/// The classification is made from structured facts (an HTTP status code, Harpoon's own checks),
+/// never from Docker's human-readable text, and it is written only by [`image_conflict_message`].
+/// It lives in the existing failure message so the journal format is unchanged and old and new
+/// readers agree; because it is a convention in free text, it is honoured only under the narrow
+/// conditions of [`Ledger::deferred_image_conflict`], so a forged or misplaced marker cannot relax
+/// anything else. Every other failure (timeouts, disconnects, 5xx, a lost reply) carries no marker
+/// and stays blocking.
+pub const IMAGE_CONFLICT_MARKER: &str = "image-conflict: ";
+
+/// The failure message for a conflict (see [`IMAGE_CONFLICT_MARKER`]).
+pub fn image_conflict_message(detail: &str) -> String {
+    format!("{IMAGE_CONFLICT_MARKER}{detail}")
+}
+
 /// One durable write. The journal persists these in order; [`Ledger::apply`] is the only
 /// way to change a ledger, so replaying the same records always yields the same state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +274,32 @@ impl Ledger {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// True only for the one narrow case in which a failed cleanup does not block other work: the
+    /// retained image of a deployment that ended without succeeding, whose removal was refused as a
+    /// conflict (see [`IMAGE_CONFLICT_MARKER`]), where everything else that deployment owns is
+    /// already released. All of these must hold, and all come from the replayed journal:
+    ///
+    /// - the entry is an `Image` with disposition `Retain` and a receipt (its identity is known);
+    /// - its state is `CleanupFailed` with the conflict marker, and no later attempt is outstanding
+    ///   (an attempt without a result is an ambiguous outcome);
+    /// - the deployment is known to have ended `NotSucceeded`;
+    /// - every other entry of that deployment is released (nothing active, refused or failed).
+    ///
+    /// A refused (F1) entry is a different state and never qualifies.
+    pub fn deferred_image_conflict(&self, e: &Entry, end: Option<EndState>) -> bool {
+        e.key.kind == ResourceKind::Image
+            && e.disposition == Disposition::Retain
+            && e.id.is_some()
+            && !e.cleanup_outstanding
+            && matches!(&e.state, EntryState::CleanupFailed(m) if m.starts_with(IMAGE_CONFLICT_MARKER))
+            && end == Some(EndState::NotSucceeded)
+            && self
+                .entries
+                .iter()
+                .filter(|o| o.deployment == e.deployment && o.key != e.key)
+                .all(Entry::is_released)
     }
 
     pub fn find(&self, deployment: &DeploymentId, key: &ResourceKey) -> Option<&Entry> {

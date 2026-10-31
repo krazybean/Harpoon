@@ -2884,3 +2884,7 @@ fn the_fork_gate_never_lets_a_spawn_overlap_an_open_journal() {
         t.join().unwrap();
     }
 }
+
+// B8.2: `cleanup-image` (offline; simulated Docker only).
+#[path = "b8_2/mod.rs"]
+mod b8_2;

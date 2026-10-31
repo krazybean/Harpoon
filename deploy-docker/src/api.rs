@@ -28,6 +28,11 @@ impl ApiError {
     pub fn is_timeout(&self) -> bool {
         matches!(self, ApiError::Transport(HttpError::Timeout(_)))
     }
+    /// Docker answered with its documented "conflict" status (HTTP 409). Decided from the status
+    /// code only; the message text is never consulted.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, ApiError::Status { status: 409, .. })
+    }
     /// Docker reports a host port that something else holds.
     pub fn is_port_collision(&self) -> bool {
         match self {
@@ -84,6 +89,9 @@ pub struct ImageInfo {
     /// `Config.Volumes`: paths the image declares as volumes (including inherited ones). Docker
     /// creates an anonymous volume for each when a container starts from the image.
     pub volumes: Vec<String>,
+    /// `RepoDigests`: registry digests this image is known by. A locally built image has none; any
+    /// entry means it was pulled or pushed and may be referenced from elsewhere.
+    pub repo_digests: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +389,26 @@ impl DockerApi {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    repo_digests: match j.get("RepoDigests") {
+                        None | Some(Json::Null) => Vec::new(),
+                        Some(Json::Arr(a)) => a
+                            .iter()
+                            .map(|d| {
+                                d.as_str()
+                                    .map(str::to_string)
+                                    .ok_or_else(|| ApiError::Malformed {
+                                        op: "image inspect",
+                                        detail: "RepoDigests holds a non-string".into(),
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Some(_) => {
+                            return Err(ApiError::Malformed {
+                                op: "image inspect",
+                                detail: "RepoDigests is not an array".into(),
+                            })
+                        }
+                    },
                 }))
             }
             404 => Ok(None),
