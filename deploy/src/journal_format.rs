@@ -114,6 +114,8 @@ fn failure_kind_str(k: FailureKind) -> &'static str {
 fn reason_str(r: Reason) -> &'static str {
     match r {
         Reason::NoPreviousRelease => "no_previous_release",
+        Reason::ConfigUnavailable => "config_unavailable",
+        Reason::Interrupted => "interrupted",
         Reason::ImageMissing => "image_missing",
         Reason::SecretUnavailable => "secret_unavailable",
         Reason::DockerUnreachable => "docker_unreachable",
@@ -192,6 +194,10 @@ pub fn encode_snapshot(d: &Deployment) -> String {
             opt(r.finished_ms),
             e(&r.note),
         ]);
+    }
+    // Appended only when set, so a snapshot without a pin is byte-identical to what earlier builds wrote.
+    if let Some(p) = &d.pinned {
+        f.push(p.encode());
     }
     frame(&f.join("\t"))
 }
@@ -286,6 +292,8 @@ fn parse_failure_kind(s: &str) -> Result<FailureKind, DecodeError> {
 fn parse_reason(s: &str) -> Result<Reason, DecodeError> {
     Ok(match s {
         "no_previous_release" => Reason::NoPreviousRelease,
+        "config_unavailable" => Reason::ConfigUnavailable,
+        "interrupted" => Reason::Interrupted,
         "image_missing" => Reason::ImageMissing,
         "secret_unavailable" => Reason::SecretUnavailable,
         "docker_unreachable" => Reason::DockerUnreachable,
@@ -320,10 +328,19 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         }
         None => return err("snapshot has no version"),
     }
-    if f.len() != SNAPSHOT_FIELDS {
+    if f.len() != SNAPSHOT_FIELDS && f.len() != SNAPSHOT_FIELDS + 1 {
         return err(format!("snapshot has {} fields, expected {SNAPSHOT_FIELDS}", f.len()));
     }
-    let mut it = Fields(f[2..].iter());
+    let pinned = match f.get(SNAPSHOT_FIELDS) {
+        Some(p) => Some(crate::release::ReleaseConfig::decode(p).or_else(|e| {
+            err(format!(
+                "snapshot has {} fields, expected {SNAPSHOT_FIELDS} (a last extra field must be a valid pinned configuration: {e})",
+                f.len()
+            ))
+        })?),
+        None => None,
+    };
+    let mut it = Fields(f[2..SNAPSHOT_FIELDS].iter());
     let id: DeploymentId = it.next("id")?.parse().or_else(|_| err("bad deployment id"))?;
     let application_id: ApplicationId = it
         .next("application id")?
@@ -431,6 +448,7 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         recovery,
         interruption,
         release,
+        pinned,
     })
 }
 
@@ -582,6 +600,41 @@ fn bad_ledger(i: usize, e: LedgerError) -> FormatError {
     FormatError::Inconsistent(format!("ledger record {} does not apply: {e}", i + 1))
 }
 
+/// The one change a terminal deployment may still receive: an `Interrupted` deployment whose
+/// cutover began and never finished gets its single bounded restoration attached (none → in
+/// progress → final outcome). Nothing else about it may differ, and a second attempt is rejected
+/// because the recovery it would replace is already final.
+fn recovery_attached(old: &Deployment, new: &Deployment) -> bool {
+    use crate::state::{CutoverState, RecoveryOutcome};
+    if old.status != DeploymentStatus::Interrupted || new.status != DeploymentStatus::Interrupted {
+        return false;
+    }
+    let same_identity = old.id == new.id
+        && old.application_id == new.application_id
+        && old.trigger == new.trigger
+        && old.created_ms == new.created_ms
+        && old.started_ms == new.started_ms
+        && old.finished_ms == new.finished_ms
+        && old.failure == new.failure
+        && old.release == new.release
+        && old.pinned == new.pinned;
+    if !same_identity {
+        return false;
+    }
+    match (old.recovery, new.recovery) {
+        (None, Some(_)) => {
+            matches!(old.cutover, CutoverState::Begun { .. }) && matches!(new.cutover, CutoverState::Failed { .. })
+        }
+        (Some(o), Some(n)) => {
+            o.outcome == RecoveryOutcome::InProgress
+                && o.started_ms == n.started_ms
+                && o.budget_ms == n.budget_ms
+                && old.cutover == new.cutover
+        }
+        _ => false,
+    }
+}
+
 /// Rebuild deployments and ledger. A deployment that already reached a terminal status must never
 /// change again; a snapshot that says otherwise means the file is not what the engine wrote.
 pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
@@ -592,7 +645,7 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
             Line::Header { .. } => {}
             Line::Snapshot(d) => match st.deployments.iter_mut().find(|x| x.id == d.id) {
                 Some(old) => {
-                    if old.status.is_terminal() && **d != *old {
+                    if old.status.is_terminal() && **d != *old && !recovery_attached(old, d) {
                         return Err(FormatError::Inconsistent(format!(
                             "deployment {} changed after reaching {}",
                             d.id, old.status

@@ -374,6 +374,29 @@ impl Harness {
         .expect("the engine itself did not error")
     }
 
+    /// [`run_replacing`](Harness::run_replacing) with an explicit configuration (prior ledger, pinned
+    /// previous release, restoration budget).
+    pub fn run_replacing_with<T: HttpTransport>(
+        &mut self,
+        b: &mut DockerBackend<T>,
+        j: &mut dyn Journal,
+        previous: &harpoon_deploy::ids::ReleaseId,
+        cfg: &RunConfig,
+    ) -> Result<Report, EngineError> {
+        harpoon_deploy::engine::run_deployment_confirmed(
+            &mut self.dep,
+            &harpoon_deploy::engine::Context {
+                previous_release: Some(previous.clone()),
+            },
+            b,
+            j,
+            &SystemClock,
+            cfg,
+            &|| false,
+            &|_| true,
+        )
+    }
+
     /// A healthy release of this application, as a previous deployment left it running.
     pub fn seed_current_release(&self) -> (String, harpoon_deploy::ids::ReleaseId) {
         let mut gen = harpoon_deploy::ids::IdGenerator::new(

@@ -8,7 +8,7 @@
 //! * only a failure **after** the cutover began triggers the single, bounded restoration;
 //! * the engine never retries, rolls back, promotes or resumes anything by itself.
 
-use crate::backend::{Backend, Event, Op, OpTrace, ResourceOps, RestoreResult, StepError, Trace};
+use crate::backend::{Backend, Event, Op, OpTrace, PreviousRelease, ResourceOps, RestoreResult, StepError, Trace};
 use crate::health::CheckEvidence;
 use crate::ids::{ApplicationId, DeploymentId, ReleaseId};
 use crate::ledger::{
@@ -17,6 +17,7 @@ use crate::ledger::{
 };
 use crate::logs::{LogCapture, LogLimits, LogSink, Redactor};
 use crate::ports::PortLease;
+use crate::release::ReleaseConfig;
 use crate::state::{Deployment, DeploymentStatus, Failure, FailureKind, RecoveryOutcome, Step, TransitionError};
 use crate::time::Clock;
 use std::fmt;
@@ -192,6 +193,9 @@ pub struct RunConfig {
     /// The ledger as restored from the durable journal. The run starts from it, so leases and
     /// unsettled entries of other deployments are visible to port allocation. Empty by default.
     pub prior_ledger: Ledger,
+    /// The pinned configuration of the release being replaced, from its durable record. Without it
+    /// a failed cutover cannot attempt a restoration and says why.
+    pub previous: Option<ReleaseConfig>,
 }
 
 impl Default for RunConfig {
@@ -202,6 +206,7 @@ impl Default for RunConfig {
             log_limits: LogLimits::default(),
             redactor: Redactor::none(),
             prior_ledger: Ledger::new(),
+            previous: None,
         }
     }
 }
@@ -705,6 +710,7 @@ struct Run<'a> {
     warnings: Vec<String>,
     unaccounted: Vec<Observed>,
     prepared: Option<Prepared>,
+    previous: Option<PreviousRelease>,
 }
 
 type StepOut = Result<Option<CheckEvidence>, StepError>;
@@ -983,18 +989,51 @@ impl Run<'_> {
         if new_started {
             self.stop_failed_new_release()?; // best effort: free the address for the restore
         }
-        let outcome = match self.backend.restore_previous(budget_ms) {
-            RestoreResult::Healthy => RecoveryOutcome::Restored,
-            RestoreResult::StartedUnverified => RecoveryOutcome::RestoredUnverified,
-            RestoreResult::Failed(r) => RecoveryOutcome::RestoreFailed(r),
-            RestoreResult::NotAttempted(r) => RecoveryOutcome::NotAttempted(r),
-        };
+        let outcome = self.restore_phase(budget_ms)?;
         let now = self.now();
         self.d.finish_recovery(outcome, now)?;
         let ok = outcome.service_restored();
         self.d.finish_step(Step::Recovery, ok, outcome.as_str(), now)?;
         self.d.transition(DeploymentStatus::Failed, now)?;
         self.save()
+    }
+
+    /// Pin the configuration the new release started with, durably, before its final check. A
+    /// release that never gets a pin simply cannot be restored later, and says so.
+    fn pin(&mut self) -> R<()> {
+        self.d.pinned = self.backend.pinned_config();
+        self.save()
+    }
+
+    /// The one bounded restoration attempt. Never retried; reports exactly what happened.
+    fn restore_phase(&mut self, budget_ms: u64) -> R<RecoveryOutcome> {
+        use crate::state::Reason;
+        let Some(prev) = self.previous.clone() else {
+            return Ok(RecoveryOutcome::NotAttempted(Reason::NoPreviousRelease));
+        };
+        if prev.config.is_none() {
+            return Ok(RecoveryOutcome::NotAttempted(Reason::ConfigUnavailable));
+        }
+        let mut got = None;
+        let (res, _) = self.exec(Step::Recovery, budget_ms, |b, io| {
+            got = Some(b.restore_previous(io, &prev, budget_ms)?);
+            Ok(())
+        })?;
+        let late = matches!(&res, Err(e) if e.timed_out);
+        Ok(match (got, res) {
+            (Some(RestoreResult::Healthy), Ok(())) => RecoveryOutcome::Restored,
+            // It came back, but not within the budget: the check cannot be trusted as in-time.
+            (Some(RestoreResult::Healthy | RestoreResult::StartedUnverified), _) => RecoveryOutcome::RestoredUnverified,
+            (Some(RestoreResult::Failed(r)), _) => RecoveryOutcome::RestoreFailed(r),
+            (Some(RestoreResult::NotAttempted(r)), _) => RecoveryOutcome::NotAttempted(r),
+            (None, _) if late => RecoveryOutcome::RestoreFailed(Reason::Timeout),
+            (None, Err(e)) => {
+                let m = self.cfg.redactor.apply(&e.message).0;
+                self.warnings.push(format!("restoration failed: {m}"));
+                RecoveryOutcome::RestoreFailed(Reason::StartFailed)
+            }
+            (None, Ok(())) => RecoveryOutcome::RestoreFailed(Reason::StartFailed),
+        })
     }
 
     /// One cutover-phase backend call. `Ok(Ok(()))` = done; `Ok(Err((message, timed_out)))` = failed.
@@ -1027,9 +1066,12 @@ impl Run<'_> {
 
     /// After the terminal state is on disk: release what this deployment created.
     fn cleanup(&mut self) -> R<()> {
-        let Some(end) = end_state(self.d.status) else {
+        let Some(mut end) = end_state(self.d.status) else {
             return Ok(());
         };
+        if matches!(self.d.cutover, crate::state::CutoverState::Failed { .. }) && end == EndState::NotSucceeded {
+            end = EndState::FailedCutover;
+        }
         if !self.ledger.entries().iter().any(|e| e.deployment == self.d.id) {
             return Ok(());
         }
@@ -1111,6 +1153,11 @@ pub fn run_deployment_confirmed(
         warnings: Vec::new(),
         unaccounted: Vec::new(),
         prepared: None,
+        previous: ctx.previous_release.as_ref().map(|r| PreviousRelease {
+            release: r.clone(),
+            deployment: r.deployment(),
+            config: cfg.previous.clone(),
+        }),
     };
     let now = run.now();
     run.d.transition(DeploymentStatus::Running, now)?;
@@ -1160,7 +1207,7 @@ pub fn run_deployment_confirmed(
             }
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
-            run.save()?;
+            run.pin()?;
             let chk = run.final_check()?;
             let now = run.now();
             match chk {
@@ -1205,7 +1252,8 @@ pub fn run_deployment_confirmed(
             run.d.start_step(Step::Cutover, now)?;
             run.save()?;
 
-            if let Err((m, to)) = run.cutover_call(|b, io| b.stop_current(io))? {
+            let prev = run.previous.clone().expect("a replacement has a previous release");
+            if let Err((m, to)) = run.cutover_call(|b, io| b.stop_current(io, &prev))? {
                 run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, m, to, false, budget)?;
                 return finish(run);
             }
@@ -1213,6 +1261,7 @@ pub fn run_deployment_confirmed(
                 run.fail_after_cutover(Step::Cutover, FailureKind::Cutover, m, to, false, budget)?;
                 return finish(run);
             }
+            run.pin()?;
             let now = run.now();
             run.d.finish_step(Step::Cutover, true, "", now)?;
             run.d.start_step(Step::FinalCheck, now)?;
@@ -1231,6 +1280,61 @@ pub fn run_deployment_confirmed(
             finish(run)
         }
     }
+}
+
+/// The explicit, bounded restoration for a cutover that was interrupted part-way (D10): the
+/// process died after the previous release was stopped and before the new one was confirmed. It
+/// runs at most once per deployment (a recorded recovery, even an unfinished one, forbids another),
+/// never resumes the interrupted deployment, never cleans up the failed candidate, and leaves the
+/// deployment `Interrupted` with the outcome and its duration recorded.
+pub fn recover_cutover(
+    d: &mut Deployment,
+    previous: PreviousRelease,
+    backend: &mut dyn Backend,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    cfg: &RunConfig,
+) -> Result<Report, EngineError> {
+    let never = || false;
+    let mut run = Run {
+        d,
+        backend,
+        journal,
+        clock,
+        cancel: &never,
+        cfg,
+        ledger: cfg.prior_ledger.clone(),
+        evidence: Vec::new(),
+        logs: Vec::new(),
+        warnings: Vec::new(),
+        unaccounted: Vec::new(),
+        prepared: None,
+        previous: Some(PreviousRelease {
+            config: cfg.previous.clone(),
+            ..previous
+        }),
+    };
+    let budget = cfg.policy.restore_budget_ms;
+    let now = run.now();
+    run.d.begin_explicit_recovery(budget, now)?;
+    run.save()?; // the attempt is on disk before anything is touched
+    let outcome = run.restore_phase(budget)?;
+    let now = run.now();
+    run.d.finish_recovery(outcome, now)?;
+    run.d
+        .finish_step(Step::Recovery, outcome.service_restored(), outcome.as_str(), now)?;
+    run.save()?;
+    Ok(Report {
+        deployment: run.d.id.clone(),
+        prepared: None,
+        status: run.d.status,
+        pause: Some(PauseReason::FailedCutover),
+        ledger: run.ledger,
+        evidence: run.evidence,
+        logs: run.logs,
+        warnings: run.warnings,
+        unaccounted: run.unaccounted,
+    })
 }
 
 fn finish(mut run: Run<'_>) -> Result<Report, EngineError> {

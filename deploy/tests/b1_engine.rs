@@ -555,6 +555,7 @@ fn a_stop_that_runs_past_the_cutover_budget_is_a_failed_cutover() {
             cutover_ms: 400,
             ..Budgets::default()
         },
+        previous: Some(harpoon_deploy::release::ReleaseConfig::simulated(38000)),
         ..RunConfig::default()
     };
     let mut j = MemoryJournal::new();

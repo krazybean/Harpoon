@@ -4,15 +4,17 @@ use crate::{exit, Fail, Gate};
 use harpoon_deploy::backend::{FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
-    end_state, execute_actions, reconcile, run_deployment_confirmed, run_deployment_with, Context,
-    CutoverPlan, NotCutOver, Report, RunConfig,
+    end_state, execute_actions, reconcile, recover_cutover, run_deployment_confirmed,
+    run_deployment_with, Context, CutoverPlan, NotCutOver, Report, RunConfig,
 };
 use harpoon_deploy::ids::{ApplicationId, IdGenerator, ReleaseId};
 use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger, Observed, ResourceKind,
 };
 use harpoon_deploy::ports::{self, Occupancy, Purpose};
-use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
+use harpoon_deploy::state::{
+    trigger_pauses, CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger,
+};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::DockerApi;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
@@ -40,6 +42,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "reconcile" => reconcile_cmd(p, out),
         "deploy" => deploy(p, gate, out),
         "replace" => replace(p, out),
+        "restore" => restore(p, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
@@ -400,6 +403,13 @@ fn status(p: &Parsed, out: &mut String) -> R {
                 f.message.lines().next().unwrap_or("")
             );
         }
+        if let Some(rec) = &d.recovery {
+            let took = rec
+                .finished_ms
+                .map(|f| format!(" in {} ms", f.saturating_sub(rec.started_ms)))
+                .unwrap_or_default();
+            let _ = writeln!(out, "    recovery: {}{took}", rec.outcome.as_str());
+        }
         if let Some(ms) = d.interruption.and_then(|i| i.duration_ms()) {
             let _ = writeln!(out, "    interruption: {ms} ms between stopping the previous release and the confirmed new one");
         }
@@ -408,6 +418,13 @@ fn status(p: &Parsed, out: &mut String) -> R {
                 out,
                 "    cutover began and was never confirmed: the application may be down"
             );
+            if d.recovery.is_none() {
+                let _ = writeln!(
+                    out,
+                    "    explicit bounded recovery (one attempt): harpoon-deploy restore --deployment {} --simulate [--apply]",
+                    d.id
+                );
+            }
         }
         for e in r.ledger.entries().iter().filter(|e| e.deployment == d.id) {
             let _ = writeln!(
@@ -422,6 +439,16 @@ fn status(p: &Parsed, out: &mut String) -> R {
         }
     }
     print_lease_and_problems(out, &r);
+    for pz in trigger_pauses(&r.deployments) {
+        let _ = writeln!(
+            out,
+            "automatic triggers paused for application {}: deployment {} {} ({}); there is no `resume` yet",
+            pz.application,
+            pz.deployment,
+            if pz.incomplete { "began a cutover that never finished" } else { "failed its cutover" },
+            pz.recovery.map(|r| format!("recovery {}", r.as_str())).unwrap_or_else(|| "no recovery recorded".into()),
+        );
+    }
     let nf = unfinished(&r.deployments);
     for l in nf {
         let _ = writeln!(out, "attention: {l}");
@@ -1255,7 +1282,8 @@ fn replace(p: &Parsed, out: &mut String) -> R {
     let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
     d.transition(DeploymentStatus::Queued, now_ms())
         .map_err(|e| Fail::failed(e.to_string()))?;
-    let cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
+    let mut cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
+    cfg.previous = find_dep(&deps, &cur_dep).and_then(|d| d.pinned.clone());
     let plan = CutoverPlan::new(&d.application_id, &cur_release, &d.id, &cfg);
     let _ = writeln!(
         out,
@@ -1339,6 +1367,166 @@ fn replace_refused(blockers: &[String]) -> Fail {
     Fail::refused(m)
 }
 
+/// What the one bounded restoration did, in words that say what happened and promise nothing.
+fn print_recovery(out: &mut String, d: &Deployment) {
+    let Some(r) = &d.recovery else { return };
+    let took = r
+        .finished_ms
+        .map(|f| {
+            format!(
+                " in {} ms (budget {} ms)",
+                f.saturating_sub(r.started_ms),
+                r.budget_ms
+            )
+        })
+        .unwrap_or_default();
+    let line = match r.outcome {
+        RecoveryOutcome::InProgress => "restoration started and has no recorded result".to_string(),
+        RecoveryOutcome::Restored => "restored: the previous release started and passed its own health check".to_string(),
+        RecoveryOutcome::RestoredUnverified => {
+            "restored_unverified: the previous release started, but its health check did not pass or was inconclusive".to_string()
+        }
+        RecoveryOutcome::RestoreFailed(why) => format!("restore_failed: {}", why.as_str_for_humans()),
+        RecoveryOutcome::NotAttempted(why) => format!("not_attempted: {}", why.as_str_for_humans()),
+    };
+    let _ = writeln!(out, "recovery: {line}{took}");
+    if d.application_may_be_down() {
+        let _ = writeln!(
+            out,
+            "the application may be down; the failed candidate was kept for inspection"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ restore
+
+/// Explicit, bounded restoration after a cutover that was interrupted part-way (D10). One attempt
+/// per deployment, ever: a recorded attempt, even one that died, forbids another. Dry run unless
+/// `--apply`. Offline only; live restoration is not enabled.
+fn restore(p: &Parsed, out: &mut String) -> R {
+    if !p.switch("simulate") {
+        return Err(Fail::refused(
+            "live restoration is not enabled in this build: replacing a running release is not enabled live, so there is nothing to restore live. \
+             Nothing was read, written or contacted. Use `restore --simulate` against a separate runtime directory for an offline run.",
+        ));
+    }
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let dep_id: harpoon_deploy::ids::DeploymentId = p
+        .value("deployment")
+        .ok_or_else(|| Fail::usage("restore needs --deployment ID"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--deployment is not a deployment id: {e}")))?;
+    let Some(r) = store::read_restored(&rt)? else {
+        return Err(Fail::refused("there is no journal; nothing to restore"));
+    };
+    let Some(d) = find_dep(&r.deployments, &dep_id) else {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} is not in the journal"
+        )));
+    };
+    if let Some(rec) = &d.recovery {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} already has a recorded restoration attempt ({}); it is never repeated. Use `status` and `reconcile`.",
+            rec.outcome.as_str()
+        )));
+    }
+    if d.status != DeploymentStatus::Interrupted || !matches!(d.cutover, CutoverState::Begun { .. })
+    {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} is {} with cutover {:?}; only an interrupted deployment whose cutover began and was never confirmed can be restored",
+            d.status, d.cutover
+        )));
+    }
+    let others: Vec<Deployment> = r
+        .deployments
+        .iter()
+        .filter(|x| x.id != dep_id)
+        .cloned()
+        .collect();
+    let Some((prev_dep, prev_release)) = current_release(&r.ledger, &others, &d.application_id)
+    else {
+        return Err(Fail::refused(format!(
+            "application {} has no earlier running release recorded to restore",
+            d.application_id
+        )));
+    };
+    let pinned = find_dep(&r.deployments, &prev_dep).and_then(|x| x.pinned.clone());
+    let _ = writeln!(
+        out,
+        "restore deployment {dep_id} (application {}): cutover began and was never confirmed",
+        d.application_id
+    );
+    let _ = writeln!(
+        out,
+        "previous release: {prev_release} (deployment {prev_dep})"
+    );
+    match &pinned {
+        Some(c) => {
+            let _ = writeln!(
+                out,
+                "pinned configuration: image {} port {}→{} memory {} B cpu {} pids {} health {}",
+                c.image_id,
+                c.host_port,
+                c.container_port,
+                c.memory_bytes,
+                c.nano_cpus,
+                c.pids,
+                c.health.path
+            );
+        }
+        None => {
+            let _ = writeln!(out, "pinned configuration: none stored; the attempt will be recorded as not_attempted (config_unavailable)");
+        }
+    }
+    let _ = writeln!(
+        out,
+        "one attempt, budget 60000 ms, never repeated. The failed candidate is not touched; if it still holds the port, run `reconcile` first (it is not undone by this command)."
+    );
+    if !p.switch("apply") {
+        let _ = writeln!(
+            out,
+            "dry run: nothing was changed. Re-run with --apply to make the attempt."
+        );
+        return Ok(exit::OK);
+    }
+
+    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let mut d = find_dep(&restored.deployments, &dep_id)
+        .cloned()
+        .ok_or_else(|| Fail::failed("the deployment disappeared from the journal"))?;
+    let mut cfg = RunConfig {
+        prior_ledger: restored.ledger.clone(),
+        previous: pinned,
+        ..RunConfig::default()
+    };
+    cfg.policy.restore_budget_ms = 60_000;
+    let prev = harpoon_deploy::backend::PreviousRelease {
+        release: prev_release,
+        deployment: prev_dep,
+        config: None,
+    };
+    let clock = ManualClock::new(now_ms());
+    let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+    let report = recover_cutover(&mut d, prev, &mut b, &mut journal, &clock, &cfg).map_err(|e| {
+        Fail::failed(format!(
+            "the restoration stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
+        ))
+    })?;
+    print_recovery(out, &d);
+    if let Some(i) = &d.interruption {
+        if let Some(ms) = i.duration_ms() {
+            let _ = writeln!(out, "measured interruption: {ms} ms (simulated clock)");
+        }
+    }
+    for w in &report.warnings {
+        let _ = writeln!(out, "warning: {w}");
+    }
+    Ok(match d.recovery.map(|r| r.outcome) {
+        Some(RecoveryOutcome::Restored | RecoveryOutcome::RestoredUnverified) => exit::OK,
+        _ => exit::FAILED,
+    })
+}
+
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     let _ = writeln!(out, "result: {}", r.status);
     for s in &d.steps {
@@ -1357,6 +1545,7 @@ fn print_report(out: &mut String, d: &Deployment, r: &Report) {
             }
         }
     }
+    print_recovery(out, d);
     for (step, ev) in &r.evidence {
         let _ = writeln!(
             out,
@@ -2123,7 +2312,7 @@ fn cleanup_image(p: &Parsed, out: &mut String) -> R {
                 "deployment {dep_id} succeeded. Its image is part of the running release; use `teardown` to dismantle it."
             )))
         }
-        Some(EndState::NotSucceeded) => {}
+        Some(EndState::NotSucceeded | EndState::FailedCutover) => {}
     }
     if e.disposition != Disposition::Retain {
         return Err(Fail::refused(format!(

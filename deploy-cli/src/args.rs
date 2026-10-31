@@ -101,6 +101,11 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "confirm-cutover"],
     },
     Spec {
+        command: "restore",
+        values: &["runtime-dir", "deployment"],
+        switches: &["simulate", "apply"],
+    },
+    Spec {
         command: "export-journal",
         values: &["runtime-dir", "to"],
         switches: &[],
@@ -213,6 +218,7 @@ COMMANDS
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
   replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; --simulate only (live replacement is not enabled)
+  restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); --simulate only (live restoration is not enabled)
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
   cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)

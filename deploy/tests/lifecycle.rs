@@ -2,7 +2,10 @@
 //! No Docker, VM, network, file or process access.
 
 use harpoon_deploy::backend::{Call, Event, FakeBackend, RestoreResult, Trace};
-use harpoon_deploy::engine::{run_deployment, Context, EngineError, JournalError, MemoryJournal, PauseReason, Policy};
+use harpoon_deploy::engine::{
+    run_deployment, run_deployment_with, Context, EngineError, JournalError, MemoryJournal, PauseReason, Policy,
+    RunConfig,
+};
 use harpoon_deploy::ids::{ApplicationId, DeploymentId, IdGenerator, ReleaseId};
 use harpoon_deploy::state::*;
 use harpoon_deploy::time::{ManualClock, SeqEntropy};
@@ -56,7 +59,16 @@ fn run(
     b: &mut FakeBackend,
     j: &mut MemoryJournal,
 ) -> Result<harpoon_deploy::engine::Report, EngineError> {
-    run_deployment(d, ctx, b, j, &w.clock, &Policy::default(), &never)
+    run_deployment_with(d, ctx, b, j, &w.clock, &pinned(Policy::default()), &never)
+}
+
+/// A previous release whose pinned configuration was stored, so that a failed cutover can restore it.
+fn pinned(policy: Policy) -> RunConfig {
+    RunConfig {
+        policy,
+        previous: Some(harpoon_deploy::release::ReleaseConfig::simulated(38000)),
+        ..RunConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------- success paths
@@ -318,15 +330,15 @@ fn custom_restore_budget_is_passed_through_unchanged() {
         FakeBackend::new(w.clock.clone()).fail_final_check("x"),
         MemoryJournal::new(),
     );
-    run_deployment(
+    run_deployment_with(
         &mut d,
         &ctx,
         &mut b,
         &mut j,
         &w.clock,
-        &Policy {
+        &pinned(Policy {
             restore_budget_ms: 5_000,
-        },
+        }),
         &never,
     )
     .unwrap();
