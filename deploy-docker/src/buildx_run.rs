@@ -34,6 +34,8 @@ pub struct BuildRequest<'a> {
     pub dockerfile: &'a Path,
     pub tag: &'a str,
     pub labels: &'a [(String, String)],
+    /// `--iidfile`: where Buildx writes the ID of the image it produced. Must not exist yet.
+    pub iidfile: &'a Path,
     pub socket: &'a Path,
     /// Empty directory used as HOME and DOCKER_CONFIG.
     pub scratch: &'a Path,
@@ -59,6 +61,8 @@ pub fn build_args(req: &BuildRequest<'_>) -> Vec<String> {
         a.push("--label".into());
         a.push(format!("{k}={v}"));
     }
+    a.push("--iidfile".into());
+    a.push(req.iidfile.display().to_string());
     a.push("-t".into());
     a.push(req.tag.to_string());
     a.push("-f".into());

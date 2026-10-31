@@ -18,6 +18,12 @@ use support::Harness;
 
 const OPEN: Gate = Gate {
     live_deploy_enabled: true,
+    guest_free_override: Some(100 << 30),
+};
+/// The gate open but, as in a real build today, with no guest free-space probe.
+const OPEN_NO_PROBE: Gate = Gate {
+    live_deploy_enabled: true,
+    guest_free_override: None,
 };
 const SHIPPING: Gate = Gate::shipping();
 
@@ -739,23 +745,42 @@ fn a_real_binary_invocation_cannot_deploy_live() {
 fn image_appears_after_build(t: &T) {
     t.h.docker.fault_after(
         Some("GET"),
-        "/images/harpoon/",
-        1,
+        "/images/sha256:",
+        0,
         1,
         Action::Race(std::sync::Arc::new(|s| {
-            let path = s.requests.last().unwrap().path.clone();
-            let tag = path
+            let id = s
+                .requests
+                .last()
+                .unwrap()
+                .path
+                .trim_start_matches("/images/")
+                .trim_end_matches("/json")
+                .to_string();
+            let tag = s
+                .requests
+                .iter()
+                .rev()
+                .find(|r| r.path.starts_with("/images/harpoon/"))
+                .unwrap()
+                .path
                 .trim_start_matches("/images/")
                 .trim_end_matches("/json")
                 .to_string();
             let (app_lc, dep) = tag.trim_start_matches("harpoon/").split_once(':').unwrap();
+            let dep = dep.rsplit_once('-').unwrap().0; // drop the random suffix
             let app = format!(
                 "app_{}",
                 app_lc.trim_start_matches("app_").to_ascii_uppercase()
             );
             let (app, dep): (ApplicationId, DeploymentId) =
                 (app.parse().unwrap(), dep.parse().unwrap());
-            s.add_image(&tag, harpoon_deploy::backend::harpoon_labels(&app, &dep));
+            s.add_image_with_id(
+                &id,
+                &[&tag],
+                harpoon_deploy::backend::harpoon_labels(&app, &dep),
+                vec![],
+            );
         })),
     );
 }
@@ -770,6 +795,8 @@ fn live_args(t: &T) -> Vec<String> {
         format!("--{AUTH_FLAG}={AUTH_PHRASE}"),
         "--health-timeout-secs".into(),
         "1".into(),
+        "--forwarder-pid".into(),
+        "4242".into(),
     ];
     v.extend(t.src());
     v
@@ -1232,4 +1259,226 @@ fn health_paths_with_control_characters_are_rejected_and_normal_paths_kept() {
     let o = go(&t, &SHIPPING, &a);
     assert_exit(&o, 3);
     assert!(o.stderr.contains("must start with '/'"));
+}
+
+// ------------------------------------------------------------------ B7 phase 1: live requirements
+
+#[test]
+fn a_live_deployment_names_the_forwarder_process_it_expects_before_anything_else_happens() {
+    let t = T::new();
+    let mut a = live_args(&t);
+    // drop the --forwarder-pid flag and its value
+    let i = a.iter().position(|x| x == "--forwarder-pid").unwrap();
+    a.drain(i..i + 2);
+    let o = go(&t, &OPEN, &a);
+    assert_exit(&o, 3);
+    assert!(
+        o.stderr.contains("--forwarder-pid") && o.stderr.contains("Harpoon app"),
+        "{}",
+        o.stderr
+    );
+    for bad in ["0", "1", "abc", "-5", ""] {
+        let mut b = live_args(&t);
+        let i = b.iter().position(|x| x == "--forwarder-pid").unwrap();
+        b[i + 1] = bad.to_string();
+        let o = go(&t, &OPEN, &b);
+        assert_exit(&o, 3);
+    }
+    let mut b = live_args(&t);
+    b.extend(["--lsof-path".to_string(), "lsof".to_string()]);
+    assert_exit(&go(&t, &OPEN, &b), 3);
+    assert!(!t.rt.exists(), "nothing was created");
+    assert_eq!(t.docker_requests(), 0);
+}
+
+#[test]
+fn without_a_guest_free_space_probe_a_live_deployment_stops_at_its_first_step() {
+    let t = T::new();
+    let a = live_args(&t);
+    let o = go(&t, &OPEN_NO_PROBE, &a);
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("failure at source")
+            && o.stdout.contains("guest free space could not be verified"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("no guest-side free-space probe is implemented"),
+        "{}",
+        o.stdout
+    );
+    assert!(t.h.ws.buildx_record("args.txt").is_empty(), "no build");
+    assert!(
+        t.h.docker.requests().iter().all(|r| r.method == "GET"),
+        "no Docker change of any kind"
+    );
+    // and the journal says what happened
+    let s = t.cli(&["status"]);
+    assert!(
+        s.stdout.contains("failed") && s.stdout.contains("unresolved cleanup: none"),
+        "{}",
+        s.stdout
+    );
+}
+
+#[test]
+fn a_live_deployment_gives_its_containers_a_marker_environment() {
+    let t = T::new();
+    image_appears_after_build(&t);
+    let a = live_args(&t);
+    let o = go(&t, &OPEN, &a);
+    assert_exit(&o, 7); // nothing answers on the published port in this test
+    let creates: Vec<_> =
+        t.h.docker
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.starts_with("/containers/create"))
+            .collect();
+    assert!(!creates.is_empty());
+    for c in creates {
+        assert!(c.body.contains("HARPOON_DEPLOYMENT_MARKER="), "{}", c.body);
+    }
+}
+
+// ------------------------------------------------------------------ inventory
+
+fn fake_lsof(t: &T, out: &str) -> String {
+    let p = t.h.ws.root.join("fake-lsof");
+    std::fs::write(&p, format!("#!/bin/sh\nprintf '%s' '{out}'\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p.display().to_string()
+}
+
+fn inv(t: &T, extra: &[&str]) -> Outcome {
+    let mut a: Vec<String> = vec!["inventory".into(), "--docker-socket".into(), t.socket()];
+    a.extend(extra.iter().map(|s| s.to_string()));
+    run(&a, &SHIPPING)
+}
+
+#[test]
+fn the_inventory_is_read_only_sorted_and_complete() {
+    let t = T::new();
+    t.h.docker.with(|s| {
+        s.add_container("zz-bystander", vec![], true);
+        s.containers.last_mut().unwrap().host_port = Some(8081);
+        s.add_container(
+            "aa-harpoon",
+            harpoon_deploy::backend::harpoon_labels(&ids(5).0, &ids(5).1),
+            false,
+        );
+        s.volumes = vec!["vol-b".into(), "vol-a".into()];
+    });
+    let lsof = fake_lsof(
+        &t,
+        "p4242\ncHarpoon\nn127.0.0.1:38000\np9\ncother\nn*:80\np9\ncother\nn*:39001\n",
+    );
+    let o = inv(&t, &["--lsof-path", &lsof]);
+    assert_exit(&o, 0);
+    let lines: Vec<&str> = o.stdout.lines().collect();
+    assert!(lines[0].starts_with("# harpoon-deploy inventory"));
+    let body = &lines[1..];
+    let mut sorted = body.to_vec();
+    sorted.sort_by_key(|l| (l.split(' ').next().unwrap().to_string(), l.to_string()));
+    assert_eq!(body, sorted.as_slice(), "sorted: {}", o.stdout);
+    for want in [
+        "container ",
+        "name=aa-harpoon state=exited harpoon=yes",
+        "name=zz-bystander state=running harpoon=no published=[8081]",
+        "image ",
+        "tag=alpine:3.22 harpoon=no",
+        "volume vol-a driver=local",
+        "volume vol-b driver=local",
+        "docker-port-mapping 8081",
+        "host-listener 127.0.0.1:38000 pid=4242 command=Harpoon",
+        "host-listener *:39001 pid=9 command=other",
+    ] {
+        assert!(o.stdout.contains(want), "{want}\n{}", o.stdout);
+    }
+    assert!(
+        !o.stdout.contains(":80 "),
+        "listeners outside Harpoon's port ranges are not listed"
+    );
+    assert!(
+        t.h.docker.requests().iter().all(|r| r.method == "GET"),
+        "read-only"
+    );
+    assert!(!t.rt.exists());
+    // identical twice: no timestamps, no ordering noise
+    assert_eq!(inv(&t, &["--lsof-path", &lsof]).stdout, o.stdout);
+}
+
+#[test]
+fn the_inventory_can_be_saved_once_and_diffed_around_a_run() {
+    let t = T::new();
+    let before_path = t.h.ws.root.join("before.txt");
+    let after_path = t.h.ws.root.join("after.txt");
+    let foreign =
+        t.h.docker
+            .with(|s| s.add_container("bystander", vec![], true));
+    let o = inv(&t, &["--to", &before_path.display().to_string()]);
+    assert_exit(&o, 0);
+    assert_eq!(mode(&before_path), 0o600);
+    // never overwrites
+    assert_exit(&inv(&t, &["--to", &before_path.display().to_string()]), 4);
+
+    image_appears_after_build(&t);
+    let a = live_args(&t);
+    assert_exit(&go(&t, &OPEN, &a), 7);
+    assert_exit(&inv(&t, &["--to", &after_path.display().to_string()]), 0);
+    let (b, a) = (
+        std::fs::read_to_string(&before_path).unwrap(),
+        std::fs::read_to_string(&after_path).unwrap(),
+    );
+    let (b, a): (Vec<&str>, Vec<&str>) = (b.lines().collect(), a.lines().collect());
+    let added: Vec<_> = a.iter().filter(|l| !b.contains(l)).collect();
+    let removed: Vec<_> = b.iter().filter(|l| !a.contains(l)).collect();
+    assert!(
+        removed.is_empty(),
+        "nothing that existed before is gone or changed: {removed:?}"
+    );
+    assert_eq!(
+        added.len(),
+        1,
+        "exactly one thing is new — the built image, which Harpoon retains: {added:?}"
+    );
+    assert!(
+        added[0].starts_with("image ") && added[0].contains("harpoon=yes"),
+        "{added:?}"
+    );
+    assert!(a
+        .iter()
+        .any(|l| l.contains("name=bystander state=running harpoon=no")));
+    assert!(t
+        .h
+        .docker
+        .with(|s| s.containers.iter().any(|c| c.id == foreign && c.running)));
+}
+
+#[test]
+fn the_inventory_needs_an_explicit_socket_and_reports_an_unreachable_one() {
+    let t = T::new();
+    assert_exit(&run(&["inventory".to_string()], &SHIPPING), 5);
+    assert_exit(
+        &run(
+            &[
+                "inventory".to_string(),
+                "--docker-socket".into(),
+                "/nonexistent/docker.sock".into(),
+            ],
+            &SHIPPING,
+        ),
+        5,
+    );
+    assert_exit(&inv(&t, &["--lsof-path", "lsof"]), 2);
+    // a failing lsof is an error, not an empty listener list
+    let bad = fake_lsof(&t, "what is this");
+    let o = inv(&t, &["--lsof-path", &bad]);
+    assert_exit(&o, 5);
+    assert!(
+        o.stderr.contains("cannot capture host listeners"),
+        "{}",
+        o.stderr
+    );
 }

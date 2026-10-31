@@ -70,6 +70,9 @@ const SPECS: &[Spec] = &[
             "docker-socket",
             "app",
             "health-timeout-secs",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
             AUTH_FLAG,
         ],
         switches: &["simulate"],
@@ -77,6 +80,11 @@ const SPECS: &[Spec] = &[
     Spec {
         command: "export-journal",
         values: &["runtime-dir", "to"],
+        switches: &[],
+    },
+    Spec {
+        command: "inventory",
+        values: &["docker-socket", "lsof-path", "to"],
         switches: &[],
     },
 ];
@@ -159,8 +167,9 @@ COMMANDS
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
   export-journal  copy the journal to a new file for investigation (--to FILE)
+  inventory       read-only listing of containers, images, volumes, port mappings and host listeners (no --runtime-dir)
 
-EVERY COMMAND NEEDS --runtime-dir. One runtime directory = one journal (DIR/deploy-journal, mode 0700).
+EVERY COMMAND EXCEPT inventory NEEDS --runtime-dir. One runtime directory = one journal (DIR/deploy-journal, mode 0700).
 Docker is contacted only with an explicit --docker-socket PATH; the Docker environment variables, Docker contexts and
 ~/.docker are never read. Changing Docker state additionally needs
   --authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE

@@ -168,3 +168,29 @@ Branch `feature/deploy-b4-boundaries`. Same constraints as B3: no live socket, n
 - **B5:** durable journal (fsync, torn tail) and cross-process lease visibility; until then port leases of other deployments are only seen through Docker.
 - **B7:** everything under "Real-runtime evidence required", the tag-race change above, LAN-isolation of the forwarder, a real-engine capture to replace
   the documentation-derived fake, the private-copy build option for the source swap window, guest-side disk space.
+
+## B7 phase 1 — readiness (offline)
+No live Docker, VM or real build. Tests: `deploy-docker` 154 (116 preserved + 32 in `b7_readiness.rs` + 6 in `b7_fixture.rs`); 20 mutations of the new gates, 20 caught.
+
+- **Image identity.** Each build attempt draws 128 bits (`random_hex`, OS entropy; injectable) and tags `harpoon/<app>:<dep>-<32 hex>`. The Image intent is journaled before the
+  tag is checked absent and before Buildx runs. Buildx gets `--iidfile <scratch>/iid-<nonce>`; the reported ID must be `sha256:` + 64 lower-case hex. The backend inspects the image **by that
+  ID**, requires the answer to carry the same ID and all three ownership labels, records the receipt (= that ID) at once, and only then checks that the tag still names the same image
+  (a moved or vanished tag fails the build, nothing runs, our image stays recorded and retained, the foreign image is untouched). Containers and the volume check use the **ID**, never
+  the tag; image removal was already by verified ID (new test: the tag now names a foreign image — only ours is removed, by ID). Collisions and a retag race are tested; with the nonce the
+  residual check/build window of B3/B4 is closed unless the randomness source is broken (an all-zero source is exactly what the mutation test checks for).
+- **Health attribution.** `DockerConfig::attribution = PerContainer`: each container gets its own random value in `HARPOON_DEPLOYMENT_MARKER`; a response counts only with the same value in
+  `X-Harpoon-Deployment-Marker`. Never journaled and never given to Buildx. Missing, wrong, unrelated-listener and stale (previous container's) markers fail; a transport that cannot check
+  markers fails closed. Before probing, `NetworkSettings.Ports` must show exactly the container port published on exactly the leased host port (no extra port, no specific non-wildcard
+  address); after a healthy verdict it is re-read, and the host-listener check (below) must pass, or the healthy response is reported as untrustworthy.
+- **Forwarding.** See `DEPLOY_B7_FORWARDING_AUDIT.md`. `forwarder.rs`: strict `lsof -F` parser, `verify_forwarder` (exactly one listener, `127.0.0.1`, expected pid and command), `LsofCheck`.
+- **Source safety.** The confined context is copied once into `<scratch>/ctx-<nonce>` (0700) and Buildx builds from the copy. Per file: `lstat`, open, `fstat` the open handle, device and inode must
+  match; links are recreated, never followed; sockets/FIFOs/devices are skipped and reported; the copy is capped at the 256 MB limit and honours the `.dockerignore` rules Harpoon understands. The
+  copied Dockerfile must equal the one confined at build start and name the same base images as the preflight, or the build stops. The snapshot and the ID file are removed afterwards.
+  This closes the swap window between the last check and Buildx; the copy itself is guarded per file as described. Limit: a file deleted and recreated under the same name can be given the same inode number by the file system, which the dev/inode comparison cannot distinguish; what is guaranteed is that the bytes come from a regular file at that path inside the context, never from something a link led to. (CI on Linux exposed a test that relied on inode numbers not being reused; it now keeps the old inode alive.)
+- **Guest free space.** `guest.rs` fixes the rule (fail closed: error, zero, short or no probe all refuse; required = 2 GiB reserve + context size). **No measuring probe exists**: the Docker API reports usage, not
+  free space, and Harpoon has no guest disk report. The CLI therefore refuses every live deployment at its first step until Phase 2 provides one (specified in `DEPLOY_B7_LIVE_ACCEPTANCE.md`).
+- **Live gates.** `DockerConfig::live_gates` (set by the CLI for every non-simulated deployment) makes the backend refuse unless attribution is on, a host-listener check and a guest probe are configured.
+- **Fixture.** `deploy-docker/fixtures/http-marker` (`alpine:3.22`, busybox `nc -e`, `/health` returns the marker; 404 elsewhere; 503 without a valid marker). Tested offline under `/bin/sh` and with Harpoon's own preflight and HTTP client; **never built or run in Docker**.
+- **Behavioural changes to existing contracts:** `image_tag(app, dep, nonce)`; `BuildRequest.iidfile`; builds run from a snapshot (cwd is `<scratch>/ctx-…`); Buildx sees the container-ID flow above. Existing tests were updated for these, none weakened.
+
+Not done / not claimed: LAN isolation; behaviour on a real host, real `lsof`, real Docker/Buildx (`--iidfile` semantics under the containerd image store); teardown of a successful deployment; the guest measurement.

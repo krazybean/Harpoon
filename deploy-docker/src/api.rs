@@ -84,6 +84,19 @@ pub struct ContainerInfo {
     pub labels: Labels,
     pub running: bool,
     pub exit_code: Option<i32>,
+    /// `NetworkSettings.Ports`: the host side of each published container port, as Docker reports
+    /// it for the running container (empty when nothing is published).
+    pub published: Vec<Published>,
+}
+
+/// One published port as Docker reports it for a running container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    pub container_port: u16,
+    pub proto: String,
+    /// Empty when Docker did not say.
+    pub host_ip: String,
+    pub host_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +362,36 @@ impl DockerApi {
     }
 
     /// Every image with its tags and labels (a list entry per tag).
+    /// Read-only: volume names and drivers, for before/after inventories. Never used by a deployment.
+    pub fn list_volumes(&self, left: Duration) -> Result<Vec<(String, String)>, ApiError> {
+        let r = self.call("GET", "/volumes", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("volume list", &r));
+        }
+        let j = parse(&r, "volume list")?;
+        let bad = |d: &str| ApiError::Malformed {
+            op: "volume list",
+            detail: d.into(),
+        };
+        let vols = match j.get("Volumes") {
+            None | Some(Json::Null) => return Ok(Vec::new()),
+            Some(Json::Arr(a)) => a,
+            Some(_) => return Err(bad("Volumes is not a list")),
+        };
+        let mut out = Vec::new();
+        for v in vols {
+            let name = req_str(v, "Name", "volume list")?.to_string();
+            let driver = v
+                .get("Driver")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_string();
+            out.push((name, driver));
+        }
+        out.sort();
+        Ok(out)
+    }
+
     pub fn list_images(&self, left: Duration) -> Result<Vec<(String, String, Labels)>, ApiError> {
         let r = self.call("GET", "/images/json", None, left)?;
         if r.status != 200 {
@@ -558,6 +601,7 @@ impl DockerApi {
                         .get("ExitCode")
                         .and_then(Json::as_i64)
                         .map(|c| c as i32),
+                    published: published_of(&j)?,
                 }))
             }
             404 => Ok(None),
@@ -731,4 +775,59 @@ pub fn demux(body: &[u8]) -> LogText {
         text: String::from_utf8_lossy(&out).into_owned(),
         truncated,
     }
+}
+
+/// `NetworkSettings.Ports`: `{"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "38000"}], "9090/tcp": null}`.
+/// Anything that is not that shape is an error: a mapping we cannot read is never taken as "none".
+fn published_of(j: &Json) -> Result<Vec<Published>, ApiError> {
+    let bad = |d: String| ApiError::Malformed {
+        op: "container inspect",
+        detail: d,
+    };
+    let ports = match j.get("NetworkSettings").and_then(|n| n.get("Ports")) {
+        None | Some(Json::Null) => return Ok(Vec::new()),
+        Some(Json::Obj(m)) => m,
+        Some(_) => return Err(bad("NetworkSettings.Ports is not an object".into())),
+    };
+    let mut out = Vec::new();
+    for (key, v) in ports {
+        let (cp, proto) = key
+            .split_once('/')
+            .ok_or_else(|| bad(format!("port key {key:?} is not <port>/<proto>")))?;
+        let container_port: u16 = cp
+            .parse()
+            .map_err(|_| bad(format!("port key {key:?} has no valid port")))?;
+        match v {
+            Json::Null => {}
+            Json::Arr(list) => {
+                for b in list {
+                    if !matches!(b, Json::Obj(_)) {
+                        return Err(bad("a published binding is not an object".into()));
+                    }
+                    let hp = match b.get("HostPort") {
+                        Some(Json::Str(s)) => s,
+                        _ => return Err(bad("a published binding has no HostPort string".into())),
+                    };
+                    let host_port: u16 = hp.parse().ok().filter(|n| *n != 0).ok_or_else(|| {
+                        bad(format!("published HostPort {hp:?} is not a port number"))
+                    })?;
+                    out.push(Published {
+                        container_port,
+                        proto: proto.to_ascii_lowercase(),
+                        host_ip: b
+                            .get("HostIp")
+                            .and_then(Json::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        host_port,
+                    });
+                }
+            }
+            _ => return Err(bad(format!("published entry for {key} is not a list"))),
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.container_port, &a.proto, a.host_port).cmp(&(b.container_port, &b.proto, b.host_port))
+    });
+    Ok(out)
 }

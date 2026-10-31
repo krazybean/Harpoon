@@ -14,10 +14,12 @@ use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::DockerApi;
-use harpoon_deploy_docker::backend::{image_tag, DockerBackend, DockerConfig};
+use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, Source};
 use harpoon_deploy_docker::dockerfile::required_images;
+use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
+use harpoon_deploy_docker::guest::{GuestDiskProbe, Unavailable};
 use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
 use harpoon_deploy_docker::preflight::context_size_with;
 use harpoon_deploy_journal::{lock_status, LockStatus, Restored};
@@ -37,6 +39,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "reconcile" => reconcile_cmd(p, out),
         "deploy" => deploy(p, gate, out),
         "export-journal" => export_journal(p, out),
+        "inventory" => inventory(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),
     }
 }
@@ -931,6 +934,7 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
                 "deploy needs an explicit --docker-socket PATH",
             ));
         }
+        forwarder_flags(p)?;
     }
     let sock = socket
         .clone()
@@ -986,7 +990,12 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         }
     );
     if !simulate {
-        let _ = writeln!(out, "image tag: {}", image_tag(&d.application_id, &d.id));
+        let _ = writeln!(
+            out,
+            "image tag: harpoon/{}:{}-<128 random bits, chosen at build>",
+            d.application_id.as_str().to_ascii_lowercase(),
+            d.id
+        );
     }
     let cfg = RunConfig {
         prior_ledger: restored.ledger.clone(),
@@ -1005,8 +1014,21 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             .value("resources-dir")
             .ok_or_else(|| Fail::config("--resources-dir DIR is required"))?;
         store::private_dir(&rt.scratch_dir(), true)?;
-        let mut b = DockerBackend::new(s.cfg.clone(), Some(Path::new(resources)))
-            .map_err(|e| Fail::config(e.to_string()))?;
+        // Every live requirement is switched on here; the backend refuses to start without them.
+        let mut live_cfg = s.cfg.clone();
+        live_cfg.live_gates = true;
+        live_cfg.attribution = Attribution::PerContainer;
+        let (lsof, pid, command) = forwarder_flags(p)?;
+        let guest: Box<dyn GuestDiskProbe> = match gate.guest_free_override {
+            Some(n) => Box::new(FixedFree(n)),
+            None => Box::new(Unavailable(
+                "no guest-side free-space probe is implemented yet (B7 phase 2 must provide one before a live deployment can run)".into(),
+            )),
+        };
+        let mut b = DockerBackend::new(live_cfg, Some(Path::new(resources)))
+            .map_err(|e| Fail::config(e.to_string()))?
+            .with_forwarder_check(LsofCheck { lsof, pid, command })
+            .with_guest_disk(BoxedProbe(guest));
         run_deployment_with(
             &mut d,
             &ctx,
@@ -1133,4 +1155,152 @@ impl Mode0600 for std::fs::OpenOptions {
         use std::os::unix::fs::OpenOptionsExt;
         self.mode(0o600)
     }
+}
+
+struct FixedFree(u64);
+impl GuestDiskProbe for FixedFree {
+    fn free_bytes(&self) -> Result<u64, String> {
+        Ok(self.0)
+    }
+}
+
+struct BoxedProbe(Box<dyn GuestDiskProbe>);
+impl GuestDiskProbe for BoxedProbe {
+    fn free_bytes(&self) -> Result<u64, String> {
+        self.0.free_bytes()
+    }
+}
+
+/// `--forwarder-pid` is mandatory for a live deployment: the host listener has to be proven to be
+/// the Harpoon app's own process, so the operator names that process.
+fn forwarder_flags(p: &Parsed) -> Result<(PathBuf, u32, String), Fail> {
+    let pid: u32 = p
+        .value("forwarder-pid")
+        .ok_or_else(|| {
+            Fail::config(
+                "--forwarder-pid N is required for a live deployment: the host listener for the published port must be proven to belong to the Harpoon app (process N)",
+            )
+        })?
+        .parse()
+        .ok()
+        .filter(|n| *n > 1)
+        .ok_or_else(|| Fail::config("--forwarder-pid must be a process id greater than 1"))?;
+    let command = p
+        .value("forwarder-command")
+        .unwrap_or("Harpoon")
+        .to_string();
+    if command.is_empty() || command.chars().any(|c| c.is_control()) {
+        return Err(Fail::config(
+            "--forwarder-command must be a plain program name",
+        ));
+    }
+    let lsof = p.value("lsof-path").unwrap_or(LsofCheck::DEFAULT_PATH);
+    if !lsof.starts_with('/') {
+        return Err(Fail::config("--lsof-path must be an absolute path"));
+    }
+    Ok((PathBuf::from(lsof), pid, command))
+}
+
+// ------------------------------------------------------------------ inventory
+
+/// Read-only snapshot for the before/after comparison of a live acceptance run. Sorted and free of
+/// timestamps, so `diff before.txt after.txt` shows exactly what changed.
+fn inventory(p: &Parsed, out: &mut String) -> R {
+    let sock = socket_flag(p)?
+        .ok_or_else(|| Fail::runtime("inventory needs an explicit --docker-socket PATH"))?;
+    let a = api(&sock);
+    let t = Duration::from_secs(10);
+    a.ping(t)
+        .map_err(|e| Fail::runtime(format!("{} did not answer: {e}", sock.display())))?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut ctrs = a
+        .list_containers(t)
+        .map_err(|e| Fail::runtime(format!("cannot list containers: {e}")))?;
+    ctrs.sort_by(|x, y| x.name.cmp(&y.name).then(x.id.cmp(&y.id)));
+    for c in &ctrs {
+        let harpoon = c
+            .labels
+            .iter()
+            .any(|(k, v)| k == "io.harpoon.managed" && v == "true");
+        let mut ports = c.host_ports.clone();
+        ports.sort();
+        lines.push(format!(
+            "container {} name={} state={} harpoon={} published={:?}",
+            c.id,
+            c.name,
+            c.state,
+            if harpoon { "yes" } else { "no" },
+            ports
+        ));
+    }
+    let mut imgs = a
+        .list_images(t)
+        .map_err(|e| Fail::runtime(format!("cannot list images: {e}")))?;
+    imgs.sort();
+    for (id, tag, labels) in &imgs {
+        let harpoon = labels
+            .iter()
+            .any(|(k, v)| k == "io.harpoon.managed" && v == "true");
+        lines.push(format!(
+            "image {id} tag={tag} harpoon={}",
+            if harpoon { "yes" } else { "no" }
+        ));
+    }
+    for (name, driver) in a
+        .list_volumes(t)
+        .map_err(|e| Fail::runtime(format!("cannot list volumes: {e}")))?
+    {
+        lines.push(format!("volume {name} driver={driver}"));
+    }
+    let ports = a
+        .published_ports(t)
+        .map_err(|e| Fail::runtime(format!("cannot read port mappings: {e}")))?;
+    for port in ports {
+        lines.push(format!("docker-port-mapping {port}"));
+    }
+    match p.value("lsof-path") {
+        None => lines.push("host-listeners not captured (no --lsof-path given)".into()),
+        Some(l) if !l.starts_with('/') => {
+            return Err(Fail::usage("--lsof-path must be an absolute path"))
+        }
+        Some(l) => {
+            for x in listeners_in_range(Path::new(l), 38000, 39099)
+                .map_err(|e| Fail::runtime(format!("cannot capture host listeners: {e}")))?
+            {
+                lines.push(format!(
+                    "host-listener {} pid={} command={}",
+                    x.address, x.pid, x.command
+                ));
+            }
+        }
+    }
+    lines.sort_by_key(|l| (l.split(' ').next().unwrap_or("").to_string(), l.clone()));
+    let mut text = String::from("# harpoon-deploy inventory (read-only; sorted; no timestamps)\n");
+    for l in &lines {
+        text.push_str(l);
+        text.push('\n');
+    }
+    match p.value("to") {
+        None => out.push_str(&text),
+        Some(to) => {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode_0600()
+                .open(to)
+                .map_err(|e| {
+                    Fail::journal(format!("cannot create {to} (it must not exist yet): {e}"))
+                })?;
+            f.write_all(text.as_bytes())
+                .and_then(|()| f.sync_all())
+                .map_err(|e| Fail::journal(format!("cannot write {to}: {e}")))?;
+            let _ = writeln!(
+                out,
+                "wrote {} inventory lines to {to} (mode 0600)",
+                lines.len()
+            );
+        }
+    }
+    Ok(exit::OK)
 }

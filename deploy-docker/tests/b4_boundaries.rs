@@ -13,7 +13,7 @@ use harpoon_deploy::health::{
 use harpoon_deploy::state::*;
 use harpoon_deploy::time::SystemClock;
 use harpoon_deploy_docker::backend::{
-    image_tag, preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig,
+    preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig,
 };
 use harpoon_deploy_docker::confine::{confine, ConfineError};
 use harpoon_deploy_docker::ignore::IgnoreRules;
@@ -103,6 +103,7 @@ fn backend_with<T: HttpTransport>(
     f(&mut cfg);
     DockerBackend::with_transport(cfg, Some(&h.ws.resources()), t)
         .expect("bundled buildx resolves")
+        .with_entropy(test_entropy())
         .with_port_probe(NoListeners)
         .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
 }
@@ -363,7 +364,7 @@ fn a_context_inside_the_project_builds_with_canonical_paths() {
     std::fs::write(sub.join("Dockerfile"), DF).unwrap();
     h.seed_built_image();
     let root = h.ws.context();
-    // spelled with a `..` detour; Buildx must be given the resolved path
+    // spelled with a `..` detour; the build runs from a private copy of the resolved folder
     let spelled = h.ws.context().join("services/../services/web");
     let mut b = backend_with(&h, ok200(), |c| {
         c.context_dir = spelled.clone();
@@ -374,8 +375,24 @@ fn a_context_inside_the_project_builds_with_canonical_paths() {
     assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
     let args = h.ws.buildx_record("args.txt");
     let canon = std::fs::canonicalize(&sub).unwrap();
-    assert!(args.contains(canon.to_str().unwrap()), "{args}");
+    assert!(
+        !args.contains(canon.to_str().unwrap()),
+        "Buildx is not pointed at the user's folder: {args}"
+    );
+    assert!(
+        args.contains("/ctx-"),
+        "it is pointed at the private snapshot: {args}"
+    );
     assert!(!args.contains(".."), "{args}");
+    let left: Vec<_> = std::fs::read_dir(h.ws.scratch())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        left.iter()
+            .all(|n| !n.starts_with("ctx-") && !n.starts_with("iid-")),
+        "the snapshot and the ID file are removed: {left:?}"
+    );
 }
 
 #[test]
@@ -1518,7 +1535,7 @@ fn a_foreign_image_on_our_tag_is_neither_overwritten_nor_removed() {
     assert!(!buildx_ran(&h));
     assert!(h.docker.with(|s| s.images.iter().any(|i| i.id == foreign)));
     assert!(!h.docker.requests().iter().any(|r| r.method == "DELETE"));
-    let _ = image_tag(&h.dep.application_id, &h.dep.id);
+    let _ = tag_for(&h.dep.application_id, &h.dep.id);
 }
 
 #[test]
