@@ -1,7 +1,11 @@
 # Harpoon 2 — Status and Direction
 
 Status: canonical consolidation of repository evidence and current direction
-Date: 2026-10-30 (deployment sections revised; runtime sections last reviewed 2026-10-29)
+Date: 2026-10-30 (runtime sections last reviewed 2026-10-29; deployment sections reconciled with the canonical roadmap after PR #121)
+
+**Milestone status lives only in [the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker).**
+This document does not track which deployment milestones are done; where it describes the
+deployment direction it records scope and rationale, and defers every status claim to the roadmap.
 
 This document is the short index for the current Harpoon 2 runtime state and the
 proposed deployment-control-plane direction. It records what is implemented,
@@ -100,13 +104,18 @@ volume pruning. Docker owns that state, broad prune commands are not safely scop
 and no targeted retention policy has been measured. Keep trim diagnostic-only;
 manual, explicitly scoped Docker cleanup remains the supported path.
 
-## Proposed native deployment control plane
+## Native deployment control plane (Harpoon 2.1)
 
-**Proposed, not implemented:** Harpoon may add a lightweight native control plane
-for one local Harpoon runtime. It should own deployment intent, source resolution,
+**Partly implemented; the full control plane is not.** Harpoon is building a lightweight native
+control plane for one local Harpoon runtime. It should own deployment intent, source resolution,
 environment/secrets configuration, serialized orchestration state, deployment
 history, and health-gated replacement. Docker remains the only authority for
-workload state. The requirements are in
+workload state. The first-deployment slice (local Dockerfile build, health-checked start, durable
+journal, gated CLI, ownership-verified cleanup) is implemented and was accepted once on a live
+disposable deployment; permanent SQLite state, replacement, bounded cutover recovery, rollback and
+Milestones C–E are not. Exactly what is done and what comes next is in
+[the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker). The
+requirements, acceptance criteria and stop conditions are in
 [deployment-control-plane-requirements](deployment-control-plane-requirements.md).
 
 Decisions approved on 2026-10-30: a standalone Rust engine (CLI first, Tauri
@@ -197,13 +206,17 @@ runtime claim.
 
 ## Phase order and stop conditions
 
+This is the intended **order** of the 2.1 work; status is in the roadmap, not here.
+
 1. Keep the runtime MVP and current release evidence stable; the deployment work does
    not touch the runtime, guest assets, or the 2.0 release effort.
-2. Complete second-Mac artifact verification and record gaps honestly.
-3. Milestone A: specification and UX discovery (this revision), then owner approval.
+2. Second-Mac artifact verification and the other Harpoon 2.0 release gates are a separate
+   track. They are not prerequisites of any 2.1 deployment milestone.
+3. Milestone A: specification and UX discovery, then owner approval.
 4. Baseline measurements (Dockerfile build over the bridge, build under load, publish
    latency, idle cost), gated on an explicitly allowed live VM.
-5. Milestone B: engine and lifecycle — the first vertical slice.
+5. Milestone B: engine and lifecycle — first the first-deployment slice, then permanent
+   SQLite state, health-gated replacement, bounded cutover recovery and explicit rollback.
 6. Milestone C: builds, environments and secrets.
 7. Gate U: decide whether credentials and execution can be satisfied unattended
    (decision only; no agent implementation).
@@ -222,10 +235,11 @@ not prerequisites for proving the local deployment path.
 
 ## Open gaps
 
-- No current second-Mac verification record is present.
+- No current second-Mac verification record is present (Harpoon 2.0 track; not a 2.1 gate).
 - Intel behavior and Windows/Linux adapters are not implemented or validated.
-- The control plane has no runtime implementation, persistence choice, secret store,
-  API schema, queue worker, webhook verifier, or rollback implementation.
+- The full control plane is incomplete: there is no permanent SQLite store (the first-slice
+  journal is a stopgap), secret store, API schema, queue worker, webhook verifier, or
+  replacement/rollback implementation. The first-deployment slice is implemented; see the roadmap.
 - OCI multi-arch publishing and registry credentials need a concrete acceptance
   contract; the current runtime remains ARM64-only.
 - GitHub/GitLab issue state could not be synchronized in the 2026-10-29 session
@@ -234,15 +248,16 @@ not prerequisites for proving the local deployment path.
   GitLab integration page, and did not read Vercel's primary Container Images page.
 - Whether Harpoon should ever deploy to Vercel or another provider is undecided by
   design.
-- Baseline measurements for the deployment engine have not been taken.
+- The deployment baseline was measured once, on one host (`results/DEPLOY_BASELINE.md`);
+  engine-level idle, latency and cleanup measurements are still owed at each milestone.
 
 ## Canonical references
 
-- [Roadmap](roadmap.md) — milestone and current-position index.
+- [Roadmap](roadmap.md) — the single authoritative milestone tracker (deployment milestones: its 2.1 section).
 - [ADR 0001](decisions/0001-virtualization-substrate.md) — macOS virtualization.
 - [ADR 0003](decisions/0003-runtime-closure.md) — offline guest/release gate.
-- [ADR 0004](decisions/0004-deployment-control-plane-boundary.md) — proposed
-  control-plane boundary.
+- [ADR 0004](decisions/0004-deployment-control-plane-boundary.md) — control-plane
+  boundary decision.
 - [Deployment requirements](deployment-control-plane-requirements.md).
 - [Coolify spike](results/SPIKE_COOLIFY_DEPLOYMENT.md).
 - [Vercel UX spike](results/SPIKE_VERCEL_UX.md).

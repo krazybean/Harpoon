@@ -3,6 +3,10 @@
 Status: DRAFT v2 (reviewed 2026-10-30; supersedes the 2026-10-29 draft)
 Date: 2026-10-30
 
+This document is the authority for milestone **scope, acceptance criteria and stop conditions**.
+Which milestones are complete, and which is next, is tracked only in
+[the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker).
+
 This initiative adds a small Harpoon-native deployment control plane to one local
 Harpoon runtime. It takes **developer-experience** ideas from Vercel and
 **orchestration lifecycle** ideas from Coolify. It does not fork or embed either, does
