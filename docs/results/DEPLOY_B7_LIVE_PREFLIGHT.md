@@ -15,7 +15,7 @@ Harpoon's `harpoon.log` and `runtime.json`. No Docker CLI, no context, no `DOCKE
 | # | Finding | Status |
 |---|---|---|
 | F1 | Docker Engine 28.3.3, API 1.51 (min 1.24), overlay2 on ext4 (not the containerd store) | PASS |
-| F2 | Harpoon's Docker parsers accept every real answer (`examples/live_preflight`: 30 PASS, 0 FAIL) | PASS |
+| F2 | Harpoon's Docker parsers accept every real answer (`examples/live_preflight`: 32 PASS, 0 FAIL) | PASS |
 | F3 | Management channel: real reply format matches; `MgmtDfProbe` accepts it; 31 099 641 856 bytes free | PASS |
 | F4 | Hostname/kernel agreement between Docker and the channel | PASS, **weak** (hostname is the unset default `(none)`) |
 | F5 | `alpine:3.22` present locally | PASS |
@@ -77,7 +77,7 @@ check therefore adds little on this guest; the real binding is that both sockets
 | `lsof -F` format | same | `p<pid>` / `c<cmd>` / `f<fd>` / `n<addr>` lines | The parser ignores `f`; accepted. Whether the real address of the forwarder's listener prints as `127.0.0.1:<port>` is UNKNOWN until one exists. |
 | Guest IP | log: `HARPOON_GUEST_IP_DISCOVERED 192.168.64.3` (2026-10-30T04:48:14Z) | counts: `HOST_FORWARD_DISCOVERY_FAILED` 0, `HOST_FORWARD_TRY_FALLBACK` 0 | The hard-coded fallback was **not** used. |
 | Collisions / errors | log | `HARPOON_PORT_FORWARD_COLLISION` 0, `HOST_FORWARD_ACCEPT_ERROR` 0 | None. |
-| Historical forwarding | log (2026-10-30 07:26–07:50, benchmark containers `hb-pm-*`) | 44 `ADD`/`LISTENING`/`REMOVE` events, all `127.0.0.1:<p> -> 192.168.64.3:<p>/tcp containerPort=8080`; 289 `HOST_FORWARD_CONNECT_FAILED … Connection refused` | Confirms loopback binding, same-number mapping and the guest IP **historically**. The refusals are the expected window while a container starts (and the 10 s sync lag): health probes must tolerate them (they do: 60 s deadline). |
+| Historical forwarding | log (2026-10-30 07:26–07:50, benchmark containers `hb-pm-*`) | 44 each of `ADD`, `LISTENING` and `REMOVE` events, all `127.0.0.1:<p> -> 192.168.64.3:<p>/tcp containerPort=8080`; 289 `HOST_FORWARD_CONNECT_FAILED … Connection refused` | Confirms loopback binding, same-number mapping and the guest IP **historically**. The refusals are the expected window while a container starts (and the 10 s sync lag): health probes must tolerate them (they do: 60 s deadline). |
 | Cadence | log | sync every 10 s, currently `containers=9 mappings=0` | Matches the audit. |
 
 LAN isolation is **not** established (separately authorized test required).
@@ -101,7 +101,7 @@ LAN isolation is **not** established (separately authorized test required).
 | Daemon builder | `Builder-Version: 2` | BuildKit is available to Buildx's docker driver (UNKNOWN until a build) |
 
 ## 7. Existing workloads that must be preserved
-9 containers, all `exited` (code 255 ×7, 0 ×1; killed when the VM last started — they have no restart policy) : `harpoon-ui-stack-test-20261015-{a-worker,b-api,b-worker,c-api,c-cache,c-worker,c-exited}-1`, `harpoon-ui-preview-{alpha,beta}-1`. None is Harpoon-deployment-owned (`io.harpoon.managed` absent); none publishes a port.
+9 containers, all `exited` (code 255 ×8, 0 ×1; killed when the VM last started — they have no restart policy) : `harpoon-ui-stack-test-20261015-{a-worker,b-api,b-worker,c-api,c-cache,c-worker,c-exited}-1`, `harpoon-ui-preview-{alpha,beta}-1`. None is Harpoon-deployment-owned (`io.harpoon.managed` absent); none publishes a port.
 6 images: `alpine:3.22`, `alpine:latest`, `postgres:16`, `hello-world:latest`, and two leftover `stage8-reclamation-*:latest`. 1 anonymous volume. The Phase 2B before/after `inventory` must show exactly the expected additions (one image, one running container) and nothing else.
 
 ## 8. Remaining prerequisites for the first disposable deployment
