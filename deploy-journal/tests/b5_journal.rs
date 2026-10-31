@@ -1544,3 +1544,48 @@ fn journal_and_lock_files_are_created_owner_only_and_named_for_what_they_are() {
     }
     assert!(!t.0.join("journal.jsonl").exists());
 }
+
+/// The mechanism behind two CI flakes (B5, B6, #116), made deterministic. `flock` belongs to the open
+/// file *description*, so a child that is forked while a journal is open holds a copy of the lock until
+/// it execs (the descriptor is close-on-exec). Dropping the journal in the parent therefore does not free
+/// the lock while another thread's forked-but-not-yet-exec'd child exists. That is operating-system
+/// behaviour, not a journal defect: a single-threaded writer (the CLI) never has a fork in flight while
+/// it holds the journal, and `Command::spawn` returns only after the exec.
+#[test]
+fn a_child_forked_while_the_journal_is_open_keeps_the_lock_until_it_execs() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    let t = Tmp::new();
+    let (j, _) = FileJournal::open(&t.0).unwrap();
+    let (mut ready_rx, ready_tx) = UnixStream::pair().unwrap();
+    let (go_tx, go_rx) = UnixStream::pair().unwrap();
+    let spawner = std::thread::spawn(move || {
+        let (mut ready_tx, mut go_rx) = (ready_tx, go_rx);
+        let mut cmd = std::process::Command::new("true");
+        // Runs in the child after fork, before exec: say "I exist", then wait to be released.
+        unsafe {
+            cmd.pre_exec(move || {
+                let _ = ready_tx.write_all(&[1]);
+                let mut b = [0u8; 1];
+                let _ = go_rx.read(&mut b);
+                Ok(())
+            });
+        }
+        cmd.status().unwrap();
+    });
+    let mut b = [0u8; 1];
+    ready_rx.read_exact(&mut b).unwrap(); // the child is forked and parked before exec
+    drop(j);
+    match FileJournal::open(&t.0) {
+        Err(OpenError::Locked(_)) => {}
+        other => panic!(
+            "a parked child should still hold the lock: {:?}",
+            other.map(|_| ())
+        ),
+    }
+    let mut go_tx = go_tx;
+    go_tx.write_all(&[1]).unwrap(); // let it exec
+    spawner.join().unwrap(); // `status()` returns after the exec and the exit
+    FileJournal::open(&t.0).expect("the lock is free once the child has exec'd");
+}
