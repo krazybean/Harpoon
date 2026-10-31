@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod fake_docker;
+pub mod fake_mgmt;
 
 use fake_docker::FakeDocker;
 use harpoon_deploy::engine::{

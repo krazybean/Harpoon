@@ -4,11 +4,11 @@ use crate::{exit, Fail, Gate};
 use harpoon_deploy::backend::{FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
-    end_state, reconcile, run_deployment_with, Context, Report, RunConfig,
+    end_state, execute_actions, reconcile, run_deployment_with, Context, Report, RunConfig,
 };
 use harpoon_deploy::ids::{ApplicationId, IdGenerator};
 use harpoon_deploy::ledger::{
-    plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger,
+    plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger, Observed, ResourceKind,
 };
 use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
@@ -19,7 +19,7 @@ use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, Source};
 use harpoon_deploy_docker::dockerfile::required_images;
 use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
-use harpoon_deploy_docker::guest::{GuestDiskProbe, Unavailable};
+use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
 use harpoon_deploy_docker::preflight::context_size_with;
 use harpoon_deploy_journal::{lock_status, LockStatus, Restored};
@@ -40,6 +40,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "deploy" => deploy(p, gate, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
+        "teardown" => teardown(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),
     }
 }
@@ -516,6 +517,47 @@ fn doctor(p: &Parsed, out: &mut String) -> R {
         }
     }
 
+    if let (Some(sock), Some(m)) = (&socket, p.value("mgmt-socket")) {
+        if !m.starts_with('/') {
+            return Err(Fail::usage("--mgmt-socket must be an absolute path"));
+        }
+        let required = source
+            .as_ref()
+            .map(|s| s.cfg.min_free_bytes.saturating_add(s.size))
+            .unwrap_or(2 * 1024 * 1024 * 1024);
+        let probe = MgmtDfProbe::new(sock, m, Duration::from_secs(10));
+        match probe.measure() {
+            Err(e) => c.fail(exit::RUNTIME, "guest free space", e),
+            Ok((free, what)) if free >= required => c.ok(
+                "guest free space",
+                format!(
+                    "{} MB free on {what}; {} MB required (read-only: hostname, uname -r, df)",
+                    free / 1_000_000,
+                    required / 1_000_000
+                ),
+            ),
+            Ok((free, what)) => c.fail(
+                exit::RUNTIME,
+                "guest free space",
+                format!(
+                    "only {} MB free on {what}; {} MB required",
+                    free / 1_000_000,
+                    required / 1_000_000
+                ),
+            ),
+        }
+    } else if p.value("mgmt-socket").is_some() {
+        c.warn(
+            "guest free space",
+            "--mgmt-socket given without --docker-socket; not measured",
+        );
+    } else {
+        c.warn(
+            "guest free space",
+            "no --mgmt-socket given; not measured (a live deployment requires it)",
+        );
+    }
+
     for l in &c.lines {
         let _ = writeln!(out, "{l}");
     }
@@ -935,6 +977,7 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             ));
         }
         forwarder_flags(p)?;
+        mgmt_flag(p)?;
     }
     let sock = socket
         .clone()
@@ -1019,16 +1062,11 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         live_cfg.live_gates = true;
         live_cfg.attribution = Attribution::PerContainer;
         let (lsof, pid, command) = forwarder_flags(p)?;
-        let guest: Box<dyn GuestDiskProbe> = match gate.guest_free_override {
-            Some(n) => Box::new(FixedFree(n)),
-            None => Box::new(Unavailable(
-                "no guest-side free-space probe is implemented yet (B7 phase 2 must provide one before a live deployment can run)".into(),
-            )),
-        };
+        let mgmt = mgmt_flag(p)?;
         let mut b = DockerBackend::new(live_cfg, Some(Path::new(resources)))
             .map_err(|e| Fail::config(e.to_string()))?
             .with_forwarder_check(LsofCheck { lsof, pid, command })
-            .with_guest_disk(BoxedProbe(guest));
+            .with_guest_disk(MgmtDfProbe::new(&sock, mgmt, Duration::from_secs(10)));
         run_deployment_with(
             &mut d,
             &ctx,
@@ -1157,17 +1195,15 @@ impl Mode0600 for std::fs::OpenOptions {
     }
 }
 
-struct FixedFree(u64);
-impl GuestDiskProbe for FixedFree {
-    fn free_bytes(&self) -> Result<u64, String> {
-        Ok(self.0)
-    }
-}
-
-struct BoxedProbe(Box<dyn GuestDiskProbe>);
-impl GuestDiskProbe for BoxedProbe {
-    fn free_bytes(&self) -> Result<u64, String> {
-        self.0.free_bytes()
+/// `--mgmt-socket` is mandatory for a live deployment: free space in the guest is measured through
+/// Harpoon's management channel and cross-checked against Docker.
+fn mgmt_flag(p: &Parsed) -> Result<PathBuf, Fail> {
+    match p.value("mgmt-socket") {
+        None => Err(Fail::config(
+            "--mgmt-socket PATH is required for a live deployment: guest free space is measured through the management channel",
+        )),
+        Some(m) if !m.starts_with('/') => Err(Fail::config("--mgmt-socket must be an absolute path")),
+        Some(m) => Ok(PathBuf::from(m)),
     }
 }
 
@@ -1303,4 +1339,407 @@ fn inventory(p: &Parsed, out: &mut String) -> R {
         }
     }
     Ok(exit::OK)
+}
+
+// ------------------------------------------------------------------ teardown
+
+/// One selected deployment's resources, from the journal.
+struct Targets {
+    containers: Vec<harpoon_deploy::ledger::Entry>,
+    images: Vec<harpoon_deploy::ledger::Entry>,
+    leases: Vec<harpoon_deploy::ledger::Entry>,
+}
+
+fn targets_of(ledger: &Ledger, dep: &harpoon_deploy::ids::DeploymentId) -> Targets {
+    let mine = |k: ResourceKind| -> Vec<_> {
+        ledger
+            .entries()
+            .iter()
+            .filter(|e| &e.deployment == dep && e.key.kind == k)
+            .cloned()
+            .collect()
+    };
+    Targets {
+        containers: mine(ResourceKind::Container),
+        images: mine(ResourceKind::Image),
+        leases: mine(ResourceKind::PortLease),
+    }
+}
+
+/// How a recorded Docker object is found in a full, successful listing.
+fn locate<'a>(e: &harpoon_deploy::ledger::Entry, observed: &'a [Observed]) -> Located<'a> {
+    let Some(id) = &e.id else {
+        return Located::NoReceipt;
+    };
+    match observed.iter().find(|o| o.kind == e.key.kind && &o.id == id) {
+        Some(o) if o.labelled_for(&e.app, &e.deployment) && (e.key.kind == ResourceKind::Image || o.name == e.key.name) => {
+            Located::Ours(o)
+        }
+        Some(o) => Located::Mismatch(format!(
+            "the {} with id {} is named {:?} and carries labels that are not exactly this deployment's; it is not touched",
+            e.key.kind.as_str(),
+            id,
+            o.name
+        )),
+        None => {
+            let same_name = e.key.kind == ResourceKind::Container
+                && observed.iter().any(|o| o.kind == e.key.kind && o.name == e.key.name);
+            if same_name {
+                Located::Mismatch(format!(
+                    "a {} named {:?} exists but its id is not the recorded {id}; it is not touched",
+                    e.key.kind.as_str(),
+                    e.key.name
+                ))
+            } else {
+                Located::Absent
+            }
+        }
+    }
+}
+
+enum Located<'a> {
+    Ours(&'a Observed),
+    Mismatch(String),
+    Absent,
+    NoReceipt,
+}
+
+fn state_note(e: &harpoon_deploy::ledger::Entry) -> &'static str {
+    match &e.state {
+        EntryState::Created => "recorded",
+        EntryState::CleanupFailed(_) => "an earlier removal failed",
+        EntryState::Intended => "no receipt",
+        EntryState::Refused(_) => "refused earlier",
+        EntryState::Released(_) => "already released",
+    }
+}
+
+fn teardown(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        authorized(p)?;
+    }
+    let dep_id: harpoon_deploy::ids::DeploymentId = p
+        .value("deployment")
+        .ok_or_else(|| {
+            Fail::usage(
+                "--deployment dep_… is required (the one succeeded deployment to dismantle)",
+            )
+        })?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--deployment is not a deployment id: {e}")))?;
+    let socket = socket_flag(p)?.ok_or_else(|| {
+        Fail::runtime(
+            "teardown needs an explicit --docker-socket PATH; nothing is assumed about the runtime",
+        )
+    })?;
+    if !rt.initialised() {
+        return Err(Fail::refused(format!(
+            "there is no journal at {}; nothing is recorded to tear down",
+            rt.journal_dir().display()
+        )));
+    }
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused(
+            "this is a simulated runtime; there is nothing real to tear down",
+        ));
+    }
+    let mut backend = docker_backend(p, &rt, &socket)?;
+    let (mut writer, restored) = if apply {
+        let (j, r) = store::open_writer(&rt, Kind::Docker)?;
+        (Some(j), r)
+    } else {
+        (None, store::read_restored(&rt)?.expect("initialised above"))
+    };
+    let Some(d) = restored
+        .deployments
+        .iter()
+        .find(|d| d.id == dep_id)
+        .cloned()
+    else {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} is not in the journal"
+        )));
+    };
+    if d.status != DeploymentStatus::Succeeded {
+        return Err(Fail::refused(format!(
+            "deployment {dep_id} is {}, not succeeded. `teardown` dismantles a successful deployment only; use `recover` and `reconcile` for anything else.",
+            d.status
+        )));
+    }
+    let t = targets_of(&restored.ledger, &dep_id);
+    let open: Vec<&harpoon_deploy::ledger::Entry> = t
+        .containers
+        .iter()
+        .chain(&t.images)
+        .chain(&t.leases)
+        .filter(|e| !e.is_released())
+        .collect();
+    // An image that an earlier teardown deliberately kept is not "open" work; see below.
+    if open.is_empty() {
+        let _ = writeln!(
+            out,
+            "teardown: nothing to do — every recorded resource of {dep_id} is already released"
+        );
+        return Ok(exit::OK);
+    }
+    if let Some(e) = open
+        .iter()
+        .find(|e| matches!(e.state, EntryState::Refused(_)))
+    {
+        return Err(Fail::refused(format!(
+            "{} {} of {dep_id} was refused earlier ({}); its ownership was not proven, so teardown will not touch it. Inspect it with `status`.",
+            e.key.kind.as_str(),
+            e.key.name,
+            match &e.state {
+                EntryState::Refused(m) => m.as_str(),
+                _ => "",
+            }
+        )));
+    }
+    if let Some(e) = t
+        .containers
+        .iter()
+        .chain(&t.images)
+        .find(|e| !e.is_released() && e.id.is_none())
+    {
+        return Err(Fail::refused(format!(
+            "{} {} of {dep_id} has no receipt, so what it was is unknown; use `reconcile`, not `teardown`",
+            e.key.kind.as_str(),
+            e.key.name
+        )));
+    }
+
+    let list_err = |e: harpoon_deploy::backend::StepError| {
+        Fail::runtime(format!(
+            "cannot list the runtime ({}): {}\nNothing was assumed absent and nothing was changed.",
+            socket.display(),
+            e.message
+        ))
+    };
+    let observed = backend.list_resources().map_err(list_err)?;
+    let docker = api(&socket);
+    let t10 = Duration::from_secs(10);
+    let _ = writeln!(
+        out,
+        "teardown of {dep_id} (application {}) — {}",
+        d.application_id,
+        if apply {
+            "APPLYING"
+        } else {
+            "dry run: nothing will be changed"
+        }
+    );
+
+    // ---- phase 1: containers, each located by its recorded ID and ownership
+    let mut c_actions: Vec<Action> = Vec::new();
+    for e in t.containers.iter().filter(|e| !e.is_released()) {
+        let entry = (e.deployment.clone(), e.key.clone());
+        match locate(e, &observed) {
+            Located::Ours(o) => c_actions.push(Action::Remove {
+                entry,
+                observed: o.clone(),
+                adopt: false,
+            }),
+            Located::Mismatch(reason) => c_actions.push(Action::Refuse { entry, reason }),
+            Located::Absent => c_actions.push(Action::MarkAbsent { entry }),
+            Located::NoReceipt => unreachable!("checked above"),
+        }
+    }
+    for a in &c_actions {
+        let _ = writeln!(out, "{}{}", if apply { "" } else { "would: " }, describe(a));
+    }
+    let open_images: Vec<_> = t.images.iter().filter(|e| !e.is_released()).collect();
+    let open_leases: Vec<_> = t.leases.iter().filter(|e| !e.is_released()).collect();
+
+    if !apply {
+        for e in &open_images {
+            let _ = writeln!(
+                out,
+                "would: remove image {} (id {}) only once its containers are gone and no other container uses it ({})",
+                e.key.name,
+                e.id.as_deref().unwrap_or("-"),
+                state_note(e)
+            );
+        }
+        for e in &open_leases {
+            let _ = writeln!(out, "would: release port lease {} only once the containers are verified absent and Docker no longer maps that port", e.key.name);
+        }
+        let _ = writeln!(out, "dry run: nothing was changed. Add --apply and --{AUTH_FLAG}=… to carry this out; each removal re-verifies id, name and all three ownership labels at that moment, stops before removing, and never uses force, prune or a name pattern.");
+        return Ok(exit::OK);
+    }
+
+    let j = writer.as_mut().expect("apply holds the writer");
+    let mut ledger = restored.ledger.clone();
+    let journal_err = |e: harpoon_deploy::engine::EngineError| {
+        Fail::failed(format!(
+            "journal write failed during teardown: {e}; run `recover`, then `status`, and retry"
+        ))
+    };
+    // One container at a time, and the first one that does not come out clean (a failed removal or a
+    // refusal) stops the rest: nothing further is touched on top of an unexplained failure, and the
+    // containers not reached are reported and retried by the next run.
+    let mut not_reached: Vec<String> = Vec::new();
+    for (i, a) in c_actions.iter().enumerate() {
+        execute_actions(
+            std::slice::from_ref(a),
+            &mut ledger,
+            j,
+            &mut backend,
+            &SystemClock,
+        )
+        .map_err(journal_err)?;
+        let key = match a {
+            Action::Remove { entry, .. }
+            | Action::Refuse { entry, .. }
+            | Action::MarkAbsent { entry } => entry,
+            _ => continue,
+        };
+        let clean = ledger.find(&key.0, &key.1).is_some_and(|e| e.is_released());
+        if !clean {
+            not_reached = c_actions[i + 1..]
+                .iter()
+                .filter_map(|n| match n {
+                    Action::Remove { entry, .. }
+                    | Action::Refuse { entry, .. }
+                    | Action::MarkAbsent { entry } => Some(entry.1.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            break;
+        }
+    }
+    for n in &not_reached {
+        let _ = writeln!(out, "not attempted: container {n} — an earlier container did not come out clean, so nothing further was touched");
+    }
+    let released = |ledger: &Ledger, es: &[harpoon_deploy::ledger::Entry]| {
+        es.iter().all(|e| {
+            ledger
+                .find(&e.deployment, &e.key)
+                .is_some_and(|x| x.is_released())
+        })
+    };
+    let containers_gone = released(&ledger, &t.containers);
+    let mut problems: Vec<String> = Vec::new();
+    if !containers_gone {
+        problems.push("a container could not be removed or verified; the image and the port leases were left alone".into());
+    }
+
+    // ---- phase 2: images, only when the containers are gone and nothing else uses the image
+    if containers_gone && !open_images.is_empty() {
+        let fresh = backend.list_resources().map_err(list_err)?;
+        let ctrs = docker
+            .list_containers(t10)
+            .map_err(|e| Fail::runtime(format!("cannot re-list containers: {e}")))?;
+        let mut i_actions: Vec<Action> = Vec::new();
+        for e in &open_images {
+            let entry = (e.deployment.clone(), e.key.clone());
+            match locate(e, &fresh) {
+                Located::Ours(o) => {
+                    let users: Vec<String> = ctrs
+                        .iter()
+                        .filter(|c| c.image_id.is_empty() || c.image_id == o.id)
+                        .map(|c| {
+                            if c.image_id.is_empty() {
+                                format!("{} (image unknown)", c.name)
+                            } else {
+                                c.name.clone()
+                            }
+                        })
+                        .collect();
+                    if users.is_empty() {
+                        i_actions.push(Action::Remove {
+                            entry,
+                            observed: o.clone(),
+                            adopt: false,
+                        });
+                    } else {
+                        let _ = writeln!(
+                            out,
+                            "kept: image {} is still referenced by {} — not removed",
+                            e.key.name,
+                            users.join(", ")
+                        );
+                    }
+                }
+                Located::Mismatch(reason) => i_actions.push(Action::Refuse { entry, reason }),
+                Located::Absent => i_actions.push(Action::MarkAbsent { entry }),
+                Located::NoReceipt => unreachable!("checked above"),
+            }
+        }
+        for a in &i_actions {
+            let _ = writeln!(out, "{}", describe(a));
+        }
+        execute_actions(&i_actions, &mut ledger, j, &mut backend, &SystemClock)
+            .map_err(journal_err)?;
+    }
+
+    // ---- phase 3: leases, only after the containers are verified absent and the port is unmapped
+    if containers_gone && !open_leases.is_empty() {
+        let mapped = docker
+            .published_ports(t10)
+            .map_err(|e| Fail::runtime(format!("cannot read Docker's port mappings: {e}")))?;
+        let mut l_actions: Vec<Action> = Vec::new();
+        for e in &open_leases {
+            let port: Option<u16> = e.key.name.parse().ok();
+            match port {
+                Some(pn) if !mapped.contains(&pn) => l_actions.push(Action::ReleaseLease {
+                    entry: (e.deployment.clone(), e.key.clone()),
+                }),
+                Some(pn) => problems.push(format!(
+                    "port {pn} is still mapped by a container; lease kept"
+                )),
+                None => problems.push(format!("lease {:?} is not a port number; kept", e.key.name)),
+            }
+        }
+        for a in &l_actions {
+            let _ = writeln!(out, "{}", describe(a));
+        }
+        execute_actions(&l_actions, &mut ledger, j, &mut backend, &SystemClock)
+            .map_err(journal_err)?;
+    }
+
+    // ---- outcome, from the journal's own state
+    let t_after = targets_of(&ledger, &dep_id);
+    for e in t_after
+        .containers
+        .iter()
+        .chain(&t_after.images)
+        .chain(&t_after.leases)
+    {
+        match &e.state {
+            EntryState::CleanupFailed(m) => problems.push(format!(
+                "{} {}: removal failed and is recorded: {m}",
+                e.key.kind.as_str(),
+                e.key.name
+            )),
+            EntryState::Refused(m) => problems.push(format!(
+                "{} {}: refused, not touched: {m}",
+                e.key.kind.as_str(),
+                e.key.name
+            )),
+            _ => {}
+        }
+    }
+    if problems.is_empty() {
+        let kept = t_after.images.iter().any(|e| !e.is_released());
+        let _ = writeln!(
+            out,
+            "teardown: complete{}",
+            if kept {
+                " (an image was kept because something still uses it)"
+            } else {
+                ""
+            }
+        );
+        Ok(exit::OK)
+    } else {
+        problems.dedup();
+        let _ = writeln!(out, "teardown: incomplete — nothing was forced; the state is recorded and a repeat run retries only what is left:");
+        for pr in problems {
+            let _ = writeln!(out, "  {pr}");
+        }
+        Ok(exit::FAILED)
+    }
 }
