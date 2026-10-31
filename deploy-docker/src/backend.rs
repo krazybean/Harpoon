@@ -13,9 +13,13 @@
 
 use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, Limits};
 use crate::buildx_run::{run_build, BuildRequest, BuildRunError, StdFileProbe};
+use crate::confine::{confine, Source};
 use crate::dockerfile::required_images;
-use crate::preflight::{context_size, DfProbe, DiskProbe};
-use crate::probe::{BindProbe, ContainerProbe, HttpTransport, PortProbe, SleepWaiter, TcpHttp};
+use crate::ignore::{always_sent, IgnoreRules};
+use crate::preflight::{context_size_with, DfProbe, DiskProbe};
+use crate::probe::{
+    BindProbe, ContainerProbe, HttpTransport, PortProbe, ResponseMarker, SleepWaiter, TcpHttp,
+};
 use harpoon_deploy::backend::{Backend, ResourceOps, RestoreResult, StepError};
 use harpoon_deploy::buildx::{self, BuildxBinary, BuildxError};
 use harpoon_deploy::engine::StepIo;
@@ -37,12 +41,17 @@ pub struct DockerConfig {
     pub socket: PathBuf,
     /// Directory holding the source tree to build.
     pub context_dir: PathBuf,
+    /// The project folder the user selected. The build context and the Dockerfile must resolve
+    /// inside it. `None` means the context folder itself is the selected project.
+    pub project_root: Option<PathBuf>,
     /// Dockerfile name inside `context_dir`.
     pub dockerfile: String,
     /// Empty, Harpoon-owned directory used as HOME/DOCKER_CONFIG for Buildx.
     pub scratch_dir: PathBuf,
     pub container_port: u16,
     pub health: HealthSpec,
+    /// When set, a health response only counts if it carries this marker (see [`ResponseMarker`]).
+    pub health_marker: Option<ResponseMarker>,
     pub env: Vec<String>,
     pub limits: Limits,
     pub max_context_bytes: u64,
@@ -66,10 +75,12 @@ impl DockerConfig {
         DockerConfig {
             socket: socket.into(),
             context_dir: context_dir.into(),
+            project_root: None,
             dockerfile: "Dockerfile".into(),
             scratch_dir: scratch_dir.into(),
             container_port,
             health: HealthSpec::first_test("/"),
+            health_marker: None,
             env: Vec::new(),
             limits: Limits::FIRST_TEST,
             max_context_bytes: 256 * 1000 * 1000,
@@ -212,6 +223,16 @@ impl<T: HttpTransport> DockerBackend<T> {
     }
 
     // ---------------------------------------------------------------- shared helpers
+
+    fn confined_source(&self) -> Result<Source, StepError> {
+        let root = self
+            .cfg
+            .project_root
+            .as_deref()
+            .unwrap_or(&self.cfg.context_dir);
+        confine(root, &self.cfg.context_dir, &self.cfg.dockerfile)
+            .map_err(|e| StepError::new(e.to_string()))
+    }
 
     fn occupancy(
         &self,
@@ -374,6 +395,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             port,
             path: &spec.path,
             transport: &self.transport,
+            marker: self.cfg.health_marker.as_ref(),
             attempt_timeout: Duration::from_secs(2).min(self.cfg.api_timeout),
         };
         let mut ev = run_health(&spec, &target, &mut probe, &SystemClock, &SleepWaiter);
@@ -511,14 +533,26 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
 
     fn prepare_source(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
         let b = Budget::new(io.budget_ms);
-        let ctx = self.cfg.context_dir.clone();
-        let df = ctx.join(&self.cfg.dockerfile);
-        let text = std::fs::read_to_string(&df).map_err(|e| {
-            StepError::new(format!("cannot read the Dockerfile {}: {e}", df.display()))
-        })?;
+        let src = self.confined_source()?;
+        let ctx = src.context.clone();
+        let text = src.dockerfile_text.clone();
         io.log.push_line(&format!("source: {}", ctx.display()));
 
-        let size = context_size(&ctx, self.cfg.max_context_bytes).map_err(|e| {
+        let rules = src
+            .ignore
+            .as_ref()
+            .map(|(_, t)| IgnoreRules::parse(t))
+            .unwrap_or_default();
+        for n in &rules.notes {
+            io.log.push_line(&format!("dockerignore: {n}"));
+        }
+        let size = context_size_with(
+            &ctx,
+            self.cfg.max_context_bytes,
+            &rules,
+            &always_sent(&src.dockerfile_rel()),
+        )
+        .map_err(|e| {
             StepError::new(format!(
                 "cannot measure the build context {}: {e}",
                 ctx.display()
@@ -526,7 +560,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         })?;
         if size > self.cfg.max_context_bytes {
             return Err(StepError::new(format!(
-                "the build context is larger than the {} MB limit (measured before .dockerignore); nothing was built",
+                "the build context is larger than the {} MB limit (counted after applying .dockerignore where Harpoon can interpret it); nothing was built",
                 self.cfg.max_context_bytes / 1_000_000
             )));
         }
@@ -595,11 +629,12 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             Disposition::Retain,
         )?;
         self.st.image_tag = Some(tag.clone());
-        let df = self.cfg.context_dir.join(&self.cfg.dockerfile);
+        // Confined again right before the build, and the canonical paths are what Buildx gets.
+        let src = self.confined_source()?;
         let req = BuildRequest {
             binary: &self.buildx,
-            context: &self.cfg.context_dir,
-            dockerfile: &df,
+            context: &src.context,
+            dockerfile: &src.dockerfile,
             tag: &tag,
             labels: &lbl,
             socket: &self.cfg.socket,

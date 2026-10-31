@@ -7,8 +7,10 @@
 pub mod api;
 pub mod backend;
 pub mod buildx_run;
+pub mod confine;
 pub mod dockerfile;
 pub mod http;
+pub mod ignore;
 pub mod json;
 pub mod preflight;
 pub mod probe;
