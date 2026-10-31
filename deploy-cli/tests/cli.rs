@@ -10,7 +10,7 @@ use harpoon_deploy::ledger::{Disposition, LedgerRecord, ResourceKey, ResourceKin
 use harpoon_deploy::state::{Deployment, DeploymentStatus, Trigger};
 use harpoon_deploy::time::{ManualClock, SeqEntropy};
 use harpoon_deploy_cli::{run as cli_run, Gate, Outcome, AUTH_FLAG, AUTH_PHRASE};
-use harpoon_deploy_journal::{read_only, FileJournal, OpenError, Restored};
+use harpoon_deploy_journal::{Restored, SqliteJournal, SqliteOpenError, SQLITE_FILE};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use support::fake_docker::Action;
@@ -86,26 +86,26 @@ fn spawning<T>(f: impl FnOnce() -> T) -> T {
 
 /// A journal handle that keeps the gate's "holding" state for exactly as long as it is open.
 struct Held {
-    journal: FileJournal, // dropped first: the lock is released before the gate is
+    journal: SqliteJournal, // dropped first: the lock is released before the gate is
     _gate: Holding,
 }
 
 impl std::ops::Deref for Held {
-    type Target = FileJournal;
-    fn deref(&self) -> &FileJournal {
+    type Target = SqliteJournal;
+    fn deref(&self) -> &SqliteJournal {
         &self.journal
     }
 }
 
 impl std::ops::DerefMut for Held {
-    fn deref_mut(&mut self) -> &mut FileJournal {
+    fn deref_mut(&mut self) -> &mut SqliteJournal {
         &mut self.journal
     }
 }
 
-fn open_j(dir: &Path) -> Result<(Held, Restored), OpenError> {
+fn open_j(dir: &Path) -> Result<(Held, Restored), SqliteOpenError> {
     let gate = holding();
-    FileJournal::open(dir).map(|(journal, r)| {
+    SqliteJournal::open(dir).map(|(journal, r)| {
         (
             Held {
                 journal,
@@ -200,7 +200,7 @@ impl T {
         self.rt.join("deploy-journal")
     }
     fn journal_bytes(&self) -> Vec<u8> {
-        std::fs::read(self.journal_dir().join("journal.wal")).unwrap()
+        std::fs::read(self.journal_dir().join(SQLITE_FILE)).unwrap()
     }
     fn docker_requests(&self) -> usize {
         self.h.docker.requests().len()
@@ -410,8 +410,8 @@ fn a_simulated_deployment_runs_through_the_real_journal_and_is_visible_afterward
     // privacy
     assert_eq!(mode(&t.rt), 0o700);
     assert_eq!(mode(&t.journal_dir()), 0o700);
-    assert_eq!(mode(&t.journal_dir().join("journal.wal")), 0o600);
-    assert_eq!(mode(&t.journal_dir().join("journal.lock")), 0o600);
+    assert_eq!(mode(&t.journal_dir().join(SQLITE_FILE)), 0o600);
+    assert_eq!(mode(&t.journal_dir().join("sqlite.lock")), 0o600);
     assert_eq!(
         std::fs::read_to_string(t.rt.join("runtime-kind")).unwrap(),
         "simulated\n"
@@ -451,8 +451,8 @@ fn status_is_strictly_read_only() {
     let bytes = t.journal_bytes();
     let meta = |p: PathBuf| std::fs::metadata(p).unwrap().modified().unwrap();
     let (m1, m2) = (
-        meta(t.journal_dir().join("journal.wal")),
-        meta(t.journal_dir().join("journal.lock")),
+        meta(t.journal_dir().join(SQLITE_FILE)),
+        meta(t.journal_dir().join("sqlite.lock")),
     );
     let listing = || {
         let mut v: Vec<_> = std::fs::read_dir(t.journal_dir())
@@ -463,27 +463,13 @@ fn status_is_strictly_read_only() {
         v
     };
     let before = listing();
-    // a torn tail is shown, ignored and left alone
-    let mut torn = bytes.clone();
-    torn.extend_from_slice(b"deadbeef\tsnap\t1\tpart");
-    std::fs::write(t.journal_dir().join("journal.wal"), &torn).unwrap();
-    let m1 = if torn != bytes {
-        meta(t.journal_dir().join("journal.wal"))
-    } else {
-        m1
-    };
     for cmd in [vec!["status"], vec!["doctor"]] {
         let o = t.cli(&cmd);
         assert_exit(&o, 0);
     }
-    let o = t.cli(&["status"]);
-    assert!(o.stdout.contains("incomplete write"), "{}", o.stdout);
-    assert_eq!(
-        std::fs::read(t.journal_dir().join("journal.wal")).unwrap(),
-        torn
-    );
-    assert_eq!(meta(t.journal_dir().join("journal.wal")), m1);
-    assert_eq!(meta(t.journal_dir().join("journal.lock")), m2);
+    assert_eq!(t.journal_bytes(), bytes);
+    assert_eq!(meta(t.journal_dir().join(SQLITE_FILE)), m1);
+    assert_eq!(meta(t.journal_dir().join("sqlite.lock")), m2);
     assert_eq!(listing(), before);
 }
 
@@ -499,7 +485,7 @@ fn leases_from_one_deployment_steer_the_next_and_the_plan() {
         o.stdout
     );
     assert!(o.stdout.contains("deployments: 2"));
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let mut ports = r.outstanding_leases();
     ports.sort();
     assert_eq!(ports, vec![39000, 39001]);
@@ -965,6 +951,116 @@ fn a_refused_ownership_stays_terminal_and_blocks_the_runtime_directory() {
     assert_foreign_untouched(&t, &foreign);
 }
 
+// ------------------------------------------------------------------ a runtime that only has the legacy journal
+
+/// Hand-build what a pre-SQLite build left behind: the write-ahead journal and its lock, nothing else.
+fn legacy_runtime(t: &T) -> Vec<u8> {
+    t.docker_runtime();
+    let (mut j, _) = harpoon_deploy_journal::FileJournal::open(&t.journal_dir()).unwrap();
+    let app: harpoon_deploy::ids::ApplicationId = "app_00000000000000000000000000".parse().unwrap();
+    let dep: harpoon_deploy::ids::DeploymentId = "dep_00000000000000000000000000".parse().unwrap();
+    let mut d = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 10);
+    d.transition(DeploymentStatus::Queued, 11).unwrap();
+    d.transition(DeploymentStatus::Running, 12).unwrap();
+    j.persist(&d).unwrap();
+    j.record(&LedgerRecord::Intent {
+        key: ResourceKey::new(ResourceKind::PortLease, "38000"),
+        app,
+        deployment: dep,
+        disposition: Disposition::RemoveOnFailure,
+        at_ms: 12,
+    })
+    .unwrap();
+    drop(j);
+    std::fs::read(t.journal_dir().join("journal.wal")).unwrap()
+}
+
+fn listing(t: &T) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<_> = std::fs::read_dir(t.journal_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn read_only_commands_on_a_legacy_only_runtime_work_and_change_nothing() {
+    let t = T::new();
+    let mut wal = legacy_runtime(&t);
+    // a torn tail is shown, ignored and left alone
+    wal.extend_from_slice(b"deadbeef\tsnap\t1\tpart");
+    std::fs::write(t.journal_dir().join("journal.wal"), &wal).unwrap();
+    let before = listing(&t);
+    for cmd in [vec!["status"], vec!["doctor"]] {
+        assert_exit(&t.cli(&cmd), 0);
+    }
+    let o = t.cli(&["status"]);
+    assert!(
+        o.stdout.contains("deployments: 1") && o.stdout.contains("port 38000"),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("incomplete write"), "{}", o.stdout);
+    assert_eq!(
+        std::fs::read(t.journal_dir().join("journal.wal")).unwrap(),
+        wal
+    );
+    assert_eq!(listing(&t), before, "no SQLite file or lock was created");
+}
+
+#[test]
+fn the_first_writer_upgrades_a_legacy_runtime_and_keeps_the_old_journal_exportable() {
+    let t = T::new();
+    let wal = legacy_runtime(&t);
+    let copy = t.h.ws.root.join("legacy-copy.wal");
+    assert_exit(
+        &t.cli(&["export-journal", "--to", &copy.display().to_string()]),
+        0,
+    );
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        wal,
+        "a legacy runtime exports its journal"
+    );
+
+    let o = t.cli(&["recover"]);
+    assert_exit(&o, 0);
+    assert_eq!(mode(&t.journal_dir().join(SQLITE_FILE)), 0o600);
+    assert_eq!(
+        std::fs::read(t.journal_dir().join("journal.wal")).unwrap(),
+        wal
+    );
+    let o = t.cli(&["status"]);
+    assert!(
+        o.stdout.contains("interrupted") && o.stdout.contains("port 38000"),
+        "history and lease survived the upgrade: {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_file_that_is_not_a_sqlite_database_fails_closed_and_is_left_alone() {
+    let t = T::new();
+    assert_exit(&t.sim_deploy(), 0);
+    let junk = b"this is not a database, and must never be overwritten".to_vec();
+    std::fs::write(t.journal_dir().join(SQLITE_FILE), &junk).unwrap();
+    for args in [vec!["status"], vec!["recover"]] {
+        let o = t.cli(&args);
+        assert_exit(&o, 4);
+        let text = format!("{}{}", o.stdout, o.stderr);
+        assert!(
+            text.contains("export-journal") && text.contains("Do not delete"),
+            "{text}"
+        );
+    }
+    assert_exit(&t.sim_deploy(), 4);
+    assert_eq!(
+        std::fs::read(t.journal_dir().join(SQLITE_FILE)).unwrap(),
+        junk
+    );
+}
+
 // ------------------------------------------------------------------ corrupt journal, lock contention, permissions
 
 #[test]
@@ -972,9 +1068,10 @@ fn a_corrupt_journal_fails_closed_with_actionable_output_and_can_be_exported() {
     let t = T::new();
     assert_exit(&t.sim_deploy(), 0);
     let mut bytes = t.journal_bytes();
-    let mid = bytes.len() / 2;
-    bytes[mid] ^= 0x01;
-    std::fs::write(t.journal_dir().join("journal.wal"), &bytes).unwrap();
+    // damage one stored record (a deployment id inside a checksummed line), not SQLite's own pages
+    let at = bytes.windows(4).position(|w| w == b"dep_").unwrap() + 6;
+    bytes[at] ^= 0x01;
+    std::fs::write(t.journal_dir().join(SQLITE_FILE), &bytes).unwrap();
     for args in [
         vec!["status"],
         vec!["doctor"],
@@ -993,7 +1090,7 @@ fn a_corrupt_journal_fails_closed_with_actionable_output_and_can_be_exported() {
         assert_exit(&o, 4);
         let text = format!("{}{}", o.stdout, o.stderr);
         assert!(
-            text.contains("journal line")
+            text.contains("invalid SQLite record")
                 && text.contains("export-journal")
                 && text.contains("Do not delete"),
             "{args:?}: {text}"
@@ -1008,7 +1105,7 @@ fn a_corrupt_journal_fails_closed_with_actionable_output_and_can_be_exported() {
     );
 
     // export a copy
-    let copy = t.h.ws.root.join("copy.wal");
+    let copy = t.h.ws.root.join("copy.sqlite3");
     let o = t.cli(&["export-journal", "--to", &copy.display().to_string()]);
     assert_exit(&o, 0);
     assert_eq!(std::fs::read(&copy).unwrap(), bytes);
@@ -1299,7 +1396,7 @@ fn with_the_gate_open_a_deployment_drives_the_backend_and_the_journal_and_fails_
     );
     assert!(reqs.iter().all(|r| !r.path.contains("prune")));
     // the journal remembers all of it
-    assert_eq!(mode(&t.journal_dir().join("journal.wal")), 0o600);
+    assert_eq!(mode(&t.journal_dir().join(SQLITE_FILE)), 0o600);
     assert_eq!(
         std::fs::read_to_string(t.rt.join("runtime-kind")).unwrap(),
         "docker\n"
@@ -2091,7 +2188,7 @@ fn mutating(t: &T) -> Vec<(String, String)> {
 }
 
 fn entry_state(t: &T, d: &Done, kind: ResourceKind, name: &str) -> String {
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let e = r
         .ledger
         .find(&d.dep, &ResourceKey::new(kind, name))
@@ -2191,7 +2288,7 @@ fn teardown_removes_the_container_then_the_image_then_releases_the_lease_each_by
             "{kind:?}"
         );
     }
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     for e in r.ledger.entries().iter().filter(|e| e.deployment == d.dep) {
         assert_eq!(e.cleanup_attempts, 1, "{}", e.key.name);
         assert!(!e.cleanup_outstanding);
@@ -2275,7 +2372,7 @@ fn a_failed_removal_is_recorded_leaves_everything_else_alone_and_is_retried_by_t
     let o = go(&t, &SHIPPING, &apply_args(&t, &d));
     assert_exit(&o, 0);
     assert!(o.stdout.contains("teardown: complete"), "{}", o.stdout);
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let c = r
         .ledger
         .find(
@@ -2316,7 +2413,7 @@ fn an_interrupted_removal_attempt_is_retried_and_not_forgotten() {
         s.stdout
     );
     assert_exit(&go(&t, &SHIPPING, &apply_args(&t, &d)), 0);
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     assert!(r.cleanup_problems().is_empty());
 }
 
@@ -2617,7 +2714,7 @@ fn teardown_does_not_touch_other_deployments_of_the_same_application() {
         "the other deployment's container is untouched"
     );
     assert!(mutating(&t).iter().all(|(_, p)| !p.contains(&cid2)));
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     assert!(!r
         .ledger
         .find(&dep2, &ResourceKey::new(ResourceKind::Container, &name2))
@@ -2796,7 +2893,7 @@ fn the_first_container_that_does_not_come_out_clean_stops_the_rest() {
                 .with(|s| s.containers.iter().any(|c| c.id == cid2 && c.running)),
             "{what}"
         );
-        let r = read_only(&t.journal_dir()).unwrap();
+        let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
         let e2 = r
             .ledger
             .find(&d.dep, &ResourceKey::new(ResourceKind::Container, &name2))

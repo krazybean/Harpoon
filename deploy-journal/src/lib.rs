@@ -32,6 +32,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+mod sqlite;
+pub use sqlite::{writer_lock_status, SqliteJournal, SqliteOpenError, SQLITE_FILE};
+
 pub const JOURNAL_FILE: &str = "journal.wal";
 pub const LOCK_FILE: &str = "journal.lock";
 
@@ -428,7 +431,11 @@ pub enum LockStatus {
 /// Is a writer holding the journal? Takes the lock *shared* for an instant and releases it; creates
 /// and writes nothing. (A writer trying to open in that instant would see `Locked` and can retry.)
 pub fn lock_status(dir: &Path) -> Result<LockStatus, OpenError> {
-    let path = dir.join(LOCK_FILE);
+    lock_status_of(&dir.join(LOCK_FILE))
+}
+
+fn lock_status_of(path: &Path) -> Result<LockStatus, OpenError> {
+    let path = path.to_path_buf();
     let f = match File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LockStatus::NotInitialized),

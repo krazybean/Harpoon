@@ -22,7 +22,7 @@ use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
 use harpoon_deploy_docker::preflight::context_size_with;
-use harpoon_deploy_journal::{lock_status, LockStatus, Restored};
+use harpoon_deploy_journal::{writer_lock_status, LockStatus, Restored};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -350,7 +350,7 @@ fn status(p: &Parsed, out: &mut String) -> R {
         .kind()?
         .map(Kind::as_str)
         .unwrap_or("unmarked (treated as docker)");
-    let lock = match lock_status(&rt.journal_dir()) {
+    let lock = match writer_lock_status(&rt.journal_dir()) {
         Ok(LockStatus::Held) => "held by a writer",
         Ok(LockStatus::Free) => "free",
         Ok(LockStatus::NotInitialized) => "absent",
@@ -360,7 +360,12 @@ fn status(p: &Parsed, out: &mut String) -> R {
     let _ = writeln!(
         out,
         "journal: {} (lock: {lock})",
-        rt.journal_file().display()
+        if rt.journal_file().exists() {
+            rt.journal_file()
+        } else {
+            rt.journal_dir().join("journal.wal")
+        }
+        .display()
     );
     if r.discarded_tail_bytes > 0 {
         let _ = writeln!(
@@ -542,7 +547,7 @@ fn doctor(p: &Parsed, out: &mut String) -> R {
             Err(f) => c.fail(f.code, "journal", f.message),
             Ok(None) => c.ok("journal", "directory exists, no journal yet"),
             Ok(Some(r)) => {
-                let lock = match lock_status(&rt.journal_dir()) {
+                let lock = match writer_lock_status(&rt.journal_dir()) {
                     Ok(LockStatus::Held) => "a writer holds it right now",
                     Ok(_) => "no writer holds it",
                     Err(_) => "lock state unknown",
@@ -1207,7 +1212,11 @@ fn export_journal(p: &Parsed, out: &mut String) -> R {
         p.value("to")
             .ok_or_else(|| Fail::usage("--to FILE is required"))?,
     );
-    let src = rt.journal_file();
+    let mut src = rt.journal_file();
+    if !src.exists() {
+        // A runtime no writer has upgraded yet still has only the legacy journal: export that.
+        src = rt.journal_dir().join("journal.wal");
+    }
     if !src.exists() {
         return Err(Fail::journal(format!(
             "there is no journal at {}",

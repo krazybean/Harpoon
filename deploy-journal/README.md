@@ -1,8 +1,8 @@
 # harpoon-deploy-journal
 
-Durable, crash-recoverable journal for the deploy engine's first slice (Milestone B5). One append-only,
-line-oriented file per journal directory; local files only. The line format and replay logic are pure and
-live in `harpoon-deploy` (`journal_format`); this crate adds the file operations.
+Durable persistence for the deploy engine. `FileJournal` remains the crash-recoverable JSON-lines
+implementation for the first slice; `SqliteJournal` is the permanent store used by the CLI. Both reuse
+the line codecs and replay logic in `harpoon-deploy` (`journal_format`).
 
 ```text
 <journal dir>/

@@ -108,7 +108,7 @@ fn apply(t: &T, c: &C) -> Outcome {
 }
 
 fn entry(t: &T, c: &C) -> Entry {
-    read_only(&t.journal_dir())
+    SqliteJournal::read_only(&t.journal_dir())
         .unwrap()
         .ledger
         .entries()
@@ -119,7 +119,7 @@ fn entry(t: &T, c: &C) -> Entry {
 }
 
 fn is_conflict(t: &T, c: &C) -> bool {
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let e = r
         .ledger
         .entries()
@@ -188,7 +188,7 @@ fn a_failed_deployments_retained_image_is_removed_by_its_recorded_id() {
     let foreign = add_foreign(&t);
     image_appears_after_build(&t);
     assert_exit(&t.go(&OPEN, &refs(&live_args(&t))), 7); // fails at the preliminary check
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let d = r.deployments[0].clone();
     let e = r
         .ledger
@@ -276,7 +276,7 @@ fn an_interrupted_deployments_image_waits_for_reconcile_and_is_then_removed() {
     let foreign = add_foreign(&t);
     interrupt_a_live_deploy(&t);
     assert_exit(&t.cli(&["recover"]), 0);
-    let r = read_only(&t.journal_dir()).unwrap();
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     let d = r.deployments[0].clone();
     let e = r
         .ledger
@@ -1013,7 +1013,9 @@ fn the_typed_conflict_is_a_journal_token_of_its_own_and_survives_a_restart() {
         Action::Respond(409, "{\"message\":\"x\"}".into()),
     );
     assert_exit(&apply(&t, &c), 7);
-    let journal = String::from_utf8(t.journal_bytes()).unwrap();
+    let journal = SqliteJournal::record_lines(&t.journal_dir())
+        .unwrap()
+        .join("\n");
     let result_line = journal
         .lines()
         .rfind(|l| l.contains("\tresult\t"))
@@ -1038,13 +1040,8 @@ fn the_typed_conflict_is_a_journal_token_of_its_own_and_survives_a_restart() {
 fn a_misplaced_unknown_or_damaged_conflict_record_makes_the_whole_journal_unusable() {
     use harpoon_deploy::ledger::codec;
     let append = |t: &T, line: &str| {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(t.journal_dir().join("journal.wal"))
-            .unwrap();
-        f.write_all(line.as_bytes()).unwrap();
-        f.write_all(b"\n").unwrap();
+        let (mut j, _) = SqliteJournal::open(&t.journal_dir()).unwrap();
+        j.append_unchecked("ledger", line).unwrap();
     };
     let setup = |seed: u8| {
         let t = T::new();
