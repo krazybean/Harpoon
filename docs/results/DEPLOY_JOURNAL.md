@@ -1,4 +1,4 @@
-# Milestone B5 — Durable journal (JSON-lines-style, first slice only)
+# Milestone B5 — Durable journal (first slice only)
 
 Status: on `feature/deploy-b5-journal`; **not merged**. No Docker, Buildx, VM, runtime, UI, release or existing workload was
 touched. SQLite remains the permanent store before real release replacement or rollback; nothing here is a database layer.
@@ -12,14 +12,20 @@ touched. SQLite remains the permanent store before real release replacement or r
 | `deploy-journal/` (new crate, file I/O) | `FileJournal` (implements the engine's `Journal`), `open` / `open_recovered` / `read_only`, `Wal` seam for fault injection. |
 
 ## The file
-One append-only file per directory (`journal.jsonl`) plus `journal.lock`. Snapshots and ledger records share the file in the order they were
-made, so the order between an intent and a snapshot survives a crash. Every line is `<crc32>\t<body>\n`. **Note:** lines are
-checksummed tab-separated text (the B1 ledger codec), not JSON objects; "JSON lines" is honoured as *one self-contained record per line,
-append-only*. Moving to literal JSON would need a JSON reader in the dependency-free `deploy` crate and is a format-version bump (the header exists for that).
+One append-only file per directory (`journal.wal`) plus `journal.lock`. Snapshots and ledger records share the file in the order they were
+made, so the order between an intent and a snapshot survives a crash. Every line is `<crc32>\t<body>\n`. The format is the checksummed,
+versioned, tab-separated text of the B1 ledger codec plus a snapshot record: **not JSON**, and deliberately kept for the first disposable
+deployment slice (decision recorded after review). SQLite remains the permanent store before real release replacement, rollback or
+long-term history. The file header carries a version so a later format can be told apart.
+
+**Permissions and directory.** `journal.wal` and `journal.lock` are created owner-only (`0600`; regression-tested). The directory must exist and
+should be private (`0700`); the crate neither creates nor chmods it and does not tighten pre-existing files. **The B6 CLI must use one canonical,
+private (`0700`) journal directory for the local runtime.** Locking and lease coordination work per directory: independent journal directories
+have independent locks and ledgers and would bypass cross-deployment lease coordination, so they must not be used side by side.
 
 ## Guarantees
-1. **Durability before side effects.** `persist`/`record` return `Ok` only after the whole line was appended in one `write` and the file was
-   `sync_all`'d. A new file's directory entry is synced before the header is written (and again on any open that finds no header). Tests:
+1. **Durability before side effects.** `persist`/`record` return `Ok` only after the whole line was appended (`write_all`, which is **not** atomic and may issue several writes) and
+   the file was `sync_all`'d. The safety contract is a complete append followed by a successful sync, plus torn-write recovery for everything else. A new file's directory entry is synced before the header is written (and again on any open that finds no header). Tests:
    strict `append, sync` alternation, `sync_dir` before the first byte, and a sweep proving every object that exists in the runtime when a
    run stops has its intent already in the file.
 2. **Torn tail vs corruption.** A final line without a newline is a write that was never acknowledged: it is cut off (file truncated and synced)
@@ -59,7 +65,7 @@ append-only*. Moving to literal JSON would need a JSON reader in the dependency-
 - **Mutation checks:** 22 defects injected (append not synced; directory not synced; torn tail not cut; lock not taken; failed sync/append not poisoning; fsync retried; foreign file truncated; interruption not persisted / persisted on every open; failed append not cut back; header not written; broken journal still writing; lease check removed; prior ledger ignored; other deployments' problems charged to a report; terminal change allowed; snapshot/file version ignored; snapshot checksum unchecked; replay keeping the first snapshot; a bad last line treated as torn): **22 caught**. One survived the first pass (directory sync: the counter was incremented independently of the call) and led to moving the directory sync behind the `Wal` seam so the test observes the call.
 
 ## Unresolved risks
-1. **Not literal JSON** (see above). Decide before B6 whether the permanent format should be JSON or whether SQLite replaces the file first.
+1. **Temporary format** (approved for the first slice): checksummed tab-separated text, not JSON; SQLite is the permanent store.
 2. **No power-loss testing.** Tests model process death and torn writes (prefixes). They assert `fsync`/directory sync are *called* in the right order; they cannot show the OS or disk honoured them (macOS needs `F_FULLFSYNC`, which Rust's `sync_all` uses there). A power cut that persists a later block but not an earlier one could leave a newline-terminated, garbled last line; that is reported as corruption (needs a human), not repaired.
 3. **No tooling for a corrupt journal** beyond refusing to open it: no quarantine, salvage or manual-override command. Deployments cannot start from a directory whose journal is corrupt until someone moves the file.
 4. **One deployment process per journal directory.** Contention fails fast; there is no queue or wait. `flock` is not reliable on network filesystems; the directory must be local. Unix only (flock, directory fsync).

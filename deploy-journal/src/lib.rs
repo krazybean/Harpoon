@@ -3,9 +3,11 @@
 //! One append-only file holds deployment snapshots and resource-ledger records in the order they
 //! were made (format: `harpoon_deploy::journal_format`). This crate adds what needs the filesystem:
 //!
-//! * **durability** — a record is appended in one `write`, then the file is synced; only then does
-//!   `persist`/`record` return `Ok`, which is what lets the engine act on it. A new file is
-//!   created, synced, and its directory synced before anything is written to it.
+//! * **durability** — a record is appended with `write_all` (which may take several `write` calls and
+//!   is *not* atomic), then the file is synced; only a complete append followed by a successful sync
+//!   returns `Ok`, which is what lets the engine act on it. A crash or error mid-append leaves a
+//!   torn tail, which recovery detects (no newline) and cuts off. A new file's directory is synced
+//!   before its header is written. Files are created owner-only (`0600`).
 //! * **one writer** — an exclusive, non-blocking `flock` on `journal.lock`. A second process gets
 //!   [`OpenError::Locked`] at once; nothing waits, nothing steals, and the kernel drops the lock
 //!   when the holder dies, so there is no stale-lock state to clean up. Read-only inspection
@@ -27,9 +29,10 @@ use harpoon_deploy::ledger::{Entry, Ledger, LedgerRecord};
 use harpoon_deploy::state::{recover_on_start, Deployment, StartupReport};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-pub const JOURNAL_FILE: &str = "journal.jsonl";
+pub const JOURNAL_FILE: &str = "journal.wal";
 pub const LOCK_FILE: &str = "journal.lock";
 
 // ------------------------------------------------------------------ the storage seam
@@ -174,6 +177,7 @@ fn lock_dir(dir: &Path) -> Result<File, OpenError> {
         .write(true)
         .create(true)
         .truncate(false)
+        .mode(0o600)
         .open(&path)
         .map_err(io_err(&path, "cannot open the lock file"))?;
     match lock.try_lock() {
@@ -229,6 +233,7 @@ impl<W: Wal> FileJournal<W> {
             let f = OpenOptions::new()
                 .write(true)
                 .create_new(true)
+                .mode(0o600)
                 .open(&path)
                 .map_err(io_err(&path, "cannot create"))?;
             drop(f);

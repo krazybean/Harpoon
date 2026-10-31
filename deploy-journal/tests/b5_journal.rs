@@ -56,6 +56,33 @@ impl Drop for Tmp {
     }
 }
 
+/// Opening where success is expected tolerates a brief `Locked`: while another test spawns a child
+/// process, the child (between fork and exec) shares this process's open file descriptions, and
+/// flock belongs to the description. That window is milliseconds; a lock that is genuinely never
+/// released still fails after the bound, so it cannot hide a real leak.
+fn retry_locked<T>(mut f: impl FnMut() -> Result<T, OpenError>) -> Result<T, OpenError> {
+    let start = std::time::Instant::now();
+    loop {
+        match f() {
+            Err(OpenError::Locked(_)) if start.elapsed() < std::time::Duration::from_secs(3) => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            other => return other,
+        }
+    }
+}
+
+fn open_wait(dir: &Path) -> Result<(FileJournal, harpoon_deploy_journal::Restored), OpenError> {
+    retry_locked(|| FileJournal::open(dir))
+}
+
+fn open_recovered_wait(
+    dir: &Path,
+    now_ms: u64,
+) -> Result<(FileJournal, harpoon_deploy_journal::Restored), OpenError> {
+    retry_locked(|| FileJournal::open_recovered(dir, now_ms))
+}
+
 fn running_as_root_like(dir: &Path) -> bool {
     // true if file modes do not stop us (root, or a filesystem that ignores them)
     let p = dir.join("probe-mode");
@@ -292,7 +319,7 @@ fn open_faulty(dir: &Path) -> (FileJournal<Faulty>, Plan) {
 #[test]
 fn a_new_journal_is_created_synced_and_its_directory_synced_before_use() {
     let t = Tmp::new();
-    let (j, r) = FileJournal::open(&t.0).unwrap();
+    let (j, r) = open_wait(&t.0).unwrap();
     assert!(
         r.deployments.is_empty() && r.ledger.entries().is_empty() && r.discarded_tail_bytes == 0
     );
@@ -307,7 +334,7 @@ fn a_new_journal_is_created_synced_and_its_directory_synced_before_use() {
     drop(j);
     // reopening an existing journal creates nothing and writes nothing
     let before = t.bytes();
-    let (j, _) = FileJournal::open(&t.0).unwrap();
+    let (j, _) = open_wait(&t.0).unwrap();
     assert_eq!(j.stats().dir_syncs, 0);
     assert_eq!(j.stats().file_syncs, 0);
     drop(j);
@@ -487,8 +514,7 @@ fn a_crash_or_torn_write_at_every_record_boundary_recovers_conservatively_and_id
                 drop(j); // the process is gone; its lock goes with it
 
                 // ---- restart
-                let (mut j2, restored) =
-                    FileJournal::open_recovered(&t.0, fx.clock.now_ms()).unwrap();
+                let (mut j2, restored) = open_recovered_wait(&t.0, fx.clock.now_ms()).unwrap();
                 if hit == Hit::Before || hit == Hit::Whole {
                     assert_eq!(restored.discarded_tail_bytes, 0, "{tag}");
                 } else {
@@ -591,8 +617,7 @@ fn a_crash_or_torn_write_at_every_record_boundary_recovers_conservatively_and_id
 
                 // ---- idempotent: another restart changes nothing at all
                 let bytes = t.bytes();
-                let (mut j3, again) =
-                    FileJournal::open_recovered(&t.0, fx.clock.now_ms() + 5_000).unwrap();
+                let (mut j3, again) = open_recovered_wait(&t.0, fx.clock.now_ms() + 5_000).unwrap();
                 assert!(
                     again.startup.interrupted.is_empty(),
                     "{tag}: interrupted marked twice"
@@ -634,7 +659,7 @@ fn recovery_marks_an_in_flight_deployment_interrupted_once_and_flags_a_begun_cut
         let _ = run(&fx2, &mut d, &ctx2, &mut b, &mut j);
         drop(j);
         let world = fx2.world.borrow().objects.clone();
-        let (j2, r) = FileJournal::open_recovered(&t.0, 9_999_999).unwrap();
+        let (j2, r) = open_recovered_wait(&t.0, 9_999_999).unwrap();
         drop(j2);
         if let Some(dd) = r.deployments.first() {
             if dd.status == DeploymentStatus::Interrupted {
@@ -665,7 +690,7 @@ fn status_cleanup_failures_ids_and_leases_survive_a_restart_exactly() {
         .fail_final_check("HTTP 500")
         .fail_remove(&serving);
     let report = {
-        let (mut j, _) = FileJournal::open(&t.0).unwrap();
+        let (mut j, _) = open_wait(&t.0).unwrap();
         run(
             &fx,
             &mut d,
@@ -711,7 +736,7 @@ fn status_cleanup_failures_ids_and_leases_survive_a_restart_exactly() {
     );
 
     // and through a writer's open as well, with nothing newly interrupted
-    let (_j, w) = FileJournal::open_recovered(&t.0, fx.clock.now_ms()).unwrap();
+    let (_j, w) = open_recovered_wait(&t.0, fx.clock.now_ms()).unwrap();
     assert_eq!(w.deployments, r.deployments);
     assert!(w.startup.interrupted.is_empty());
 }
@@ -769,7 +794,7 @@ fn outstanding_leases_block_the_same_port_after_a_restart_until_a_verified_relea
     let port = restored.outstanding_leases()[0];
 
     // B starts after the restart, from the restored ledger
-    let (mut j, r2) = FileJournal::open_recovered(&dir.0, 5_000_000).unwrap();
+    let (mut j, r2) = open_recovered_wait(&dir.0, 5_000_000).unwrap();
     assert_eq!(
         r2.outstanding_leases(),
         vec![port],
@@ -824,7 +849,7 @@ fn outstanding_leases_block_the_same_port_after_a_restart_until_a_verified_relea
     drop(j);
 
     // the dead deployment's entries are reconciled explicitly; only then is the port free again
-    let (mut j, r3) = FileJournal::open(&dir.0).unwrap();
+    let (mut j, r3) = open_wait(&dir.0).unwrap();
     let mut ledger = r3.ledger.clone();
     let ended = [(dead.id.clone(), EndState::NotSucceeded)];
     reconcile(&mut ledger, &ended, &mut j, &mut fx4.backend(), &fx4.clock).unwrap();
@@ -835,7 +860,7 @@ fn outstanding_leases_block_the_same_port_after_a_restart_until_a_verified_relea
 // ------------------------------------------------------------------ torn tails and corruption on disk
 
 fn full_journal(t: &Tmp) -> Vec<u8> {
-    let (mut j, _) = FileJournal::open(&t.0).unwrap();
+    let (mut j, _) = open_wait(&t.0).unwrap();
     let mut fx = Fx::new();
     let mut d = fx.deployment();
     let mut b = fx.backend();
@@ -885,7 +910,7 @@ fn a_journal_cut_at_any_byte_opens_with_exactly_its_whole_records_and_stays_appe
         let expect_len = bounds[whole];
         let pure = fmt::recover(&full[..cut]).unwrap();
         let expect = fmt::replay(&pure.lines).unwrap();
-        let (mut j, r) = FileJournal::open(&t.0).unwrap_or_else(|e| panic!("cut {cut}: {e}"));
+        let (mut j, r) = open_wait(&t.0).unwrap_or_else(|e| panic!("cut {cut}: {e}"));
         assert_eq!(r.deployments, expect.deployments, "cut {cut}");
         assert_eq!(r.ledger, expect.ledger, "cut {cut}");
         assert_eq!(r.discarded_tail_bytes, cut - expect_len, "cut {cut}");
@@ -930,7 +955,7 @@ fn a_damaged_committed_record_stops_recovery_and_changes_nothing() {
         let before = std::fs::read(t.journal()).unwrap();
         for _ in 0..2 {
             // twice: the failed open must not leave the lock held
-            match FileJournal::open(&t.0) {
+            match open_wait(&t.0) {
                 Err(OpenError::Format(FormatError::Corrupt { line, .. })) => {
                     assert_eq!(line, rec + 1)
                 }
@@ -950,7 +975,7 @@ fn a_damaged_committed_record_stops_recovery_and_changes_nothing() {
     f[n - 5] ^= 0x01;
     std::fs::write(t.journal(), &f).unwrap();
     assert!(matches!(
-        FileJournal::open(&t.0),
+        open_wait(&t.0),
         Err(OpenError::Format(FormatError::Corrupt { .. }))
     ));
 }
@@ -960,28 +985,25 @@ fn files_that_are_not_this_journal_are_never_modified() {
     let t = Tmp::new();
     // an unterminated foreign file must not be "recovered" by truncation
     std::fs::write(t.journal(), b"this is somebody's notes").unwrap();
-    assert!(matches!(
-        FileJournal::open(&t.0),
-        Err(OpenError::NotAJournal(_))
-    ));
+    assert!(matches!(open_wait(&t.0), Err(OpenError::NotAJournal(_))));
     assert_eq!(t.bytes(), b"this is somebody's notes");
     // a terminated foreign line
     std::fs::write(t.journal(), b"hello\n").unwrap();
     assert!(matches!(
-        FileJournal::open(&t.0),
+        open_wait(&t.0),
         Err(OpenError::Format(FormatError::BadHeader(_)))
     ));
     assert_eq!(t.bytes(), b"hello\n");
     // an empty file and a torn header are both just a journal that never got its header
     std::fs::write(t.journal(), b"").unwrap();
-    FileJournal::open(&t.0).unwrap();
+    open_wait(&t.0).unwrap();
     assert_eq!(
         t.bytes(),
         format!("{}\n", fmt::encode_header()).into_bytes()
     );
     let h = fmt::encode_header();
     std::fs::write(t.journal(), &h.as_bytes()[..7]).unwrap();
-    let (_j, r) = FileJournal::open(&t.0).unwrap();
+    let (_j, r) = open_wait(&t.0).unwrap();
     assert_eq!(r.discarded_tail_bytes, 7);
     assert_eq!(t.bytes(), format!("{h}\n").into_bytes());
 }
@@ -998,7 +1020,7 @@ fn a_journal_of_an_unknown_version_is_refused_untouched() {
     );
     std::fs::write(t.journal(), &line).unwrap();
     assert!(matches!(
-        FileJournal::open(&t.0),
+        open_wait(&t.0),
         Err(OpenError::Format(FormatError::UnsupportedVersion(v))) if v == fmt::FILE_VERSION + 1
     ));
     assert_eq!(t.bytes(), line.into_bytes());
@@ -1022,7 +1044,7 @@ fn contradictory_records_are_refused_untouched() {
     f.push(b'\n');
     std::fs::write(t.journal(), &f).unwrap();
     assert!(matches!(
-        FileJournal::open(&t.0),
+        open_wait(&t.0),
         Err(OpenError::Format(FormatError::Inconsistent(_)))
     ));
     assert_eq!(t.bytes(), f);
@@ -1110,7 +1132,7 @@ fn a_partial_write_is_cut_back_when_possible_and_by_the_next_open_when_not() {
             assert!(j.broken().unwrap().contains("tail not cleaned"));
         }
         drop(j);
-        let (_j, r) = FileJournal::open(&t.0).unwrap();
+        let (_j, r) = open_wait(&t.0).unwrap();
         assert_eq!(
             r.deployments,
             vec![d.clone()],
@@ -1146,7 +1168,7 @@ fn a_failed_sync_poisons_the_journal_is_never_retried_and_the_record_may_or_may_
     drop(j);
     // the data did reach the file in this run, so recovery sees it: the caller learned only that
     // it was NOT acknowledged, and the engine had stopped
-    let (_j, r) = FileJournal::open(&t.0).unwrap();
+    let (_j, r) = open_wait(&t.0).unwrap();
     assert_eq!(r.deployments[0].status, DeploymentStatus::Cancelled);
 }
 
@@ -1195,13 +1217,13 @@ fn permission_errors_are_reported_with_the_path_and_leave_everything_as_it_was()
     // a directory that does not exist
     let missing = probe.0.join("nope");
     assert!(
-        matches!(FileJournal::open(&missing), Err(OpenError::Io { op, .. }) if op.contains("lock file"))
+        matches!(open_wait(&missing), Err(OpenError::Io { op, .. }) if op.contains("lock file"))
     );
 
     // a read-only directory: nothing can be created, and nothing partial is left behind
     let ro = Tmp::new();
     std::fs::set_permissions(&ro.0, std::fs::Permissions::from_mode(0o555)).unwrap();
-    match FileJournal::open(&ro.0) {
+    match open_wait(&ro.0) {
         Err(OpenError::Io { error, path, .. }) => {
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
             assert!(path.starts_with(&ro.0));
@@ -1216,7 +1238,7 @@ fn permission_errors_are_reported_with_the_path_and_leave_everything_as_it_was()
     full_journal(&t);
     let before = t.bytes();
     std::fs::set_permissions(t.journal(), std::fs::Permissions::from_mode(0o444)).unwrap();
-    match FileJournal::open(&t.0) {
+    match open_wait(&t.0) {
         Err(OpenError::Io { op, error, .. }) => {
             assert!(op.contains("appending"), "{op}");
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
@@ -1228,13 +1250,11 @@ fn permission_errors_are_reported_with_the_path_and_leave_everything_as_it_was()
     assert!(read_only(&t.0).is_ok());
     // the failed open did not keep the lock
     std::fs::set_permissions(t.journal(), std::fs::Permissions::from_mode(0o644)).unwrap();
-    FileJournal::open(&t.0).unwrap();
+    open_wait(&t.0).unwrap();
 
     // a journal that cannot be read
     std::fs::set_permissions(t.journal(), std::fs::Permissions::from_mode(0o200)).unwrap();
-    assert!(
-        matches!(FileJournal::open(&t.0), Err(OpenError::Io { op, .. }) if op.contains("read"))
-    );
+    assert!(matches!(open_wait(&t.0), Err(OpenError::Io { op, .. }) if op.contains("read")));
     assert!(matches!(read_only(&t.0), Err(OpenError::Io { .. })));
     std::fs::set_permissions(t.journal(), std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -1242,7 +1262,7 @@ fn permission_errors_are_reported_with_the_path_and_leave_everything_as_it_was()
     let cut = before.len() - 3;
     std::fs::write(t.journal(), &before[..cut]).unwrap();
     std::fs::set_permissions(t.journal(), std::fs::Permissions::from_mode(0o444)).unwrap();
-    assert!(FileJournal::open(&t.0).is_err());
+    assert!(open_wait(&t.0).is_err());
     assert_eq!(t.bytes(), before[..cut].to_vec());
 }
 
@@ -1498,4 +1518,29 @@ fn the_directory_is_synced_before_the_header_and_a_failed_directory_sync_writes_
     let plan = Plan::default();
     let _j = open_faulty_with(&t.0, plan.clone()).unwrap();
     assert!(plan.log().is_empty());
+}
+
+#[test]
+fn journal_and_lock_files_are_created_owner_only_and_named_for_what_they_are() {
+    assert_eq!(JOURNAL_FILE, "journal.wal");
+    let t = Tmp::new();
+    let (_j, _) = open_wait(&t.0).unwrap();
+    for name in [JOURNAL_FILE, LOCK_FILE] {
+        let mode = std::fs::metadata(t.0.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "{name} is accessible to group/others: {mode:o}"
+        );
+        assert_eq!(
+            mode & 0o600,
+            0o600,
+            "{name} is not owner read/write: {mode:o}"
+        );
+    }
+    assert!(!t.0.join("journal.jsonl").exists());
 }
