@@ -10,15 +10,17 @@ import { CsshWorkspace } from "./CsshWorkspace";
 import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
 import { confirmAction } from "../components/ConfirmDialog";
+import { ComposeProjectWizard } from "./ComposeProjectWizard";
 
 const SAMPLE_CONTAINER_COMMAND = "docker --context harpoon run -d --name hello nginx:alpine";
 
-function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doAction }: {
+function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doAction, onImportCompose }: {
   refreshing: boolean;
   updatedAt: number | null;
   refresh: () => Promise<any>;
   actionInProgress: string | null;
   doAction: (name: string, fn: () => Promise<any>) => Promise<void>;
+  onImportCompose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -36,6 +38,7 @@ function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doA
       </div>
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
         <div className="text-body">No containers yet.</div>
+        <button className="btn btn--primary btn--sm" onClick={onImportCompose} disabled={!!actionInProgress}><FolderSimple size={14} /> Create from Docker Compose</button>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => doAction("start-sample", () => invoke("run_sample_container"))} disabled={!!actionInProgress} className="btn btn--primary btn--sm">
             <Play size={14} /> {starting ? "Starting sample…" : "Run a sample container"}
@@ -73,6 +76,7 @@ export const ContainersView = memo(function ContainersView({
   onOpenContainer: (containerId: string) => void;
 }) {
   const [detail, setDetail] = useState<string>("");
+  const [composeImportOpen, setComposeImportOpen] = useState(false);
   const [confirmContainer, setConfirmContainer] = useState<any>(null);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ ids: string[]; title: string; names: string[] } | null>(null);
   const [batchResult, setBatchResult] = useState<{ message: string; failed: number } | null>(null);
@@ -143,7 +147,7 @@ export const ContainersView = memo(function ContainersView({
     }
     // One stable empty state for every refresh phase, so the periodic refresh never
     // remounts it (which used to clear a text selection mid-copy).
-    if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
+    if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} onImportCompose={() => setComposeImportOpen(true)} />;
     return null;
   })();
 
@@ -280,7 +284,8 @@ export const ContainersView = memo(function ContainersView({
   useEffect(() => {
     if (!selectedStack) requestAnimationFrame(() => { if (galleryRef.current) galleryRef.current.scrollTop = galleryScrollTop.current; });
   }, [selectedStack]);
-  if (earlyView) return earlyView;
+  const composeWizard = composeImportOpen ? <ComposeProjectWizard onClose={() => setComposeImportOpen(false)} onLaunched={async (project) => { await refresh(); setComposeImportOpen(false); setView("stacks"); setSelectedStack(project); }} /> : null;
+  if (earlyView) return <>{earlyView}{composeWizard}</>;
 
   const renderRow = (c:any) => (
     <tr key={c.ID||c.Id} className="table-row">
@@ -320,6 +325,7 @@ export const ContainersView = memo(function ContainersView({
         </div>
         <div className="containers-toolbar__actions">
           {activeStack && <button className="btn btn--secondary" onClick={returnToGallery}><CaretLeft size={15} aria-hidden="true" /> Back to stacks</button>}
+          {!activeStack && <button onClick={() => setComposeImportOpen(true)} disabled={!isRunning || !!actionInProgress} className="btn btn--primary"><FolderSimple size={15} aria-hidden="true" /> Create from Compose</button>}
           <button onClick={refresh} disabled={refreshing} className="btn btn--secondary"><ArrowClockwise size={15} aria-hidden="true" /> Refresh</button>
         </div>
       </div>
@@ -420,6 +426,7 @@ export const ContainersView = memo(function ContainersView({
         )}
         {batchResult && (view !== "table" || activeStack) && <div className="containers-action-status" role="status" aria-live="polite">{batchResult.message}</div>}
       </div>
+      {composeWizard}
     </div>
   );
 });
