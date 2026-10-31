@@ -229,74 +229,120 @@ static ROUTE: std::sync::Mutex<Route> = std::sync::Mutex::new(Route {
     st: None,
     stale_on_test_port: None,
 });
-static LISTENERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-/// Serve the real fixture script on 38000 and 39000, once per process (the listener threads live
-/// until the process ends). Its `HARPOON_DEPLOYMENT_MARKER` is whatever the fake Docker recorded in
-/// the environment of the container published on that port — exactly how a real container gets it.
-fn fixture_listeners() -> bool {
-    *LISTENERS.get_or_init(|| {
-        let (a, b) = (
-            TcpListener::bind(("127.0.0.1", 38000)),
-            TcpListener::bind(("127.0.0.1", 39000)),
-        );
-        let (Ok(a), Ok(b)) = (a, b) else { return false };
-        for (port, l) in [(38000u16, a), (39000u16, b)] {
-            let script = fixture().join("srv.sh");
-            std::thread::spawn(move || {
-                for c in l.incoming().flatten() {
-                    let script = script.clone();
-                    std::thread::spawn(move || {
-                        let (st, stale) = {
-                            let r = ROUTE.lock().unwrap();
-                            (r.st.clone(), r.stale_on_test_port)
-                        };
-                        let marker: Option<String> = match (port, stale) {
-                            (39000, Some(m)) => Some(m.to_string()),
-                            _ => st.and_then(|st| {
-                                let s = st.lock().unwrap();
-                                s.containers.iter().find_map(|k| {
-                                    (k.host_port == Some(port))
-                                        .then(|| {
-                                            k.create_body
-                                                .get("Env")
-                                                .and_then(
-                                                    harpoon_deploy_docker::json::Json::as_array,
-                                                )
-                                                .and_then(|a| {
-                                                    a.iter().filter_map(|e| e.as_str()).find_map(
-                                                        |e| {
-                                                            e.strip_prefix(
-                                                                "HARPOON_DEPLOYMENT_MARKER=",
-                                                            )
-                                                            .map(str::to_string)
-                                                        },
-                                                    )
-                                                })
-                                        })
-                                        .flatten()
-                                })
-                            }),
-                        };
-                        let leaked: Option<&'static str> =
-                            marker.map(|m| &*Box::leak(m.into_boxed_str()));
-                        run_script(c, &script, leaked);
-                    });
-                }
-            });
-        }
-        true
-    })
+/// The backend keeps its logical 38000/39000 port contract; this test routes those ports to
+/// independently allocated loopback listeners to avoid collisions with other CI processes.
+#[derive(Clone, Copy)]
+struct FixturePorts {
+    app: u16,
+    pre: u16,
 }
 
-fn deploy_against_the_fixture(h: &mut Harness, deadline_ms: u64) -> harpoon_deploy::engine::Report {
+impl FixturePorts {
+    fn physical(self, logical: u16) -> Option<u16> {
+        match logical {
+            38000 => Some(self.app),
+            39000 => Some(self.pre),
+            _ => None,
+        }
+    }
+}
+
+/// A real TCP transport with test-only port translation. Evidence stays non-simulated.
+struct RoutedHttp(FixturePorts);
+
+impl HttpTransport for RoutedHttp {
+    fn get(&self, port: u16, path: &str, timeout: Duration) -> Observation {
+        match self.0.physical(port) {
+            Some(actual) => TcpHttp.get(actual, path, timeout),
+            None => Observation::ConnectFailed(format!("unexpected logical fixture port {port}")),
+        }
+    }
+
+    fn get_expecting(
+        &self,
+        port: u16,
+        path: &str,
+        timeout: Duration,
+        marker: Option<&ResponseMarker>,
+    ) -> Observation {
+        match self.0.physical(port) {
+            Some(actual) => TcpHttp.get_expecting(actual, path, timeout, marker),
+            None => Observation::ConnectFailed(format!("unexpected logical fixture port {port}")),
+        }
+    }
+}
+
+/// Serve the real fixture script on two dynamically allocated loopback TCP ports.
+/// The fake Docker still publishes logical 38000 (application) and 39000 (preliminary).
+/// Each accepted connection uses the marker recorded for the container on that logical port.
+fn fixture_listeners() -> FixturePorts {
+    let app = TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind fixture application listener on an available loopback port");
+    let pre = TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind fixture preliminary listener on an available loopback port");
+    let ports = FixturePorts {
+        app: app.local_addr().unwrap().port(),
+        pre: pre.local_addr().unwrap().port(),
+    };
+    for (logical_port, listener) in [(38000u16, app), (39000u16, pre)] {
+        let script = fixture().join("srv.sh");
+        std::thread::spawn(move || {
+            for c in listener.incoming().flatten() {
+                let script = script.clone();
+                std::thread::spawn(move || {
+                    let (st, stale) = {
+                        let r = ROUTE.lock().unwrap();
+                        (r.st.clone(), r.stale_on_test_port)
+                    };
+                    let marker: Option<String> = match (logical_port, stale) {
+                        (39000, Some(m)) => Some(m.to_string()),
+                        _ => st.and_then(|st| {
+                            let s = st.lock().unwrap();
+                            s.containers.iter().find_map(|k| {
+                                (k.host_port == Some(logical_port))
+                                    .then(|| {
+                                        k.create_body
+                                            .get("Env")
+                                            .and_then(
+                                                harpoon_deploy_docker::json::Json::as_array,
+                                            )
+                                            .and_then(|a| {
+                                                a.iter().filter_map(|e| e.as_str()).find_map(
+                                                    |e| {
+                                                        e.strip_prefix(
+                                                            "HARPOON_DEPLOYMENT_MARKER=",
+                                                        )
+                                                        .map(str::to_string)
+                                                    },
+                                                )
+                                            })
+                                    })
+                                    .flatten()
+                            })
+                        }),
+                    };
+                    let leaked: Option<&'static str> =
+                        marker.map(|m| &*Box::leak(m.into_boxed_str()));
+                    run_script(c, &script, leaked);
+                });
+            }
+        });
+    }
+    ports
+}
+
+fn deploy_against_the_fixture(
+    h: &mut Harness,
+    deadline_ms: u64,
+    ports: FixturePorts,
+) -> harpoon_deploy::engine::Report {
     use harpoon_deploy_docker::backend::{Attribution, DockerBackend};
     let mut cfg = config(&h.ws, &h.docker);
     cfg.attribution = Attribution::PerContainer;
     // the fixture answers /health only; a deployment of it must be told so (`--health-path /health`)
     cfg.health.path = "/health".into();
     cfg.health.startup_deadline_ms = deadline_ms;
-    let mut backend = DockerBackend::with_transport(cfg, Some(&h.ws.resources()), TcpHttp)
+    let mut backend = DockerBackend::with_transport(cfg, Some(&h.ws.resources()), RoutedHttp(ports))
         .unwrap()
         .with_entropy(test_entropy())
         .with_port_probe(NoListeners)
@@ -308,14 +354,8 @@ fn deploy_against_the_fixture(h: &mut Harness, deadline_ms: u64) -> harpoon_depl
 #[test]
 fn the_real_fixture_script_is_healthy_only_with_its_own_containers_marker_over_real_http() {
     use harpoon_deploy::state::DeploymentStatus;
-    if !fixture_listeners() {
-        // never a silent pass: say so loudly, and fail on CI where the ports are free
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "ports 38000/39000 should be free on CI"
-        );
-        return eprintln!("ports 38000/39000 are busy on this machine: skipped");
-    }
+    let ports = fixture_listeners();
+    assert_ne!(ports.app, ports.pre, "the two test listeners must be distinct");
     // 1. a stale instance (some other marker) answers on the test port: the deployment must not pass
     let mut h = Harness::new();
     h.seed_built_image();
@@ -324,7 +364,7 @@ fn the_real_fixture_script_is_healthy_only_with_its_own_containers_marker_over_r
         r.st = Some(h.docker.st.clone());
         r.stale_on_test_port = Some("deadbeefdeadbeefdeadbeefdeadbeef");
     }
-    let r = deploy_against_the_fixture(&mut h, 600);
+    let r = deploy_against_the_fixture(&mut h, 600, ports);
     assert_eq!(r.status, DeploymentStatus::Failed);
     assert!(h.dep.failure.clone().unwrap().message.contains("marker"));
     assert!(
@@ -340,7 +380,7 @@ fn the_real_fixture_script_is_healthy_only_with_its_own_containers_marker_over_r
         r.st = Some(h.docker.st.clone());
         r.stale_on_test_port = None;
     }
-    let r = deploy_against_the_fixture(&mut h, 3000);
+    let r = deploy_against_the_fixture(&mut h, 3000, ports);
     // (message kept short on purpose: the evidence of a long failing probe is hundreds of attempts)
     let why = h
         .dep
