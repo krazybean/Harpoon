@@ -546,8 +546,9 @@ fn settle(
 }
 
 /// List the runtime, plan, execute. If the runtime cannot even be listed, every object that
-/// would have needed removal is recorded as a **failed** cleanup (not skipped) and port
-/// leases are released (ledger-only). Used right after a deployment and again at startup.
+/// would have needed removal is recorded as a **failed** cleanup (not skipped). Port leases are
+/// released only after their deployment's containers are settled. Used right after a deployment
+/// and again at startup.
 pub fn reconcile(
     ledger: &mut Ledger,
     ended: &[(DeploymentId, EndState)],
@@ -558,7 +559,30 @@ pub fn reconcile(
     match ops.list_resources() {
         Ok(observed) => {
             let actions = plan(ledger, &observed, ended);
-            execute_actions(&actions, ledger, journal, ops, clock)
+            let (leases, objects): (Vec<_>, Vec<_>) = actions
+                .into_iter()
+                .partition(|a| matches!(a, Action::ReleaseLease { .. }));
+            let mut unaccounted = execute_actions(&objects, ledger, journal, ops, clock)?;
+            for action in leases {
+                let Action::ReleaseLease { entry } = &action else {
+                    unreachable!()
+                };
+                let containers_settled = ledger
+                    .entries()
+                    .iter()
+                    .filter(|e| e.deployment == entry.0 && e.key.kind == ResourceKind::Container)
+                    .all(|e| e.is_released());
+                if containers_settled {
+                    unaccounted.extend(execute_actions(
+                        std::slice::from_ref(&action),
+                        ledger,
+                        journal,
+                        ops,
+                        clock,
+                    )?);
+                }
+            }
+            Ok(unaccounted)
         }
         Err(e) => {
             // Plan against an empty runtime to learn *which* entries need cleanup, then fail them honestly.

@@ -87,6 +87,15 @@ struct SourceCfg {
     notes: Vec<String>,
 }
 
+fn deployment_config(health_deadline_ms: u64, prior_ledger: Ledger) -> RunConfig {
+    let mut cfg = RunConfig {
+        prior_ledger,
+        ..RunConfig::default()
+    };
+    cfg.budgets.preliminary_ms = health_deadline_ms;
+    cfg
+}
+
 fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Result<SourceCfg, Fail> {
     let project = p
         .value("project-dir")
@@ -1100,10 +1109,8 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             d.id
         );
     }
-    let cfg = RunConfig {
-        prior_ledger: restored.ledger.clone(),
-        ..RunConfig::default()
-    };
+    // Keep the engine's preliminary-step budget aligned with the user-visible health deadline.
+    let cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
     let ctx = Context {
         previous_release: None,
     };
@@ -1150,6 +1157,18 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             exit::FAILED
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deployment_config;
+    use harpoon_deploy::ledger::Ledger;
+
+    #[test]
+    fn health_timeout_also_extends_the_engine_preliminary_budget() {
+        let cfg = deployment_config(125_000, Ledger::new());
+        assert_eq!(cfg.budgets.preliminary_ms, 125_000);
+    }
 }
 
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
