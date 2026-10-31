@@ -1,5 +1,7 @@
 # B7 phase 1 — audit of Harpoon's host-to-guest port forwarding
 
+> **Final results:** the first live deployment, LAN-isolation test and teardown are recorded in [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) (**B7 first-deployment acceptance: PASS**; not general production readiness). The text below is the historical forwarding audit (source reading; its LAN-isolation section was an open item when written) and is kept as written.
+
 Offline audit by reading the source (`harpoon/Sources/PortForwardManager.swift`, `PortForwardBridge.swift`, `VMManager.swift`). **Nothing
 here was observed on a running Harpoon or VM, and LAN isolation is not proven.** Every claim below is either "the code does X" or an explicit
 open question.
@@ -49,3 +51,7 @@ local exposure the design accepts). Until then, **LAN isolation is an open B7 ga
 - What is the Harpoon app's real process name and pid source for `--forwarder-pid`/`--forwarder-command`?
 - Does the VM NAT segment accept connections from other hosts on the LAN?
 - Is the 10 s sync lag what is observed, and does `HARPOON_PORT_FORWARD_LISTENING` appear before the first successful probe?
+
+## Update after the live run
+The "LAN isolation — not proven" section above is the state when this audit was written. It was later measured: from a Windows laptop on the same Wi-Fi, connections to the Mac's LAN IPv4 address and to all eight of its global IPv6 addresses on the published port were refused, with a passive capture showing the SYNs reaching the Mac's interface; the only listener was `127.0.0.1:38000` owned by the Harpoon pid. See [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) §5. Findings F1 (fallback guest IP: not used), F2 (collision: none), and F4 (a single listener) were also observed; F3 (startup lag) did not occur in that run and remains unverified as intermittent.
+

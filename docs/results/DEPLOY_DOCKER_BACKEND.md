@@ -200,3 +200,7 @@ Not done / not claimed: LAN isolation; behaviour on a real host, real `lsof`, re
   Limit: two guests with identical hostname and kernel cannot be told apart; busybox `df` behaviour is assumed from the existing gate (`df -B1 /`).
 - `DockerApi::info()` (read-only) and `ContainerSummary.image_id` (used by teardown to decide whether an image is still in use).
 - Mutation checks for the guest probe and teardown: 19 injected, 19 caught (one, "leases released before containers verified", survived until a test removed the masking effect of the port-mapping check).
+
+## B7 live results
+The image-identity, marker, mapping, listener-check, snapshot and guest-probe designs above were exercised once against the real engine; see [`DEPLOY_B7_LIVE_RESULTS.md`](DEPLOY_B7_LIVE_RESULTS.md) for what was observed (all as designed) and what remains unverified (failure paths, interrupted recovery, guest private-NAT exposure, intermittent forwarder lag, release/packaging).
+
