@@ -1,0 +1,16 @@
+[package]
+name = "harpoon-deploy-cli"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Gated developer CLI for the Harpoon deploy engine (Milestone B6): status, doctor, plan, recover, reconcile, export-journal, and a deploy that stays disabled for live runtimes until B7."
+
+[[bin]]
+name = "harpoon-deploy"
+path = "src/main.rs"
+
+# No registry dependencies and no CLI framework: arguments are parsed by hand.
+[dependencies]
+harpoon-deploy = { path = "../deploy" }
+harpoon-deploy-docker = { path = "../deploy-docker" }
+harpoon-deploy-journal = { path = "../deploy-journal" }

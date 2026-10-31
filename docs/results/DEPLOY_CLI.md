@@ -1,0 +1,83 @@
+# Milestone B6 — Gated developer CLI
+
+Status: on `feature/deploy-b6-cli`; **not merged**. Nothing here touched the running VM, a live Docker socket, a real build, or a real
+container; the shipping UI and release artifacts are unchanged. B7 is not started.
+
+## What exists
+`deploy-cli/` (binary `harpoon-deploy`, no registry dependencies, no CLI framework; arguments parsed by hand) wires the existing engine,
+`DockerBackend` and `FileJournal`. `deploy-journal` gained `lock_status()` (inspect the writer lock without writing).
+
+| Command | Writes? | Docker? | What it does |
+|---|---|---|---|
+| `status` | no | no | deployments (newest first), per-deployment resources with ids/state/keep-policy, unresolved cleanup, outstanding leases, lock state, torn-tail note |
+| `doctor` | no | read-only, only with `--docker-socket` | source (confined, Dockerfile, context size), bundled Buildx, journal location/readability/lock, runtime ping, base images present locally |
+| `plan` | no | read-only, only with `--docker-socket` | validated config; the five ordered operations with the ports a deploy would pick (journaled leases + Docker mappings); blockers; exit 6 if `deploy` would refuse |
+| `recover` | journal | never | marks interrupted deployments (idempotent); lists unresolved items; does not reconcile |
+| `reconcile` | dry run: no; `--apply`: journal + Docker | explicit socket | `plan` of the ledger against the runtime; `--apply` runs the engine's `reconcile` (every removal re-verifies id, name and all three labels) |
+| `deploy` | journal (+ Docker) | gated | first-deployment workflow; refuses unless every gate passes |
+| `export-journal` | new file only | no | copy of the journal bytes to a new `0600` file; works on a corrupt or locked journal |
+
+Exit codes: 0 ok · 2 usage · 3 source/configuration invalid · 4 journal (corrupt, locked, permissions, wrong location) · 5 runtime unreachable or not
+configured · 6 refused by a safety gate · 7 deployment failed or work remains.
+
+## Journal and runtime rules (as implemented and tested)
+- `--runtime-dir` is required, absolute, never guessed. Journal = `<runtime>/deploy-journal`. Writers create both directories `0700` (parent must exist), and
+  `journal.wal`/`journal.lock` are `0600`. An existing directory with group/other access, or a symlinked journal directory, is refused with the `chmod 700` fix.
+- A `runtime-kind` marker (`docker` or `simulated`, `0600`) keeps simulated and real journals apart; neither command kind will use the other's directory, and a
+  simulation refuses an existing unmarked journal. Simulated runs therefore cannot leave fake leases in a real ledger.
+- The ledger is restored before anything is allocated or run (`RunConfig::prior_ledger`), so journaled leases steer allocation; the lock is fail-fast and the
+  message says not to create a second journal directory.
+- Read-only commands use `read_only()`: no lock, no creation, no truncation, no interruption marking (tested: bytes, mtimes and directory listing unchanged,
+  including with a torn tail).
+- Corruption fails closed with the damaged line, an `export-journal` hint and "do not delete or reset". Nothing is repaired, skipped or discarded.
+- `deploy` refuses (6) while any deployment is unfinished, any ledger entry needs a decision (failed/refused/interrupted cleanup, unreceipted intent, entries a
+  finished deployment should have cleaned), or the application already has a recorded container (release replacement is not implemented). Retained images and a
+  successful deployment's serving container are not "unresolved".
+
+## Execution safety
+- Docker contact requires `--docker-socket` (absolute path). The environment is never read; tests set `DOCKER_HOST`/`DOCKER_CONTEXT` canaries and see zero requests.
+- Changing Docker state (`reconcile --apply`, live `deploy`) additionally needs `--authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE`, checked before any I/O.
+- Live `deploy` is closed by `Gate::shipping()`, a constant in the binary's call path: no flag, variable or file opens it. Even with a reachable socket and every flag, the shipping binary
+  exits 6 before reading, writing or contacting anything (tested in-process and as a real process). Tests open the gate to prove the wiring against the fake Docker only.
+- No cleanup, pruning, release replacement or rollback is implicit in any command. `reconcile` never treats an unlistable runtime as "absent" (exit 5, no journal write).
+
+## Tests
+`deploy-cli`: 24 tests (in-process against the deploy-docker fake Docker on a temp socket and fake Buildx, plus real-process checks): usage and exit codes; fresh runtime creates nothing for
+read-only commands; doctor/plan checks; complete simulated deployment through the real journal with permissions/markers and status afterwards; read-only status; cross-deployment leases and
+plan ports; unfinished deployment → refused → `recover` → idempotent; unreceipted creation keeps blocking; corrupt journal on every command + export (no overwrite, no export into the journal);
+held lock; loose permissions, symlink, mixed runtime kinds; live gate (shipping and open); gate open → `DockerBackend` + journal drive a failing deployment cleanly (preliminary container removed, nothing
+foreign touched, state in `status`); foreign same-name container refused and untouched; owned container removed with `force=false`; unreachable/erroring runtime writes nothing; recorded release blocks a second
+first-deployment. Other suites unchanged: `deploy` 135, `deploy-docker` 113, `deploy-journal` 25.
+Mutation checks: 12 injected (live gate ignored, authorisation text unchecked, failed/refused cleanup not counted, read-only restore marking interrupted, directory mode unchecked, export into the journal allowed, unlistable runtime treated as empty, unfinished deployments ignored, runtime kinds mixed, recorded release ignored, dry run applying, retained entries counted as unresolved): **12 caught** (two needed test additions after the first pass: the kind-mixing check and the unlistable-runtime check).
+
+## B7 hand-off — first authorized disposable deployment
+Prerequisites (none of this has been done): written authorization naming the disposable application; a build of the CLI in which `Gate::shipping()` is deliberately opened in a reviewed B7 change;
+the B7 gates below implemented and tested. Then, with a **fresh** runtime directory used for nothing else:
+
+```text
+R=<private absolute dir, will be created 0700>      P=<disposable project dir>      N=<container port>
+RES=<Harpoon.app/Contents/Resources>                S=<Harpoon's Docker socket, given explicitly>
+harpoon-deploy doctor --runtime-dir $R --project-dir $P --container-port $N --resources-dir $RES --docker-socket $S   # must exit 0
+harpoon-deploy plan   --runtime-dir $R --project-dir $P --container-port $N --resources-dir $RES --docker-socket $S   # must exit 0, "blockers: none"
+harpoon-deploy status --runtime-dir $R                                                                                 # empty / nothing unresolved
+harpoon-deploy deploy --runtime-dir $R --project-dir $P --container-port $N --resources-dir $RES --docker-socket $S \
+    --authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE
+harpoon-deploy status --runtime-dir $R        # afterwards; then reconcile (dry run) and review before any --apply
+```
+Preflight record to keep: output of `doctor` and `plan`; the list of existing containers, images and volumes before the run (to compare afterwards); the journal copy via `export-journal`.
+
+Mandatory B7 gates carried forward (all still open):
+1. **Unique build-image identity and tag-race mitigation:** per-attempt random tag recorded in the intent + `--iidfile` identity, remove by ID only (design in `DEPLOY_DOCKER_BACKEND.md`, B4).
+2. **Deployment-specific health marker:** `ResponseMarker` exists in the backend but the CLI does not expose it; B7 must generate a per-deployment marker, hand it to the disposable app and require it.
+3. **Host-to-VM forwarder ownership verification:** which process owns the host listener for the leased port, and that it forwards to this VM.
+4. **Loopback-only host exposure and LAN isolation:** publishing without `HostIp` binds the wildcard on the Docker side; verify what the host actually exposes.
+5. **Guest-side disk-space verification:** the preflight measures the host.
+6. **Preservation of existing containers, images and volumes:** before/after comparison on the real runtime; anonymous-volume images stay rejected.
+7. **Real Docker API response verification:** replace the documentation-derived fake with captured responses.
+
+## Remaining gaps
+- The successful `DockerBackend` path is not driven through the CLI in tests (it needs a real HTTP listener behind a published port); only the failing path is.
+- No `--json` output and no owner (uid) check on the runtime directory.
+- `reconcile` needs `--resources-dir` only because the backend constructor resolves Buildx; it never builds.
+- `doctor` and `status` take the writer lock shared/not at all, so a writer starting in that instant can see `Locked` once and retry.
+- Everything from the B5 risk list still applies (no power-loss testing, no journal salvage beyond export, one writer per runtime directory).

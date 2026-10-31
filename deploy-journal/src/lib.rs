@@ -413,3 +413,30 @@ pub fn lines(dir: &Path) -> Result<Vec<Line>, OpenError> {
     let bytes = std::fs::read(&path).map_err(io_err(&path, "cannot read"))?;
     recover(&bytes).map(|r| r.lines).map_err(OpenError::Format)
 }
+
+// ------------------------------------------------------------------ lock inspection
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStatus {
+    /// No lock file yet: the journal has never been opened for writing.
+    NotInitialized,
+    Free,
+    /// A writer holds it right now.
+    Held,
+}
+
+/// Is a writer holding the journal? Takes the lock *shared* for an instant and releases it; creates
+/// and writes nothing. (A writer trying to open in that instant would see `Locked` and can retry.)
+pub fn lock_status(dir: &Path) -> Result<LockStatus, OpenError> {
+    let path = dir.join(LOCK_FILE);
+    let f = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LockStatus::NotInitialized),
+        Err(e) => return Err(io_err(&path, "cannot open the lock file")(e)),
+    };
+    match f.try_lock_shared() {
+        Ok(()) => Ok(LockStatus::Free),
+        Err(TryLockError::WouldBlock) => Ok(LockStatus::Held),
+        Err(TryLockError::Error(e)) => Err(io_err(&path, "cannot inspect the lock")(e)),
+    }
+}
