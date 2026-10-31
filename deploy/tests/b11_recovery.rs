@@ -366,6 +366,7 @@ fn interrupted_mid_cutover(w: &mut W) -> Deployment {
     let now = w.clock.now_ms();
     d.transition(DeploymentStatus::Running, now).unwrap();
     d.start_step(Step::Cutover, now).unwrap();
+    d.replaces = Some(ReleaseId::from_deployment(&w.prev_dep));
     d.begin_cutover(now).unwrap();
     let mut v = [d];
     let rep = recover_on_start(&mut v, now + 10);
@@ -380,6 +381,7 @@ fn prev(w: &W) -> PreviousRelease {
         release: ReleaseId::from_deployment(&w.prev_dep),
         deployment: w.prev_dep.clone(),
         config: None,
+        container: None,
     }
 }
 

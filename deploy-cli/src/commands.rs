@@ -7,7 +7,7 @@ use harpoon_deploy::engine::{
     end_state, execute_actions, reconcile, recover_cutover, run_deployment_confirmed,
     run_deployment_with, Context, CutoverPlan, NotCutOver, Report, RunConfig,
 };
-use harpoon_deploy::ids::{ApplicationId, IdGenerator, ReleaseId};
+use harpoon_deploy::ids::{ApplicationId, IdGenerator};
 use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger, Observed, ResourceKind,
 };
@@ -439,6 +439,25 @@ fn status(p: &Parsed, out: &mut String) -> R {
         }
     }
     print_lease_and_problems(out, &r);
+    let mut apps: Vec<&ApplicationId> = r.deployments.iter().map(|d| &d.application_id).collect();
+    apps.sort();
+    apps.dedup();
+    for app in apps {
+        if let Some(sv) = harpoon_deploy::serving::serving_release(&r.ledger, &r.deployments, app) {
+            let _ = writeln!(
+                out,
+                "serving: application {app} runs release {} (deployment {}) in container {} of deployment {}{}",
+                sv.release,
+                sv.deployment,
+                sv.container_name,
+                sv.container_owner,
+                match &sv.via {
+                    harpoon_deploy::serving::ServedBy::Original => String::new(),
+                    harpoon_deploy::serving::ServedBy::Restored { by } => format!(" (restored by {by})"),
+                }
+            );
+        }
+    }
     for pz in trigger_pauses(&r.deployments) {
         let _ = writeln!(
             out,
@@ -1198,26 +1217,14 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ replace
 
-/// The release currently serving `app`: the most recently finished succeeded deployment whose
-/// serving container is still recorded and not released. `None` when there is nothing to replace.
+/// The release currently serving `app` and the container that really serves it (after a
+/// restoration that is the restored container, recorded under the deployment that restored it).
 fn current_release(
     ledger: &Ledger,
     deps: &[Deployment],
     app: &ApplicationId,
-) -> Option<(harpoon_deploy::ids::DeploymentId, ReleaseId)> {
-    deps.iter()
-        .filter(|d| d.application_id == *app && d.status == DeploymentStatus::Succeeded)
-        .filter(|d| {
-            ledger.entries().iter().any(|e| {
-                e.deployment == d.id && e.key.kind == ResourceKind::Container && !e.is_released()
-            })
-        })
-        .max_by(|a, b| {
-            a.finished_ms
-                .cmp(&b.finished_ms)
-                .then(a.id.as_str().cmp(b.id.as_str()))
-        })
-        .and_then(|d| d.release.clone().map(|r| (d.id.clone(), r)))
+) -> Option<harpoon_deploy::serving::Serving> {
+    harpoon_deploy::serving::serving_release(ledger, deps, app)
 }
 
 /// Health-gated replacement of a running release, offline only. The candidate is built and checked
@@ -1267,10 +1274,11 @@ fn replace(p: &Parsed, out: &mut String) -> R {
                 )
             }),
     );
-    let Some((cur_dep, cur_release)) = current_release(&restored.ledger, &deps, &app) else {
+    let Some(serving) = current_release(&restored.ledger, &deps, &app) else {
         blockers.push(format!("application {app} has no running release recorded"));
         return Err(replace_refused(&blockers));
     };
+    let (cur_dep, cur_release) = (serving.deployment.clone(), serving.release.clone());
     if !blockers.is_empty() {
         return Err(replace_refused(&blockers));
     }
@@ -1284,11 +1292,22 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         .map_err(|e| Fail::failed(e.to_string()))?;
     let mut cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
     cfg.previous = find_dep(&deps, &cur_dep).and_then(|d| d.pinned.clone());
+    cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: serving.container_owner.clone(),
+        name: serving.container_name.clone(),
+    });
     let plan = CutoverPlan::new(&d.application_id, &cur_release, &d.id, &cfg);
     let _ = writeln!(
         out,
-        "deployment {} (application {}) — SIMULATED, no Docker; replaces the release of deployment {cur_dep}",
-        d.id, d.application_id
+        "deployment {} (application {}) — SIMULATED, no Docker; replaces the release of deployment {cur_dep}, served by container {} of deployment {}{}",
+        d.id,
+        d.application_id,
+        serving.container_name,
+        serving.container_owner,
+        match &serving.via {
+            harpoon_deploy::serving::ServedBy::Original => String::new(),
+            harpoon_deploy::serving::ServedBy::Restored { by } => format!(" (restored by {by})"),
+        }
     );
     for l in plan.lines() {
         let _ = writeln!(out, "{l}");
@@ -1437,19 +1456,17 @@ fn restore(p: &Parsed, out: &mut String) -> R {
             d.status, d.cutover
         )));
     }
-    let others: Vec<Deployment> = r
-        .deployments
-        .iter()
-        .filter(|x| x.id != dep_id)
-        .cloned()
-        .collect();
-    let Some((prev_dep, prev_release)) = current_release(&r.ledger, &others, &d.application_id)
-    else {
+    let Some(prev_release) = d.replaces.clone() else {
         return Err(Fail::refused(format!(
-            "application {} has no earlier running release recorded to restore",
-            d.application_id
+            "deployment {dep_id} does not record which release it replaced, so what to restore cannot be known; nothing was changed"
         )));
     };
+    let prev_dep = prev_release.deployment();
+    if find_dep(&r.deployments, &prev_dep).is_none() {
+        return Err(Fail::refused(format!(
+            "the replaced release's deployment {prev_dep} is not in the journal; nothing was changed"
+        )));
+    }
     let pinned = find_dep(&r.deployments, &prev_dep).and_then(|x| x.pinned.clone());
     let _ = writeln!(
         out,
@@ -1504,6 +1521,7 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         release: prev_release,
         deployment: prev_dep,
         config: None,
+        container: None,
     };
     let clock = ManualClock::new(now_ms());
     let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
@@ -1512,6 +1530,13 @@ fn restore(p: &Parsed, out: &mut String) -> R {
             "the restoration stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
         ))
     })?;
+    if !report.blocked.is_empty() {
+        let _ = writeln!(out, "restoration not started; nothing was recorded or changed, and the one attempt is not spent:");
+        for b in &report.blocked {
+            let _ = writeln!(out, "  {b}");
+        }
+        return Ok(exit::REFUSED);
+    }
     print_recovery(out, &d);
     if let Some(i) = &d.interruption {
         if let Some(ms) = i.duration_ms() {
@@ -1800,7 +1825,11 @@ struct Targets {
     leases: Vec<harpoon_deploy::ledger::Entry>,
 }
 
-fn targets_of(ledger: &Ledger, dep: &harpoon_deploy::ids::DeploymentId) -> Targets {
+fn targets_of(
+    ledger: &Ledger,
+    deps: &[Deployment],
+    dep: &harpoon_deploy::ids::DeploymentId,
+) -> Targets {
     let mine = |k: ResourceKind| -> Vec<_> {
         ledger
             .entries()
@@ -1809,8 +1838,14 @@ fn targets_of(ledger: &Ledger, dep: &harpoon_deploy::ids::DeploymentId) -> Targe
             .cloned()
             .collect()
     };
+    // A restoration recreates the release's container under the failed deployment that restored
+    // it; dismantling the release must handle that container too, each by its own recorded ids.
+    let containers = harpoon_deploy::serving::containers_of_release(ledger, deps, dep)
+        .into_iter()
+        .cloned()
+        .collect();
     Targets {
-        containers: mine(ResourceKind::Container),
+        containers,
         images: mine(ResourceKind::Image),
         leases: mine(ResourceKind::PortLease),
     }
@@ -1919,7 +1954,7 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
             d.status
         )));
     }
-    let t = targets_of(&restored.ledger, &dep_id);
+    let t = targets_of(&restored.ledger, &restored.deployments, &dep_id);
     let open: Vec<&harpoon_deploy::ledger::Entry> = t
         .containers
         .iter()
@@ -2152,7 +2187,7 @@ fn teardown(p: &Parsed, out: &mut String) -> R {
     }
 
     // ---- outcome, from the journal's own state
-    let t_after = targets_of(&ledger, &dep_id);
+    let t_after = targets_of(&ledger, &restored.deployments, &dep_id);
     for e in t_after
         .containers
         .iter()

@@ -115,6 +115,7 @@ fn reason_str(r: Reason) -> &'static str {
     match r {
         Reason::NoPreviousRelease => "no_previous_release",
         Reason::ConfigUnavailable => "config_unavailable",
+        Reason::PortInUse => "port_in_use",
         Reason::Interrupted => "interrupted",
         Reason::ImageMissing => "image_missing",
         Reason::SecretUnavailable => "secret_unavailable",
@@ -195,9 +196,13 @@ pub fn encode_snapshot(d: &Deployment) -> String {
             e(&r.note),
         ]);
     }
-    // Appended only when set, so a snapshot without a pin is byte-identical to what earlier builds wrote.
-    if let Some(p) = &d.pinned {
-        f.push(p.encode());
+    // Optional trailing fields, appended only when set so a snapshot without them is byte-identical
+    // to what earlier builds wrote: the pin (`-` when only `replaces` is set), then the replaced release.
+    if d.pinned.is_some() || d.replaces.is_some() {
+        f.push(d.pinned.as_ref().map(|p| p.encode()).unwrap_or_else(|| "-".into()));
+    }
+    if let Some(r) = &d.replaces {
+        f.push(r.to_string());
     }
     frame(&f.join("\t"))
 }
@@ -293,6 +298,7 @@ fn parse_reason(s: &str) -> Result<Reason, DecodeError> {
     Ok(match s {
         "no_previous_release" => Reason::NoPreviousRelease,
         "config_unavailable" => Reason::ConfigUnavailable,
+        "port_in_use" => Reason::PortInUse,
         "interrupted" => Reason::Interrupted,
         "image_missing" => Reason::ImageMissing,
         "secret_unavailable" => Reason::SecretUnavailable,
@@ -328,17 +334,24 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         }
         None => return err("snapshot has no version"),
     }
-    if f.len() != SNAPSHOT_FIELDS && f.len() != SNAPSHOT_FIELDS + 1 {
-        return err(format!("snapshot has {} fields, expected {SNAPSHOT_FIELDS}", f.len()));
+    if f.len() < SNAPSHOT_FIELDS || f.len() > SNAPSHOT_FIELDS + 2 {
+        return err(format!(
+            "snapshot has {} fields, expected {SNAPSHOT_FIELDS} (plus up to two optional trailing fields: the pinned configuration, the replaced release)",
+            f.len()
+        ));
     }
     let pinned = match f.get(SNAPSHOT_FIELDS) {
+        None | Some(&"-") => None,
         Some(p) => Some(crate::release::ReleaseConfig::decode(p).or_else(|e| {
             err(format!(
                 "snapshot has {} fields, expected {SNAPSHOT_FIELDS} (a last extra field must be a valid pinned configuration: {e})",
                 f.len()
             ))
         })?),
+    };
+    let replaces = match f.get(SNAPSHOT_FIELDS + 1) {
         None => None,
+        Some(r) => Some(r.parse::<ReleaseId>().or_else(|_| err("bad replaced release id"))?),
     };
     let mut it = Fields(f[2..SNAPSHOT_FIELDS].iter());
     let id: DeploymentId = it.next("id")?.parse().or_else(|_| err("bad deployment id"))?;
@@ -449,6 +462,7 @@ fn decode_snapshot(f: &[&str]) -> Result<Deployment, DecodeError> {
         interruption,
         release,
         pinned,
+        replaces,
     })
 }
 
@@ -617,7 +631,8 @@ fn recovery_attached(old: &Deployment, new: &Deployment) -> bool {
         && old.finished_ms == new.finished_ms
         && old.failure == new.failure
         && old.release == new.release
-        && old.pinned == new.pinned;
+        && old.pinned == new.pinned
+        && old.replaces == new.replaces;
     if !same_identity {
         return false;
     }

@@ -2998,3 +2998,7 @@ mod b9;
 // Bounded cutover recovery (offline; simulated only).
 #[path = "b11/mod.rs"]
 mod b11;
+
+// Recovery hardening (offline; simulated Docker only).
+#[path = "b12/mod.rs"]
+mod b12;

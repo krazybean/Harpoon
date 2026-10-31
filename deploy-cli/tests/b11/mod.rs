@@ -14,6 +14,11 @@ fn app_of(o: &Outcome) -> String {
     after.split(')').next().unwrap().to_string()
 }
 
+/// Shared with the hardening tests.
+pub fn earlier_release_for_tests(t: &T, app: &str, dep: &str, pin: bool) {
+    earlier_release(t, app, dep, pin)
+}
+
 /// A succeeded release of `app` as an earlier deployment left it: record and serving container.
 /// `pin` says whether its configuration was pinned (a release from before pinning has none).
 fn earlier_release(t: &T, app: &str, dep: &str, pin: bool) {
@@ -48,12 +53,13 @@ fn earlier_release(t: &T, app: &str, dep: &str, pin: bool) {
 }
 
 /// A replacement that died after stopping the release: cutover begun, never confirmed.
-fn dead_cutover(t: &T, app: &str, dep: &str) {
+fn dead_cutover(t: &T, app: &str, dep: &str, replaces: &str) {
     let (app, dep): (ApplicationId, DeploymentId) = (app.parse().unwrap(), dep.parse().unwrap());
     let mut d = Deployment::new(dep, app, Trigger::Cli, 200);
     d.transition(DeploymentStatus::Queued, 201).unwrap();
     d.transition(DeploymentStatus::Running, 202).unwrap();
     d.start_step(Step::Cutover, 203).unwrap();
+    d.replaces = Some(ReleaseId::from_deployment(&replaces.parse().unwrap()));
     d.begin_cutover(204).unwrap();
     let (mut j, _) = open_j(&t.journal_dir()).unwrap();
     j.persist(&d).unwrap();
@@ -75,7 +81,7 @@ fn crafted() -> T {
     let t = T::new();
     earlier_release(&t, APP, PREV, true);
     earlier_release(&t, OTHER, OTHER_PREV, true);
-    dead_cutover(&t, APP, DEAD);
+    dead_cutover(&t, APP, DEAD, PREV);
     assert_exit(&t.cli(&["recover"]), 0);
     t
 }
@@ -193,7 +199,7 @@ fn the_explicit_recovery_runs_once_records_its_outcome_and_leaves_other_applicat
 fn a_release_without_a_pinned_configuration_is_not_attempted_and_says_why() {
     let t = T::new();
     earlier_release(&t, APP, PREV, false);
-    dead_cutover(&t, APP, DEAD);
+    dead_cutover(&t, APP, DEAD, PREV);
     assert_exit(&t.cli(&["recover"]), 0);
     let dry = restore(&t, DEAD, &[]);
     assert_exit(&dry, 0);
@@ -238,22 +244,18 @@ fn only_an_interrupted_unrecovered_cutover_can_be_restored() {
     }
     let solo = T::new();
     solo.docker_runtime_sim();
-    dead_cutover(&solo, OTHER, DEAD);
+    dead_cutover(&solo, OTHER, DEAD, OTHER_PREV);
     assert_exit(&solo.cli(&["recover"]), 0);
     let o = restore(&solo, DEAD, &["--apply"]);
     assert_exit(&o, 6);
-    assert!(
-        o.stderr.contains("no earlier running release"),
-        "{}",
-        o.stderr
-    );
+    assert!(o.stderr.contains("is not in the journal"), "{}", o.stderr);
 }
 
 #[test]
 fn a_restoration_that_died_part_way_is_closed_as_interrupted_and_never_repeated() {
     let t = T::new();
     earlier_release(&t, APP, PREV, true);
-    dead_cutover(&t, APP, DEAD);
+    dead_cutover(&t, APP, DEAD, PREV);
     assert_exit(&t.cli(&["recover"]), 0);
     // the explicit recovery recorded its attempt, then the process died before the result
     {
