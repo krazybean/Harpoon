@@ -53,8 +53,6 @@ library code and tests.
   eligible target (`not earlier`); returning to it is a new deployment.
 - **No resume.** The trigger pause after a rollback has no consumer and no `resume` command yet; no
   automatic trigger exists, so nothing is paused in practice.
-- **Teardown by a rollback's own id** is not offered; dismantling the target release's deployment id
-  includes the rollback container and port lease, and `reconcile` handles the rest.
 - **Simulated CLI.** `rollback --simulate` drives the fake backend; the Docker rollback path is covered
   by fake-Docker library tests, not by a CLI run.
 - The pin-timing window after a collision-moved port and single-listing blocker detection (B11
