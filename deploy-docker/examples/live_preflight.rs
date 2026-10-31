@@ -26,11 +26,19 @@ fn main() {
             println!("FAIL {what}: {e}")
         }
     };
-    say("ping", api.ping(t).map(|()| "OK".into()).map_err(|e| e.to_string()));
+    say(
+        "ping",
+        api.ping(t).map(|()| "OK".into()).map_err(|e| e.to_string()),
+    );
     say(
         "info",
         api.info(t)
-            .map(|i| format!("name={:?} root={:?} kernel={:?}", i.name, i.root_dir, i.kernel_version))
+            .map(|i| {
+                format!(
+                    "name={:?} root={:?} kernel={:?}",
+                    i.name, i.root_dir, i.kernel_version
+                )
+            })
             .map_err(|e| e.to_string()),
     );
     let containers = api.list_containers(t);
@@ -50,7 +58,10 @@ fn main() {
                         "running={} labels={} published={:?}",
                         i.running,
                         i.labels.len(),
-                        i.published.iter().map(|p| (p.container_port, p.host_ip.clone(), p.host_port)).collect::<Vec<_>>()
+                        i.published
+                            .iter()
+                            .map(|p| (p.container_port, p.host_ip.clone(), p.host_port))
+                            .collect::<Vec<_>>()
                     ),
                     None => "vanished".into(),
                 })
@@ -63,9 +74,20 @@ fn main() {
                 .map_err(|e| e.to_string()),
         );
     }
-    say("published ports", api.published_ports(t).map(|p| format!("{p:?}")).map_err(|e| e.to_string()));
+    say(
+        "published ports",
+        api.published_ports(t)
+            .map(|p| format!("{p:?}"))
+            .map_err(|e| e.to_string()),
+    );
     let images = api.list_images(t);
-    say("image list", images.as_ref().map(|i| format!("{} rows parsed", i.len())).map_err(|e| e.to_string()));
+    say(
+        "image list",
+        images
+            .as_ref()
+            .map(|i| format!("{} rows parsed", i.len()))
+            .map_err(|e| e.to_string()),
+    );
     for (id, tag, _) in images.unwrap_or_default() {
         say(
             &format!("image inspect {tag}"),
@@ -86,12 +108,27 @@ fn main() {
             })
             .map_err(|e| e.to_string()),
     );
-    say("volume list", api.list_volumes(t).map(|v| format!("{v:?}")).map_err(|e| e.to_string()));
+    say(
+        "volume list",
+        api.list_volumes(t)
+            .map(|v| format!("{v:?}"))
+            .map_err(|e| e.to_string()),
+    );
     let probe = MgmtDfProbe::new(docker, mgmt, t);
     say(
         "guest free space (MgmtDfProbe)",
-        probe.measure().map(|(free, what)| format!("{free} bytes free on {what}")).map_err(|e| e),
+        probe
+            .measure()
+            .map(|(free, what)| format!("{free} bytes free on {what}"))
+            .map_err(|e| e),
     );
-    println!("{}", if bad == 0 { "ALL PARSERS ACCEPTED THE LIVE ANSWERS" } else { "SOME PARSERS REJECTED LIVE ANSWERS" });
+    println!(
+        "{}",
+        if bad == 0 {
+            "ALL PARSERS ACCEPTED THE LIVE ANSWERS"
+        } else {
+            "SOME PARSERS REJECTED LIVE ANSWERS"
+        }
+    );
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
