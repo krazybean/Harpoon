@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle, FolderOpen, Warning, X, Stack } from "@phosphor-icons/react";
 
@@ -11,8 +12,8 @@ type ComposePreview = {
 type ComposeLaunchResult = { project: string; detail: string };
 
 const BASE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
-const bodyStyle = { display: "flex", flexDirection: "column" as const, gap: 12, maxHeight: "65vh", overflowY: "auto" as const };
-const panelStyle = { border: "1px solid var(--border)", borderRadius: 8, padding: 12, background: "var(--panel-header)" };
+const bodyStyle: CSSProperties = { display: "flex", flexDirection: "column" as const, gap: 12, maxHeight: "65vh", overflowY: "auto" as const };
+const panelStyle: CSSProperties = { border: "1px solid var(--border)", borderRadius: 8, padding: 12, background: "var(--panel-header)" };
 
 export function ComposeProjectWizard({ onClose, onLaunched }: {
   onClose: () => void;
