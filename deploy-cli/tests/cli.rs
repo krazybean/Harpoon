@@ -143,6 +143,12 @@ fn spawn_binary(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
 
 const OPEN: Gate = Gate {
     live_deploy_enabled: true,
+    live_replacement_enabled: false,
+};
+/// What the acceptance build opens: live deploy and the replacement family.
+const ACCEPTANCE: Gate = Gate {
+    live_deploy_enabled: true,
+    live_replacement_enabled: true,
 };
 const SHIPPING: Gate = Gate::shipping();
 
@@ -3018,3 +3024,8 @@ mod b13;
 // B14: durable pauses, held events and explicit resume (offline; fake Docker only to prove it is untouched).
 #[path = "b14/mod.rs"]
 mod b14;
+
+// B15: live replace, rollback and restore through the acceptance gate against the fake Docker, and
+// the packaging boundary (offline; fake Docker only).
+#[path = "b15/mod.rs"]
+mod b15;

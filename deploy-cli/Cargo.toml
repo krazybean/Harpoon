@@ -9,6 +9,19 @@ description = "Gated developer CLI for the Harpoon deploy engine (Milestone B6):
 name = "harpoon-deploy"
 path = "src/main.rs"
 
+# The acceptance build: the same CLI with live `replace`, `rollback` and `restore` open, for the
+# written-authorization live acceptance runs only. It is built only when the `acceptance` feature is
+# asked for by name (`required-features`), so `cargo build`, `cargo build --release` and `cargo test`
+# never produce it. It has no fault injection and no way to open `deploy` beyond what the gate says.
+[[bin]]
+name = "harpoon-deploy-acceptance"
+path = "src/acceptance_main.rs"
+required-features = ["acceptance"]
+
+[features]
+# Adds nothing to the library or to `harpoon-deploy`: it only makes the acceptance binary buildable.
+acceptance = []
+
 # No registry dependencies and no CLI framework: arguments are parsed by hand.
 [dependencies]
 harpoon-deploy = { path = "../deploy" }

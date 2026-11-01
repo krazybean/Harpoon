@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn app_of(o: &Outcome) -> String {
+pub fn app_of(o: &Outcome) -> String {
     let after = o
         .stdout
         .split("(application ")
@@ -58,7 +58,7 @@ fn live_replacement_is_refused_before_anything_is_read_even_with_every_authoriza
         assert_exit(&o, 6);
         assert!(
             o.stderr.contains("live replacement is not enabled")
-                && o.stderr.contains("bounded cutover recovery"),
+                && o.stderr.contains("until the live acceptance evidence"),
             "{}",
             o.stderr
         );
