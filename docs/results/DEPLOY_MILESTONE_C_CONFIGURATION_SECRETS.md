@@ -75,9 +75,16 @@ harpoon-deploy deploy|replace --project shop --environment prod --target release
   with the Keychain locked; `--check-secrets` probes availability and exits 6 if any is unavailable.
 * **Build secrets.** Written as `0600` files in a `0700` directory `scratch/buildsecrets-<nonce>`, beside (never inside) the
   context snapshot, passed as `--secret id=NAME,src=FILE`; the directory is removed on drop (success, failure, timeout and
-  unwinding). A hard kill of the process skips `Drop`: the next build sweeps any `buildsecrets-*` directory first (one writer at
-  a time). **Limitation:** between a hard kill and the next build, plaintext build secrets remain in that `0700` directory under
-  the runtime directory. The engine does not cancel a running Buildx mid-step; cancellation applies between steps.
+  unwinding). A hard kill of the process (SIGKILL, power loss) skips `Drop` and **cannot be cleaned up by the process that died**.
+  What is done: opening the single writer lock in any writing command (so `recover`, the explicit post-crash step, `config-set`,
+  `secret-set`, `deploy`, ...) removes every `buildsecrets-*` directory, because holding the lock proves no build is running;
+  a build also sweeps before it starts; and a read-only `status` reports leftovers with a WARNING and removes nothing.
+  **Remaining limitation, not removed:** from the hard kill until the next writing command, plaintext build secrets remain in that
+  `0700` directory (files `0600`) under the runtime directory. Cleanup after SIGKILL is therefore not guaranteed; the exposure is
+  bounded by that gap, by local file permissions, and by a developer running `status` or `recover`. Anything stronger (for
+  example passing the secret by an unlinked file descriptor so no path exists) was not adopted: it was not verified to work with the
+  bundled Buildx's secret handling, and this PR does not run a real Buildx. The engine does not cancel a running Buildx mid-step;
+  cancellation applies between steps.
 * **Values in memory.** `SecretValue` has no `Display`, a redacted `Debug`, and is zeroed on drop (best effort; copies made by
   the allocator, Security.framework or the OS are not tracked). `SecretBundle`, `Redactor` and `LogSink` also format without values.
 
@@ -117,10 +124,12 @@ image-layer exposure were not observed here (no real BuildKit): not live.
 | deploy-journal | 46 | config records replay/legacy store/fail-closed/pins/cut after every write/second writer |
 | deploy-docker | 227 | Buildx flags, secret files (mode, location, not in context, not in argv or environment), cleanup on success/failure/timeout, stale sweep, missing secret, output masking of every shape and chunking, withheld output, runtime injection, pin holds references |
 | deploy-keychain | 1 (+1 ignored) | status mapping; the ignored test is the real round trip |
-| deploy-cli | 171 (172 with `--features acceptance`) | the eleven-step workflow, stdin-only input, Keychain locked/denied/unavailable, a restore blocked by an unavailable pinned secret, the leakage matrix through a failing build |
+| deploy-cli | 172 (173 with `--features acceptance`) | the eleven-step workflow, stdin-only input, Keychain locked/denied/unavailable, a restore blocked by an unavailable pinned secret, the leakage matrix through a failing build |
 
 fmt, Clippy `-D warnings` (all five crates; `deploy-cli` also with `--features acceptance`) and the CI source guards are clean.
 
+* **Platforms.** `deploy-keychain` compiles and passes Clippy `-D warnings` on macOS and, checked with a Linux target, on Linux
+  (where the store reports `Unavailable`); CI runs the Linux path.
 * **Native Keychain.** `cargo test -- --ignored` in `deploy-keychain` ran once on this Mac against a unique service name and
   account: add, duplicate refused, multi-line read-back, missing item, delete, repeat delete. No dialog appeared (the query
   forbids one) and no existing credential was read or changed. This is one run on one machine with one binary identity; behaviour
@@ -134,22 +143,22 @@ fmt, Clippy `-D warnings` (all five crates; `deploy-cli` also with `--features a
 
 ## 8. Not done, or not proven
 
-* **Image reuse for runtime-only changes: not implemented.** A runtime-only change today goes through `replace`, which rebuilds.
-  Doing it safely needs a replacement mode that serves the serving release's pinned image id (the rollback mechanism, aimed at
+* **Image reuse for runtime-only changes: deferred; rebuilding is accepted for now.** A runtime-only change today goes through
+  `replace`, which rebuilds. Doing it safely needs a replacement mode that serves the serving release's pinned image id (the rollback mechanism, aimed at
   the current release) and a rule for when the build identity makes reuse valid. The pin now records the build identity and
   the snapshot, so the data exists; the engine change is a separate, reviewable step.
 * **No live evidence.** Real Buildx secret mounts, `docker history` and layer contents, a real container's `inspect`, a real
   Keychain lock during a deploy, and the interplay with the forwarder were not exercised. Live Docker is not authorized here.
 * **No branch scope; no external providers; no `--json` output** (there is none in the CLI, so there was nothing to review).
-* **Accepted limits:** secret files exist in the runtime scratch directory for the duration of a build and after a hard kill
-  until the next build; values are copied in memory by libraries outside this code; redaction is exact-match only.
+* **Accepted limits:** secret files exist in the runtime scratch directory for the duration of a build and, after a hard kill,
+  until the next writing command (reported by `status`; see section 4); values are copied in memory by libraries outside this code; redaction is exact-match only.
 * **Dockerfile settings** are command-line choices (`--context`, `--dockerfile`, `--target`), recorded in the pin's build
   identity, not scoped variables.
 
 ## 9. Recommendation
 
-The slice is complete and consistent offline, with the safety requirements enforced by construction and tested. Milestone C is
-**not ready for closure** until a separately authorized live session shows (a) a real BuildKit secret mount absent from
-`docker history` and layers, (b) a real container receiving runtime secrets and `docker inspect` exposure matching this document,
-(c) the Keychain behaving as designed when locked mid-session and under the shipping binary's signing identity, and (d) a
-decision on image reuse for runtime-only changes (implement, or accept a rebuild). After those, it can close, and Gate U can start.
+The slice is complete and consistent offline, with the safety requirements enforced by construction and tested. Scope decisions
+recorded: runtime-only image reuse is deferred and a rebuild is accepted; signing-identity and headless Keychain feasibility
+belong to Gate U; Git and desktop work are out of scope. Milestone C is **not ready for closure** until a separately authorized
+live session shows (a) a real BuildKit secret mount absent from `docker history` and layers and (b) a real container receiving
+runtime secrets with `docker inspect` exposure matching this document. After that it can close, and Gate U can start.

@@ -950,3 +950,63 @@ fn the_report_documents_what_cannot_be_detected_or_hidden() {
         assert!(doc.contains(must), "the report must say: {must}");
     }
 }
+
+#[test]
+fn build_secret_files_left_by_a_hard_kill_are_reported_read_only_and_removed_by_the_next_writer() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(
+        &cfg(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                "global",
+                "--name",
+                "A",
+                "--value",
+                "1",
+            ],
+        ),
+        0,
+    );
+    let stale = t.rt.join("scratch").join("buildsecrets-deadbeef");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("s0"), "left-by-a-killed-build").unwrap();
+    let jb = t.journal_bytes();
+    // status only reports it: nothing is removed and the journal is untouched
+    let o = cfg(&t, &kc, &["status"]);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("WARNING: 1 build-secret directory from an interrupted build remains")
+            && !o.stdout.contains("left-by-a-killed-build"),
+        "{}",
+        o.stdout
+    );
+    assert!(stale.exists() && t.journal_bytes() == jb);
+    // `recover` (the explicit post-crash step, a writer) removes it, and then status is quiet
+    assert_exit(&cfg(&t, &kc, &["recover"]), 0);
+    assert!(!stale.exists(), "removed by the next writer");
+    assert!(!cfg(&t, &kc, &["status"]).stdout.contains("build-secret"));
+    // any other writing command does the same
+    std::fs::create_dir_all(&stale).unwrap();
+    assert_exit(
+        &cfg(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                "global",
+                "--name",
+                "B",
+                "--value",
+                "2",
+            ],
+        ),
+        0,
+    );
+    assert!(!stale.exists());
+}

@@ -18,6 +18,8 @@
 use harpoon_deploy::secrets::{SecretError, SecretRef, SecretStore, SecretValue, SERVICE};
 
 pub struct Keychain {
+    // Only the macOS implementation uses it; elsewhere the store is unavailable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     service: String,
 }
 

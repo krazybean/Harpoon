@@ -84,6 +84,22 @@ impl SecretFiles {
         n
     }
 
+    /// How many build-secret directories are on disk under `scratch`, without touching them (a
+    /// read-only `status` uses this to say that an interrupted build left some).
+    pub fn leftovers(scratch: &Path) -> usize {
+        std::fs::read_dir(scratch)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with(SECRET_DIR_PREFIX)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     pub fn create(
         scratch: &Path,
         nonce: &str,

@@ -579,6 +579,19 @@ fn status(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         }
     }
     print_lease_and_problems(out, &r);
+    // Read-only: say so if a killed build left secret files behind (the next writing command, such
+    // as `recover`, removes them).
+    let residue = harpoon_deploy_docker::buildx_run::SecretFiles::leftovers(&rt.scratch_dir());
+    if residue > 0 {
+        let _ = writeln!(
+            out,
+            "WARNING: {residue} build-secret director{} from an interrupted build remain{} in {} (mode 0700, plaintext); `recover` or the next writing command removes {}",
+            if residue == 1 { "y" } else { "ies" },
+            if residue == 1 { "s" } else { "" },
+            rt.scratch_dir().display(),
+            if residue == 1 { "it" } else { "them" }
+        );
+    }
     let mut apps: Vec<&ApplicationId> = r.deployments.iter().map(|d| &d.application_id).collect();
     apps.sort();
     apps.dedup();
