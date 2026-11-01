@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod contention;
 mod preliminary;
 
 fn app_of(o: &Outcome) -> String {

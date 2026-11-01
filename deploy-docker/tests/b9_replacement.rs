@@ -306,3 +306,50 @@ fn a_failed_build_leaves_the_same_invariants_and_no_candidate_image() {
         .iter()
         .all(|i| !i.tags.iter().any(|t| t.contains(&h.dep.id.to_string())))));
 }
+
+#[test]
+fn a_docker_api_that_fails_while_the_candidate_is_prepared_changes_nothing_and_leaks_nothing() {
+    use support::fake_docker::Action;
+    // a transient outage at each point of the preparation: image inspect, container create, start
+    for (method, path) in [
+        ("GET", "/images/"),
+        ("POST", "/containers/create"),
+        ("POST", "/start"),
+    ] {
+        let mut h = Harness::new();
+        h.seed_built_image();
+        let (cur_id, prev) = h.seed_current_release();
+        let cur_name = h.docker.with(|s| s.containers[0].name.clone());
+        let other = other_app(&h);
+        h.docker.fault(
+            Some(method),
+            path,
+            1,
+            Action::Respond(503, "{\"message\":\"temporarily unavailable\"}".into()),
+        );
+        let mut b = backend(&h, Scripted::always(Observation::Status(200)));
+        let mut j = StampedJournal::new();
+        let r = h.run_replacing(&mut b, &mut j, &prev, &|_| panic!("never asked"));
+        assert_eq!(
+            r.status,
+            DeploymentStatus::Failed,
+            "{method} {path}: {:?}",
+            h.dep.failure
+        );
+        assert_eq!(h.dep.cutover, CutoverState::NotStarted, "{method} {path}");
+        assert_eq!(r.pause, None);
+        assert!(h.dep.recovery.is_none());
+        current_release_only_read(&h, &cur_id, &cur_name);
+        assert!(h.docker.container(&other).unwrap().running);
+        assert!(
+            r.cleanup_problems().is_empty(),
+            "{method} {path}: {:?}",
+            r.cleanup_problems()
+        );
+        assert!(
+            h.docker.container(&preliminary_name(&h.dep.id)).is_none(),
+            "{method} {path}: nothing leaked"
+        );
+        assert!(h.docker.container(&serving_name(&h.dep.id)).is_none());
+    }
+}
