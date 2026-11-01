@@ -1805,12 +1805,14 @@ fn current_release(
     harpoon_deploy::serving::serving_release(ledger, deps, app)
 }
 
-/// Health-gated replacement of a running release, offline only. The candidate is built and checked
+/// Health-gated replacement of a running release. The candidate is built and checked
 /// while the current release keeps running; the cutover plan and its anticipated interruption are
 /// printed before anything is stopped; the cutover itself needs `--confirm-cutover`.
 ///
-/// Live replacement is deliberately not available: the bounded restoration that must follow a
-/// failed cutover is the next milestone, so a live run is refused before anything is read.
+/// `--simulate` runs offline against the fake backend. A live run needs the open
+/// `live_replacement_enabled` gate (closed in the shipping binary, open only in the acceptance
+/// binary), the exact authorization phrase and every explicit path; otherwise it is refused before
+/// anything is read. A failed cutover gets one bounded restoration from the previous release's pin.
 fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
@@ -2127,7 +2129,8 @@ fn releases(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     Ok(exit::OK)
 }
 
-/// Developer-initiated rollback to one named earlier release, offline only. The target's retained
+/// Developer-initiated rollback to one named earlier release (`--simulate` offline; live only
+/// through the open `live_replacement_enabled` gate, as for `replace`). The target's retained
 /// image and pinned configuration are used as they are (nothing is rebuilt); the serving release
 /// keeps running until the target is prepared and has passed its preliminary check; the plan, the
 /// interruption and the data warning are printed before anything is stopped; the cutover needs
@@ -2327,7 +2330,8 @@ fn rollback_refused(blockers: &[String]) -> Fail {
 
 /// Explicit, bounded restoration after a cutover that was interrupted part-way (D10). One attempt
 /// per deployment, ever: a recorded attempt, even one that died, forbids another. Dry run unless
-/// `--apply`. Offline only; live restoration is not enabled.
+/// `--apply`. `--simulate` runs offline; a live restoration needs the open `live_replacement_enabled`
+/// gate (closed in the shipping binary), the authorization phrase and every explicit path.
 fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
