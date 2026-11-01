@@ -138,6 +138,7 @@ fn rig() -> Rig {
             memory_bytes: 128 * 1024 * 1024,
             nano_cpus: 250_000_000,
             pids: 32,
+            env: Vec::new(),
         }),
         ..RunConfig::default()
     };
@@ -910,4 +911,167 @@ fn an_interrupted_cutover_with_the_candidate_still_running_is_reported_and_costs
             .any(|(_, c)| c.text.contains("stopped container stopped-holder")),
         "the stopped holder was reported"
     );
+}
+
+// ---------------------------------------------------------------- non-secret runtime environment
+
+/// `ByPort` that also accepts a marker-bearing probe (it answers by port, as a simulation does).
+struct Marked(ByPort);
+impl HttpTransport for Marked {
+    fn get(&self, port: u16, p: &str, t: Duration) -> Observation {
+        self.0.get(port, p, t)
+    }
+    fn get_expecting(
+        &self,
+        port: u16,
+        p: &str,
+        t: Duration,
+        _marker: Option<&harpoon_deploy_docker::probe::ResponseMarker>,
+    ) -> Observation {
+        self.0.get(port, p, t)
+    }
+    fn is_simulated(&self) -> bool {
+        true
+    }
+}
+
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// The exact `Env` array of a create request, in order.
+fn env_of(body: &str) -> Vec<String> {
+    let j = harpoon_deploy_docker::json::Json::parse(body).unwrap();
+    j.get("Env")
+        .and_then(|e| e.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn marker_of(env: &[String]) -> String {
+    env.iter()
+        .find_map(|e| e.strip_prefix("HARPOON_DEPLOYMENT_MARKER="))
+        .expect("every container carries its own marker")
+        .to_string()
+}
+
+fn creates(r: &Rig) -> Vec<(String, Vec<String>)> {
+    r.h.docker
+        .requests()
+        .iter()
+        .filter(|q| q.method == "POST" && q.path.contains("/containers/create"))
+        .map(|q| {
+            let name = q.path.split("name=").nth(1).unwrap_or("").to_string();
+            (name, env_of(&q.body))
+        })
+        .collect()
+}
+
+#[test]
+fn a_restoration_uses_the_restored_releases_own_pinned_environment_never_the_new_runs() {
+    let mut r = rig();
+    // the serving (previous) release was pinned with its own variables; this run asks for different ones
+    r.cfg.previous.as_mut().unwrap().env = pairs(&[("EMPTY", ""), ("PREV", "a=b=c")]);
+    let mut cfg = config(&r.h.ws, &r.h.docker);
+    cfg.enable_replacement = true;
+    cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
+    cfg.env = vec!["NEW=2".into(), "ZED=".into()];
+    let mut b = DockerBackend::with_transport(
+        cfg,
+        Some(&r.h.ws.resources()),
+        Marked(transport(Observation::Status(200))),
+    )
+    .unwrap()
+    .with_entropy(test_entropy())
+    .with_port_probe(NoListeners)
+    .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024));
+    let (rel, rcfg) = (release(&r), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &rcfg)
+            .expect("the engine itself did not error");
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+
+    let made = creates(&r);
+    let by = |suffix: &str| {
+        made.iter()
+            .find(|(n, _)| n.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no create for {suffix}: {made:?}"))
+            .1
+            .clone()
+    };
+    let (pre, serving, restored) = (by("-pre"), by(&r.h.dep.id.to_string()), by("-restored"));
+    let strip = |e: &[String]| {
+        e.iter()
+            .filter(|x| !x.starts_with("HARPOON_DEPLOYMENT_MARKER="))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // preliminary and serving candidate: this run's variables, exactly, plus their own marker
+    assert_eq!(strip(&pre), ["NEW=2", "ZED="]);
+    assert_eq!(strip(&serving), ["NEW=2", "ZED="]);
+    // the restored release: its own pin, exactly, and none of this run's
+    assert_eq!(strip(&restored), ["EMPTY=", "PREV=a=b=c"]);
+    assert_eq!(restored.len(), 3);
+    // three containers, three different markers
+    let m = [marker_of(&pre), marker_of(&serving), marker_of(&restored)];
+    assert!(m[0] != m[1] && m[1] != m[2] && m[0] != m[2], "{m:?}");
+    // the candidate's pin carries this run's environment (it failed, so it is never a restore source)
+    assert_eq!(
+        r.h.dep.pinned.as_ref().unwrap().env,
+        pairs(&[("NEW", "2"), ("ZED", "")])
+    );
+}
+
+#[test]
+fn a_run_without_variables_keeps_the_legacy_behaviour_and_pin() {
+    let mut r = rig();
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let _ = run(&mut r, &mut b);
+    for (name, env) in creates(&r) {
+        assert!(env.is_empty(), "{name}: {env:?}");
+    }
+    let pin = r.h.dep.pinned.as_ref().unwrap();
+    assert!(pin.env.is_empty() && pin.encode().starts_with("v1;"));
+}
+
+#[test]
+fn a_reserved_or_malformed_variable_never_reaches_docker() {
+    for bad in [
+        "HARPOON_DEPLOYMENT_MARKER=x",
+        "HARPOON_X=1",
+        "BAD NAME=1",
+        "A=1\nB=2",
+    ] {
+        let mut r = rig();
+        let mut cfg = config(&r.h.ws, &r.h.docker);
+        cfg.enable_replacement = true;
+        cfg.env = vec![bad.into()];
+        let mut b = DockerBackend::with_transport(
+            cfg,
+            Some(&r.h.ws.resources()),
+            transport(Observation::Status(200)),
+        )
+        .unwrap()
+        .with_entropy(test_entropy())
+        .with_port_probe(NoListeners)
+        .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024));
+        let _ = run(&mut r, &mut b);
+        assert!(creates(&r).is_empty(), "{bad:?}: a container was created");
+        assert!(
+            r.h.docker.container(&r.prev_name).unwrap().running,
+            "{bad:?}: the serving release must be untouched"
+        );
+        assert!(r.h.dep.failure.is_some(), "{bad:?}");
+    }
 }

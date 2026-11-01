@@ -322,6 +322,7 @@ pub struct FakeBackend {
     blockers: Vec<String>,
     plan_error: Option<StepError>,
     rollback: Option<ReleaseConfig>,
+    env: Vec<(String, String)>,
 }
 
 impl FakeBackend {
@@ -352,6 +353,7 @@ impl FakeBackend {
             blockers: Vec::new(),
             plan_error: None,
             rollback: None,
+            env: Vec::new(),
         }
     }
 
@@ -456,6 +458,12 @@ impl FakeBackend {
     /// release serves with the target's pinned configuration (only the port is chosen afresh).
     pub fn with_rollback(mut self, target: ReleaseConfig) -> Self {
         self.rollback = Some(target);
+        self
+    }
+    /// The (already validated) non-secret environment this run's release is pinned with. A rollback
+    /// ignores it: it serves with the target's own pinned environment.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
         self
     }
     /// Deciding the new release's configuration fails, before anything is created or stopped.
@@ -612,7 +620,10 @@ impl Backend for FakeBackend {
                 host_port: 39000,
                 ..t.clone()
             },
-            None => ReleaseConfig::simulated(39000),
+            None => ReleaseConfig {
+                env: self.env.clone(),
+                ..ReleaseConfig::simulated(39000)
+            },
         })
     }
     fn restore_blockers(

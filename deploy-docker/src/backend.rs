@@ -455,7 +455,11 @@ impl<T: HttpTransport> DockerBackend<T> {
                 img.volumes.join(", ")
             )));
         }
-        let mut env = self.cfg.env.clone();
+        // Validated again here, whatever the source (this run, a pin read from the journal): a
+        // reserved or malformed variable never reaches Docker.
+        let pairs = harpoon_deploy::envvars::validate(&self.effective_env())
+            .map_err(|e| StepError::new(format!("environment: {e}; no container was created")))?;
+        let mut env = harpoon_deploy::envvars::docker_form(&pairs);
         if self.cfg.attribution == Attribution::PerContainer {
             let value = random_hex(&mut *self.entropy)?;
             env.push(format!("{MARKER_ENV}={value}"));
@@ -1201,6 +1205,8 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
                 "no verified image was built; there is nothing to plan",
             ));
         };
+        harpoon_deploy::envvars::validate(&self.effective_env())
+            .map_err(|e| StepError::new(format!("environment: {e}; nothing was planned")))?;
         let occ = self.occupancy(io, Purpose::Application, &b)?;
         let lease = ports::allocate(
             Purpose::Application,
@@ -1221,6 +1227,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             memory_bytes: self.cfg.limits.memory_bytes,
             nano_cpus: self.cfg.limits.nano_cpus,
             pids: self.cfg.limits.pids,
+            env: self.effective_env(),
         }))
     }
 
@@ -1321,6 +1328,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             memory_bytes: self.cfg.limits.memory_bytes,
             nano_cpus: self.cfg.limits.nano_cpus,
             pids: self.cfg.limits.pids,
+            env: self.effective_env(),
         })
     }
 
@@ -1514,6 +1522,36 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
 }
 
 impl<T: HttpTransport> DockerBackend<T> {
+    /// The non-secret environment the container being created gets (the marker is added separately,
+    /// per container). A restoration uses the **restored release's own pinned environment**, a
+    /// rollback the target's; only a new build uses this run's configuration. Never the CLI's
+    /// arguments of some other run, and never another release's values.
+    fn effective_env(&self) -> Vec<(String, String)> {
+        if let Some(c) = self.st.restoring.as_ref().and_then(|p| p.config.as_ref()) {
+            return c.env.clone();
+        }
+        if let Some((_, c)) = &self.st.rollback {
+            return c.env.clone();
+        }
+        self.cfg_env_pairs()
+    }
+
+    /// `cfg.env` as pairs. A malformed entry (the CLI validates, a library user might not) is kept
+    /// as a name with no value so that the pin never silently drops it; creation refuses it later.
+    fn cfg_env_pairs(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .cfg
+            .env
+            .iter()
+            .map(|e| match e.split_once('=') {
+                Some((k, v)) => (k.to_string(), v.to_string()),
+                None => (e.clone(), String::new()),
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
     fn restore_inner(
         &mut self,
         io: &mut StepIo<'_>,

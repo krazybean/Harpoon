@@ -3010,3 +3010,7 @@ mod rollback;
 // Criterion 7: state-loss visibility (offline; fake Docker only).
 #[path = "state_loss/mod.rs"]
 mod state_loss;
+
+// B13: non-secret runtime variables and preliminary-failure output (offline; fake Docker only).
+#[path = "b13/mod.rs"]
+mod b13;

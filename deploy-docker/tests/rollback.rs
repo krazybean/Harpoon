@@ -76,6 +76,7 @@ fn pin(image: &str, tag: &str, port: u16, mem: i64) -> ReleaseConfig {
         memory_bytes: mem,
         nano_cpus: 250_000_000,
         pids: 32,
+        env: Vec::new(),
     }
 }
 
@@ -490,4 +491,155 @@ fn selection_from_the_records_matches_what_the_backend_will_serve() {
     )
     .unwrap();
     assert_eq!(t.config.unwrap().image_id, r.old_image);
+}
+
+// ---------------------------------------------------------------- non-secret runtime environment
+
+struct Marked(ByPort);
+impl HttpTransport for Marked {
+    fn get(&self, port: u16, p: &str, t: Duration) -> Observation {
+        self.0.get(port, p, t)
+    }
+    fn get_expecting(
+        &self,
+        port: u16,
+        p: &str,
+        t: Duration,
+        _m: Option<&harpoon_deploy_docker::probe::ResponseMarker>,
+    ) -> Observation {
+        self.0.get(port, p, t)
+    }
+    fn is_simulated(&self) -> bool {
+        true
+    }
+}
+
+fn env_pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// Environment of every container the run created, by name suffix, without the per-container marker.
+fn created_env(r: &Rig) -> Vec<(String, Vec<String>)> {
+    r.h.docker
+        .requests()
+        .iter()
+        .filter(|q| q.method == "POST" && q.path.contains("/containers/create"))
+        .map(|q| {
+            let j = harpoon_deploy_docker::json::Json::parse(&q.body).unwrap();
+            let env: Vec<String> = j
+                .get("Env")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                env.iter()
+                    .filter(|e| e.starts_with("HARPOON_DEPLOYMENT_MARKER="))
+                    .count(),
+                1,
+                "exactly one marker per container: {env:?}"
+            );
+            (
+                q.path.split("name=").nth(1).unwrap_or("").to_string(),
+                env.into_iter()
+                    .filter(|e| !e.starts_with("HARPOON_DEPLOYMENT_MARKER="))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn marked_backend(r: &Rig, t: ByPort, cli_env: &[&str]) -> DockerBackend<Marked> {
+    let mut cfg = config(&r.h.ws, &r.h.docker);
+    cfg.enable_replacement = true;
+    cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
+    cfg.env = cli_env.iter().map(|s| s.to_string()).collect();
+    DockerBackend::with_transport(cfg, Some(&r.h.ws.resources()), Marked(t))
+        .unwrap()
+        .with_entropy(test_entropy())
+        .with_port_probe(NoListeners)
+        .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+        .with_rollback(r.old.clone(), r.old_pin.clone())
+}
+
+#[test]
+fn a_rollback_reproduces_the_target_releases_own_environment_not_the_command_line() {
+    let mut r = rig();
+    r.old_pin.env = env_pairs(&[("E", ""), ("OLD", "1=2")]);
+    r.serving_pin.env = env_pairs(&[("SERVING", "x")]);
+    r.deps[0].pinned = Some(r.old_pin.clone());
+    r.deps[1].pinned = Some(r.serving_pin.clone());
+    r.cfg.previous = Some(r.serving_pin.clone());
+    let mut b = marked_backend(
+        &r,
+        ByPort {
+            pre: ok(),
+            candidate: ok(),
+            restored: ok(),
+        },
+        &["CLI=ignored"],
+    );
+    let (rel, cfg) = (ReleaseId::from_deployment(&r.serving), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &cfg)
+            .unwrap();
+    assert_eq!(
+        rep.status,
+        DeploymentStatus::Succeeded,
+        "{:?}",
+        r.h.dep.failure
+    );
+    for (name, env) in created_env(&r) {
+        assert_eq!(
+            env,
+            ["E=", "OLD=1=2"],
+            "{name}: the target's pin, nothing from the CLI or the serving release"
+        );
+    }
+    assert_eq!(r.h.dep.pinned.as_ref().unwrap().env, r.old_pin.env);
+}
+
+#[test]
+fn a_rollback_that_fails_restores_the_serving_releases_environment_not_the_rollback_targets() {
+    let mut r = rig();
+    r.old_pin.env = env_pairs(&[("OLD", "1")]);
+    r.serving_pin.env = env_pairs(&[("SERVING", "x"), ("S2", "")]);
+    r.deps[1].pinned = Some(r.serving_pin.clone());
+    r.cfg.previous = Some(r.serving_pin.clone());
+    let mut b = marked_backend(
+        &r,
+        ByPort {
+            pre: ok(),
+            candidate: Observation::Status(503),
+            restored: ok(),
+        },
+        &[],
+    );
+    let (rel, cfg) = (ReleaseId::from_deployment(&r.serving), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &cfg)
+            .unwrap();
+    assert_eq!(rep.status, DeploymentStatus::Failed);
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+    let made = created_env(&r);
+    let restored = made
+        .iter()
+        .find(|(n, _)| n.ends_with("-restored"))
+        .expect("a restoration");
+    assert_eq!(restored.1, ["S2=", "SERVING=x"]);
+    let candidate = made
+        .iter()
+        .find(|(n, _)| !n.ends_with("-restored") && !n.ends_with("-pre"))
+        .unwrap();
+    assert_eq!(candidate.1, ["OLD=1"]);
 }

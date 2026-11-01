@@ -92,6 +92,8 @@ struct SourceCfg {
     images: BTreeSet<String>,
     size: u64,
     notes: Vec<String>,
+    /// The validated, sorted non-secret environment from `--env` (empty when none was given).
+    env: Vec<(String, String)>,
 }
 
 fn deployment_config(health_deadline_ms: u64, prior_ledger: Ledger) -> RunConfig {
@@ -125,7 +127,10 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
             }
             (None, false) => 8080,
         };
+    // Before anything is read, built or written: a bad variable is a configuration error.
+    let env = harpoon_deploy::envvars::parse_all(p.values("env")).map_err(Fail::config)?;
     let mut cfg = DockerConfig::first_test(socket, &context, rt.scratch_dir(), port);
+    cfg.env = harpoon_deploy::envvars::docker_form(&env);
     cfg.project_root = Some(project.clone());
     if let Some(d) = p.value("dockerfile") {
         cfg.dockerfile = d.to_string();
@@ -184,7 +189,17 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
         images,
         size,
         notes,
+        env,
     })
+}
+
+/// How the environment is described by Harpoon's own output: names only, and a reminder of what
+/// these values are.
+fn env_line(env: &[(String, String)], provenance: &str) -> String {
+    format!(
+        "environment ({provenance}): {} — NON-SECRET values: visible in `docker inspect` and stored in the journal",
+        harpoon_deploy::envvars::names(env)
+    )
 }
 
 fn find_dep<'a>(
@@ -937,6 +952,7 @@ fn plan(p: &Parsed, out: &mut String) -> R {
     for n in &s.notes {
         let _ = writeln!(out, "  .dockerignore: {n}");
     }
+    let _ = writeln!(out, "{}", env_line(&s.env, "from --env"));
 
     let mut docker_ports = BTreeSet::new();
     let mut socket_note = "not contacted (no --docker-socket)".to_string();
@@ -1365,6 +1381,11 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             "Docker"
         }
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(&s.env, "from --env, pinned with the release")
+    );
     if !simulate {
         let _ = writeln!(
             out,
@@ -1381,7 +1402,9 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 
     let report = if simulate {
         let clock = ManualClock::new(now_ms());
-        let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+        let mut b = FakeBackend::new(clock.clone())
+            .with_runtime(FakeRuntime::world())
+            .with_env(s.env.clone());
         run_deployment_with(&mut d, &ctx, &mut b, &mut journal, &clock, &cfg, &|| false)
     } else {
         let resources = p
@@ -1518,6 +1541,21 @@ fn replace(p: &Parsed, out: &mut String) -> R {
             harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
         }
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(&s.env, "from --env, pinned with the candidate")
+    );
+    match &cfg.previous {
+        Some(prev) if prev.env != s.env => {
+            let _ = writeln!(
+                out,
+                "environment differs from the serving release's pinned environment ({}): the candidate gets exactly the variables given now; a restoration or rollback uses each release's own pin",
+                harpoon_deploy::envvars::names(&prev.env)
+            );
+        }
+        _ => {}
+    }
     for l in plan.lines() {
         let _ = writeln!(out, "{l}");
     }
@@ -1533,7 +1571,9 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         previous_release: Some(cur_release),
     };
     let clock = ManualClock::new(now_ms());
-    let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+    let mut b = FakeBackend::new(clock.clone())
+        .with_runtime(FakeRuntime::world())
+        .with_env(s.env.clone());
     let report = run_deployment_confirmed(
         &mut d,
         &ctx,
@@ -1785,6 +1825,14 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
         target.deployment(),
         target_config.image_id
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(
+            &target_config.env,
+            &format!("pinned by release {target}; not taken from this command")
+        )
+    );
     for l in plan.lines() {
         let _ = writeln!(out, "{l}");
     }
@@ -1935,6 +1983,11 @@ fn restore(p: &Parsed, out: &mut String) -> R {
                 c.nano_cpus,
                 c.pids,
                 c.health.path
+            );
+            let _ = writeln!(
+                out,
+                "{}",
+                env_line(&c.env, "pinned with the release being restored")
             );
         }
         None => {
