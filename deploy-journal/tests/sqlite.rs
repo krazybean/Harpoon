@@ -420,6 +420,9 @@ mod control_records {
         let ten = "dep_00000000000000000000000010";
         assert!(write(ten, PauseKind::FailedCutover, 105).is_ok());
         assert!(write(ten, PauseKind::InterruptedCutover, 104).is_ok());
+        // inside the old interval but not the cutover's persisted start (104): contradiction
+        assert!(write(ten, PauseKind::InterruptedCutover, 103).is_err());
+        assert!(write(ten, PauseKind::InterruptedCutover, 102).is_err());
         assert!(write(ten, PauseKind::Rollback, 105).is_err());
         assert!(write(ten, PauseKind::FailedCutover, 106).is_err());
         assert!(write(
@@ -461,6 +464,8 @@ mod control_records {
             Resumed::NothingToDo
         );
         assert_eq!(file(), before, "byte-identical after refusals");
+        drop(SqliteJournal::read_only(&dir).unwrap());
+        assert_eq!(file(), before, "a read-only open and check mutates nothing");
         assert_eq!(ctl, ControlState::default());
         // a crash after the pause record and before the decision: reopen, repeat, same end state
         let pause = ControlRecord::Pause(PauseRec {

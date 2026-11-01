@@ -676,6 +676,28 @@ fn replay_checks_that_a_pause_names_a_pause_causing_deployment_of_a_compatible_k
     assert!(pause(dep(10), PauseKind::InterruptedCutover, 104)
         .check_against(std::slice::from_ref(&failed))
         .is_ok());
+    // the time must be the cutover's original start (interruption.started_ms = 104), not any time in
+    // the old interval, and not the failure time
+    for t in [100, 101, 102, 103, 105, 106] {
+        assert!(
+            pause(dep(10), PauseKind::InterruptedCutover, t)
+                .check_against(std::slice::from_ref(&failed))
+                .is_err(),
+            "{t}"
+        );
+    }
+    assert_eq!(failed.interruption.map(|i| i.started_ms), Some(104));
+    // with no recorded start nothing can vouch for the time: fail closed
+    let mut no_start = failed.clone();
+    no_start.interruption = None;
+    assert!(pause(dep(10), PauseKind::InterruptedCutover, 104)
+        .check_against(&[no_start])
+        .is_err());
+    // a checked state is not changed by checking it
+    let probe = pause(dep(10), PauseKind::InterruptedCutover, 104);
+    let before = probe.clone();
+    probe.check_against(std::slice::from_ref(&failed)).unwrap();
+    assert_eq!(probe, before);
     // the other direction (a failure recorded, then "interrupted") never happens
     let open = open_cutover(A, 11, 100);
     assert!(pause(dep(11), PauseKind::InterruptedCutover, 104)

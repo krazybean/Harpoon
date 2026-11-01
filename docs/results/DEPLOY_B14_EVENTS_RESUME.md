@@ -35,7 +35,8 @@ nothing depends on the clock or on anything outside the journal.
   deployment that never paused its application, or a pause that does not match a pause-causing deployment of its
   own application: the store refuses to open. A pause must name a deployment whose record causes a pause (failed or
   interrupted cutover, successful rollback) with the same kind and time; the one legitimate change is an interrupted
-  cutover recorded while open and failed since (its time then lies between the deployment's creation and the failure).
+  cutover recorded while open and failed since, whose pause time must equal the cutover's original start
+  (`interruption.started_ms`, persisted by `begin_cutover`); with no recorded start, replay fails closed.
 
 ## 2. Commands
 

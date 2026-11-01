@@ -537,17 +537,17 @@ impl ControlState {
                 ));
             };
             // The kind and time are recorded when the pause is first seen; the deployment may move on
-            // afterwards. An interrupted cutover later recorded as failed is the one legitimate change
-            // (its time then lies between the deployment's creation and the failure); every other
-            // kind and time is fixed by the deployment record.
-            let created = deployments
+            // afterwards. An interrupted cutover later recorded as failed is the one legitimate change,
+            // and its pause time must be exactly the cutover's original start (`interruption.started_ms`,
+            // persisted by `begin_cutover`). With no such start on record, nothing can vouch for the
+            // time, so replay fails closed. Every other kind and time is fixed by the deployment record.
+            let started = deployments
                 .iter()
                 .find(|d| d.id == p.origin)
-                .map(|d| d.created_ms)
-                .unwrap_or(0);
+                .and_then(|d| d.interruption.map(|i| i.started_ms));
             let compatible = match (p.kind, c.kind) {
                 (a, b) if a == b => p.at_ms == c.at_ms,
-                (PauseKind::InterruptedCutover, PauseKind::FailedCutover) => p.at_ms >= created && p.at_ms <= c.at_ms,
+                (PauseKind::InterruptedCutover, PauseKind::FailedCutover) => started == Some(p.at_ms),
                 _ => false,
             };
             if !compatible {
