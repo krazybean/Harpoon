@@ -368,7 +368,7 @@ fn an_interrupted_rollback_is_never_resumed_or_repeated_and_blocks_further_chang
     }
     assert_exit(&t.cli(&["recover"]), 0);
     let s = t.cli(&["status"]).stdout;
-    assert!(s.contains("the application may be down"), "{s}");
+    assert!(s.contains("MAY BE DOWN"), "{s}");
     assert!(
         s.contains(&format!("rollback to release {}", rel(OLD))),
         "{s}"

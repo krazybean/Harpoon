@@ -87,7 +87,7 @@ read was preserved with the evidence rather than discarded.
 | 3 | Preliminary failure with a running release; listed next actions | **Unproven**: a live preliminary failure was not run; no retry text |
 | 4 | Bounded recovery outcomes | `restored` proven live with an injected fault; `restored_unverified`, `restore_failed`, `not_attempted` and a naturally failing application **unproven** |
 | 5 | Manual rollback | Proven live (L3) |
-| 6 | Crash/restart survival | L1–L3 show restart survival only; **`kill -9` mid-cutover and live `restore` of an interrupted cutover unproven** (L4) |
+| 6 | Crash/restart survival | L1–L3 show restart survival only; the crash mid-cutover and live `restore` were then run once as L4 (`DEPLOY_MILESTONE_B_L4_RESULTS.md`, passed, one injected boundary) |
 | 7 | State-loss visibility | Offline read-only discovery implemented (section 8); **not yet proven live**, no store was deleted |
 | — | Requirements failure tests | Docker unreachable (live), port in use, disk full, concurrent deploys **not run**; idle-cost (30 MiB RSS / 0.5 % CPU) and build-overhead (≤ 1.2× direct build) stop conditions **not measured** |
 
