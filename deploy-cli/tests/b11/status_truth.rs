@@ -103,7 +103,9 @@ fn after_a_successful_restoration_the_history_is_kept_and_the_service_is_not_cal
     );
     assert!(s.contains("recovery: restored"), "{s}");
     assert!(
-        s.contains("this deployment did NOT succeed and its candidate never served"),
+        s.contains("its candidate was never confirmed as the successful serving release")
+            && s.contains("was restored by an explicit restoration")
+            && !s.contains("never served"),
         "{s}"
     );
     assert!(
@@ -177,4 +179,55 @@ fn a_missing_store_does_not_claim_that_nothing_was_deployed() {
     );
     assert!(!t.rt.exists(), "nothing was created");
     assert_eq!(t.docker_requests(), 0);
+}
+
+#[test]
+fn an_automatic_recovery_is_not_called_explicit_and_the_header_and_notes_agree_on_the_lock() {
+    use harpoon_deploy::state::{RecoveryOutcome, Step};
+    let t = T::new();
+    earlier_release(&t, APP, PREV, true);
+    let (app, dep): (ApplicationId, DeploymentId) = (APP.parse().unwrap(), DEAD.parse().unwrap());
+    let mut d = Deployment::new(dep, app, Trigger::Cli, 200);
+    d.transition(DeploymentStatus::Queued, 201).unwrap();
+    d.transition(DeploymentStatus::Running, 202).unwrap();
+    d.start_step(Step::Cutover, 203).unwrap();
+    d.replaces = Some(ReleaseId::from_deployment(&PREV.parse().unwrap()));
+    d.begin_cutover(204).unwrap();
+    d.fail_cutover(205).unwrap();
+    d.start_recovery(60_000, 206).unwrap();
+    d.finish_recovery(RecoveryOutcome::Restored, 207).unwrap();
+    d.transition(DeploymentStatus::Failed, 208).unwrap();
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.persist(&d).unwrap();
+    }
+    let s = t.cli(&["status"]).stdout;
+    assert!(
+        s.contains("restored by the automatic bounded recovery of that run"),
+        "{s}"
+    );
+    assert!(
+        !s.contains("explicit restoration")
+            && !s.contains("never served")
+            && !s.contains("MAY BE DOWN"),
+        "{s}"
+    );
+    // with a writer holding the journal, the header and the notes tell the same story
+    let (_w, _) = open_j(&t.journal_dir()).unwrap();
+    let held = t.cli(&["status"]).stdout;
+    assert!(held.contains("(lock: held by a writer)"), "{held}");
+}
+
+#[test]
+fn a_live_runtime_is_not_offered_simulated_or_unavailable_commands_by_releases() {
+    let t = open_cutover();
+    std::fs::write(t.rt.join("runtime-kind"), "docker\n").unwrap();
+    let o = t.cli(&["releases", "--app", APP]);
+    assert!(!o.stdout.contains("--simulate"), "{}", o.stdout);
+    assert!(
+        o.stdout
+            .contains("this build cannot roll back a live runtime"),
+        "{}",
+        o.stdout
+    );
 }

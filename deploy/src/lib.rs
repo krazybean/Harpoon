@@ -15,6 +15,7 @@
 pub mod backend;
 pub mod buildx;
 pub mod engine;
+pub mod envvars;
 pub mod health;
 pub mod ids;
 pub mod journal_format;

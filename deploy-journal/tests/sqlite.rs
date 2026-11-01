@@ -264,3 +264,53 @@ fn a_rollback_record_survives_restarts_and_its_target_cannot_be_rewritten() {
     assert!(SqliteJournal::open(&dir).is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_pinned_environment_round_trips_through_sqlite_and_the_legacy_form_is_unchanged() {
+    use harpoon_deploy::release::ReleaseConfig;
+    let dir = temp_dir();
+    let (app, dep) = ids();
+    let mut with_env = Deployment::new(dep, app.clone(), Trigger::Cli, 10);
+    with_env.transition(DeploymentStatus::Queued, 11).unwrap();
+    with_env.transition(DeploymentStatus::Running, 12).unwrap();
+    let mut pin = ReleaseConfig::simulated(38050);
+    pin.env = vec![("A".into(), "".into()), ("B".into(), "x=y;z,w".into())];
+    with_env.pinned = Some(pin.clone());
+    let other_dep: DeploymentId = "dep_00000000000000000000000001".parse().unwrap();
+    let mut legacy = Deployment::new(other_dep, app, Trigger::Cli, 20);
+    legacy.transition(DeploymentStatus::Queued, 21).unwrap();
+    legacy.transition(DeploymentStatus::Running, 22).unwrap();
+    legacy.pinned = Some(ReleaseConfig::simulated(38051));
+    {
+        let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&with_env).unwrap();
+        db.persist(&legacy).unwrap();
+    }
+    // restart (read-only and writer): both pins come back exactly
+    let r = SqliteJournal::read_only(&dir).unwrap();
+    let got = |n: u16| {
+        r.deployments
+            .iter()
+            .find(|d| d.pinned.as_ref().is_some_and(|p| p.host_port == n))
+            .unwrap()
+            .pinned
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(got(38050), pin);
+    assert_eq!(got(38051).env, Vec::<(String, String)>::new());
+    // on disk: the environment release is v2, a release without one is byte-for-byte the old v1
+    let bytes = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(has(b"v2;img="), "an environment pin is stored as v2");
+    assert!(has(b"v1;img="), "a release without one keeps the v1 form");
+    // damage inside the stored environment: the checksummed record no longer verifies, and the store
+    // refuses to open rather than guessing at the variables
+    let at = bytes.windows(5).position(|w| w == b";env=").unwrap() + 8;
+    let mut bad = bytes.clone();
+    bad[at] = if bad[at] == b'0' { b'1' } else { b'0' };
+    std::fs::write(dir.join(SQLITE_FILE), &bad).unwrap();
+    assert!(SqliteJournal::read_only(&dir).is_err());
+    assert!(SqliteJournal::open(&dir).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}

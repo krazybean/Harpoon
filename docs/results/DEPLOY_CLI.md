@@ -174,3 +174,15 @@ The test Docker server's image deletion now follows Docker's *documented* behavi
 ### Remaining gaps after B8.2
 No live validation of any of this; real 409 behaviour (including child images and the containerd image store) unobserved; `teardown` of a successful deployment does not yet apply the exclusivity checks (tags, digests) that `cleanup-image` applies; a retained image cannot be removed while another tag points at it (by design — remove that tag yourself); the F1 terminal refusal still has no acknowledgement or override.
 
+
+## B13 — runtime variables, failure output, forwarder default
+
+- `--env KEY=VALUE` (repeatable) on `plan`, `deploy` and `replace`. **Non-secret only**: values are visible in `docker inspect`
+  and stored in the journal; Harpoon prints names only. `HARPOON_*` is reserved (the per-container
+  `HARPOON_DEPLOYMENT_MARKER` is generated, never configured). Each release is pinned with its own variables; a restoration or
+  rollback reuses that release's pin. See `DEPLOY_B13_ACCEPTANCE.md` for validation limits and the pin format (`v1` unchanged,
+  `v2` only when variables exist).
+- A candidate that fails before any cutover prints what stayed untouched and the real next commands (`status`, the deliberate
+  re-run, `cleanup-image`).
+- `--forwarder-command` defaults to `harpoon`, the live runtime's real process name; the check remains exact.
+- `status` words an unfinished or restored cutover accurately (see the B13 document).

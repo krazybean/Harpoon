@@ -42,6 +42,7 @@ const SPECS: &[Spec] = &[
             "dockerfile",
             "container-port",
             "health-path",
+            "env",
             "resources-dir",
             "docker-socket",
             "app",
@@ -67,6 +68,7 @@ const SPECS: &[Spec] = &[
             "dockerfile",
             "container-port",
             "health-path",
+            "env",
             "resources-dir",
             "docker-socket",
             "app",
@@ -88,6 +90,7 @@ const SPECS: &[Spec] = &[
             "dockerfile",
             "container-port",
             "health-path",
+            "env",
             "resources-dir",
             "docker-socket",
             "app",
@@ -150,16 +153,25 @@ const SPECS: &[Spec] = &[
     },
 ];
 
+/// Value flags that may be given more than once (collected in order). Every other value flag still
+/// rejects a repeat.
+const REPEATABLE: &[&str] = &["env"];
+
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub command: String,
     values: BTreeMap<String, String>,
+    repeated: BTreeMap<String, Vec<String>>,
     switches: Vec<String>,
 }
 
 impl Parsed {
     pub fn value(&self, k: &str) -> Option<&str> {
         self.values.get(k).map(String::as_str)
+    }
+    /// Every occurrence of a repeatable flag, in the order given.
+    pub fn values(&self, k: &str) -> &[String] {
+        self.repeated.get(k).map(Vec::as_slice).unwrap_or(&[])
     }
     pub fn switch(&self, k: &str) -> bool {
         self.switches.iter().any(|s| s == k)
@@ -205,7 +217,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                     .cloned()
                     .ok_or_else(|| format!("--{name} needs a value"))?,
             };
-            if p.values.insert(name.to_string(), v).is_some() {
+            if REPEATABLE.contains(&name) {
+                p.repeated.entry(name.to_string()).or_default().push(v);
+            } else if p.values.insert(name.to_string(), v).is_some() {
                 return Err(format!("--{name} given twice"));
             }
         } else {
@@ -241,6 +255,15 @@ EVERY COMMAND EXCEPT inventory NEEDS --runtime-dir. One runtime directory = one 
 Docker is contacted only with an explicit --docker-socket PATH; the Docker environment variables, Docker contexts and
 ~/.docker are never read. Changing Docker state additionally needs
   --authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE
+
+RUNTIME VARIABLES (plan, deploy, replace)
+  --env KEY=VALUE   repeatable. NON-SECRET variables for the release's containers: they are visible in `docker inspect`
+                    and are stored in the journal with the release. Do not use for secrets (Keychain-backed secrets are
+                    a later milestone). Names: letters, digits, underscores; HARPOON_* is reserved (the per-container
+                    HARPOON_DEPLOYMENT_MARKER is generated for you). Values may be empty or contain `=`; control
+                    characters are refused. Each release is pinned with its own variables: a restoration or rollback
+                    reuses that release's pin, never the current command line. `replace` without --env gives the
+                    candidate no variables.
 
 EXIT CODES
   0 ok   2 usage   3 source/configuration invalid   4 journal problem (corrupt, locked, permissions)

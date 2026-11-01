@@ -11,9 +11,10 @@
 
 mod args;
 mod commands;
+mod next_steps;
 mod store;
 
-pub use args::{AUTH_FLAG, AUTH_PHRASE, HELP};
+pub use args::{command_names, AUTH_FLAG, AUTH_PHRASE, HELP};
 
 /// Exit codes (also in `--help`).
 pub mod exit {

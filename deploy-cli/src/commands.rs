@@ -92,6 +92,8 @@ struct SourceCfg {
     images: BTreeSet<String>,
     size: u64,
     notes: Vec<String>,
+    /// The validated, sorted non-secret environment from `--env` (empty when none was given).
+    env: Vec<(String, String)>,
 }
 
 fn deployment_config(health_deadline_ms: u64, prior_ledger: Ledger) -> RunConfig {
@@ -125,7 +127,10 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
             }
             (None, false) => 8080,
         };
+    // Before anything is read, built or written: a bad variable is a configuration error.
+    let env = harpoon_deploy::envvars::parse_all(p.values("env")).map_err(Fail::config)?;
     let mut cfg = DockerConfig::first_test(socket, &context, rt.scratch_dir(), port);
+    cfg.env = harpoon_deploy::envvars::docker_form(&env);
     cfg.project_root = Some(project.clone());
     if let Some(d) = p.value("dockerfile") {
         cfg.dockerfile = d.to_string();
@@ -184,7 +189,17 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
         images,
         size,
         notes,
+        env,
     })
+}
+
+/// How the environment is described by Harpoon's own output: names only, and a reminder of what
+/// these values are.
+fn env_line(env: &[(String, String)], provenance: &str) -> String {
+    format!(
+        "environment ({provenance}): {} — NON-SECRET values: visible in `docker inspect` and stored in the journal",
+        harpoon_deploy::envvars::names(env)
+    )
 }
 
 fn find_dep<'a>(
@@ -454,13 +469,15 @@ fn status(p: &Parsed, out: &mut String) -> R {
         .kind()?
         .map(Kind::as_str)
         .unwrap_or("unmarked (treated as docker)");
-    let lock = match writer_lock_status(&rt.journal_dir()) {
+    // One observation of the writer lock for the whole invocation: the header and every note agree.
+    let observed = writer_lock_status(&rt.journal_dir());
+    let lock = match &observed {
         Ok(LockStatus::Held) => "held by a writer",
         Ok(LockStatus::Free) => "free",
         Ok(LockStatus::NotInitialized) => "absent",
         Err(_) => "unknown",
     };
-    let lock_held = matches!(writer_lock_status(&rt.journal_dir()), Ok(LockStatus::Held));
+    let lock_held = matches!(observed, Ok(LockStatus::Held));
     let _ = writeln!(out, "kind: {kind}");
     let _ = writeln!(
         out,
@@ -633,7 +650,7 @@ fn cutover_notes(
             let _ = if rt.kind()? == Some(Kind::Simulated) {
                 writeln!(
                     out,
-                    "    explicit bounded recovery (one attempt, never automatic): harpoon-deploy restore --deployment {} --simulate [--apply]",
+                    "    explicit restoration (one bounded attempt, never automatic): harpoon-deploy restore --deployment {} --simulate [--apply]",
                     d.id
                 )
             } else {
@@ -645,14 +662,21 @@ fn cutover_notes(
         }
     }
     if let (Some(o), CutoverState::Failed { .. }) = (restored, d.cutover) {
+        // An interrupted deployment was restored by the explicit `restore` command; one that ended
+        // `failed` was restored by the engine's own bounded recovery during its run.
+        let how = if d.status == DeploymentStatus::Interrupted {
+            "was restored by an explicit restoration"
+        } else {
+            "was restored by the automatic bounded recovery of that run"
+        };
         let _ = match o {
             RecoveryOutcome::Restored => writeln!(
                 out,
-                "    this deployment did NOT succeed and its candidate never served; the previous release was restored by explicit bounded recovery and passed its own health check (recovery: restored)"
+                "    this deployment did NOT succeed: its candidate was never confirmed as the successful serving release (it may have answered a health check before the final confirmation); the previous release {how} and passed its own health check (recovery: restored)"
             ),
             _ => writeln!(
                 out,
-                "    this deployment did NOT succeed; the previous release was started again but its health check did not pass (recovery: restored_unverified): verify the application yourself"
+                "    this deployment did NOT succeed; the previous release {how} but its health check did not pass (recovery: restored_unverified): verify the application yourself"
             ),
         };
     }
@@ -937,6 +961,7 @@ fn plan(p: &Parsed, out: &mut String) -> R {
     for n in &s.notes {
         let _ = writeln!(out, "  .dockerignore: {n}");
     }
+    let _ = writeln!(out, "{}", env_line(&s.env, "from --env"));
 
     let mut docker_ports = BTreeSet::new();
     let mut socket_note = "not contacted (no --docker-socket)".to_string();
@@ -1365,6 +1390,11 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
             "Docker"
         }
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(&s.env, "from --env, pinned with the release")
+    );
     if !simulate {
         let _ = writeln!(
             out,
@@ -1381,7 +1411,9 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 
     let report = if simulate {
         let clock = ManualClock::new(now_ms());
-        let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+        let mut b = FakeBackend::new(clock.clone())
+            .with_runtime(FakeRuntime::world())
+            .with_env(s.env.clone());
         run_deployment_with(&mut d, &ctx, &mut b, &mut journal, &clock, &cfg, &|| false)
     } else {
         let resources = p
@@ -1414,6 +1446,7 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         ))
     })?;
     print_report(out, &d, &report);
+    print_prepare_failure(out, "deploy", &d, &report, &rt, simulate, None);
     Ok(
         if report.status == DeploymentStatus::Succeeded && report.is_clean() {
             exit::OK
@@ -1518,6 +1551,21 @@ fn replace(p: &Parsed, out: &mut String) -> R {
             harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
         }
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(&s.env, "from --env, pinned with the candidate")
+    );
+    match &cfg.previous {
+        Some(prev) if prev.env != s.env => {
+            let _ = writeln!(
+                out,
+                "environment differs from the serving release's pinned environment ({}): the candidate gets exactly the variables given now; a restoration or rollback uses each release's own pin",
+                harpoon_deploy::envvars::names(&prev.env)
+            );
+        }
+        _ => {}
+    }
     for l in plan.lines() {
         let _ = writeln!(out, "{l}");
     }
@@ -1533,7 +1581,9 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         previous_release: Some(cur_release),
     };
     let clock = ManualClock::new(now_ms());
-    let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
+    let mut b = FakeBackend::new(clock.clone())
+        .with_runtime(FakeRuntime::world())
+        .with_env(s.env.clone());
     let report = run_deployment_confirmed(
         &mut d,
         &ctx,
@@ -1550,6 +1600,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         ))
     })?;
     print_report(out, &d, &report);
+    print_prepare_failure(out, "replace", &d, &report, &rt, true, Some(&serving));
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
@@ -1695,10 +1746,17 @@ fn releases(p: &Parsed, out: &mut String) -> R {
             }
         }
     }
-    let _ = writeln!(
-        out,
-        "roll back with: harpoon-deploy rollback --app {app} --to RELEASE_ID --simulate [--confirm-rollback] (the exact release id, nothing is guessed)"
-    );
+    let _ = if store::Runtime::from_flag(p.value("runtime-dir"))?.kind()? == Some(Kind::Simulated) {
+        writeln!(
+            out,
+            "roll back with: harpoon-deploy rollback --app {app} --to RELEASE_ID --simulate [--confirm-rollback] (the exact release id, nothing is guessed)"
+        )
+    } else {
+        writeln!(
+            out,
+            "this build cannot roll back a live runtime (`rollback` is refused here); this listing is read from the journal only"
+        )
+    };
     Ok(exit::OK)
 }
 
@@ -1785,6 +1843,14 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
         target.deployment(),
         target_config.image_id
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        env_line(
+            &target_config.env,
+            &format!("pinned by release {target}; not taken from this command")
+        )
+    );
     for l in plan.lines() {
         let _ = writeln!(out, "{l}");
     }
@@ -1819,6 +1885,7 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
         ))
     })?;
     print_report(out, &d, &report);
+    print_prepare_failure(out, "rollback", &d, &report, &rt, true, Some(&serving));
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
@@ -1936,6 +2003,11 @@ fn restore(p: &Parsed, out: &mut String) -> R {
                 c.pids,
                 c.health.path
             );
+            let _ = writeln!(
+                out,
+                "{}",
+                env_line(&c.env, "pinned with the release being restored")
+            );
         }
         None => {
             let _ = writeln!(out, "pinned configuration: none stored; the attempt will be recorded as not_attempted (config_unavailable)");
@@ -1996,6 +2068,32 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         Some(RecoveryOutcome::Restored | RecoveryOutcome::RestoredUnverified) => exit::OK,
         _ => exit::FAILED,
     })
+}
+
+/// For a candidate that failed before any cutover: what stayed untouched and the commands that exist.
+fn print_prepare_failure(
+    out: &mut String,
+    command: &str,
+    d: &Deployment,
+    r: &Report,
+    rt: &Runtime,
+    simulated: bool,
+    serving: Option<&harpoon_deploy::serving::Serving>,
+) {
+    let dir = rt.dir.display().to_string();
+    let ctx = crate::next_steps::Ctx {
+        command,
+        app: &d.application_id,
+        deployment: d,
+        ledger: &r.ledger,
+        runtime_dir: &dir,
+        simulated,
+        serving: serving.map(|s| (s.release.to_string(), s.container_name.clone())),
+        paused: r.pause.is_some(),
+    };
+    for l in crate::next_steps::lines(&ctx).unwrap_or_default() {
+        let _ = writeln!(out, "{l}");
+    }
 }
 
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
@@ -2144,7 +2242,7 @@ fn forwarder_flags(p: &Parsed) -> Result<(PathBuf, u32, String), Fail> {
         .ok_or_else(|| Fail::config("--forwarder-pid must be a process id greater than 1"))?;
     let command = p
         .value("forwarder-command")
-        .unwrap_or("Harpoon")
+        .unwrap_or("harpoon")
         .to_string();
     if command.is_empty() || command.chars().any(|c| c.is_control()) {
         return Err(Fail::config(
@@ -3004,5 +3102,45 @@ mod tests {
     fn health_timeout_also_extends_the_engine_preliminary_budget() {
         let cfg = deployment_config(125_000, Ledger::new());
         assert_eq!(cfg.budgets.preliminary_ms, 125_000);
+    }
+}
+
+#[cfg(test)]
+mod forwarder_default_tests {
+    use super::*;
+
+    /// The forwarder process the live runtime actually has is named `harpoon` (see
+    /// `docs/results/DEPLOY_B7_LIVE_PREFLIGHT.md`); the listener check stays exact and case-sensitive.
+    #[test]
+    fn the_forwarder_default_matches_the_real_process_name_and_stays_exact() {
+        let args: Vec<String> = ["deploy", "--forwarder-pid", "4242"]
+            .map(String::from)
+            .to_vec();
+        let p = crate::args::parse(&args).unwrap();
+        let (_, pid, command) = forwarder_flags(&p).unwrap();
+        assert_eq!((pid, command.as_str()), (4242, "harpoon"));
+        // an explicit value is still honoured verbatim, so a different process is never accepted by accident
+        let args: Vec<String> = [
+            "deploy",
+            "--forwarder-pid",
+            "4242",
+            "--forwarder-command",
+            "Harpoon",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (_, _, command) = forwarder_flags(&crate::args::parse(&args).unwrap()).unwrap();
+        assert_eq!(command, "Harpoon");
+        assert!(!harpoon_deploy_docker::forwarder::verify_forwarder(
+            &[harpoon_deploy_docker::forwarder::Listener {
+                pid: 4242,
+                command: "Harpoon".into(),
+                address: "127.0.0.1:38000".into()
+            }],
+            38000,
+            4242,
+            "harpoon"
+        )
+        .is_ok());
     }
 }

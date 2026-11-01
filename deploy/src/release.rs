@@ -1,7 +1,8 @@
 //! The immutable, non-secret configuration needed to recreate a release (spec D5, cutover
 //! recovery). It is pinned when a release starts serving and stored with the deployment's durable
-//! snapshot. It holds no environment values and no secrets: the per-container response marker is
-//! generated afresh for every container, and secrets are not part of this milestone.
+//! snapshot. It holds the release's **non-secret** environment variables (`--env`, see
+//! [`crate::envvars`]) and no secrets: the values are visible in `docker inspect` and in the journal.
+//! The per-container response marker is not part of it; it is generated afresh for every container.
 
 use crate::health::{HealthSpec, StatusClass};
 
@@ -18,6 +19,9 @@ pub struct ReleaseConfig {
     pub memory_bytes: i64,
     pub nano_cpus: i64,
     pub pids: i64,
+    /// The release's non-secret environment, sorted by name. Empty for a release that had none
+    /// and for every release pinned before this field existed.
+    pub env: Vec<(String, String)>,
 }
 
 fn hex(s: &str) -> String {
@@ -35,14 +39,16 @@ fn unhex(s: &str) -> Option<String> {
 }
 
 impl ReleaseConfig {
-    /// One line without tabs or newlines: `v1;key=value;…` with free text hex-encoded.
+    /// One line without tabs or newlines: `v1;key=value;…` with free text hex-encoded. A release
+    /// with no environment encodes exactly as before (`v1`); one with an environment adds a trailing
+    /// `env=` field and is `v2`. Older readers fail closed on `v2` rather than dropping the variables.
     pub fn encode(&self) -> String {
         let expect = match self.health.expect {
             StatusClass::Success2xx => "2xx",
             StatusClass::NotServerError => "lt500",
         };
-        format!(
-            "v1;img={};tag={};cport={};hport={};path={};expect={expect};interval={};ok={};deadline={};mem={};cpu={};pids={}",
+        let base = format!(
+            "img={};tag={};cport={};hport={};path={};expect={expect};interval={};ok={};deadline={};mem={};cpu={};pids={}",
             hex(&self.image_id),
             hex(&self.image_tag),
             self.container_port,
@@ -54,12 +60,19 @@ impl ReleaseConfig {
             self.memory_bytes,
             self.nano_cpus,
             self.pids,
-        )
+        );
+        if self.env.is_empty() {
+            format!("v1;{base}")
+        } else {
+            let env: Vec<String> = self.env.iter().map(|(k, v)| hex(&format!("{k}={v}"))).collect();
+            format!("v2;{base};env={}", env.join(","))
+        }
     }
 
     pub fn decode(s: &str) -> Result<ReleaseConfig, String> {
         let mut parts = s.split(';');
-        if parts.next() != Some("v1") {
+        let version = parts.next();
+        if version != Some("v1") && version != Some("v2") {
             return Err("unknown pinned-configuration version".into());
         }
         let mut get = |key: &str| -> Result<&str, String> {
@@ -88,6 +101,25 @@ impl ReleaseConfig {
             num(get("cpu")?, "cpu")?,
             num(get("pids")?, "pids")?,
         );
+        let env = if version == Some("v2") {
+            let raw = get("env")?;
+            if raw.is_empty() {
+                return Err("a v2 pinned configuration has an empty environment (it would be v1)".into());
+            }
+            let mut pairs = Vec::new();
+            for item in raw.split(',') {
+                let kv = unhex(item).ok_or("an environment entry is not valid")?;
+                let (k, v) = kv.split_once('=').ok_or("an environment entry has no name")?;
+                pairs.push((k.to_string(), v.to_string()));
+            }
+            let canonical = crate::envvars::validate(&pairs).map_err(|e| format!("pinned environment: {e}"))?;
+            if canonical != pairs {
+                return Err("the pinned environment is not in canonical order".into());
+            }
+            canonical
+        } else {
+            Vec::new()
+        };
         if parts.next().is_some() {
             return Err("unexpected trailing fields".into());
         }
@@ -110,6 +142,7 @@ impl ReleaseConfig {
             memory_bytes,
             nano_cpus,
             pids,
+            env,
         })
     }
 
@@ -124,6 +157,7 @@ impl ReleaseConfig {
             memory_bytes: 256 * 1024 * 1024,
             nano_cpus: 500_000_000,
             pids: 64,
+            env: Vec::new(),
         }
     }
 }
@@ -147,10 +181,41 @@ mod tests {
             assert!(ReleaseConfig::decode(bad).is_err(), "{bad}");
         }
         assert!(ReleaseConfig::decode(&format!("{};extra=1", c.encode())).is_err());
+        let mut e = c.clone();
+        // values that stress the field and entry separators
+        e.env = vec![("A".into(), "".into()), ("B".into(), "x=y;z,w".into())];
+        let enc = e.encode();
+        assert!(enc.starts_with("v2;") && !enc.contains(['\t', '\n']), "{enc}");
+        assert_eq!(ReleaseConfig::decode(&enc).unwrap(), e);
+        assert!(c.encode().starts_with("v1;"), "no environment keeps the legacy form");
+        assert!(
+            ReleaseConfig::decode(&enc.replace("v2;", "v1;")).is_err(),
+            "v1 has no env field"
+        );
+        assert!(ReleaseConfig::decode(&format!("{};env=", c.encode().replace("v1;", "v2;"))).is_err());
+        let out_of_order = format!("{};env={},{}", c.encode().replace("v1;", "v2;"), hex("B=1"), hex("A=1"));
+        assert!(ReleaseConfig::decode(&out_of_order).is_err());
+        let reserved = format!(
+            "{};env={}",
+            c.encode().replace("v1;", "v2;"),
+            hex("HARPOON_DEPLOYMENT_MARKER=x")
+        );
+        assert!(ReleaseConfig::decode(&reserved).is_err());
         let tag_id = c.encode().replace(&hex(&c.image_id), &hex("latest"));
         assert!(
             ReleaseConfig::decode(&tag_id).is_err(),
             "a tag is not an exact image id"
         );
+    }
+
+    /// A pin written by the build that predates `env` (taken from a real journal): it decodes with an
+    /// empty environment and encodes back to exactly the same text, so old snapshots never change.
+    #[test]
+    fn a_pin_from_before_the_environment_existed_decodes_and_re_encodes_unchanged() {
+        let legacy = "v1;img=7368613235363a36383738303733393738313035613637303439363031623233386331366132656634653135363265663162613633306365363237306430383839323234323166;tag=686172706f6f6e2f6170705f30316d3661683763316867323168376e783235383830686132633a6465705f30314d3641483835473948523745395248374d323535535350342d3038313932393261343663356638633165393332653633363432396230376330;cport=8080;hport=38002;path=2f6865616c7468;expect=2xx;interval=500;ok=2;deadline=60000;mem=268435456;cpu=500000000;pids=64";
+        let c = ReleaseConfig::decode(legacy).unwrap();
+        assert!(c.env.is_empty());
+        assert_eq!(c.host_port, 38002);
+        assert_eq!(c.encode(), legacy);
     }
 }
