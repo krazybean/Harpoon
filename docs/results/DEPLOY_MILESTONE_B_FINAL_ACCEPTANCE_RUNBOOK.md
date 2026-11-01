@@ -54,7 +54,7 @@ the container publishing that port.
 | S6 | `reconcile` dry run, then `--apply` | remove only the failed candidate's verified container and lease |
 | S7 L5 | `rollback --to <A1 release> --confirm-rollback` (acceptance) | preliminary create/remove from A1's retained image; stop restored A2; create+start A1' from A1's pin |
 | S8 L7 | with Harpoon CLI idle: `mv` the dedicated runtime directory aside (rename, same filesystem); `status --docker-socket`; `mv` it back; hash; then copy, corrupt the copy, `status --runtime-dir <copy>` | **none** (read-only discovery) |
-| S9 P1 | alternate direct and Harpoon builds (section 5) | per run: one image (removed by id) and, for Harpoon runs, a transient preliminary container |
+| S9 P1 | alternate direct and Harpoon builds (section 5); per-iteration cleanup (5.4) | per run: one image (removed by exact id after a dry run/inspect) and, for Harpoon runs, a transient preliminary container created and removed |
 | S10 P2 | `ps` evidence (section 6) | none |
 | S11 | dry-run-first cleanup (section 7) | remove only session-owned resources by exact id |
 
@@ -75,20 +75,73 @@ Port numbers are read from each plan output, never assumed.
   exits 4 (fail closed) and the original is byte-identical afterwards.
 - **P1:** see section 5. **P2:** see section 6.
 
-## 5. P1 build overhead (decision recorded: no `--no-cache` exists)
+## 5. P1 build overhead
 
-Harpoon's build runs `buildx build --load --progress=plain --pull=false --label ... --iidfile` with the default cache; it has no
-`--no-cache` option, so "same cache policy" means default cache on both sides. To make every build do real work, each iteration gets
-its own cache-busting stamp file (same size) in an otherwise identical copy of one small Dockerfile context (`alpine:3.22`, already
-local). Direct builds use the same bundled buildx binary and the same flags through the same socket. Order: D H D H ... with one
-discarded warm-up of each, then N = 5 each; Harpoon runs are unconfirmed `replace` on A (builds the candidate and its preliminary
-check, then stops), so no serving release changes.
+Harpoon's build runs the bundled Buildx with `build --load --progress=plain --pull=false --label ... --iidfile F -t TAG -f
+Dockerfile CONTEXT`, a cleared environment (`PATH=/usr/bin:/bin`, `HOME` and `DOCKER_CONFIG` an empty scratch directory,
+`DOCKER_HOST=unix://<socket>`) and the default cache. It has no `--no-cache` option, so "same cache policy" means the default
+cache on both sides.
 
-Report separately, per run and as medians: (1) direct wall clock; (2) Harpoon **build step** duration from the journal (the step's
-started/finished milliseconds, field triples after the release id in the snapshot record); (3) Harpoon **source preparation** step
-duration; (4) the whole `replace` wall clock (includes the preliminary check; informational). **Acceptance criterion: median(2) /
-median(1) <= 1.2.** (3) and (4) are reported but not part of the criterion; if the ratio is within 1.2 only when source preparation
-is excluded, say so explicitly. Remove each image by exact id (dry run first).
+### 5.1 Three metrics, reported separately
+
+| Metric | Definition | How it is taken |
+|---|---|---|
+| **A** direct | Buildx invocation to image completion | host wall clock around one direct `docker-buildx build` (identical argv and environment, see 5.3) up to process exit with the iidfile written |
+| **B** Harpoon internal build step | the engine's `build` step duration | the step's `finished_ms - started_ms` in the journal (field triples after the release id in the snapshot record; extractor validated offline against a simulated journal before the session) |
+| **C** Harpoon end-to-end build path | CLI invocation to image-build completion, **including** process start, journal open, source preparation and validation, planning, **excluding** the preliminary and final health checks | `build.finished_ms - invoke_ms`, where `invoke_ms` is the host epoch time read immediately before the CLI is executed (same clock as the journal's) |
+| **D** (informational) | whole `replace` wall time | host wall clock around the command; includes the preliminary check; not part of any verdict |
+
+Scope note: B is whatever the engine does inside its `build` step (the Buildx run and the post-build image verification); it is
+reported as such and not relabelled. Source preparation duration (its own step) is also recorded separately.
+
+Ratios (medians of N=5): **B / A** (internal build-step ratio) and **C / A** (conservative end-to-end build-path ratio). Individual
+per-pair ratios H_i / D_i are listed too, in run order, never selected.
+
+### 5.2 Verdict rules (fixed before the session; nothing is re-run to improve a number)
+
+| Outcome | Result |
+|---|---|
+| all equivalence checks pass, **B/A <= 1.2 and C/A <= 1.2** | **PASS** |
+| B/A <= 1.2 and C/A > 1.2 | **NOT PASSED**: the internal build step meets 1.2x, the end-to-end build path does not. Both numbers are reported; B/A alone never claims the requirement |
+| B/A > 1.2 | **FAIL** |
+| any equivalence check fails, any run exits non-zero or is aborted, or the first direct warm-up is outside 2-60 s | **INCONCLUSIVE** (recorded as such; not retried inside the session) |
+
+### 5.3 Equivalence preconditions (all recorded; any failure makes P1 inconclusive)
+
+- **One Dockerfile, one meaningful workload.** `FROM alpine:3.22` (local, never pulled), `COPY srv.sh`, `COPY stamp /stamp`, then one
+  `RUN` that hashes 512 MiB of zeros and `/stamp` (`dd if=/dev/zero bs=1M count=512 | sha256sum - > /z && sha256sum /stamp /z >
+  /stamp.sum`), then the same `CMD` as the fixture app, so Harpoon's preliminary check can pass. The size is fixed before the session
+  and is not tuned afterwards. SHA-256 of the Dockerfile and `srv.sh` are identical for every run.
+- **The cache-busting input is consumed.** `stamp` is a fresh random 4 KiB file written immediately before each build, different
+  content and same size, in an otherwise identical context copy. Proof per run, on both sides: the produced image's last layer digest
+  is unique across all runs, and for the direct runs the plain progress shows the `COPY stamp` and the `RUN` step executed (not
+  `CACHED`). A repeated digest or a cached step makes P1 inconclusive.
+- **Same builder, socket, base image, cache policy.** The same Buildx binary (path and SHA-256 recorded), the same socket, the
+  identical cleared environment and argv as above except: the tag, the iidfile path and the labels (Harpoon's three ownership
+  labels versus one `p1.benchmark=direct` label, because Harpoon's keys on a non-Harpoon image would confuse ownership checks), and
+  the same `alpine:3.22` image id before and after. Default cache on both sides; no `--no-cache`, no `--pull`.
+- **Same context content.** Harpoon confines and copies the context; the direct run builds a directory with the same files and
+  sizes. The file list and sizes of both are recorded and must match.
+- **Order and counts.** Strictly alternating D, H, D, H ... starting with D; one discarded warm-up of each, then five measured
+  runs of each (ten measurements plus two warm-ups). The warm-ups are recorded but excluded from the statistics.
+- **Raw data kept.** One CSV row per run: kind, run number, invoke epoch ms, exit status, A or (B, source-prep, C, D), image id,
+  last-layer digest, stamp SHA-256. The report gives all individual values, min / median / max / mean / standard deviation per
+  metric, and the per-pair ratios. No run is dropped or repeated; if a run is disturbed (a stop condition), P1 is inconclusive.
+
+### 5.4 Cleanup of every benchmark image
+
+- **Harpoon runs** (unconfirmed `replace`: builds the candidate, runs the preliminary check, releases the preliminary container and
+  lease, stops). After each run: `cleanup-image --deployment D --image I` as a **dry run** (it must report exactly the recorded id,
+  "no container, running or stopped, uses it", force=false); only then the same command with `--apply` and the authorization flag.
+  Proven offline: the unconfirmed run's deployment is terminal and not succeeded, its other resources are released, the dry run writes
+  nothing, apply removes exactly that image by id and leaves the serving release's image and the bystander untouched, and a repeat
+  is a no-op (`test(deploy-cli)`, PR #139).
+- **Direct runs.** These images are not in Harpoon's journal, so `cleanup-image` cannot see them. Each is removed by exactly one
+  non-forcing, non-pruning `DELETE /images/<full id>?force=false&noprune=true` **after** a read-only inspect confirms: the exact id
+  from the iidfile, the `p1.benchmark=direct` label, one tag, and no container uses it. This is not a prune and not a force; it needs
+  to be named in the written authorization.
+- **Rule.** If any benchmark image cannot be removed by these supported steps (a dry run refuses, an inspect does not match, Docker
+  refuses the delete), **stop the campaign**. No `rmi -f`, no prune, no manual container removal, no retry with other flags.
 
 ## 6. P2 resident process
 
@@ -119,7 +172,7 @@ one (identical image, env and port inside the container); the L3 original baseli
 
 `~/harpoon-b-acceptance-evidence/L567-<date>/` (0700), with: `vars.sh`, `NOTES.md`, `SHA256SUMS`, `00-preflight/` (baseline JSON,
 pids, ports, binary SHAs and `--*-info`, shipping refusals), `01-B/`, `02-A1/`, `03-L6/`, `04-L5-replace/`, `05-L5-fault-restore/`,
-`06-reconcile/`, `07-L5-rollback/`, `08-L7/`, `09-P1/` (per-run timings CSV, medians), `10-P2/`, `11-cleanup/`, `final/` (inventory
+`06-reconcile/`, `07-L5-rollback/`, `08-L7/`, `09-P1/` (raw per-run CSV, equivalence record, per-pair ratios, statistics, verdict), `10-P2/`, `11-cleanup/`, `final/` (inventory
 diff against baseline), `journal/` (a copy and hash after every step). Each step directory holds `cmd.txt`, `stdout`, `stderr`,
 `exit`, `before-*.json`, `after-*.json`, `docker-requests-note.txt`.
 
