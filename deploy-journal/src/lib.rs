@@ -131,6 +131,8 @@ pub struct Restored {
     pub ledger: Ledger,
     /// Pauses, held events and resume decisions (empty for a store that never recorded any).
     pub control: harpoon_deploy::control::ControlState,
+    /// Configuration definitions, saved secret versions and snapshots (references, never values).
+    pub config: harpoon_deploy::config::ConfigState,
     /// A torn final write that was (or, read-only, would be) discarded.
     pub discarded_tail_bytes: usize,
     /// Deployments newly marked interrupted by this open. Empty on every later open.
@@ -300,6 +302,7 @@ impl<W: Wal> FileJournal<W> {
                 deployments: state.deployments,
                 ledger: state.ledger,
                 control: state.control,
+                config: state.config,
                 discarded_tail_bytes: discarded,
                 startup: StartupReport::default(),
             },
@@ -406,6 +409,7 @@ pub fn read_only(dir: &Path) -> Result<Restored, OpenError> {
         deployments: state.deployments,
         ledger: state.ledger,
         control: state.control,
+        config: state.config,
         discarded_tail_bytes: match rec.tail {
             Tail::Clean => 0,
             Tail::PartialDiscarded(n) => n,

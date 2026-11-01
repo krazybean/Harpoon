@@ -1,0 +1,10 @@
+[package]
+name = "harpoon-deploy-keychain"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "macOS Keychain adapter for Harpoon deployment secrets (Milestone C): the engine's SecretStore over Security.framework. No registry dependencies."
+
+# The engine defines the SecretStore trait; this crate only implements it.
+[dependencies]
+harpoon-deploy = { path = "../deploy" }
