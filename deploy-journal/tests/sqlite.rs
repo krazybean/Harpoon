@@ -314,3 +314,131 @@ fn a_pinned_environment_round_trips_through_sqlite_and_the_legacy_form_is_unchan
     assert!(SqliteJournal::open(&dir).is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---------------------------------------------------------------- B14: pauses, held events, decisions
+
+mod control_records {
+    use super::*;
+    use harpoon_deploy::control::*;
+    use harpoon_deploy::state::{RecoveryOutcome, Step};
+
+    fn failed(id: &str, app: &ApplicationId, at: u64) -> Deployment {
+        let mut d = Deployment::new(id.parse().unwrap(), app.clone(), Trigger::Cli, at);
+        d.transition(DeploymentStatus::Queued, at + 1).unwrap();
+        d.transition(DeploymentStatus::Running, at + 2).unwrap();
+        d.start_step(Step::Cutover, at + 3).unwrap();
+        d.begin_cutover(at + 4).unwrap();
+        d.fail_cutover(at + 5).unwrap();
+        d.start_recovery(60_000, at + 6).unwrap();
+        d.finish_recovery(RecoveryOutcome::Restored, at + 7)
+            .unwrap();
+        d.transition(DeploymentStatus::Failed, at + 8).unwrap();
+        d
+    }
+
+    fn sequence(dir: &std::path::Path) -> (ControlState, Vec<Deployment>) {
+        let (app, _) = ids();
+        let deps = vec![failed("dep_00000000000000000000000010", &app, 100)];
+        let (mut db, restored) = SqliteJournal::open(dir).unwrap();
+        assert_eq!(restored.control, ControlState::default());
+        for d in &deps {
+            db.persist(d).unwrap();
+        }
+        let mut ctl = ControlState::default();
+        for (id, rev, t) in [("d1", "r1", 300), ("d2", "r2", 310), ("d3", "r3", 320)] {
+            let e = Incoming {
+                app: &app,
+                delivery_id: id,
+                source: "webhook",
+                revision: rev,
+                received_ms: t,
+            };
+            assert_eq!(ingest(&mut db, &deps, &mut ctl, e).unwrap(), Ingress::Held);
+        }
+        resume(&mut db, &deps, &mut ctl, &app, Choice::Newest, 400).unwrap();
+        (ctl, deps)
+    }
+
+    #[test]
+    fn pauses_events_and_decisions_replay_exactly_after_a_restart_and_legacy_stores_stay_readable()
+    {
+        let dir = temp_dir();
+        let (want, _) = sequence(&dir);
+        assert_eq!(want.pauses.len(), 1);
+        assert_eq!(want.events.len(), 3);
+        // read-only and writer opens both reconstruct the same state
+        assert_eq!(SqliteJournal::read_only(&dir).unwrap().control, want);
+        let (_db, again) = SqliteJournal::open(&dir).unwrap();
+        assert_eq!(again.control, want);
+        drop(_db);
+        // a store written before these records existed has none and reads as before
+        let old = temp_dir();
+        let (app, dep) = ids();
+        let mut d = Deployment::new(dep, app, Trigger::Cli, 1);
+        d.transition(DeploymentStatus::Queued, 2).unwrap();
+        {
+            let (mut db, _) = SqliteJournal::open(&old).unwrap();
+            db.persist(&d).unwrap();
+        }
+        let r = SqliteJournal::read_only(&old).unwrap();
+        assert_eq!(r.control, ControlState::default());
+        assert_eq!(r.deployments.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(old);
+    }
+
+    #[test]
+    fn damaged_or_inconsistent_control_state_fails_closed() {
+        let dir = temp_dir();
+        let (_, _) = sequence(&dir);
+        let bytes = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        // flip a byte inside a stored event record: its checksum no longer verifies
+        let at = bytes.windows(9).position(|w| w == b"\tevent\t1\t").unwrap() + 20;
+        let mut bad = bytes.clone();
+        bad[at] = if bad[at] == b'a' { b'b' } else { b'a' };
+        let path = dir.join(SQLITE_FILE);
+        std::fs::write(&path, &bad).unwrap();
+        assert!(SqliteJournal::read_only(&dir).is_err());
+        assert!(SqliteJournal::open(&dir).is_err());
+        // an intact record that contradicts the state (a delivery recorded twice) is refused too
+        std::fs::write(&path, &bytes).unwrap();
+        let (app, _) = ids();
+        let dup = ControlRecord::Event(EventRec {
+            app,
+            delivery: "d1".into(),
+            source: "webhook".into(),
+            revision: "r-other".into(),
+            received_ms: 1,
+        });
+        {
+            let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+            db.append_unchecked("control", &encode(&dup)).unwrap();
+        }
+        let e = SqliteJournal::read_only(&dir).unwrap_err();
+        assert!(e.0.contains("recorded twice"), "{}", e.0);
+        assert!(SqliteJournal::open(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_writer_cannot_touch_the_event_history() {
+        let dir = temp_dir();
+        let (want, _) = sequence(&dir);
+        let (held, _) = SqliteJournal::open(&dir).unwrap();
+        let before = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || SqliteJournal::open(&d).err().map(|e| e.0))
+            })
+            .collect();
+        for h in handles {
+            let e = h.join().unwrap().expect("a second writer is refused");
+            assert!(e.contains("another Harpoon process holds"), "{e}");
+        }
+        assert_eq!(std::fs::read(dir.join(SQLITE_FILE)).unwrap(), before);
+        assert_eq!(SqliteJournal::read_only(&dir).unwrap().control, want);
+        drop(held);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

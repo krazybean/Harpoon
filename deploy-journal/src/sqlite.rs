@@ -255,6 +255,7 @@ fn restore(db: &Db) -> Result<Restored, SqliteOpenError> {
     Ok(Restored {
         deployments: state.deployments,
         ledger: state.ledger,
+        control: state.control,
         discarded_tail_bytes: 0,
         startup: StartupReport::default(),
     })
@@ -368,6 +369,7 @@ impl SqliteJournal {
             Line::Header { .. } => Ok(()),
             Line::Snapshot(d) => self.insert_row("snapshot", &encode_snapshot(d)),
             Line::Ledger(r) => self.insert_row("ledger", &encode_ledger(r)),
+            Line::Control(c) => self.insert_row("control", &harpoon_deploy::control::encode(c)),
         });
         match imported.and_then(|()| self.db.exec("COMMIT").map_err(|e| e.to_string())) {
             Ok(()) => Ok(()),
@@ -426,5 +428,8 @@ impl Journal for SqliteJournal {
     }
     fn record(&mut self, r: &LedgerRecord) -> Result<(), JournalError> {
         self.insert("ledger", &encode_ledger(r))
+    }
+    fn control(&mut self, r: &harpoon_deploy::control::ControlRecord) -> Result<(), JournalError> {
+        self.insert("control", &harpoon_deploy::control::encode(r))
     }
 }

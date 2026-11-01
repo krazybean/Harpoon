@@ -31,9 +31,13 @@ const MAGIC: &str = "harpoon-journal";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
-    Header { version: u32 },
+    Header {
+        version: u32,
+    },
     Snapshot(Box<Deployment>),
     Ledger(LedgerRecord),
+    /// A pause, held event or resume decision (see [`crate::control`]).
+    Control(crate::control::ControlRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +504,14 @@ pub fn decode_line(line: &str) -> Result<Line, DecodeError> {
                 decode_snapshot(&f).map(|d| Line::Snapshot(Box::new(d)))
             }
         }
+        "pause" | "event" | "resume" => {
+            let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
+            if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
+                return err("checksum mismatch");
+            }
+            let f: Vec<&str> = body.split('\t').collect();
+            crate::control::decode(&f).map(Line::Control).map_err(DecodeError)
+        }
         _ => codec::decode(line)
             .map(Line::Ledger)
             .map_err(|e| DecodeError(e.0.to_string())),
@@ -619,6 +631,8 @@ pub struct State {
     /// The latest snapshot of each deployment, in order of first appearance.
     pub deployments: Vec<Deployment>,
     pub ledger: Ledger,
+    /// Pauses, held events and resume decisions, rebuilt in order.
+    pub control: crate::control::ControlState,
 }
 
 fn bad_ledger(i: usize, e: LedgerError) -> FormatError {
@@ -686,7 +700,14 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
                 st.ledger.apply(r).map_err(|e| bad_ledger(ledger_idx, e))?;
                 ledger_idx += 1;
             }
+            Line::Control(c) => st
+                .control
+                .apply(c)
+                .map_err(|e| FormatError::Inconsistent(format!("control record does not apply: {e}")))?,
         }
     }
+    st.control
+        .check_against(&st.deployments)
+        .map_err(|e| FormatError::Inconsistent(format!("control state: {e}")))?;
     Ok(st)
 }

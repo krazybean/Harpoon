@@ -34,6 +34,13 @@ pub trait Journal {
     fn persist(&mut self, d: &Deployment) -> Result<(), JournalError>;
     /// Append one resource-ledger record (intent, receipt, cleanup attempt/result).
     fn record(&mut self, r: &LedgerRecord) -> Result<(), JournalError>;
+    /// Append one pause, held-event or resume-decision record (see [`crate::control`]). A journal
+    /// that cannot store them says so; it never pretends.
+    fn control(&mut self, _r: &crate::control::ControlRecord) -> Result<(), JournalError> {
+        Err(JournalError::Io(
+            "this journal cannot store pause and event records".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +57,7 @@ pub enum JournalError {
 pub struct MemoryJournal {
     pub snapshots: Vec<Deployment>,
     pub ledger_records: Vec<LedgerRecord>,
+    pub control_records: Vec<crate::control::ControlRecord>,
     writes: usize,
     crash_at: Option<usize>,
     trace: Option<Trace>,
@@ -125,6 +133,12 @@ impl Journal for MemoryJournal {
             t.borrow_mut().push(Op::Write(r.clone()));
         }
         self.ledger_records.push(r.clone());
+        Ok(())
+    }
+
+    fn control(&mut self, r: &crate::control::ControlRecord) -> Result<(), JournalError> {
+        self.gate()?;
+        self.control_records.push(r.clone());
         Ok(())
     }
 }
