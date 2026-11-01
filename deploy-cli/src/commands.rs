@@ -12,9 +12,7 @@ use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Ledger, Observed, ResourceKind,
 };
 use harpoon_deploy::ports::{self, Occupancy, Purpose};
-use harpoon_deploy::state::{
-    trigger_pauses, CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger,
-};
+use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::DockerApi;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
@@ -44,6 +42,8 @@ pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         "replace" => replace(p, out),
         "restore" => restore(p, out),
         "releases" => releases(p, out),
+        "resume" => resume_cmd(p, out),
+        "events" => events_cmd(p, out),
         "rollback" => rollback(p, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
@@ -576,24 +576,7 @@ fn status(p: &Parsed, out: &mut String) -> R {
             );
         }
     }
-    for pz in trigger_pauses(&r.deployments) {
-        if let Some(t) = &pz.rollback {
-            let _ = writeln!(
-                out,
-                "automatic triggers paused for application {}: deployment {} rolled the application back to release {t}; automatic deployment does not resume by itself and there is no `resume` yet",
-                pz.application, pz.deployment,
-            );
-            continue;
-        }
-        let _ = writeln!(
-            out,
-            "automatic triggers paused for application {}: deployment {} {} ({}); there is no `resume` yet",
-            pz.application,
-            pz.deployment,
-            if pz.incomplete { "began a cutover that never finished" } else { "failed its cutover" },
-            pz.recovery.map(|r| format!("recovery {}", r.as_str())).unwrap_or_else(|| "no recovery recorded".into()),
-        );
-    }
+    print_pauses_and_events(out, &r);
     for d in r.deployments.iter().filter(|d| !d.status.is_terminal()) {
         let _ = writeln!(
             out,
@@ -707,6 +690,110 @@ fn serving_caveat(
     ""
 }
 
+/// Pauses in force, held events and decisions, per application. Everything here comes from the
+/// journal's records: it says nothing about Docker, and a decision is never described as a deployment.
+fn print_pauses_and_events(out: &mut String, r: &Restored) {
+    use harpoon_deploy::control::{active_pauses, EventStatus, PauseKind};
+    let active = active_pauses(&r.deployments, &r.control);
+    let mut apps: Vec<ApplicationId> = active.iter().map(|p| p.app.clone()).collect();
+    apps.extend(r.control.events.iter().map(|e| e.rec.app.clone()));
+    apps.sort();
+    apps.dedup();
+    for app in apps {
+        let mine: Vec<_> = active.iter().filter(|p| p.app == app).collect();
+        for p in &mine {
+            let dep = r.deployments.iter().find(|d| d.id == p.origin);
+            // The recovery outcome can arrive after the pause was recorded (an explicit restoration
+            // later); show what the deployment record says now. `since` stays the recorded time.
+            let live = harpoon_deploy::control::pause_candidates(&r.deployments)
+                .into_iter()
+                .find(|c| c.origin == p.origin)
+                .map(|c| c.context)
+                .unwrap_or_else(|| p.context.clone());
+            let what = match p.kind {
+                PauseKind::Rollback => format!(
+                    "rolled the application back to release {}; automatic deployment does not resume by itself",
+                    dep.and_then(|d| d.rollback_to.as_ref()).map(|t| t.to_string()).unwrap_or_else(|| "?".into())
+                ),
+                PauseKind::InterruptedCutover => format!("began a cutover that never finished ({live})"),
+                PauseKind::FailedCutover => format!("failed its cutover ({live})"),
+            };
+            let _ = writeln!(
+                out,
+                "automatic triggers paused for application {app}: deployment {} {what}; since {} ms (epoch), {}",
+                p.origin,
+                p.since_ms,
+                if p.recorded { "recorded" } else { "derived from the deployment record, not yet written as a pause record (the next writer records it)" }
+            );
+        }
+        let held = r.control.held(&app);
+        let pending = r.control.pending_selection(&app);
+        if mine.is_empty() && r.control.events_of(&app).next().is_none() {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "application {app}: {} — held events: {}",
+            if mine.is_empty() {
+                "not paused"
+            } else {
+                "PAUSED"
+            },
+            held.len()
+        );
+        for e in &held {
+            let _ = writeln!(
+                out,
+                "  held: revision {} delivery {} source {} received {} ms",
+                e.rec.revision, e.rec.delivery, e.rec.source, e.rec.received_ms
+            );
+        }
+        if let Some(e) = pending {
+            let _ = writeln!(
+                out,
+                "  PENDING ATTENDED EXECUTION: revision {} (delivery {}) was selected at {} ms. NOTHING HAS BEEN DEPLOYED: Milestone B has no source executor. The application stays blocked until this selection is dismissed.",
+                e.rec.revision,
+                e.rec.delivery,
+                e.decided_ms.unwrap_or(0)
+            );
+        }
+        for e in r
+            .control
+            .events_of(&app)
+            .filter(|e| e.status != EventStatus::Held && e.status != EventStatus::Selected)
+        {
+            let _ = writeln!(
+                out,
+                "  history: revision {} delivery {} {}{} at {} ms",
+                e.rec.revision,
+                e.rec.delivery,
+                e.status.as_str(),
+                match (e.status, &e.related) {
+                    (EventStatus::Superseded(w), Some(by)) =>
+                        format!(" by delivery {by} ({})", w.as_str()),
+                    (EventStatus::Superseded(w), None) => format!(" ({})", w.as_str()),
+                    _ => String::new(),
+                },
+                e.decided_ms.unwrap_or(0)
+            );
+        }
+        if !mine.is_empty() || !held.is_empty() || pending.is_some() {
+            let _ = writeln!(
+                out,
+                "  actions (each records a decision and deploys nothing): {}",
+                if pending.is_some() || held.is_empty() {
+                    format!("harpoon-deploy resume --app {app} --dismiss")
+                } else {
+                    format!(
+                        "harpoon-deploy resume --app {app} --dismiss | --newest | --revision REV (held revisions: {})",
+                        held.iter().map(|e| e.rec.revision.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            );
+        }
+    }
+}
+
 fn state_word(s: &EntryState) -> &'static str {
     match s {
         EntryState::Intended => "intended",
@@ -724,6 +811,161 @@ fn disposition_word(d: Disposition) -> &'static str {
         Disposition::RemoveOnFailure => "remove-on-failure",
         Disposition::RemoveAlways => "remove-always",
     }
+}
+
+// ------------------------------------------------------------------ resume, events
+
+/// One explicit decision about a paused application's held events. It writes journal records and
+/// nothing else: it never contacts Docker, builds, starts, stops or deploys anything.
+fn resume_cmd(p: &Parsed, out: &mut String) -> R {
+    use harpoon_deploy::control::{self, Choice, ControlError, Resumed};
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let app: ApplicationId = p
+        .value("app")
+        .ok_or_else(|| Fail::usage("resume needs --app APPLICATION_ID"))?
+        .parse()
+        .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?;
+    let choice = match (p.switch("dismiss"), p.switch("newest"), p.value("revision")) {
+        (true, false, None) => Choice::Dismiss,
+        (false, true, None) => Choice::Newest,
+        (false, false, Some(r)) => Choice::Revision(r.to_string()),
+        _ => {
+            return Err(Fail::usage(
+                "resume needs exactly one of --dismiss, --newest or --revision REV; Harpoon never guesses a revision",
+            ))
+        }
+    };
+    // Look before opening the writer: a refusal must not create a journal.
+    let Some(existing) = store::read_restored(&rt)? else {
+        return Err(Fail::refused(format!(
+            "there is no deployment store at {}; nothing is paused or held here",
+            rt.journal_dir().display()
+        )));
+    };
+    let kind = rt.kind()?.unwrap_or(Kind::Docker);
+    let (mut journal, restored) = store::open_writer(&rt, kind)?;
+    let mut ctl = restored.control.clone();
+    let deployments = restored.deployments;
+    drop(existing);
+    let _ = writeln!(out, "resume for application {app}: records a decision only; nothing is deployed, built, started or stopped, and Docker is not contacted");
+    match control::resume(&mut journal, &deployments, &mut ctl, &app, choice, now_ms()) {
+        Ok(Resumed::Dismissed { events, pauses }) => {
+            let _ = writeln!(
+                out,
+                "dismissed {events} event(s) (kept in the history) and cleared {pauses} pause(s). Automatic triggers are no longer held for this application; a new failed cutover or rollback pauses it again."
+            );
+        }
+        Ok(Resumed::Selected {
+            delivery,
+            revision,
+            superseded,
+        }) => {
+            let _ = writeln!(
+                out,
+                "selected revision {revision} (delivery {delivery}); {superseded} other held event(s) were recorded as superseded, none was dropped.\n\
+                 NOTHING HAS BEEN DEPLOYED. Milestone B has no source executor, so this selection is pending attended execution. The application stays paused and blocked; `resume --app {app} --dismiss` abandons the selection and clears the pause."
+            );
+        }
+        Ok(Resumed::AlreadySelected { delivery }) => {
+            let _ = writeln!(out, "that revision is already selected (delivery {delivery}) and pending attended execution; nothing was written");
+        }
+        Ok(Resumed::NothingToDo) => {
+            let _ = writeln!(out, "nothing to resume: the application is not paused and has no held event; nothing was written");
+        }
+        Err(ControlError::Invalid(m)) => return Err(Fail::usage(m)),
+        Err(ControlError::Conflict(m)) => {
+            return Err(Fail::refused(format!("{m}. Nothing was changed.")))
+        }
+        Err(ControlError::Journal(e)) => {
+            return Err(Fail::journal(format!(
+                "the decision could not be recorded: {e:?}"
+            )))
+        }
+    }
+    Ok(exit::OK)
+}
+
+/// Read-only: every pause record and every event with its status and the decision that settled it.
+fn events_cmd(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let only: Option<ApplicationId> = match p.value("app") {
+        None => None,
+        Some(a) => Some(
+            a.parse()
+                .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?,
+        ),
+    };
+    let Some(r) = store::read_restored(&rt)? else {
+        let _ = writeln!(
+            out,
+            "no deployment store at {}; no pause or event is recorded here",
+            rt.journal_dir().display()
+        );
+        return Ok(exit::OK);
+    };
+    let _ = writeln!(
+        out,
+        "pause and event history (from the journal; nothing here says what Docker is running)"
+    );
+    for pr in r
+        .control
+        .pauses
+        .iter()
+        .filter(|x| only.as_ref().is_none_or(|a| *a == x.app))
+    {
+        let cleared = r
+            .control
+            .resumes
+            .iter()
+            .find(|x| x.cleared.contains(&pr.origin));
+        let _ = writeln!(
+            out,
+            "pause: application {} deployment {} {} since {} ms (as recorded: {}) — {}",
+            pr.app,
+            pr.origin,
+            pr.kind.as_str(),
+            pr.at_ms,
+            pr.context,
+            match cleared {
+                Some(c) => format!("cleared by a decision at {} ms", c.at_ms),
+                None => "in force".into(),
+            }
+        );
+    }
+    for e in r
+        .control
+        .events
+        .iter()
+        .filter(|x| only.as_ref().is_none_or(|a| *a == x.rec.app))
+    {
+        let _ = writeln!(
+            out,
+            "event: application {} delivery {} source {} revision {} received {} ms — {}{}",
+            e.rec.app,
+            e.rec.delivery,
+            e.rec.source,
+            e.rec.revision,
+            e.rec.received_ms,
+            e.status.as_str(),
+            match (e.status, &e.related, e.decided_ms) {
+                (harpoon_deploy::control::EventStatus::Selected, _, Some(t)) =>
+                    format!(" at {t} ms (pending attended execution; nothing deployed)"),
+                (harpoon_deploy::control::EventStatus::Superseded(w), by, Some(t)) => format!(
+                    " at {t} ms ({}{})",
+                    w.as_str(),
+                    by.as_ref()
+                        .map(|b| format!(", by delivery {b}"))
+                        .unwrap_or_default()
+                ),
+                (_, _, Some(t)) => format!(" at {t} ms"),
+                _ => String::new(),
+            }
+        );
+    }
+    if r.control.pauses.is_empty() && r.control.events.is_empty() {
+        let _ = writeln!(out, "none recorded");
+    }
+    Ok(exit::OK)
 }
 
 // ------------------------------------------------------------------ doctor
@@ -1128,7 +1370,7 @@ fn recover(p: &Parsed, out: &mut String) -> R {
         return Ok(exit::OK);
     }
     let kind = rt.kind()?.unwrap_or(Kind::Docker);
-    let (_j, r) = store::open_writer_recovered(&rt, kind, now_ms())?;
+    let (mut _j, r) = store::open_writer_recovered(&rt, kind, now_ms())?;
     if r.discarded_tail_bytes > 0 {
         let _ = writeln!(
             out,
@@ -1150,7 +1392,15 @@ fn recover(p: &Parsed, out: &mut String) -> R {
         );
     }
     print_lease_and_problems(out, &r);
-    let _ = writeln!(out, "recover changed deployment status only. Docker was not contacted; nothing was removed, adopted, released or redeployed.");
+    if let Ok(Some(now)) = store::read_restored(&rt) {
+        let mut ctl = now.control.clone();
+        if let Ok(n) = harpoon_deploy::control::sync_pauses(&mut _j, &now.deployments, &mut ctl) {
+            if n > 0 {
+                let _ = writeln!(out, "recorded {n} pause record(s): automatic triggers for the application stay paused until `resume`");
+            }
+        }
+    }
+    let _ = writeln!(out, "recover changed deployment status and recorded pauses only. Docker was not contacted; nothing was removed, adopted, released or redeployed.");
     if !unresolved(&r.ledger, &r.deployments).is_empty() {
         let _ = writeln!(out, "next: harpoon-deploy reconcile --runtime-dir {} --docker-socket <path> --resources-dir <dir>", rt.dir.display());
     }
@@ -1447,6 +1697,7 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     })?;
     print_report(out, &d, &report);
     print_prepare_failure(out, "deploy", &d, &report, &rt, simulate, None);
+    record_pauses(out, &rt, &mut journal);
     Ok(
         if report.status == DeploymentStatus::Succeeded && report.is_clean() {
             exit::OK
@@ -1601,6 +1852,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
     })?;
     print_report(out, &d, &report);
     print_prepare_failure(out, "replace", &d, &report, &rt, true, Some(&serving));
+    record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
@@ -1886,6 +2138,7 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
     })?;
     print_report(out, &d, &report);
     print_prepare_failure(out, "rollback", &d, &report, &rt, true, Some(&serving));
+    record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
@@ -2056,6 +2309,7 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         return Ok(exit::REFUSED);
     }
     print_recovery(out, &d);
+    record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         if let Some(ms) = i.duration_ms() {
             let _ = writeln!(out, "measured interruption: {ms} ms (simulated clock)");
@@ -2068,6 +2322,28 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         Some(RecoveryOutcome::Restored | RecoveryOutcome::RestoredUnverified) => exit::OK,
         _ => exit::FAILED,
     })
+}
+
+/// After a command that can end a cutover or a rollback: write the pause record of every
+/// pause-causing deployment that has none (see `harpoon_deploy::control`). The pause is in force
+/// whether or not this succeeds (it is derived from the deployment records), so a failure is a note.
+fn record_pauses(
+    out: &mut String,
+    rt: &Runtime,
+    journal: &mut harpoon_deploy_journal::SqliteJournal,
+) {
+    if let Ok(Some(r)) = store::read_restored(rt) {
+        let mut ctl = r.control.clone();
+        match harpoon_deploy::control::sync_pauses(journal, &r.deployments, &mut ctl) {
+            Ok(0) => {}
+            Ok(n) => {
+                let _ = writeln!(out, "recorded {n} pause record(s): automatic triggers for the application stay paused until `resume`");
+            }
+            Err(e) => {
+                let _ = writeln!(out, "warning: could not write the pause record ({e}); the pause still holds, derived from the deployment records");
+            }
+        }
+    }
 }
 
 /// For a candidate that failed before any cutover: what stayed untouched and the commands that exist.

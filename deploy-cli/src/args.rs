@@ -104,6 +104,16 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "confirm-cutover"],
     },
     Spec {
+        command: "resume",
+        values: &["runtime-dir", "app", "revision"],
+        switches: &["dismiss", "newest"],
+    },
+    Spec {
+        command: "events",
+        values: &["runtime-dir", "app"],
+        switches: &[],
+    },
+    Spec {
         command: "releases",
         values: &["runtime-dir", "app"],
         switches: &[],
@@ -244,6 +254,9 @@ COMMANDS
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
   replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; --simulate only (live replacement is not enabled)
   releases        list an application's retained releases, the one serving, and why any cannot be rolled back to (reads the journal only)
+  resume          record ONE explicit decision for a paused application's held events: --dismiss (clear the pause), --newest or --revision REV
+                  (select a held revision: it deploys NOTHING and the application stays blocked until dismissed). Never contacts Docker
+  events          read-only: pause records and held/selected/dismissed/superseded events with their decisions
   rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); --simulate only (live rollback is not enabled)
   restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); --simulate only (live restoration is not enabled)
   export-journal  copy the journal to a new file for investigation (--to FILE)

@@ -441,4 +441,73 @@ mod control_records {
         drop(held);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// The control sequence is cut after every write (the store keeps exactly a prefix of what a full
+    /// run writes), reopened, and the same requests are made again: the final state is always the
+    /// one an uninterrupted run reaches, and every prefix replays.
+    #[test]
+    fn a_store_cut_after_every_control_write_replays_and_completes_to_the_same_state() {
+        use harpoon_deploy::engine::MemoryJournal;
+        let (app, _) = ids();
+        let deps = vec![failed("dep_00000000000000000000000010", &app, 100)];
+        fn run<J: Journal>(
+            j: &mut J,
+            deps: &[Deployment],
+            ctl: &mut ControlState,
+            app: &ApplicationId,
+        ) {
+            for (id, rev, t) in [
+                ("d1", "r1", 300),
+                ("d2", "r2", 310),
+                ("d3", "r3", 320),
+                ("d2", "r2", 310),
+            ] {
+                let e = Incoming {
+                    app,
+                    delivery_id: id,
+                    source: "webhook",
+                    revision: rev,
+                    received_ms: t,
+                };
+                ingest(j, deps, ctl, e).unwrap();
+            }
+            let _ = resume(j, deps, ctl, app, Choice::Newest, 400);
+            let _ = resume(j, deps, ctl, app, Choice::Dismiss, 410);
+        }
+        let mut reference = MemoryJournal::new();
+        let mut want = ControlState::default();
+        run(&mut reference, &deps, &mut want, &app);
+        let records = reference.control_records.clone();
+        assert_eq!(records.len(), 6, "one pause, three events, two decisions");
+        for n in 0..=records.len() {
+            let dir = temp_dir();
+            {
+                let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+                for d in &deps {
+                    db.persist(d).unwrap();
+                }
+                for r in &records[..n] {
+                    db.control(r).unwrap();
+                }
+            }
+            let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+            assert_eq!(
+                restored.control.pauses.len()
+                    + restored.control.events.len()
+                    + restored.control.resumes.len(),
+                n,
+                "prefix {n} replays"
+            );
+            let mut ctl = restored.control.clone();
+            run(&mut db, &restored.deployments, &mut ctl, &app);
+            drop(db);
+            assert_eq!(ctl, want, "cut after write {n}");
+            assert_eq!(
+                SqliteJournal::read_only(&dir).unwrap().control,
+                want,
+                "and it replays from disk"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
