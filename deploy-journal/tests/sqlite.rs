@@ -388,6 +388,116 @@ mod control_records {
     }
 
     #[test]
+    fn a_valid_checksum_pause_that_contradicts_its_deployment_fails_closed() {
+        let (app, _) = ids();
+        let write = |origin: &str, kind: PauseKind, at_ms: u64| {
+            let dir = temp_dir();
+            let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+            db.persist(&failed("dep_00000000000000000000000010", &app, 100))
+                .unwrap();
+            // a deployment of the same application that caused no pause
+            let mut plain = Deployment::new(
+                "dep_00000000000000000000000011".parse().unwrap(),
+                app.clone(),
+                Trigger::Cli,
+                200,
+            );
+            plain.transition(DeploymentStatus::Queued, 201).unwrap();
+            db.persist(&plain).unwrap();
+            db.control(&ControlRecord::Pause(PauseRec {
+                app: app.clone(),
+                origin: origin.parse().unwrap(),
+                kind,
+                at_ms,
+                context: String::new(),
+            }))
+            .unwrap();
+            drop(db);
+            let r = SqliteJournal::read_only(&dir).map(|_| ());
+            let _ = std::fs::remove_dir_all(dir);
+            r
+        };
+        let ten = "dep_00000000000000000000000010";
+        assert!(write(ten, PauseKind::FailedCutover, 105).is_ok());
+        assert!(write(ten, PauseKind::InterruptedCutover, 104).is_ok());
+        // inside the old interval but not the cutover's persisted start (104): contradiction
+        assert!(write(ten, PauseKind::InterruptedCutover, 103).is_err());
+        assert!(write(ten, PauseKind::InterruptedCutover, 102).is_err());
+        assert!(write(ten, PauseKind::Rollback, 105).is_err());
+        assert!(write(ten, PauseKind::FailedCutover, 106).is_err());
+        assert!(write(
+            "dep_00000000000000000000000011",
+            PauseKind::FailedCutover,
+            201
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn refusals_on_a_legacy_store_write_nothing_and_a_crash_between_pause_and_decision_completes() {
+        let (app, _) = ids();
+        let deps = vec![failed("dep_00000000000000000000000010", &app, 100)];
+        let dir = temp_dir();
+        let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+        db.persist(&deps[0]).unwrap();
+        let mut ctl = restored.control;
+        let file = || std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        let before = file();
+        // not paused for another app, invalid revision, selection with nothing held: zero writes
+        let other: ApplicationId = "app_00000000000000000000000099".parse().unwrap();
+        let e = Incoming {
+            app: &other,
+            delivery_id: "d1",
+            source: "webhook",
+            revision: "r1",
+            received_ms: 1,
+        };
+        assert_eq!(
+            ingest(&mut db, &deps, &mut ctl, e).unwrap(),
+            Ingress::NotPaused
+        );
+        for c in [Choice::Revision("nope".into()), Choice::Newest] {
+            assert!(resume(&mut db, &deps, &mut ctl, &app, c, 5).is_err());
+        }
+        assert_eq!(
+            resume(&mut db, &deps, &mut ctl, &other, Choice::Dismiss, 5).unwrap(),
+            Resumed::NothingToDo
+        );
+        assert_eq!(file(), before, "byte-identical after refusals");
+        drop(SqliteJournal::read_only(&dir).unwrap());
+        assert_eq!(file(), before, "a read-only open and check mutates nothing");
+        assert_eq!(ctl, ControlState::default());
+        // a crash after the pause record and before the decision: reopen, repeat, same end state
+        let pause = ControlRecord::Pause(PauseRec {
+            app: app.clone(),
+            origin: deps[0].id.clone(),
+            kind: PauseKind::FailedCutover,
+            at_ms: 105,
+            context: "recovery restored".into(),
+        });
+        db.control(&pause).unwrap();
+        drop(db);
+        let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+        let mut ctl = restored.control;
+        assert_eq!(ctl.pauses.len(), 1);
+        resume(&mut db, &deps, &mut ctl, &app, Choice::Dismiss, 6).unwrap();
+        drop(db);
+        let done = SqliteJournal::read_only(&dir).unwrap().control;
+        assert_eq!((done.pauses.len(), done.resumes.len()), (1, 1));
+        assert!(!is_paused(&app, &deps, &done));
+        // the same decision from a clean store writes the same two records
+        let dir2 = temp_dir();
+        let (mut db2, _) = SqliteJournal::open(&dir2).unwrap();
+        db2.persist(&deps[0]).unwrap();
+        let mut c2 = ControlState::default();
+        resume(&mut db2, &deps, &mut c2, &app, Choice::Dismiss, 6).unwrap();
+        drop(db2);
+        assert_eq!(SqliteJournal::read_only(&dir2).unwrap().control, done);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[test]
     fn damaged_or_inconsistent_control_state_fails_closed() {
         let dir = temp_dir();
         let (_, _) = sequence(&dir);

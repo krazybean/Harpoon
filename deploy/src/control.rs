@@ -530,14 +530,35 @@ impl ControlState {
     pub fn check_against(&self, deployments: &[Deployment]) -> Result<(), String> {
         let cands = pause_candidates(deployments);
         for p in &self.pauses {
-            match deployments.iter().find(|d| d.id == p.origin) {
-                Some(d) if d.application_id == p.app => {}
-                _ => {
-                    return bad(format!(
-                        "pause names deployment {}, which is not an application deployment of {}",
-                        p.origin, p.app
-                    ))
-                }
+            let Some(c) = cands.iter().find(|c| c.origin == p.origin && c.app == p.app) else {
+                return bad(format!(
+                    "pause names deployment {}, which did not cause a pause of {}",
+                    p.origin, p.app
+                ));
+            };
+            // The kind and time are recorded when the pause is first seen; the deployment may move on
+            // afterwards. An interrupted cutover later recorded as failed is the one legitimate change,
+            // and its pause time must be exactly the cutover's original start (`interruption.started_ms`,
+            // persisted by `begin_cutover`). With no such start on record, nothing can vouch for the
+            // time, so replay fails closed. Every other kind and time is fixed by the deployment record.
+            let started = deployments
+                .iter()
+                .find(|d| d.id == p.origin)
+                .and_then(|d| d.interruption.map(|i| i.started_ms));
+            let compatible = match (p.kind, c.kind) {
+                (a, b) if a == b => p.at_ms == c.at_ms,
+                (PauseKind::InterruptedCutover, PauseKind::FailedCutover) => started == Some(p.at_ms),
+                _ => false,
+            };
+            if !compatible {
+                return bad(format!(
+                    "pause for deployment {} ({} at {}) contradicts its deployment record ({} at {})",
+                    p.origin,
+                    p.kind.as_str(),
+                    p.at_ms,
+                    c.kind.as_str(),
+                    c.at_ms
+                ));
             }
         }
         for r in &self.resumes {
@@ -645,9 +666,19 @@ pub fn sync_pauses<J: Journal>(
     deployments: &[Deployment],
     ctl: &mut ControlState,
 ) -> Result<usize, ControlError> {
+    sync_pauses_where(j, deployments, ctl, None)
+}
+
+/// As [`sync_pauses`], but only for one application (writes nothing for any other).
+fn sync_pauses_where<J: Journal>(
+    j: &mut J,
+    deployments: &[Deployment],
+    ctl: &mut ControlState,
+    only: Option<&ApplicationId>,
+) -> Result<usize, ControlError> {
     let mut n = 0;
     for c in pause_candidates(deployments) {
-        if ctl.pause_of(&c.origin).is_some() {
+        if ctl.pause_of(&c.origin).is_some() || only.is_some_and(|a| *a != c.app) {
             continue;
         }
         let rec = ControlRecord::Pause(PauseRec {
@@ -687,7 +718,8 @@ pub enum Ingress {
 
 /// The one way a trigger integration hands an event to the engine. A paused application records it
 /// as `held` (never dropped); a duplicate delivery changes nothing; a delivery id reused with
-/// different content is refused. Pauses are recorded first, so a held event always has its pause.
+/// different content is refused. This application's pauses are recorded first, so a held event always has its pause; nothing is
+/// written for an unpaused application or for any other application.
 pub fn ingest<J: Journal>(
     j: &mut J,
     deployments: &[Deployment],
@@ -714,10 +746,11 @@ pub fn ingest<J: Journal>(
             )))
         };
     }
-    sync_pauses(j, deployments, ctl)?;
+    // decide from the records alone: NotPaused writes nothing, for any application
     if !is_paused(ev.app, deployments, ctl) {
         return Ok(Ingress::NotPaused);
     }
+    sync_pauses_where(j, deployments, ctl, Some(ev.app))?;
     let r = ControlRecord::Event(rec);
     j.control(&r)?;
     ctl.apply(&r).map_err(ControlError::Conflict)?;
@@ -742,7 +775,10 @@ pub enum Resumed {
     NothingToDo,
 }
 
-/// One developer decision for one application. Refusals (`Err`) write nothing.
+/// One developer decision for one application. Every choice is validated against the records before
+/// anything is written, so a refusal (`Err`) or a no-op writes nothing, even when a legacy deployment
+/// has a pause that no `pause` record yet materialises. Only an accepted dismissal records that
+/// application's pauses (so the history shows what it cleared) and then its one `resume` record.
 pub fn resume<J: Journal>(
     j: &mut J,
     deployments: &[Deployment],
@@ -751,7 +787,6 @@ pub fn resume<J: Journal>(
     choice: Choice,
     now_ms: u64,
 ) -> Result<Resumed, ControlError> {
-    sync_pauses(j, deployments, ctl)?;
     let active: Vec<ActivePause> = active_pauses(deployments, ctl)
         .into_iter()
         .filter(|p| p.app == *app)
@@ -783,6 +818,7 @@ pub fn resume<J: Journal>(
                 cleared: active.iter().map(|p| p.origin.clone()).collect(),
             };
             let n = rec.cleared.len();
+            sync_pauses_where(j, deployments, ctl, Some(app))?;
             let r = ControlRecord::Resume(rec);
             j.control(&r)?;
             ctl.apply(&r).map_err(ControlError::Conflict)?;
