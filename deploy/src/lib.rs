@@ -14,6 +14,7 @@
 
 pub mod backend;
 pub mod buildx;
+pub mod control;
 pub mod engine;
 pub mod envvars;
 pub mod health;

@@ -186,3 +186,10 @@ No live validation of any of this; real 409 behaviour (including child images an
   re-run, `cleanup-image`).
 - `--forwarder-command` defaults to `harpoon`, the live runtime's real process name; the check remains exact.
 - `status` words an unfinished or restored cutover accurately (see the B13 document).
+
+## B14 — pauses, held events, resume
+
+- `resume --app A (--dismiss | --newest | --revision REV)` records one explicit decision; it never contacts Docker and a
+  selection deploys nothing (pending attended execution; the application stays blocked until dismissed). `events [--app A]`
+  lists the pause and event history. `status` shows pauses (with since-time and origin), held events and decisions. There is
+  no command that creates events: the engine's `control::ingest` is the interface a future trigger integration uses.

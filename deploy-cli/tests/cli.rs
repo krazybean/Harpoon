@@ -3014,3 +3014,7 @@ mod state_loss;
 // B13: non-secret runtime variables and preliminary-failure output (offline; fake Docker only).
 #[path = "b13/mod.rs"]
 mod b13;
+
+// B14: durable pauses, held events and explicit resume (offline; fake Docker only to prove it is untouched).
+#[path = "b14/mod.rs"]
+mod b14;
