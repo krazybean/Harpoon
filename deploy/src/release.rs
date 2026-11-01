@@ -1,10 +1,13 @@
-//! The immutable, non-secret configuration needed to recreate a release (spec D5, cutover
-//! recovery). It is pinned when a release starts serving and stored with the deployment's durable
-//! snapshot. It holds the release's **non-secret** environment variables (`--env`, see
-//! [`crate::envvars`]) and no secrets: the values are visible in `docker inspect` and in the journal.
+//! The immutable configuration needed to recreate a release (spec D5, cutover recovery). It is
+//! pinned when a release starts serving and stored with the deployment's durable snapshot. It holds
+//! the release's **non-secret** environment (see [`crate::envvars`]: visible in `docker inspect` and
+//! in the journal), the **references** (id and exact version) of its runtime secrets, the identity of
+//! the configuration snapshot it came from, and the identity of its build configuration. It never
+//! holds a secret value: a restore or rollback resolves the pinned versions from the secret store.
 //! The per-container response marker is not part of it; it is generated afresh for every container.
 
 use crate::health::{HealthSpec, StatusClass};
+use crate::secrets::SecretRef;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseConfig {
@@ -22,6 +25,14 @@ pub struct ReleaseConfig {
     /// The release's non-secret environment, sorted by name. Empty for a release that had none
     /// and for every release pinned before this field existed.
     pub env: Vec<(String, String)>,
+    /// The release's runtime secrets: environment name and the exact saved version, sorted by name.
+    pub secrets: Vec<(String, SecretRef)>,
+    /// The deployment whose configuration snapshot (provenance of every value) this release came
+    /// from. A rollback reuses its target's, never the current command's.
+    pub snapshot: Option<String>,
+    /// Canonical description of the build configuration (Dockerfile, target stage, build arguments,
+    /// build-secret references): what an unchanged image depends on. No values of secrets.
+    pub build: Option<String>,
 }
 
 fn hex(s: &str) -> String {
@@ -41,7 +52,9 @@ fn unhex(s: &str) -> Option<String> {
 impl ReleaseConfig {
     /// One line without tabs or newlines: `v1;key=value;…` with free text hex-encoded. A release
     /// with no environment encodes exactly as before (`v1`); one with an environment adds a trailing
-    /// `env=` field and is `v2`. Older readers fail closed on `v2` rather than dropping the variables.
+    /// `env=` field and is `v2`; one with secret references, a snapshot or a build identity is `v3`
+    /// (`env=;sec=;snap=;build=`, each possibly empty). Older readers fail closed on `v2` and `v3`
+    /// rather than dropping what they do not understand.
     pub fn encode(&self) -> String {
         let expect = match self.health.expect {
             StatusClass::Success2xx => "2xx",
@@ -61,18 +74,29 @@ impl ReleaseConfig {
             self.nano_cpus,
             self.pids,
         );
-        if self.env.is_empty() {
-            format!("v1;{base}")
+        let env: Vec<String> = self.env.iter().map(|(k, v)| hex(&format!("{k}={v}"))).collect();
+        if self.secrets.is_empty() && self.snapshot.is_none() && self.build.is_none() {
+            if self.env.is_empty() {
+                format!("v1;{base}")
+            } else {
+                format!("v2;{base};env={}", env.join(","))
+            }
         } else {
-            let env: Vec<String> = self.env.iter().map(|(k, v)| hex(&format!("{k}={v}"))).collect();
-            format!("v2;{base};env={}", env.join(","))
+            let sec: Vec<String> = self.secrets.iter().map(|(n, r)| hex(&format!("{n}={r}"))).collect();
+            format!(
+                "v3;{base};env={};sec={};snap={};build={}",
+                env.join(","),
+                sec.join(","),
+                self.snapshot.as_deref().map(hex).unwrap_or_default(),
+                self.build.as_deref().map(hex).unwrap_or_default()
+            )
         }
     }
 
     pub fn decode(s: &str) -> Result<ReleaseConfig, String> {
         let mut parts = s.split(';');
         let version = parts.next();
-        if version != Some("v1") && version != Some("v2") {
+        if version != Some("v1") && version != Some("v2") && version != Some("v3") {
             return Err("unknown pinned-configuration version".into());
         }
         let mut get = |key: &str| -> Result<&str, String> {
@@ -101,13 +125,13 @@ impl ReleaseConfig {
             num(get("cpu")?, "cpu")?,
             num(get("pids")?, "pids")?,
         );
-        let env = if version == Some("v2") {
+        let env = if version == Some("v2") || version == Some("v3") {
             let raw = get("env")?;
-            if raw.is_empty() {
+            if raw.is_empty() && version == Some("v2") {
                 return Err("a v2 pinned configuration has an empty environment (it would be v1)".into());
             }
             let mut pairs = Vec::new();
-            for item in raw.split(',') {
+            for item in raw.split(',').filter(|i| !i.is_empty()) {
                 let kv = unhex(item).ok_or("an environment entry is not valid")?;
                 let (k, v) = kv.split_once('=').ok_or("an environment entry has no name")?;
                 pairs.push((k.to_string(), v.to_string()));
@@ -120,6 +144,40 @@ impl ReleaseConfig {
         } else {
             Vec::new()
         };
+        let (mut secrets, mut snapshot, mut build) = (Vec::new(), None, None);
+        if version == Some("v3") {
+            let raw = get("sec")?;
+            for item in raw.split(',').filter(|i| !i.is_empty()) {
+                let kv = unhex(item).ok_or("a secret entry is not valid")?;
+                let (n, r) = kv.split_once('=').ok_or("a secret entry has no name")?;
+                crate::envvars::check_name(n).map_err(|e| format!("pinned secret: {e}"))?;
+                secrets.push((
+                    n.to_string(),
+                    SecretRef::parse(r).map_err(|e| format!("pinned secret: {e}"))?,
+                ));
+            }
+            let names: Vec<&String> = secrets.iter().map(|(n, _)| n).collect();
+            if names.windows(2).any(|w| w[0] >= w[1]) {
+                return Err("the pinned secrets are not unique and in canonical order".into());
+            }
+            if secrets.iter().any(|(n, _)| env.iter().any(|(k, _)| k == n)) {
+                return Err("a name is pinned both as a value and as a secret".into());
+            }
+            let opt = |v: &str, what: &str| -> Result<Option<String>, String> {
+                if v.is_empty() {
+                    Ok(None)
+                } else {
+                    unhex(v)
+                        .map(Some)
+                        .ok_or_else(|| format!("the pinned {what} is not valid"))
+                }
+            };
+            snapshot = opt(get("snap")?, "snapshot id")?;
+            build = opt(get("build")?, "build identity")?;
+            if secrets.is_empty() && snapshot.is_none() && build.is_none() {
+                return Err("a v3 pinned configuration with nothing v3 about it (it would be v1 or v2)".into());
+            }
+        }
         if parts.next().is_some() {
             return Err("unexpected trailing fields".into());
         }
@@ -143,6 +201,9 @@ impl ReleaseConfig {
             nano_cpus,
             pids,
             env,
+            secrets,
+            snapshot,
+            build,
         })
     }
 
@@ -158,6 +219,9 @@ impl ReleaseConfig {
             nano_cpus: 500_000_000,
             pids: 64,
             env: Vec::new(),
+            secrets: Vec::new(),
+            snapshot: None,
+            build: None,
         }
     }
 }
@@ -206,6 +270,58 @@ mod tests {
             ReleaseConfig::decode(&tag_id).is_err(),
             "a tag is not an exact image id"
         );
+    }
+
+    #[test]
+    fn v3_carries_secret_references_snapshot_and_build_identity_and_never_a_value() {
+        let mut c = ReleaseConfig::simulated(38007);
+        c.env = vec![("A".into(), "1".into())];
+        c.secrets = vec![
+            (
+                "DB".into(),
+                SecretRef::new("app:app_00000000000000000000000001@prod/DB", 3),
+            ),
+            ("TOKEN".into(), SecretRef::new("global/TOKEN", 1)),
+        ];
+        c.snapshot = Some("dep_00000000000000000000000010".into());
+        c.build = Some("target=release;args=A=1".into());
+        let enc = c.encode();
+        assert!(enc.starts_with("v3;") && !enc.contains(['\t', '\n']), "{enc}");
+        assert_eq!(ReleaseConfig::decode(&enc).unwrap(), c);
+        // secrets only, no environment
+        let mut s = ReleaseConfig::simulated(1);
+        s.secrets = vec![("X".into(), SecretRef::new("g/X", 2))];
+        assert_eq!(ReleaseConfig::decode(&s.encode()).unwrap(), s);
+        // v1 and v2 still decode and re-encode unchanged next to it
+        for older in [ReleaseConfig::simulated(2), {
+            let mut v = ReleaseConfig::simulated(3);
+            v.env = vec![("A".into(), "1".into())];
+            v
+        }] {
+            assert_eq!(ReleaseConfig::decode(&older.encode()).unwrap(), older);
+        }
+        // damage: out of order, duplicate, overlap with env, empty v3, bad reference
+        let sec = |items: &[(&str, &str)]| {
+            let l: Vec<String> = items.iter().map(|(n, r)| hex(&format!("{n}={r}"))).collect();
+            format!(
+                "{};env=;sec={};snap=;build=",
+                ReleaseConfig::simulated(1).encode().replace("v1;", "v3;"),
+                l.join(",")
+            )
+        };
+        assert!(ReleaseConfig::decode(&sec(&[("B", "g/B@1"), ("A", "g/A@1")])).is_err());
+        assert!(ReleaseConfig::decode(&sec(&[("A", "g/A@1"), ("A", "g/A@2")])).is_err());
+        assert!(ReleaseConfig::decode(&sec(&[("A", "g/A@0")])).is_err());
+        assert!(ReleaseConfig::decode(&sec(&[("HARPOON_X", "g/A@1")])).is_err());
+        assert!(ReleaseConfig::decode(&sec(&[])).is_err(), "v3 with nothing in it");
+        assert!(ReleaseConfig::decode(&sec(&[("A", "g/A@1")])).is_ok());
+        let overlap = format!(
+            "{};env={};sec={};snap=;build=",
+            ReleaseConfig::simulated(1).encode().replace("v1;", "v3;"),
+            hex("A=1"),
+            hex("A=g/A@1")
+        );
+        assert!(ReleaseConfig::decode(&overlap).is_err());
     }
 
     /// A pin written by the build that predates `env` (taken from a real journal): it decodes with an

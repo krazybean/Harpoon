@@ -14,6 +14,7 @@
 
 pub mod backend;
 pub mod buildx;
+pub mod config;
 pub mod control;
 pub mod engine;
 pub mod envvars;
@@ -26,6 +27,7 @@ pub mod ports;
 pub mod queue;
 pub mod release;
 pub mod rollback;
+pub mod secrets;
 pub mod serving;
 pub mod state;
 pub mod time;

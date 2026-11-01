@@ -323,6 +323,9 @@ pub struct FakeBackend {
     plan_error: Option<StepError>,
     rollback: Option<ReleaseConfig>,
     env: Vec<(String, String)>,
+    secrets: Vec<(String, crate::secrets::SecretRef)>,
+    snapshot: Option<String>,
+    build_identity: Option<String>,
 }
 
 impl FakeBackend {
@@ -353,6 +356,9 @@ impl FakeBackend {
             blockers: Vec::new(),
             plan_error: None,
             rollback: None,
+            secrets: Vec::new(),
+            snapshot: None,
+            build_identity: None,
             env: Vec::new(),
         }
     }
@@ -464,6 +470,19 @@ impl FakeBackend {
     /// ignores it: it serves with the target's own pinned environment.
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
+        self
+    }
+    /// The runtime-secret references, configuration snapshot and build identity this run's release is
+    /// pinned with (references only). A rollback ignores them, like [`FakeBackend::with_env`].
+    pub fn with_pin_extras(
+        mut self,
+        secrets: Vec<(String, crate::secrets::SecretRef)>,
+        snapshot: Option<String>,
+        build: Option<String>,
+    ) -> Self {
+        self.secrets = secrets;
+        self.snapshot = snapshot;
+        self.build_identity = build;
         self
     }
     /// Deciding the new release's configuration fails, before anything is created or stopped.
@@ -622,6 +641,9 @@ impl Backend for FakeBackend {
             },
             None => ReleaseConfig {
                 env: self.env.clone(),
+                secrets: self.secrets.clone(),
+                snapshot: self.snapshot.clone(),
+                build: self.build_identity.clone(),
                 ..ReleaseConfig::simulated(39000)
             },
         })
