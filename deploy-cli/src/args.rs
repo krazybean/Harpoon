@@ -15,7 +15,7 @@ struct Spec {
 const SPECS: &[Spec] = &[
     Spec {
         command: "status",
-        values: &["runtime-dir"],
+        values: &["runtime-dir", "docker-socket"],
         switches: &[],
     },
     Spec {
@@ -222,6 +222,7 @@ USAGE: harpoon-deploy <command> --runtime-dir DIR [options]
 
 COMMANDS
   status          read-only: deployments, resource ownership, unresolved cleanup, leases
+                  (--docker-socket lists Harpoon-labelled containers only if the store is missing)
   doctor          read-only checks: source, bundled Buildx, journal, explicit runtime
   plan            validate source/config and show what a deploy would do (starts nothing)
   recover         mark interrupted deployments (writes the journal); never touches Docker

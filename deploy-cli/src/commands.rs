@@ -343,16 +343,112 @@ fn print_lease_and_problems(out: &mut String, r: &Restored) {
 
 // ------------------------------------------------------------------ status
 
+/// Missing deployment store: list the containers that carry Harpoon's ownership labels. Read-only
+/// (one `GET /containers/json`); never adopts, records, stops, removes or modifies anything, and
+/// never goes by container names. What it prints is Docker's current state, not deployment history.
+fn discover_workloads(sock: &Path, out: &mut String) -> i32 {
+    use harpoon_deploy::ids::{labels, DeploymentId};
+    let _ = writeln!(
+        out,
+        "WARNING: deployment history is unavailable: the deployment store is missing. Nothing below is authoritative history, \
+         and nothing was adopted, recorded or recreated."
+    );
+    let list = match api(sock).list_containers(Duration::from_secs(10)) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "docker inspection FAILED ({}): {e}\n\
+                 The Docker inventory is UNKNOWN, not empty; running Harpoon workloads may exist.",
+                sock.display()
+            );
+            return exit::RUNTIME;
+        }
+    };
+    let label = |c: &harpoon_deploy_docker::api::ContainerSummary, k: &str| {
+        c.labels
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    };
+    let (mut found, mut foreign) = (Vec::new(), 0usize);
+    for c in &list {
+        if label(c, labels::MANAGED).as_deref() == Some("true") {
+            found.push(c);
+        } else {
+            foreign += 1;
+        }
+    }
+    let _ = writeln!(
+        out,
+        "docker discovery (read-only, {}): {} Harpoon-labelled container(s) (UNVERIFIED against any deployment record); \
+         {foreign} other container(s) ignored (ownership is read from labels only, never from names)",
+        sock.display(),
+        found.len()
+    );
+    for c in found {
+        let app = label(c, labels::APP).and_then(|a| a.parse::<ApplicationId>().ok().map(|_| a));
+        let dep =
+            label(c, labels::DEPLOYMENT).and_then(|d| d.parse::<DeploymentId>().ok().map(|_| d));
+        let _ = writeln!(
+            out,
+            "  discovered container {} name={} state={}",
+            c.id,
+            c.name,
+            if c.state.is_empty() {
+                "unknown"
+            } else {
+                &c.state
+            }
+        );
+        let _ = writeln!(
+            out,
+            "    application={} deployment={} image={}",
+            app.as_deref()
+                .unwrap_or("unknown (label missing or malformed)"),
+            dep.as_deref()
+                .unwrap_or("unknown (label missing or malformed)"),
+            if c.image_id.is_empty() {
+                "unknown"
+            } else {
+                &c.image_id
+            }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "These resources keep running and were not touched. To manage them, an operator must decide; Harpoon does not adopt them."
+    );
+    exit::OK
+}
+
 fn status(p: &Parsed, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let _ = writeln!(out, "runtime: {}", rt.dir.display());
+    // Corrupt or unusable state is an error here and never reaches the Docker fallback.
     let Some(r) = store::read_restored(&rt)? else {
         let _ = writeln!(
             out,
             "journal: not initialised (nothing has been deployed; nothing was created)"
         );
-        return Ok(exit::OK);
+        return match socket_flag(p)? {
+            Some(sock) => Ok(discover_workloads(&sock, out)),
+            None => {
+                let _ = writeln!(
+                    out,
+                    "note: if workloads were deployed and this store was lost, they may still be running; \
+                     add --docker-socket PATH to list Harpoon-labelled containers (read-only)"
+                );
+                Ok(exit::OK)
+            }
+        };
     };
+    if socket_flag(p)?.is_some() {
+        let _ = writeln!(
+            out,
+            "note: deployment history is available, so Docker was not consulted"
+        );
+    }
     let kind = rt
         .kind()?
         .map(Kind::as_str)

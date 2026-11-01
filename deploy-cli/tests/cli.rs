@@ -3006,3 +3006,7 @@ mod b12;
 // Explicit manual rollback (offline; simulated Docker only).
 #[path = "rollback/mod.rs"]
 mod rollback;
+
+// Criterion 7: state-loss visibility (offline; fake Docker only).
+#[path = "state_loss/mod.rs"]
+mod state_loss;
