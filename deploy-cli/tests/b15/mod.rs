@@ -1160,3 +1160,133 @@ fn simulated_and_live_runs_are_reported_as_what_they_are() {
         "{acceptance}"
     );
 }
+
+// ------------------------------------------------------------------ P1 cleanup procedure
+
+#[test]
+fn an_unconfirmed_live_replacements_retained_image_is_removed_by_id_dry_run_first_and_only_that_image(
+) {
+    let _ports = ports();
+    let t = T::new();
+    let lsof = forwarder_lsof(&t);
+    let (serving_image, serving_cid) = seed_release(&t, true, &[]);
+    let by = bystander(&t);
+    let held = occupy_all_but_first();
+    let _pre = responder(&t, TEST_PORT, true);
+    image_appears_after_build(&t);
+    let o = live(&t, &lsof, replace_args(&t, &[]));
+    drop(held);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("candidate prepared, current release untouched"),
+        "{}",
+        o.stdout
+    );
+
+    // what the journal says about the unconfirmed run: finished, not succeeded, one retained image,
+    // everything else released
+    let r = harpoon_deploy_journal::SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    let d = r
+        .deployments
+        .iter()
+        .find(|d| d.id.to_string() != PREV)
+        .expect("the unconfirmed run is recorded");
+    assert!(
+        d.status.is_terminal() && d.status != DeploymentStatus::Succeeded,
+        "{:?}",
+        d.status
+    );
+    let mine: Vec<_> = r
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == d.id)
+        .collect();
+    let images: Vec<_> = mine
+        .iter()
+        .filter(|e| e.key.kind == ResourceKind::Image)
+        .collect();
+    assert_eq!(images.len(), 1);
+    let image = images[0].id.clone().expect("the image has a receipt");
+    assert!(
+        mine.iter()
+            .filter(|e| e.key.kind != ResourceKind::Image)
+            .all(|e| e.is_released()),
+        "the preliminary container and its lease were released: {mine:?}"
+    );
+    assert!(image != serving_image);
+
+    let dep = d.id.to_string();
+    let cf = |extra: &[&str]| -> Vec<String> {
+        let mut a: Vec<String> = ["cleanup-image", "--deployment", &dep, "--image", &image]
+            .map(String::from)
+            .to_vec();
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a.extend([
+            "--docker-socket".into(),
+            t.socket(),
+            "--resources-dir".into(),
+            t.resources(),
+        ]);
+        a
+    };
+    let run = |a: Vec<String>| t.go(&SHIPPING, &a.iter().map(String::as_str).collect::<Vec<_>>());
+
+    // dry run first: reads only, writes nothing, names exactly this id
+    let (jb, n) = (t.journal_bytes(), t.docker_requests());
+    let o = run(cf(&[]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("dry run: nothing will be changed")
+            && o.stdout
+                .contains(&format!("remove image {image} by id (force=false"))
+            && o.stdout
+                .contains("no container, running or stopped, uses it"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(t.journal_bytes(), jb);
+    assert!(t.h.docker.requests()[n..].iter().all(|r| r.method == "GET"));
+    assert!(t.h.docker.with(|s| s.images.iter().any(|i| i.id == image)));
+
+    // apply: needs the authorization phrase; removes that one image by id, force=false
+    let before_apply = t.docker_requests();
+    let o = run(cf(&[])
+        .into_iter()
+        .chain([auth()])
+        .chain(["--apply".to_string()])
+        .collect());
+    assert_exit(&o, 0);
+    let deletes: Vec<_> = t.h.docker.requests()[before_apply..]
+        .iter()
+        .filter(|r| r.method != "GET")
+        .cloned()
+        .collect();
+    assert_eq!(deletes.len(), 1, "only the one image removal: {deletes:?}");
+    assert_eq!(deletes[0].method, "DELETE");
+    assert!(
+        deletes[0].path.contains(&image) && !deletes[0].path.contains("force=true"),
+        "{}",
+        deletes[0].path
+    );
+    assert!(t.h.docker.with(|s| !s.images.iter().any(|i| i.id == image)));
+    assert!(
+        t.h.docker
+            .with(|s| s.images.iter().any(|i| i.id == serving_image)),
+        "the serving release's image stays"
+    );
+    untouched(&t, &serving_cid);
+    untouched(&t, &by);
+    // repeating it is a no-op
+    let n = t.docker_requests();
+    let o = run(cf(&[])
+        .into_iter()
+        .chain([auth()])
+        .chain(["--apply".to_string()])
+        .collect());
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("already released"), "{}", o.stdout);
+    assert!(t.h.docker.requests()[n..].iter().all(|r| r.method == "GET"));
+    drop(open_j(&t.journal_dir()).expect("the journal replays"));
+}
