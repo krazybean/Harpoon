@@ -44,22 +44,25 @@ recovery; a gated CLI (`status`, `doctor`, `plan`, `recover`, `reconcile`, `depl
 Evidence: `docs/results/DEPLOY_B7_LIVE_RESULTS.md` (B7 first-deployment acceptance: PASS — not
 general production readiness).
 
-**Not implemented — the full control plane:** live health-gated replacement of a running release
-and live cutover recovery (offline slices exist, see below), explicit rollback (offline slice in review; the Docker backend and CLI refuse live
-replacement and live rollback), and everything in
-Milestones C–E. Milestone B's acceptance criteria are therefore **not yet met**.
+**Milestone B implementation status: COMPLETE — OWNER RISK-ACCEPTED / DEFERRED
+EVIDENCE.** The B1–B15 implementation is complete on `main`, including permanent
+SQLite state, health-gated replacement, bounded cutover recovery, explicit rollback,
+runtime configuration pinning, durable pause/held-event state, and the separately
+gated live wiring. This is an implementation closure, not an unconditional
+acceptance PASS: L5–L7 and P1–P2 were not run because the required idle-host
+precondition failed, and therefore remain explicitly untested.
 
-**Shipping gate: closed.** `Gate::shipping()` refuses live `deploy`; the experimental gate-opening
-branch (`experiment/b7-live-gate`) is unmerged and local-only. Live work uses a separately built,
-separately authorized binary and is never part of a merge.
+**Shipping gate: closed.** `Gate::shipping()` refuses live `deploy`, `replace`, `rollback` and
+`restore`. The acceptance binary is separately built and authorized for live scenarios; it is not
+the shipping binary and does not open the product gate.
 
 ### Milestones
 
 | Milestone | Scope | Status |
 |---|---|---|
 | A | Specification and UX discovery | Approved (decisions 2026-10-30; B1 authorized) |
-| B | Deployment engine and lifecycle — see the step table below | **In progress**: first-deployment slice implemented and live-accepted; live replacement and rollback not enabled |
-| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | Not started; prerequisite: Milestone B accepted |
+| B | Deployment engine and lifecycle — see the step table below | **Implementation complete — owner risk-accepted / deferred evidence**: L1–L4 live evidence retained; L5–L7 and P1–P2 not run; not an unconditional acceptance PASS |
+| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | **Next executable milestone**; begins after this documented owner-risk acceptance, with B's deferred evidence retained as a release-risk item |
 | Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | Not started; follows C; must precede any "unattended" claim |
 | D | Git integration and automation (polling, signed-fixture webhooks); attended unless Gate U passed | Not started; follows Gate U |
 | E | Desktop deployment experience and previews | Not started; follows D |
@@ -81,15 +84,51 @@ separately authorized binary and is never part of a merge.
 | **B8.3** | **Controlled live failure and recovery validation** | **Complete — CONDITIONAL PASS: user-reported L1–L4 live results, exact inventory restoration; live Docker HTTP 409 observed, typed `DockerRefused` journal transition remains untested** | — | `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md` |
 | B9 | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **Complete (offline; includes legacy-journal import)** | #124 | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
 | B10 | Health-gated replacement of a running release (offline slice) | **Complete (offline; `replace --simulate` only)** | #125 | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
-| B11 | Bounded cutover recovery (offline slice and hardening) | **Complete (offline; `replace --simulate` / `restore --simulate` only)**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; **live replacement stays disabled** | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
-| B12 | Explicit manual rollback | **Complete (offline; `rollback --simulate` only)**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; **live rollback stays disabled** | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
-| B13 | Runtime configuration, failure hardening, acceptance matrix | **Complete (offline)**: `--env KEY=VALUE` non-secret variables validated, pinned per release (`v2` pin; `v1` unchanged) and reproduced by restoration and rollback; preliminary-failure next actions (real commands only); status wording and forwarder-default corrections; offline failure matrix audit and additions; canonical acceptance matrix and pending live procedures; pause/resume audit (held events and `resume` do **not** exist) | this PR | `docs/results/DEPLOY_B13_ACCEPTANCE.md`; criteria 1 and 3 |
+| B11 | Bounded cutover recovery (offline slice and hardening) | **Implementation complete; offline evidence retained**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; live wiring is present behind the separately authorized acceptance gate | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
+| B12 | Explicit manual rollback | **Implementation complete; offline evidence retained**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; live wiring is present behind the separately authorized acceptance gate | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
+| B13 | Runtime configuration, failure hardening, acceptance matrix | **Implementation complete; offline evidence retained**: `--env KEY=VALUE` non-secret variables validated, pinned per release (`v2` pin; `v1` unchanged) and reproduced by restoration and rollback; preliminary-failure next actions (real commands only); status wording and forwarder-default corrections; offline failure matrix audit and additions; canonical acceptance matrix and deferred live procedures; durable pause/resume state is implemented | this PR | `docs/results/DEPLOY_B13_ACCEPTANCE.md`; criteria 1 and 3 |
 | B14 | Durable pauses, held events, explicit resume | **Complete (offline)**: `pause`/`event`/`resume` records in the journal replayed from SQLite; engine ingress (`ingest`) with delivery-id idempotency, isolation and fail-closed replay; `resume --app A --dismiss \| --newest \| --revision REV` and read-only `events`; a selection is recorded as pending attended execution, deploys **nothing** and keeps the application blocked until dismissed; `status` shows pauses, held events and decisions; crash sweeps (every write, every SQLite prefix); no event source and no source executor exist, so real delivery and execution are deferred to Milestone D | this PR | `docs/results/DEPLOY_B14_EVENTS_RESUME.md` |
-| B15 | Reviewed live lifecycle integration | **Complete (offline)**: live `replace`, `rollback` and `restore` wired into the maintained CLI behind a gate that is **closed in the shipping binary**; a separate `harpoon-deploy-acceptance` binary (opt-in Cargo feature, no fault injection) opens it for authorized acceptance runs; honours B13 environment pins and B14 pauses; packaging-isolation tests and CI guards; no live run | this PR | `docs/results/DEPLOY_B15_LIVE_INTEGRATION.md` |
-| **NEXT** | Milestone B live acceptance | **L1 (healthy replacement), L2 (injected failed replacement, one bounded restoration), L3 (manual rollback) and L4 (injected SIGKILL after the stop, then one explicit restoration) passed live** with a local-only experimental binary; each restored the Docker inventory; the shipping gate stayed closed. Criterion 7 offline discovery (`status --docker-socket` when the store is missing) is implemented and `status` now states that an unfinished cutover is unverified and the application may be down. **Milestone B is not accepted**: criteria 1 and 3 are covered offline only (live L5/L6 pending), 4 (other outcomes), 7 (live), the build-overhead and resident-process checks (P1/P2), and the gated live wiring remain open; held events and `resume` exist as durable state and decisions (B14), with real delivery and execution deferred to Milestone D; L4 covers only one injected crash boundary | this branch | `docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`, `DEPLOY_MILESTONE_B_L4_RESULTS.md`, `DEPLOY_MILESTONE_B_LIVE_ACCEPTANCE_PLAN.md` |
+| B15 | Reviewed live lifecycle integration | **Implementation complete; live evidence partial**: live `replace`, `rollback` and `restore` wired into the maintained CLI behind a gate that is **closed in the shipping binary**; a separate `harpoon-deploy-acceptance` binary (opt-in Cargo feature, no fault injection) opens it for authorized acceptance runs; honours B13 environment pins and B14 pauses; packaging-isolation tests and CI guards; L1–L4 were demonstrated, while L5–L7 and P1–P2 remain untested under the recorded idle-host precondition failure | this PR | `docs/results/DEPLOY_B15_LIVE_INTEGRATION.md` |
 
-The unnumbered rows run in the order shown, after B9. Milestone B is accepted only when its
-requirements criteria 1–7 pass with no stop condition triggered.
+### Acceptance disposition (not a new submilestone)
+
+L1–L4 passed live with the local-only acceptance binary and restored the Docker
+inventory; the records remain `docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`
+and `docs/results/DEPLOY_MILESTONE_B_L4_RESULTS.md`. The campaign then stopped
+before L5–L7 and P1–P2 because the idle-host precondition failed.
+
+The B implementation is closed for planning by explicit owner risk acceptance. The
+requirements' full acceptance criteria remain the truth: the deferred checks below
+are not passed, and no release or shipping claim may treat them as passed.
+
+### Milestone B deferred evidence and closure boundary — 2026-11-01
+
+The latest-main campaign stopped before S0 because precondition 13 (idle host)
+failed. The recorded sample showed load averages 4.29/6.18/7.44 on 11 cores and
+38.67% CPU idle while VS Code, WindowServer, cloudd, Codex and other work were
+active. No campaign Docker mutation or scenario run occurred. The precondition
+record is preserved at
+`/Users/juancastro/harpoon-b-acceptance-evidence/L567-20261101/00-preconditions/preconditions.txt`.
+
+Deferred, still untested checks:
+
+- **L5:** non-secret environment pinning through replacement, failed-final-check
+  restoration, and rollback.
+- **L6:** preliminary health failure while a previous release is running; the
+  previous release must remain unchanged and the candidate must be retained or
+  cleaned according to the recorded plan.
+- **L7:** store-loss visibility and read-only discovery of labelled Docker
+  workloads, including fail-closed handling of a corrupt store copy.
+- **P1:** Dockerfile build overhead at or below the requirements' 1.2× direct-build
+  ceiling.
+- **P2:** no resident engine process and no idle-cost violation for the one-shot
+  CLI.
+
+L1–L4 remain the existing live evidence; they do not substitute for these checks.
+The offline suites, formatting, Clippy, gate-closed assertions, binary identity
+checks, and no-mutation precondition record support implementation closure but do
+not convert deferred checks into PASS. The shipping `Gate::shipping()` remains
+closed, and no Docker/VM rerun is authorized by this closure.
 
 ### Milestone B12: Explicit manual rollback (complete, offline)
 
@@ -103,17 +142,18 @@ interruption and "Application rollback only. Data, volumes and database schema a
 are printed first, and the cutover needs `--confirm-rollback`. A failed cutover gets the same single
 bounded restoration of the release that was serving. The rollback is a durable deployment operation
 (source, target, pin, interruption, outcome); the serving release is derived from the records; a
-successful rollback pauses the application's automatic triggers, shown by `status`, with no
-`resume` yet. **Live replacement and live rollback stay disabled** and the shipping gate stays closed.
-Nothing here claims production readiness. The evidence required before enabling either live is
-listed in `docs/results/DEPLOY_B12_ROLLBACK.md` and `DEPLOY_B11_RECOVERY.md`.
+successful rollback pauses the application's automatic triggers, shown by `status`, with durable
+`resume` state implemented in B14. The live replacement and rollback wiring exists behind the
+separately authorized acceptance gate; the shipping gate stays closed. Nothing here claims
+production readiness. The deferred evidence remains listed in `docs/results/DEPLOY_B12_ROLLBACK.md`
+and `DEPLOY_B11_RECOVERY.md`.
 
 The separate Harpoon 2.0 track is unchanged by this milestone.
 
-**Next: Milestone B live acceptance — in progress.** L1–L4 passed live
-(`docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`, `DEPLOY_MILESTONE_B_L4_RESULTS.md`); the open gaps are listed there. Each further live
-scenario needs explicit authorization. The shipping
-gate stays closed.
+**Next: Milestone C — builds, environments and secrets.** L1–L4 remain preserved live evidence;
+L5–L7 and P1–P2 are explicitly deferred and untested after the idle-host precondition stopped the
+campaign before S0. This owner-risk acceptance does not reopen any live gate. Revisit the deferred
+checks only when a separately authorized, idle-host campaign is worth the release risk.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,

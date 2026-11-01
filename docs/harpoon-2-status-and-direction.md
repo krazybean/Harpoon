@@ -106,14 +106,15 @@ manual, explicitly scoped Docker cleanup remains the supported path.
 
 ## Native deployment control plane (Harpoon 2.1)
 
-**Partly implemented; the full control plane is not.** Harpoon is building a lightweight native
-control plane for one local Harpoon runtime. It should own deployment intent, source resolution,
-environment/secrets configuration, serialized orchestration state, deployment
-history, and health-gated replacement. Docker remains the only authority for
-workload state. The first-deployment slice (local Dockerfile build, health-checked start, durable
-journal, gated CLI, ownership-verified cleanup) is implemented and was accepted once on a live
-disposable deployment; permanent SQLite state, replacement, bounded cutover recovery, rollback and
-Milestones C–E are not. Exactly what is done and what comes next is in
+**Milestone B implementation is complete; live evidence is intentionally incomplete.** Harpoon is
+building a lightweight native control plane for one local Harpoon runtime. It owns deployment
+intent, source resolution, environment/secrets configuration, serialized orchestration state,
+deployment history, and health-gated replacement while Docker remains the only authority for
+workload state. The first-deployment slice was accepted once on a live disposable deployment;
+permanent SQLite state, replacement, bounded cutover recovery, rollback, durable pause/held-event
+state, and the gated live wiring are implemented. L5–L7 and P1–P2 remain untested because the
+required idle-host precondition failed; the owner-risk acceptance and next milestone are recorded
+in
 [the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker). The
 requirements, acceptance criteria and stop conditions are in
 [deployment-control-plane-requirements](deployment-control-plane-requirements.md).
@@ -237,9 +238,9 @@ not prerequisites for proving the local deployment path.
 
 - No current second-Mac verification record is present (Harpoon 2.0 track; not a 2.1 gate).
 - Intel behavior and Windows/Linux adapters are not implemented or validated.
-- The full control plane is incomplete: there is no permanent SQLite store (the first-slice
-  journal is a stopgap), secret store, API schema, queue worker, webhook verifier, or
-  replacement/rollback implementation. The first-deployment slice is implemented; see the roadmap.
+- Milestone B's control-plane implementation is complete, including permanent SQLite state,
+  replacement, rollback, durable pause/held-event state, and gated live lifecycle wiring. L5–L7
+  and P1–P2 remain explicitly untested after the idle-host prerequisite failed; see the roadmap.
 - OCI multi-arch publishing and registry credentials need a concrete acceptance
   contract; the current runtime remains ARM64-only.
 - GitHub/GitLab issue state could not be synchronized in the 2026-10-29 session
