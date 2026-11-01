@@ -87,7 +87,7 @@ cache on both sides.
 | Metric | Definition | How it is taken |
 |---|---|---|
 | **A** direct | Buildx invocation to image completion | host wall clock around one direct `docker-buildx build` (identical argv and environment, see 5.3) up to process exit with the iidfile written |
-| **B** Harpoon internal build step | the engine's `build` step duration | the step's `finished_ms - started_ms` in the journal (field triples after the release id in the snapshot record; extractor validated offline against a simulated journal before the session) |
+| **B** Harpoon internal build step | the engine's `build` step duration | the step's `finished_ms - started_ms` in a **copy** of the journal, read with `tools/deploy-acceptance/journal_steps.py JOURNAL_COPY DEPLOYMENT_ID` (read-only; validated offline against a simulated journal: all six steps parse) |
 | **C** Harpoon end-to-end build path | CLI invocation to image-build completion, **including** process start, journal open, source preparation and validation, planning, **excluding** the preliminary and final health checks | `build.finished_ms - invoke_ms`, where `invoke_ms` is the host epoch time read immediately before the CLI is executed (same clock as the journal's) |
 | **D** (informational) | whole `replace` wall time | host wall clock around the command; includes the preliminary check; not part of any verdict |
 
