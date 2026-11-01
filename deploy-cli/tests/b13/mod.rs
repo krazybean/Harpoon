@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod preliminary;
 
 fn app_of(o: &Outcome) -> String {
     o.stdout
