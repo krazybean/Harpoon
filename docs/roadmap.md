@@ -82,15 +82,16 @@ separately authorized binary and is never part of a merge.
 | B9 | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **Complete (offline; includes legacy-journal import)** | #124 | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
 | B10 | Health-gated replacement of a running release (offline slice) | **Complete (offline; `replace --simulate` only)** | #125 | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
 | B11 | Bounded cutover recovery (offline slice and hardening) | **Complete (offline; `replace --simulate` / `restore --simulate` only)**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; **live replacement stays disabled** | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
-| **NEXT** | **B12 — Explicit manual rollback** | **Offline slice in review**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; **live rollback stays disabled** | this branch | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
+| B12 | Explicit manual rollback | **Complete (offline; `rollback --simulate` only)**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; **live rollback stays disabled** | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
+| **NEXT** | Milestone B live acceptance | **Preparation underway (plan only; nothing run live)**: read-only preflight, scenarios L1–L3, safety rules and acceptance matrix written; live replacement/rollback/restore still need separately authorized experimental wiring; each live scenario needs explicit authorization; Milestone B is not accepted | this branch | `docs/results/DEPLOY_MILESTONE_B_LIVE_ACCEPTANCE_PLAN.md` |
 
 The unnumbered rows run in the order shown, after B9. Milestone B is accepted only when its
 requirements criteria 1–7 pass with no stop condition triggered.
 
-### Next executable milestone: Explicit manual rollback (B12)
+### Milestone B12: Explicit manual rollback (complete, offline)
 
-Bounded cutover recovery (B11, #126 and #127) is complete as an offline slice. Explicit manual rollback is
-implemented offline in review: a developer lists an application's retained releases (`releases`),
+Bounded cutover recovery (B11, #126 and #127) is complete as an offline slice. Explicit manual rollback (B12, #128) is
+implemented offline: a developer lists an application's retained releases (`releases`),
 sees which one serves, and names an earlier release by its exact id (`rollback --to`). A target is
 accepted only when its pinned configuration (an immutable image id) and a retained image are
 recorded; it is then re-served from that image and configuration with nothing rebuilt. The serving
@@ -105,6 +106,11 @@ Nothing here claims production readiness. The evidence required before enabling 
 listed in `docs/results/DEPLOY_B12_ROLLBACK.md` and `DEPLOY_B11_RECOVERY.md`.
 
 The separate Harpoon 2.0 track is unchanged by this milestone.
+
+**Next: Milestone B live acceptance — preparation underway.** Only a plan exists
+(`docs/results/DEPLOY_MILESTONE_B_LIVE_ACCEPTANCE_PLAN.md`); nothing has been run live and each live
+scenario needs explicit authorization. Live replace/rollback/restore still need separately authorized
+experimental wiring. The shipping gate stays closed.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,
 Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,
