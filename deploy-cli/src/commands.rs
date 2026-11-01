@@ -429,7 +429,8 @@ fn status(p: &Parsed, out: &mut String) -> R {
     let Some(r) = store::read_restored(&rt)? else {
         let _ = writeln!(
             out,
-            "journal: not initialised (nothing has been deployed; nothing was created)"
+            "journal: not initialised: no deployment store exists at {} (nothing was created). This does not show that nothing was deployed: a store that was deleted or lost looks the same.",
+            rt.journal_dir().display()
         );
         return match socket_flag(p)? {
             Some(sock) => Ok(discover_workloads(&sock, out)),
@@ -459,6 +460,7 @@ fn status(p: &Parsed, out: &mut String) -> R {
         Ok(LockStatus::NotInitialized) => "absent",
         Err(_) => "unknown",
     };
+    let lock_held = matches!(writer_lock_status(&rt.journal_dir()), Ok(LockStatus::Held));
     let _ = writeln!(out, "kind: {kind}");
     let _ = writeln!(
         out,
@@ -521,19 +523,7 @@ fn status(p: &Parsed, out: &mut String) -> R {
         if let Some(ms) = d.interruption.and_then(|i| i.duration_ms()) {
             let _ = writeln!(out, "    interruption: {ms} ms between stopping the previous release and the confirmed new one");
         }
-        if d.status == DeploymentStatus::Interrupted && d.application_may_be_down() {
-            let _ = writeln!(
-                out,
-                "    cutover began and was never confirmed: the application may be down"
-            );
-            if d.recovery.is_none() {
-                let _ = writeln!(
-                    out,
-                    "    explicit bounded recovery (one attempt): harpoon-deploy restore --deployment {} --simulate [--apply]",
-                    d.id
-                );
-            }
-        }
+        cutover_notes(out, d, &rt, lock_held)?;
         for e in r.ledger.entries().iter().filter(|e| e.deployment == d.id) {
             let _ = writeln!(
                 out,
@@ -552,9 +542,10 @@ fn status(p: &Parsed, out: &mut String) -> R {
     apps.dedup();
     for app in apps {
         if let Some(sv) = harpoon_deploy::serving::serving_release(&r.ledger, &r.deployments, app) {
+            let uncertain = serving_caveat(&r.deployments, app, &sv);
             let _ = writeln!(
                 out,
-                "serving: application {app} runs release {} (deployment {}) in container {} of deployment {}{}",
+                "serving: application {app} runs release {} (deployment {}) in container {} of deployment {}{}{}",
                 sv.release,
                 sv.deployment,
                 sv.container_name,
@@ -563,7 +554,8 @@ fn status(p: &Parsed, out: &mut String) -> R {
                     harpoon_deploy::serving::ServedBy::Original => String::new(),
                     harpoon_deploy::serving::ServedBy::Restored { by } => format!(" (restored by {by})"),
                     harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
-                }
+                },
+                uncertain
             );
         }
     }
@@ -585,11 +577,110 @@ fn status(p: &Parsed, out: &mut String) -> R {
             pz.recovery.map(|r| format!("recovery {}", r.as_str())).unwrap_or_else(|| "no recovery recorded".into()),
         );
     }
-    let nf = unfinished(&r.deployments);
-    for l in nf {
-        let _ = writeln!(out, "attention: {l}");
+    for d in r.deployments.iter().filter(|d| !d.status.is_terminal()) {
+        let _ = writeln!(
+            out,
+            "attention: deployment {} is `{}` in the record only: that does not show that a Harpoon process is alive or that anything is healthy. {}",
+            d.id,
+            d.status,
+            if lock_held {
+                "A writer holds the journal and may still be working: do not run `recover` while it is active."
+            } else {
+                "No writer holds the journal, so the process that began it is probably gone; `recover` marks it interrupted (a change to the record only)."
+            }
+        );
     }
     Ok(exit::OK)
+}
+
+/// What the records say about one deployment's cutover. Read-only: nothing here contacts Docker or
+/// changes a record, and a status of `running` is never taken as proof of a live process.
+fn cutover_notes(
+    out: &mut String,
+    d: &Deployment,
+    rt: &Runtime,
+    lock_held: bool,
+) -> Result<(), Fail> {
+    use harpoon_deploy::state::{CutoverState, RecoveryOutcome};
+    let restored = d
+        .recovery
+        .map(|r| r.outcome)
+        .filter(|o| o.service_restored());
+    if d.application_may_be_down() {
+        let _ = match d.cutover {
+            CutoverState::Begun { .. } => writeln!(
+                out,
+                "    cutover began and was never confirmed: completion is UNVERIFIED and the application MAY BE DOWN"
+            ),
+            _ => writeln!(
+                out,
+                "    cutover failed and no running release is confirmed afterwards: the application MAY BE DOWN"
+            ),
+        };
+        if !d.status.is_terminal() {
+            let _ = writeln!(
+                out,
+                "    the record says `{}`; that is not proof of a live process{}",
+                d.status,
+                if lock_held {
+                    " (a writer holds the journal now, so it may still be working)"
+                } else {
+                    " (no writer holds the journal)"
+                }
+            );
+        }
+        if d.status == DeploymentStatus::Interrupted && d.recovery.is_none() {
+            let _ = if rt.kind()? == Some(Kind::Simulated) {
+                writeln!(
+                    out,
+                    "    explicit bounded recovery (one attempt, never automatic): harpoon-deploy restore --deployment {} --simulate [--apply]",
+                    d.id
+                )
+            } else {
+                writeln!(
+                    out,
+                    "    this build cannot restore a live runtime (`restore` is refused here), and nothing restores it automatically; the previous release's container is recorded above"
+                )
+            };
+        }
+    }
+    if let (Some(o), CutoverState::Failed { .. }) = (restored, d.cutover) {
+        let _ = match o {
+            RecoveryOutcome::Restored => writeln!(
+                out,
+                "    this deployment did NOT succeed and its candidate never served; the previous release was restored by explicit bounded recovery and passed its own health check (recovery: restored)"
+            ),
+            _ => writeln!(
+                out,
+                "    this deployment did NOT succeed; the previous release was started again but its health check did not pass (recovery: restored_unverified): verify the application yourself"
+            ),
+        };
+    }
+    Ok(())
+}
+
+/// A caveat for the `serving:` line when the records alone cannot say the release is serving.
+fn serving_caveat(
+    deps: &[Deployment],
+    app: &ApplicationId,
+    sv: &harpoon_deploy::serving::Serving,
+) -> &'static str {
+    use harpoon_deploy::state::RecoveryOutcome;
+    if deps
+        .iter()
+        .any(|d| &d.application_id == app && d.application_may_be_down())
+    {
+        return " — per the records only: a cutover began after this and has no confirmed outcome, so this release's container may be stopped and the application DOWN";
+    }
+    if let harpoon_deploy::serving::ServedBy::Restored { by } = &sv.via {
+        if deps.iter().any(|d| {
+            &d.id == by
+                && d.recovery.map(|r| r.outcome) == Some(RecoveryOutcome::RestoredUnverified)
+        }) {
+            return " — record-derived: the restored release's health check did not pass";
+        }
+    }
+    ""
 }
 
 fn state_word(s: &EntryState) -> &'static str {

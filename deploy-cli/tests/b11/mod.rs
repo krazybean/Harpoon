@@ -5,6 +5,8 @@ use super::*;
 use harpoon_deploy::ids::ReleaseId;
 use harpoon_deploy::state::Step;
 
+mod status_truth;
+
 fn app_of(o: &Outcome) -> String {
     let after = o
         .stdout
@@ -111,7 +113,7 @@ fn builds_and_checks_that_fail_never_pause_and_a_dead_cutover_does() {
         !s.contains(&format!("paused for application {OTHER}")),
         "the other application is not paused: {s}"
     );
-    assert!(s.contains("the application may be down"), "{s}");
+    assert!(s.contains("MAY BE DOWN"), "{s}");
     assert!(
         s.contains(&format!("restore --deployment {DEAD} --simulate")),
         "the explicit recovery is offered: {s}"
@@ -219,7 +221,7 @@ fn a_release_without_a_pinned_configuration_is_not_attempted_and_says_why() {
         o.stdout
     );
     let s = t.cli(&["status"]).stdout;
-    assert!(s.contains("the application may be down"), "{s}");
+    assert!(s.contains("MAY BE DOWN"), "{s}");
     assert!(
         !s.contains("restore --deployment"),
         "not offered again: {s}"
@@ -273,7 +275,7 @@ fn a_restoration_that_died_part_way_is_closed_as_interrupted_and_never_repeated(
     assert_exit(&o, 0);
     let s = t.cli(&["status"]).stdout;
     assert!(s.contains("recovery: restore_failed"), "{s}");
-    assert!(s.contains("the application may be down"), "{s}");
+    assert!(s.contains("MAY BE DOWN"), "{s}");
     let before = t.journal_bytes();
     let o = restore(&t, DEAD, &["--apply"]);
     assert_exit(&o, 6);

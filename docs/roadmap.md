@@ -83,7 +83,7 @@ separately authorized binary and is never part of a merge.
 | B10 | Health-gated replacement of a running release (offline slice) | **Complete (offline; `replace --simulate` only)** | #125 | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
 | B11 | Bounded cutover recovery (offline slice and hardening) | **Complete (offline; `replace --simulate` / `restore --simulate` only)**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; **live replacement stays disabled** | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
 | B12 | Explicit manual rollback | **Complete (offline; `rollback --simulate` only)**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; **live rollback stays disabled** | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
-| **NEXT** | Milestone B live acceptance | **L1 (healthy replacement), L2 (injected failed replacement, one bounded restoration) and L3 (manual rollback) passed live** with a local-only experimental binary; each restored the Docker inventory; the shipping gate stayed closed. Criterion 7 offline discovery (`status --docker-socket` when the store is missing) is implemented. **Milestone B is not accepted**: criteria 1 (runtime variables), 3, 4 (other outcomes), 6 (`kill -9` mid-cutover, live restore) and 7 (live) and the failure tests remain open | this branch | `docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`, `docs/results/DEPLOY_MILESTONE_B_LIVE_ACCEPTANCE_PLAN.md` |
+| **NEXT** | Milestone B live acceptance | **L1 (healthy replacement), L2 (injected failed replacement, one bounded restoration), L3 (manual rollback) and L4 (injected SIGKILL after the stop, then one explicit restoration) passed live** with a local-only experimental binary; each restored the Docker inventory; the shipping gate stayed closed. Criterion 7 offline discovery (`status --docker-socket` when the store is missing) is implemented and `status` now states that an unfinished cutover is unverified and the application may be down. **Milestone B is not accepted**: criteria 1 (runtime variables), 3, 4 (other outcomes), 7 (live) and the failure tests remain open; L4 covers only one injected crash boundary | this branch | `docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`, `DEPLOY_MILESTONE_B_L4_RESULTS.md`, `DEPLOY_MILESTONE_B_LIVE_ACCEPTANCE_PLAN.md` |
 
 The unnumbered rows run in the order shown, after B9. Milestone B is accepted only when its
 requirements criteria 1–7 pass with no stop condition triggered.
@@ -107,9 +107,9 @@ listed in `docs/results/DEPLOY_B12_ROLLBACK.md` and `DEPLOY_B11_RECOVERY.md`.
 
 The separate Harpoon 2.0 track is unchanged by this milestone.
 
-**Next: Milestone B live acceptance — in progress.** L1–L3 passed live
-(`docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`); the open gaps are listed there. Each further live
-scenario (next: L4, a crash during cutover and explicit restore) needs explicit authorization. The shipping
+**Next: Milestone B live acceptance — in progress.** L1–L4 passed live
+(`docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`, `DEPLOY_MILESTONE_B_L4_RESULTS.md`); the open gaps are listed there. Each further live
+scenario needs explicit authorization. The shipping
 gate stays closed.
 
 Out of scope for this initiative's first release: inbound public webhooks on a laptop,

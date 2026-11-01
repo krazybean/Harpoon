@@ -194,7 +194,7 @@ fn an_unfinished_cutover_blocks_replacement_and_status_says_the_application_may_
     assert_exit(&o, 0);
     let s = t.cli(&["status"]).stdout;
     assert!(
-        s.contains("cutover began and was never confirmed: the application may be down"),
+        s.contains("cutover began and was never confirmed: completion is UNVERIFIED and the application MAY BE DOWN"),
         "{s}"
     );
     // recovery marked it interrupted; a new replacement is still not allowed over a possibly-down app
