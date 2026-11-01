@@ -93,6 +93,8 @@ Existing coverage was inspected first and not duplicated. Where a row says *exis
 
 ## 3. Pause and resume contract audit (D4/D5, offline requirement)
 
+> **Update (B14):** the missing pieces listed below were implemented as durable state and an explicit decision command; see `DEPLOY_B14_EVENTS_RESUME.md`. This section records the audit as it stood at B13.
+
 What exists: a pause is **derived** from deployment records (`trigger_pauses`): an open or failed cutover, or a successful
 rollback, pauses the application; the reason (the deployment, the failure, the recovery outcome or the rollback target) is
 shown by `status`; an ordinary build failure or failed preliminary check does not pause (tested). Deployment status
@@ -138,7 +140,7 @@ Classes: **Live** passed live · **Offline** passed offline only · **Impl.** im
 | Restoration failures (cannot start, image/pin unavailable, Docker unreachable, over budget) | **Offline** |
 | Engine killed mid-cutover | **Live** (L4, one boundary); mid-restoration **Offline** |
 | Pause: build/preliminary failure do not pause; failed cutover and rollback do; reason in `status` | **Offline**; failed cutover and rollback pause seen live in `status` (L2, L3) |
-| Events held while paused; explicit `resume` | **None** (see 3) |
+| Events held while paused; explicit `resume` | **None** at B13; **Offline (durable state and decision only)** after B14 (`DEPLOY_B14_EVENTS_RESUME.md`); real events and execution of a selection wait for a source executor |
 
 ## 5. Stop conditions
 
