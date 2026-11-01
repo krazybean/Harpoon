@@ -193,3 +193,11 @@ No live validation of any of this; real 409 behaviour (including child images an
   selection deploys nothing (pending attended execution; the application stays blocked until dismissed). `events [--app A]`
   lists the pause and event history. `status` shows pauses (with since-time and origin), held events and decisions. There is
   no command that creates events: the engine's `control::ingest` is the interface a future trigger integration uses.
+
+## Milestone C — scoped configuration and secrets
+
+- `config-set`, `secret-set` (value on standard input only), `config-unset`, `config-defs`, `config-show`, `config-diff`, and on
+  `deploy`/`replace`: `--project`, `--environment`, `--target`, `--build-arg KEY=VALUE`. Secrets are Keychain items (service
+  `io.harpoon.deploy`, account `<id>@<version>`); the journal stores references only. A secret that cannot be read stops the
+  command before anything is built, stopped or written (exit 6, the key named). Restore and rollback use the pinned versions of the
+  release they recreate. Full design, exposure notes and gaps: `DEPLOY_MILESTONE_C_CONFIGURATION_SECRETS.md`.
