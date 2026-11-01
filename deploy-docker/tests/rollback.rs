@@ -77,6 +77,9 @@ fn pin(image: &str, tag: &str, port: u16, mem: i64) -> ReleaseConfig {
         nano_cpus: 250_000_000,
         pids: 32,
         env: Vec::new(),
+        secrets: Vec::new(),
+        snapshot: None,
+        build: None,
     }
 }
 

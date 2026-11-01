@@ -12,7 +12,7 @@
 //! * health evidence comes only from real observations of the published port.
 
 use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, Limits};
-use crate::buildx_run::{run_build, BuildRequest, BuildRunError, StdFileProbe};
+use crate::buildx_run::{run_build, BuildRequest, BuildRunError, SecretFiles, StdFileProbe};
 use crate::confine::{confine, Source};
 use crate::dockerfile::required_images;
 use crate::forwarder::HostListenerCheck;
@@ -33,6 +33,7 @@ use harpoon_deploy::ledger::{
 };
 use harpoon_deploy::ports::{self, Occupancy, PortLease, PortRange, Purpose};
 use harpoon_deploy::release::ReleaseConfig;
+use harpoon_deploy::secrets::{SecretBundle, SecretRef};
 use harpoon_deploy::state::Reason;
 use harpoon_deploy::time::{Entropy, OsEntropy, SystemClock};
 use std::collections::BTreeSet;
@@ -78,6 +79,19 @@ pub struct DockerConfig {
     /// When set, a health response only counts if it carries this marker (see [`ResponseMarker`]).
     pub health_marker: Option<ResponseMarker>,
     pub env: Vec<String>,
+    /// `--target`: the Dockerfile stage to build.
+    pub build_target: Option<String>,
+    /// Non-secret build arguments (`--build-arg`), sorted by name.
+    pub build_args: Vec<(String, String)>,
+    /// Build secrets (BuildKit `--secret`): the id the Dockerfile asks for, and the exact version.
+    /// References only; the values come from the backend's [`SecretBundle`].
+    pub build_secrets: Vec<(String, SecretRef)>,
+    /// Runtime secrets: environment name and exact version, injected into the container.
+    pub runtime_secrets: Vec<(String, SecretRef)>,
+    /// The configuration snapshot (a deployment id) and the canonical build description this
+    /// release is pinned with. Identity only.
+    pub snapshot_id: Option<String>,
+    pub build_identity: Option<String>,
     pub limits: Limits,
     pub max_context_bytes: u64,
     pub min_free_bytes: u64,
@@ -114,6 +128,12 @@ impl DockerConfig {
             live_gates: false,
             health_marker: None,
             env: Vec::new(),
+            build_target: None,
+            build_args: Vec::new(),
+            build_secrets: Vec::new(),
+            runtime_secrets: Vec::new(),
+            snapshot_id: None,
+            build_identity: None,
             limits: Limits::FIRST_TEST,
             max_context_bytes: 256 * 1000 * 1000,
             min_free_bytes: 2 * 1024 * 1024 * 1024,
@@ -162,6 +182,8 @@ pub struct DockerBackend<T: HttpTransport = TcpHttp> {
     forwarder: Option<Box<dyn HostListenerCheck>>,
     guest_disk: Option<Box<dyn GuestDiskProbe>>,
     copy_hook: Option<CopyHook>,
+    /// Resolved secret values for this operation, in memory only (never formatted, never stored).
+    secrets: SecretBundle,
     st: State,
 }
 
@@ -286,6 +308,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             forwarder: None,
             guest_disk: None,
             copy_hook: None,
+            secrets: SecretBundle::new(),
             st: State::default(),
         })
     }
@@ -301,6 +324,12 @@ impl<T: HttpTransport> DockerBackend<T> {
     /// Randomness for image tags and response markers. Tests inject a deterministic source.
     pub fn with_entropy(mut self, e: impl Entropy + 'static) -> Self {
         self.entropy = Box::new(e);
+        self
+    }
+    /// The resolved secret values this operation needs (build secrets, runtime secrets, and the
+    /// pinned secrets of a release that may be restored or rolled back to).
+    pub fn with_secrets(mut self, bundle: SecretBundle) -> Self {
+        self.secrets = bundle;
         self
     }
     /// Checked after a healthy response: the host listener for the port must be the forwarder's.
@@ -460,6 +489,14 @@ impl<T: HttpTransport> DockerBackend<T> {
         let pairs = harpoon_deploy::envvars::validate(&self.effective_env())
             .map_err(|e| StepError::new(format!("environment: {e}; no container was created")))?;
         let mut env = harpoon_deploy::envvars::docker_form(&pairs);
+        for (name, r) in self.effective_secrets() {
+            let v = self.secrets.get(&r).ok_or_else(|| {
+                StepError::new(format!(
+                    "secret {name} ({r}) is not available; no container was created"
+                ))
+            })?;
+            env.push(format!("{name}={}", v.expose_str()));
+        }
         if self.cfg.attribution == Attribution::PerContainer {
             let value = random_hex(&mut *self.entropy)?;
             env.push(format!("{MARKER_ENV}={value}"));
@@ -793,6 +830,29 @@ impl<T: HttpTransport> DockerBackend<T> {
                 iidfile.display()
             )));
         }
+        // Build secrets: every one must be available before Buildx starts; they go to BuildKit as
+        // files in a private directory beside (never inside) the context snapshot, and the files are
+        // gone again whatever happens (`SecretFiles` removes them on drop).
+        SecretFiles::sweep(&self.cfg.scratch_dir);
+        let mut wanted: Vec<(String, &[u8])> = Vec::new();
+        for (id, r) in &self.cfg.build_secrets {
+            let v = self.secrets.get(r).ok_or_else(|| {
+                StepError::new(format!(
+                    "build secret {id} ({r}) is not available; nothing was built"
+                ))
+            })?;
+            wanted.push((id.clone(), v.expose()));
+        }
+        let files = SecretFiles::create(&self.cfg.scratch_dir, nonce, &wanted).map_err(|e| {
+            StepError::new(format!(
+                "cannot prepare the build secrets: {e}; nothing was built"
+            ))
+        })?;
+        if files.files.iter().any(|(_, p)| p.starts_with(&snap.dir)) {
+            return Err(StepError::new(
+                "a build secret would sit inside the build context; nothing was built",
+            ));
+        }
         let req = BuildRequest {
             binary: &self.buildx,
             context: &snap.dir,
@@ -802,11 +862,15 @@ impl<T: HttpTransport> DockerBackend<T> {
             iidfile: &iidfile,
             socket: &self.cfg.socket,
             scratch: &self.cfg.scratch_dir,
+            target: self.cfg.build_target.as_deref(),
+            build_args: &self.cfg.build_args,
+            secrets: &files.files,
         };
         let log = &mut *io.log;
-        let outcome = run_build(&req, b.left("starting the build")?, &mut |line| {
-            log.push_line(line)
+        let outcome = run_build(&req, b.left("starting the build")?, &mut |text| {
+            log.push_chunk(text)
         });
+        drop(files);
         let iid_text = std::fs::read_to_string(&iidfile);
         let _ = std::fs::remove_file(&iidfile);
         match outcome {
@@ -1207,6 +1271,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         };
         harpoon_deploy::envvars::validate(&self.effective_env())
             .map_err(|e| StepError::new(format!("environment: {e}; nothing was planned")))?;
+        self.check_secrets_available("nothing was planned")?;
         let occ = self.occupancy(io, Purpose::Application, &b)?;
         let lease = ports::allocate(
             Purpose::Application,
@@ -1228,6 +1293,9 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             nano_cpus: self.cfg.limits.nano_cpus,
             pids: self.cfg.limits.pids,
             env: self.effective_env(),
+            secrets: self.effective_secrets(),
+            snapshot: self.effective_snapshot(),
+            build: self.effective_build(),
         }))
     }
 
@@ -1242,6 +1310,17 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         let Some(cfg) = previous.config.as_ref() else {
             return Ok(Vec::new());
         };
+        // The restoration would inject the previous release's own pinned secrets: if one cannot be
+        // resolved now, the cutover must not start.
+        let missing: Vec<String> = cfg
+            .secrets
+            .iter()
+            .filter(|(_, r)| self.secrets.get(r).is_none())
+            .map(|(n, r)| format!("secret {n} ({r}) of the previous release is not available, so it could not be restored"))
+            .collect();
+        if !missing.is_empty() {
+            return Ok(missing);
+        }
         let b = Budget::new(io.budget_ms);
         let own: Vec<String> = io
             .ledger()
@@ -1329,6 +1408,9 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             nano_cpus: self.cfg.limits.nano_cpus,
             pids: self.cfg.limits.pids,
             env: self.effective_env(),
+            secrets: self.effective_secrets(),
+            snapshot: self.effective_snapshot(),
+            build: self.effective_build(),
         })
     }
 
@@ -1534,6 +1616,53 @@ impl<T: HttpTransport> DockerBackend<T> {
             return c.env.clone();
         }
         self.cfg_env_pairs()
+    }
+
+    /// The runtime secrets of the container being created: a restoration uses the restored release's
+    /// own pinned versions, a rollback the target's, a new build this run's resolved ones.
+    fn effective_secrets(&self) -> Vec<(String, SecretRef)> {
+        if let Some(c) = self.st.restoring.as_ref().and_then(|p| p.config.as_ref()) {
+            return c.secrets.clone();
+        }
+        if let Some((_, c)) = &self.st.rollback {
+            return c.secrets.clone();
+        }
+        self.cfg.runtime_secrets.clone()
+    }
+
+    /// Where the release's configuration came from, and how it was built: a rollback keeps its
+    /// target's, a new build records this run's.
+    fn effective_snapshot(&self) -> Option<String> {
+        match &self.st.rollback {
+            Some((_, c)) => c.snapshot.clone(),
+            None => self.cfg.snapshot_id.clone(),
+        }
+    }
+    fn effective_build(&self) -> Option<String> {
+        match &self.st.rollback {
+            Some((_, c)) => c.build.clone(),
+            None => self.cfg.build_identity.clone(),
+        }
+    }
+
+    /// Defense in depth for the CLI's preflight: every secret this operation can inject must already
+    /// be in memory, so a missing one stops it before anything is created or stopped.
+    fn check_secrets_available(&self, consequence: &str) -> Result<(), StepError> {
+        for (name, r) in self.effective_secrets() {
+            if self.secrets.get(&r).is_none() {
+                return Err(StepError::new(format!(
+                    "secret {name} ({r}) is not available; {consequence}"
+                )));
+            }
+        }
+        for (id, r) in &self.cfg.build_secrets {
+            if self.st.rollback.is_none() && self.secrets.get(r).is_none() {
+                return Err(StepError::new(format!(
+                    "build secret {id} ({r}) is not available; {consequence}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// `cfg.env` as pairs. A malformed entry (the CLI validates, a library user might not) is kept

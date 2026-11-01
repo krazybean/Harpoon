@@ -139,6 +139,9 @@ fn rig() -> Rig {
             nano_cpus: 250_000_000,
             pids: 32,
             env: Vec::new(),
+            secrets: Vec::new(),
+            snapshot: None,
+            build: None,
         }),
         ..RunConfig::default()
     };
