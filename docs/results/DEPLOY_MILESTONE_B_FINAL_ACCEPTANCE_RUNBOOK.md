@@ -127,5 +127,5 @@ diff against baseline), `journal/` (a copy and hash after every step). Each step
 
 The overlay is test code and its binary hash must be recorded with the evidence; P1 is sensitive to a noisy host (run nothing else);
 build cache growth is expected; the forwarder listener can lag about ten seconds after teardown (wait, do not retry commands); the
-8 + 1 live containers are within the guest's memory budget only if the baseline stays as captured; a human decision is still needed on
+guest's free memory and disk are checked by the engine's own preflight at each step, not assumed; a human decision is still needed on
 the written acceptance review and on `Gate::shipping()` after the evidence exists.
