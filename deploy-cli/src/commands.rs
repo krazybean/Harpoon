@@ -1,7 +1,7 @@
 use crate::args::{Parsed, AUTH_FLAG, AUTH_PHRASE};
 use crate::store::{self, Kind, Runtime};
 use crate::{exit, Fail, Gate};
-use harpoon_deploy::backend::{FakeBackend, FakeRuntime, ResourceOps};
+use harpoon_deploy::backend::{Backend, FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
     end_state, execute_actions, reconcile, recover_cutover, run_deployment_confirmed,
@@ -33,18 +33,18 @@ type R = Result<i32, Fail>;
 
 pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     match p.command.as_str() {
-        "status" => status(p, out),
+        "status" => status(p, gate, out),
         "doctor" => doctor(p, out),
         "plan" => plan(p, out),
         "recover" => recover(p, out),
         "reconcile" => reconcile_cmd(p, out),
         "deploy" => deploy(p, gate, out),
-        "replace" => replace(p, out),
-        "restore" => restore(p, out),
-        "releases" => releases(p, out),
+        "replace" => replace(p, gate, out),
+        "restore" => restore(p, gate, out),
+        "releases" => releases(p, gate, out),
         "resume" => resume_cmd(p, out),
         "events" => events_cmd(p, out),
-        "rollback" => rollback(p, out),
+        "rollback" => rollback(p, gate, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
@@ -437,7 +437,7 @@ fn discover_workloads(sock: &Path, out: &mut String) -> i32 {
     exit::OK
 }
 
-fn status(p: &Parsed, out: &mut String) -> R {
+fn status(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let _ = writeln!(out, "runtime: {}", rt.dir.display());
     // Corrupt or unusable state is an error here and never reaches the Docker fallback.
@@ -540,7 +540,7 @@ fn status(p: &Parsed, out: &mut String) -> R {
         if let Some(ms) = d.interruption.and_then(|i| i.duration_ms()) {
             let _ = writeln!(out, "    interruption: {ms} ms between stopping the previous release and the confirmed new one");
         }
-        cutover_notes(out, d, &rt, lock_held)?;
+        cutover_notes(out, d, &rt, lock_held, gate)?;
         for e in r.ledger.entries().iter().filter(|e| e.deployment == d.id) {
             let _ = writeln!(
                 out,
@@ -600,6 +600,7 @@ fn cutover_notes(
     d: &Deployment,
     rt: &Runtime,
     lock_held: bool,
+    gate: &Gate,
 ) -> Result<(), Fail> {
     use harpoon_deploy::state::{CutoverState, RecoveryOutcome};
     let restored = d
@@ -634,6 +635,12 @@ fn cutover_notes(
                 writeln!(
                     out,
                     "    explicit restoration (one bounded attempt, never automatic): harpoon-deploy restore --deployment {} --simulate [--apply]",
+                    d.id
+                )
+            } else if gate.live_replacement_enabled {
+                writeln!(
+                    out,
+                    "    explicit restoration (one bounded attempt, never automatic): restore --deployment {} [--apply] {LIVE_FLAGS_HINT} (a dry run unless --apply)",
                     d.id
                 )
             } else {
@@ -1707,6 +1714,85 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     )
 }
 
+// ------------------------------------------------------------------ live replacement family
+
+/// The checks every live `replace`, `rollback` and `restore` makes before reading or writing
+/// anything: the build's gate, the exact authorization phrase, and every explicit path the real
+/// backend needs. Returns the Docker socket the operator named; none is ever inferred.
+fn live_replacement_gate(p: &Parsed, gate: &Gate, what: &str, cmd: &str) -> Result<PathBuf, Fail> {
+    if !gate.live_replacement_enabled {
+        return Err(Fail::refused(format!(
+            "live {what} is not enabled in this build: live replacement, rollback and restoration stay closed until the live acceptance evidence has been reviewed and accepted. \
+             Nothing was read, written or contacted. Use `{cmd} --simulate` against a separate runtime directory for an offline run."
+        )));
+    }
+    authorized(p)?;
+    let sock = socket_flag(p)?
+        .ok_or_else(|| Fail::runtime(format!("{what} needs an explicit --docker-socket PATH")))?;
+    forwarder_flags(p)?;
+    mgmt_flag(p)?;
+    p.value("resources-dir")
+        .ok_or_else(|| Fail::config("--resources-dir DIR is required"))?;
+    Ok(sock)
+}
+
+/// The Docker backend for a live run, built exactly as a live `deploy` builds it (every live
+/// requirement on, the forwarder ownership proof, the guest free-space probe), plus replacement.
+fn live_backend(
+    p: &Parsed,
+    rt: &Runtime,
+    sock: &Path,
+    mut cfg: DockerConfig,
+) -> Result<DockerBackend, Fail> {
+    let resources = p
+        .value("resources-dir")
+        .ok_or_else(|| Fail::config("--resources-dir DIR is required"))?;
+    store::private_dir(&rt.scratch_dir(), true)?;
+    cfg.live_gates = true;
+    cfg.attribution = Attribution::PerContainer;
+    cfg.enable_replacement = true;
+    let (lsof, pid, command) = forwarder_flags(p)?;
+    let mgmt = mgmt_flag(p)?;
+    Ok(DockerBackend::new(cfg, Some(Path::new(resources)))
+        .map_err(|e| Fail::config(e.to_string()))?
+        .with_forwarder_check(LsofCheck { lsof, pid, command })
+        .with_guest_disk(MgmtDfProbe::new(sock, mgmt, Duration::from_secs(10))))
+}
+
+/// A configuration for commands that never build (`rollback`, `restore`): the image, port, health
+/// check, limits and environment all come from a pinned release, so no project directory is read.
+fn pinned_only_cfg(rt: &Runtime, sock: &Path, port: u16) -> DockerConfig {
+    DockerConfig::first_test(sock, rt.scratch_dir(), rt.scratch_dir(), port)
+}
+
+/// What a live replacement-family command needs besides its own flags (shown only by a build that
+/// has them open).
+const LIVE_FLAGS_HINT: &str = "with --docker-socket PATH --resources-dir DIR --mgmt-socket PATH --forwarder-pid PID and the exact authorization flag; nothing is inferred";
+
+fn runtime_kind(simulate: bool) -> Kind {
+    if simulate {
+        Kind::Simulated
+    } else {
+        Kind::Docker
+    }
+}
+
+fn mode_label(simulate: bool) -> &'static str {
+    if simulate {
+        "SIMULATED, no Docker"
+    } else {
+        "Docker"
+    }
+}
+
+fn live_banner(out: &mut String, what: &str) {
+    let _ = writeln!(
+        out,
+        "*** LIVE {} (acceptance build) — real Docker; run only under written authorization ***",
+        what.to_ascii_uppercase()
+    );
+}
+
 // ------------------------------------------------------------------ replace
 
 /// The release currently serving `app` and the container that really serves it (after a
@@ -1725,20 +1811,22 @@ fn current_release(
 ///
 /// Live replacement is deliberately not available: the bounded restoration that must follow a
 /// failed cutover is the next milestone, so a live run is refused before anything is read.
-fn replace(p: &Parsed, out: &mut String) -> R {
-    if !p.switch("simulate") {
-        return Err(Fail::refused(
-            "live replacement is not enabled in this build: the bounded cutover recovery that must follow a failed cutover is not implemented yet. \
-             Nothing was read, written or contacted. Use `replace --simulate` against a separate runtime directory for an offline run.",
-        ));
-    }
+fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    let simulate = p.switch("simulate");
+    let live_sock = if simulate {
+        None
+    } else {
+        Some(live_replacement_gate(p, gate, "replacement", "replace")?)
+    };
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let app: ApplicationId = p
         .value("app")
         .ok_or_else(|| Fail::usage("replace needs --app APPLICATION_ID"))?
         .parse()
         .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?;
-    let sock = PathBuf::from("/nonexistent");
+    let sock = live_sock
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
     let s = source_cfg(p, &rt, &sock, true)?;
     // Look before opening the writer: a refusal must not create a journal.
     let Some(existing) = store::read_restored(&rt)? else {
@@ -1751,7 +1839,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
             "application {app} has no running release recorded; use `deploy` for a first deployment"
         )]));
     }
-    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let (mut journal, restored) = store::open_writer(&rt, runtime_kind(simulate))?;
     let deps = restored.deployments.clone();
 
     let mut blockers = unfinished(&deps);
@@ -1761,7 +1849,7 @@ fn replace(p: &Parsed, out: &mut String) -> R {
             .filter(|d| d.application_may_be_down())
             .map(|d| {
                 format!(
-                    "deployment {} began a cutover that was never confirmed: the application may be down. Replacing is blocked until the bounded cutover recovery exists",
+                    "deployment {} began a cutover that was never confirmed: the application may be down. Replacing is blocked until it is resolved with `recover` and the explicit, one-attempt `restore`",
                     d.id
                 )
             }),
@@ -1791,9 +1879,10 @@ fn replace(p: &Parsed, out: &mut String) -> R {
     let plan = CutoverPlan::new(&d.application_id, &cur_release, &d.id, &cfg);
     let _ = writeln!(
         out,
-        "deployment {} (application {}) — SIMULATED, no Docker; replaces the release of deployment {cur_dep}, served by container {} of deployment {}{}",
+        "deployment {} (application {}) — {}; replaces the release of deployment {cur_dep}, served by container {} of deployment {}{}",
         d.id,
         d.application_id,
+        mode_label(simulate),
         serving.container_name,
         serving.container_owner,
         match &serving.via {
@@ -1802,6 +1891,9 @@ fn replace(p: &Parsed, out: &mut String) -> R {
             harpoon_deploy::serving::ServedBy::RolledBack { by } => format!(" (rolled back by {by})"),
         }
     );
+    if !simulate {
+        live_banner(out, "replacement");
+    }
     let _ = writeln!(
         out,
         "{}",
@@ -1831,16 +1923,28 @@ fn replace(p: &Parsed, out: &mut String) -> R {
     let ctx = Context {
         previous_release: Some(cur_release),
     };
-    let clock = ManualClock::new(now_ms());
-    let mut b = FakeBackend::new(clock.clone())
+    let sim_clock = ManualClock::new(now_ms());
+    let mut fake = FakeBackend::new(sim_clock.clone())
         .with_runtime(FakeRuntime::world())
         .with_env(s.env.clone());
+    let mut real = match &live_sock {
+        None => None,
+        Some(sock) => {
+            let mut live_cfg = s.cfg.clone();
+            live_cfg.socket = sock.clone();
+            Some(live_backend(p, &rt, sock, live_cfg)?)
+        }
+    };
+    let (b, clock): (&mut dyn Backend, &dyn Clock) = match real.as_mut() {
+        Some(r) => (r, &SystemClock),
+        None => (&mut fake, &*sim_clock),
+    };
     let report = run_deployment_confirmed(
         &mut d,
         &ctx,
-        &mut b,
+        b,
         &mut journal,
-        &clock,
+        clock,
         &cfg,
         &|| false,
         &|_: &CutoverPlan| confirmed,
@@ -1851,13 +1955,18 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         ))
     })?;
     print_report(out, &d, &report);
-    print_prepare_failure(out, "replace", &d, &report, &rt, true, Some(&serving));
+    print_prepare_failure(out, "replace", &d, &report, &rt, simulate, Some(&serving));
     record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
                 out,
-                "measured interruption: {ms} ms (simulated clock; a real cutover has not been measured)"
+                "measured interruption: {ms} ms{}",
+                if simulate {
+                    " (simulated clock; a real cutover has not been measured)"
+                } else {
+                    ""
+                }
             ),
             None => writeln!(
                 out,
@@ -1869,7 +1978,8 @@ fn replace(p: &Parsed, out: &mut String) -> R {
         let _ = match pr.why {
             NotCutOver::NotConfirmed => writeln!(
                 out,
-                "candidate prepared, current release untouched. Re-run with --confirm-cutover to perform the (simulated) cutover; the candidate image is kept (see `cleanup-image`)."
+                "candidate prepared, current release untouched. Re-run with --confirm-cutover to perform the {}cutover; the candidate image is kept (see `cleanup-image`).",
+                if simulate { "(simulated) " } else { "" }
             ),
             NotCutOver::Unsupported => writeln!(
                 out,
@@ -1947,7 +2057,7 @@ fn operation_blockers(ledger: &Ledger, deps: &[Deployment], what: &str) -> Vec<S
 
 /// The retained releases of one application, read from the journal. Reads only: no Docker, no
 /// writer lock, nothing created.
-fn releases(p: &Parsed, out: &mut String) -> R {
+fn releases(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let app: ApplicationId = p
         .value("app")
@@ -2003,6 +2113,11 @@ fn releases(p: &Parsed, out: &mut String) -> R {
             out,
             "roll back with: harpoon-deploy rollback --app {app} --to RELEASE_ID --simulate [--confirm-rollback] (the exact release id, nothing is guessed)"
         )
+    } else if gate.live_replacement_enabled {
+        writeln!(
+            out,
+            "roll back with: rollback --app {app} --to RELEASE_ID [--confirm-rollback] {LIVE_FLAGS_HINT} (the exact release id, nothing is guessed)"
+        )
     } else {
         writeln!(
             out,
@@ -2017,13 +2132,13 @@ fn releases(p: &Parsed, out: &mut String) -> R {
 /// keeps running until the target is prepared and has passed its preliminary check; the plan, the
 /// interruption and the data warning are printed before anything is stopped; the cutover needs
 /// `--confirm-rollback`. A failed cutover gets the same one bounded restoration as a replacement.
-fn rollback(p: &Parsed, out: &mut String) -> R {
-    if !p.switch("simulate") {
-        return Err(Fail::refused(
-            "live rollback is not enabled in this build: live replacement, which a rollback is, is not enabled. \
-             Nothing was read, written or contacted. Use `rollback --simulate` against a separate runtime directory for an offline run.",
-        ));
-    }
+fn rollback(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    let simulate = p.switch("simulate");
+    let live_sock = if simulate {
+        None
+    } else {
+        Some(live_replacement_gate(p, gate, "rollback", "rollback")?)
+    };
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let app: ApplicationId = p
         .value("app")
@@ -2043,7 +2158,7 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
     };
     harpoon_deploy::rollback::select_target(&existing.ledger, &existing.deployments, &app, &target)
         .map_err(|why| rollback_refused(&why))?;
-    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let (mut journal, restored) = store::open_writer(&rt, runtime_kind(simulate))?;
     let deps = restored.deployments.clone();
     let blockers = operation_blockers(&restored.ledger, &deps, "A rollback");
     if !blockers.is_empty() {
@@ -2081,9 +2196,14 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
     plan.rollback = true;
     let _ = writeln!(
         out,
-        "rollback deployment {} (application {}) — SIMULATED, no Docker",
-        d.id, d.application_id
+        "rollback deployment {} (application {}) — {}",
+        d.id,
+        d.application_id,
+        mode_label(simulate)
     );
+    if !simulate {
+        live_banner(out, "rollback");
+    }
     let _ = writeln!(
         out,
         "serving now: release {} (deployment {}), container {} of deployment {}",
@@ -2117,16 +2237,30 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
     let ctx = Context {
         previous_release: Some(serving.release.clone()),
     };
-    let clock = ManualClock::new(now_ms());
-    let mut b = FakeBackend::new(clock.clone())
+    let sim_clock = ManualClock::new(now_ms());
+    let mut fake = FakeBackend::new(sim_clock.clone())
         .with_runtime(FakeRuntime::world())
-        .with_rollback(target_config);
+        .with_rollback(target_config.clone());
+    let mut real = match &live_sock {
+        None => None,
+        Some(sock) => {
+            let live_cfg = pinned_only_cfg(&rt, sock, target_config.container_port);
+            Some(
+                live_backend(p, &rt, sock, live_cfg)?
+                    .with_rollback(target.deployment(), target_config.clone()),
+            )
+        }
+    };
+    let (b, clock): (&mut dyn Backend, &dyn Clock) = match real.as_mut() {
+        Some(r) => (r, &SystemClock),
+        None => (&mut fake, &*sim_clock),
+    };
     let report = run_deployment_confirmed(
         &mut d,
         &ctx,
-        &mut b,
+        b,
         &mut journal,
-        &clock,
+        clock,
         &cfg,
         &|| false,
         &|_: &CutoverPlan| confirmed,
@@ -2137,13 +2271,18 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
         ))
     })?;
     print_report(out, &d, &report);
-    print_prepare_failure(out, "rollback", &d, &report, &rt, true, Some(&serving));
+    print_prepare_failure(out, "rollback", &d, &report, &rt, simulate, Some(&serving));
     record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         let _ = match i.duration_ms() {
             Some(ms) => writeln!(
                 out,
-                "measured interruption: {ms} ms (simulated clock; a real cutover has not been measured)"
+                "measured interruption: {ms} ms{}",
+                if simulate {
+                    " (simulated clock; a real cutover has not been measured)"
+                } else {
+                    ""
+                }
             ),
             None => writeln!(
                 out,
@@ -2154,7 +2293,8 @@ fn rollback(p: &Parsed, out: &mut String) -> R {
     if report.prepared.is_some() {
         let _ = writeln!(
             out,
-            "target prepared, serving release untouched. Re-run with --confirm-rollback to perform the (simulated) rollback."
+            "target prepared, serving release untouched. Re-run with --confirm-rollback to perform the {}rollback.",
+                if simulate { "(simulated) " } else { "" }
         );
         return Ok(exit::OK);
     }
@@ -2188,13 +2328,13 @@ fn rollback_refused(blockers: &[String]) -> Fail {
 /// Explicit, bounded restoration after a cutover that was interrupted part-way (D10). One attempt
 /// per deployment, ever: a recorded attempt, even one that died, forbids another. Dry run unless
 /// `--apply`. Offline only; live restoration is not enabled.
-fn restore(p: &Parsed, out: &mut String) -> R {
-    if !p.switch("simulate") {
-        return Err(Fail::refused(
-            "live restoration is not enabled in this build: replacing a running release is not enabled live, so there is nothing to restore live. \
-             Nothing was read, written or contacted. Use `restore --simulate` against a separate runtime directory for an offline run.",
-        ));
-    }
+fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    let simulate = p.switch("simulate");
+    let live_sock = if simulate {
+        None
+    } else {
+        Some(live_replacement_gate(p, gate, "restoration", "restore")?)
+    };
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let dep_id: harpoon_deploy::ids::DeploymentId = p
         .value("deployment")
@@ -2278,7 +2418,7 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         return Ok(exit::OK);
     }
 
-    let (mut journal, restored) = store::open_writer(&rt, Kind::Simulated)?;
+    let (mut journal, restored) = store::open_writer(&rt, runtime_kind(simulate))?;
     let mut d = find_dep(&restored.deployments, &dep_id)
         .cloned()
         .ok_or_else(|| Fail::failed("the deployment disappeared from the journal"))?;
@@ -2294,9 +2434,22 @@ fn restore(p: &Parsed, out: &mut String) -> R {
         config: None,
         container: None,
     };
-    let clock = ManualClock::new(now_ms());
-    let mut b = FakeBackend::new(clock.clone()).with_runtime(FakeRuntime::world());
-    let report = recover_cutover(&mut d, prev, &mut b, &mut journal, &clock, &cfg).map_err(|e| {
+    let sim_clock = ManualClock::new(now_ms());
+    let mut fake = FakeBackend::new(sim_clock.clone()).with_runtime(FakeRuntime::world());
+    let mut real = match (&live_sock, &cfg.previous) {
+        (Some(sock), Some(c)) => {
+            live_banner(out, "restoration");
+            let live_cfg = pinned_only_cfg(&rt, sock, c.container_port);
+            Some(live_backend(p, &rt, sock, live_cfg)?)
+        }
+        // No pin: the engine records `not_attempted(config_unavailable)` without touching Docker.
+        _ => None,
+    };
+    let (b, clock): (&mut dyn Backend, &dyn Clock) = match real.as_mut() {
+        Some(r) => (r, &SystemClock),
+        None => (&mut fake, &*sim_clock),
+    };
+    let report = recover_cutover(&mut d, prev, b, &mut journal, clock, &cfg).map_err(|e| {
         Fail::failed(format!(
             "the restoration stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
         ))
@@ -2312,7 +2465,11 @@ fn restore(p: &Parsed, out: &mut String) -> R {
     record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
         if let Some(ms) = i.duration_ms() {
-            let _ = writeln!(out, "measured interruption: {ms} ms (simulated clock)");
+            let _ = writeln!(
+                out,
+                "measured interruption: {ms} ms{}",
+                if simulate { " (simulated clock)" } else { "" }
+            );
         }
     }
     for w in &report.warnings {

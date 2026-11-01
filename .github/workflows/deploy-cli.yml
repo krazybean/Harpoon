@@ -75,6 +75,24 @@ jobs:
             echo "the CLI must not call a prune endpoint or force a removal" >&2; exit 1
           fi
 
+      - name: No fault-injection or crash controls in production deploy sources
+        run: |
+          # Scoped to the deploy crates' sources: legitimate crash-recovery tests (which simulate a
+          # crash by cutting a journal or a fake write) live under tests/ and are not scanned.
+          if grep -rnE 'experimental-(fail-final-check|crash-after-stop)|INJECTED (FAULT|TEST FAULT)|CrashAfterStop|SIGKILL' ../deploy/src ../deploy-docker/src ../deploy-journal/src src; then
+            echo "fault injection or crash controls must never be in production deploy sources" >&2; exit 1
+          fi
+          if grep -rnE 'extern "C" \{[^}]*fn kill' ../deploy/src ../deploy-docker/src ../deploy-journal/src src; then
+            echo "no process may signal itself in production deploy sources" >&2; exit 1
+          fi
+
+      - name: Packaging boundary - nothing that packages a release names or builds the acceptance executable
+        run: |
+          if grep -rIl 'harpoon-deploy-acceptance' ../.github/workflows ../tools ../ui/harpoon-desktop/src-tauri ../package.json 2>/dev/null | grep -v 'deploy-cli.yml'; then
+            echo "the acceptance executable must not be named by any packaging file" >&2; exit 1
+          fi
+          grep -q 'required-features = \["acceptance"\]' Cargo.toml
+
       - name: Format
         run: cargo fmt --check
 
@@ -83,3 +101,16 @@ jobs:
 
       - name: Tests
         run: cargo test --offline
+
+      # The acceptance executable is built and tested here and nowhere else. Default builds and
+      # release builds never produce it (required-features); this job never uploads it.
+      - name: Default build does not produce the acceptance executable
+        run: |
+          cargo build --offline
+          test ! -e target/debug/harpoon-deploy-acceptance
+
+      - name: Acceptance feature - Clippy and tests (the binary exists only with --features acceptance)
+        run: |
+          cargo clippy --offline --all-targets --features acceptance -- -D warnings
+          cargo test --offline --features acceptance
+          test -e target/debug/harpoon-deploy-acceptance

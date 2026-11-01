@@ -120,12 +120,33 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         command: "rollback",
-        values: &["runtime-dir", "app", "to"],
+        values: &[
+            "runtime-dir",
+            "app",
+            "to",
+            "docker-socket",
+            "resources-dir",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+        ],
         switches: &["simulate", "confirm-rollback"],
     },
     Spec {
         command: "restore",
-        values: &["runtime-dir", "deployment"],
+        values: &[
+            "runtime-dir",
+            "deployment",
+            "docker-socket",
+            "resources-dir",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+        ],
         switches: &["simulate", "apply"],
     },
     Spec {
@@ -252,13 +273,13 @@ COMMANDS
   recover         mark interrupted deployments (writes the journal); never touches Docker
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
   deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
-  replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; --simulate only (live replacement is not enabled)
+  replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; live only in the separate acceptance build (closed in this one); offline with --simulate
   releases        list an application's retained releases, the one serving, and why any cannot be rolled back to (reads the journal only)
   resume          record ONE explicit decision for a paused application's held events: --dismiss (clear the pause), --newest or --revision REV
                   (select a held revision: it deploys NOTHING and the application stays blocked until dismissed). Never contacts Docker
   events          read-only: pause records and held/selected/dismissed/superseded events with their decisions
-  rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); --simulate only (live rollback is not enabled)
-  restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); --simulate only (live restoration is not enabled)
+  rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only in the separate acceptance build (closed in this one); offline with --simulate
+  restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only in the separate acceptance build (closed in this one); offline with --simulate
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
   cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)

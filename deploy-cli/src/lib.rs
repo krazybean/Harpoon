@@ -33,12 +33,17 @@ pub mod exit {
 #[derive(Debug, Clone, Copy)]
 pub struct Gate {
     pub live_deploy_enabled: bool,
+    /// Live `replace`, `rollback` and `restore`. Closed in the shipping binary. Only the
+    /// `harpoon-deploy-acceptance` binary, which exists only when the `acceptance` Cargo feature is
+    /// asked for by name, opens it; nothing at run time can.
+    pub live_replacement_enabled: bool,
 }
 
 impl Gate {
     pub const fn shipping() -> Gate {
         Gate {
             live_deploy_enabled: false,
+            live_replacement_enabled: false,
         }
     }
 }
