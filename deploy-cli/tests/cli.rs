@@ -637,8 +637,16 @@ fn b8_child_live_deploy_to_be_killed() {
 /// Start a live deployment in a separate process, hold it inside the start of its preliminary
 /// container, and SIGKILL it. What remains is exactly what an interrupted run leaves: a journal
 /// with a running deployment, leases and a receipted container, and that container in Docker.
+/// Tests that bind or occupy the preliminary-check or application port ranges, or that run a live
+/// deployment that needs a free port from them, take this so they never starve each other.
+pub(crate) fn port_range() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn interrupt_a_live_deploy(t: &T) {
     use std::time::{Duration, Instant};
+    let _ports = port_range();
     image_appears_after_build(t);
     t.h.docker.fault(
         Some("POST"),

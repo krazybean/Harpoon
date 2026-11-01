@@ -11,6 +11,7 @@
 
 mod args;
 mod commands;
+mod config_cmds;
 mod next_steps;
 mod store;
 
@@ -101,8 +102,34 @@ impl Fail {
     }
 }
 
-/// Run one command. `args` excludes the program name.
+/// What a command may touch besides the runtime directory and Docker: the secret store (the macOS
+/// Keychain in the product, a fake in tests) and standard input (the only way a secret value enters).
+pub struct Services<'a> {
+    pub secrets: &'a dyn harpoon_deploy::secrets::SecretStore,
+    pub stdin: &'a mut dyn std::io::Read,
+    /// An interactive terminal would echo a secret; `secret-set` refuses one.
+    pub stdin_is_terminal: bool,
+}
+
+/// Run one command against the real Keychain and standard input. `args` excludes the program name.
 pub fn run(args: &[String], gate: &Gate) -> Outcome {
+    use std::io::IsTerminal;
+    let keychain = harpoon_deploy_keychain::Keychain::new();
+    let mut stdin = std::io::stdin();
+    let terminal = stdin.is_terminal();
+    run_with(
+        args,
+        gate,
+        &mut Services {
+            secrets: &keychain,
+            stdin: &mut stdin,
+            stdin_is_terminal: terminal,
+        },
+    )
+}
+
+/// [`run`] with explicit services, for tests.
+pub fn run_with(args: &[String], gate: &Gate, svc: &mut Services) -> Outcome {
     if args.is_empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
         return Outcome {
             code: if args.is_empty() {
@@ -136,7 +163,7 @@ pub fn run(args: &[String], gate: &Gate) -> Outcome {
         }
     };
     let mut out = String::new();
-    let res = commands::dispatch(&parsed, gate, &mut out);
+    let res = commands::dispatch(&parsed, gate, svc, &mut out);
     match res {
         Ok(code) => Outcome {
             code,

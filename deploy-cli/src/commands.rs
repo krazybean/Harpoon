@@ -1,11 +1,11 @@
 use crate::args::{Parsed, AUTH_FLAG, AUTH_PHRASE};
 use crate::store::{self, Kind, Runtime};
-use crate::{exit, Fail, Gate};
+use crate::{config_cmds, exit, Fail, Gate, Services};
 use harpoon_deploy::backend::{Backend, FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
     end_state, execute_actions, reconcile, recover_cutover, run_deployment_confirmed,
-    run_deployment_with, Context, CutoverPlan, NotCutOver, Report, RunConfig,
+    run_deployment_with, Context, CutoverPlan, Journal, NotCutOver, Report, RunConfig,
 };
 use harpoon_deploy::ids::{ApplicationId, IdGenerator};
 use harpoon_deploy::ledger::{
@@ -31,20 +31,26 @@ use std::time::Duration;
 
 type R = Result<i32, Fail>;
 
-pub fn dispatch(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     match p.command.as_str() {
+        "config-set" => config_cmds::config_set(p, out),
+        "secret-set" => config_cmds::secret_set(p, svc, out),
+        "config-unset" => config_cmds::config_unset(p, out),
+        "config-defs" => config_cmds::config_defs(p, out),
+        "config-show" => config_cmds::config_show(p, svc, out),
+        "config-diff" => config_cmds::config_diff(p, out),
         "status" => status(p, gate, out),
         "doctor" => doctor(p, out),
         "plan" => plan(p, out),
         "recover" => recover(p, out),
         "reconcile" => reconcile_cmd(p, out),
-        "deploy" => deploy(p, gate, out),
-        "replace" => replace(p, gate, out),
-        "restore" => restore(p, gate, out),
+        "deploy" => deploy(p, gate, svc, out),
+        "replace" => replace(p, gate, svc, out),
+        "restore" => restore(p, gate, svc, out),
         "releases" => releases(p, gate, out),
         "resume" => resume_cmd(p, out),
         "events" => events_cmd(p, out),
-        "rollback" => rollback(p, gate, out),
+        "rollback" => rollback(p, gate, svc, out),
         "export-journal" => export_journal(p, out),
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
@@ -200,6 +206,25 @@ fn env_line(env: &[(String, String)], provenance: &str) -> String {
         "environment ({provenance}): {} — NON-SECRET values: visible in `docker inspect` and stored in the journal",
         harpoon_deploy::envvars::names(env)
     )
+}
+
+/// Secret references of a pin, names and exact versions only.
+fn secrets_line(
+    secrets: &[(String, harpoon_deploy::secrets::SecretRef)],
+    provenance: &str,
+) -> String {
+    format!(
+        "secrets ({provenance}): {} — references to exact Keychain versions; values are never shown or stored by Harpoon, and are visible in `docker inspect` of the running container",
+        if secrets.is_empty() {
+            "none".to_string()
+        } else {
+            secrets.iter().map(|(n, r)| format!("{n}={r}")).collect::<Vec<_>>().join(", ")
+        }
+    )
+}
+
+fn journal_config_err(e: impl std::fmt::Debug) -> Fail {
+    Fail::journal(format!("cannot record the configuration snapshot: {e:?}"))
 }
 
 fn find_dep<'a>(
@@ -1572,7 +1597,7 @@ fn reconcile_cmd(p: &Parsed, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ deploy
 
-fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let simulate = p.switch("simulate");
     let socket = socket_flag(p)?;
@@ -1636,6 +1661,12 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
     d.transition(DeploymentStatus::Queued, now_ms())
         .map_err(|e| Fail::failed(e.to_string()))?;
+    // Configuration and secrets, resolved and fetched before the journal is written to, anything is
+    // built, or Docker is contacted: a missing or inaccessible secret stops the run here.
+    let mut prep = config_cmds::prepare(p, svc, &restored.config, &d.application_id, &s.env, &[])?;
+    journal
+        .config(&prep.snapshot(&d.id, &d.application_id))
+        .map_err(journal_config_err)?;
     let _ = writeln!(
         out,
         "deployment {} (application {}) — {}",
@@ -1650,8 +1681,16 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let _ = writeln!(
         out,
         "{}",
-        env_line(&s.env, "from --env, pinned with the release")
+        env_line(&prep.runtime_env, "from --env, pinned with the release")
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        secrets_line(&prep.runtime_secrets, "pinned with the release")
+    );
+    for l in prep.lines() {
+        let _ = writeln!(out, "{l}");
+    }
     if !simulate {
         let _ = writeln!(
             out,
@@ -1661,7 +1700,8 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         );
     }
     // Keep the engine's preliminary-step budget aligned with the user-visible health deadline.
-    let cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
+    let mut cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());
+    cfg.redactor = prep.redactor.clone();
     let ctx = Context {
         previous_release: None,
     };
@@ -1670,7 +1710,12 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         let clock = ManualClock::new(now_ms());
         let mut b = FakeBackend::new(clock.clone())
             .with_runtime(FakeRuntime::world())
-            .with_env(s.env.clone());
+            .with_env(prep.runtime_env.clone())
+            .with_pin_extras(
+                prep.runtime_secrets.clone(),
+                prep.pin_identity(&d.id).0,
+                prep.pin_identity(&d.id).1,
+            );
         run_deployment_with(&mut d, &ctx, &mut b, &mut journal, &clock, &cfg, &|| false)
     } else {
         let resources = p
@@ -1681,10 +1726,12 @@ fn deploy(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         let mut live_cfg = s.cfg.clone();
         live_cfg.live_gates = true;
         live_cfg.attribution = Attribution::PerContainer;
+        prep.apply_to(&mut live_cfg, &d.id);
         let (lsof, pid, command) = forwarder_flags(p)?;
         let mgmt = mgmt_flag(p)?;
         let mut b = DockerBackend::new(live_cfg, Some(Path::new(resources)))
             .map_err(|e| Fail::config(e.to_string()))?
+            .with_secrets(std::mem::take(&mut prep.bundle))
             .with_forwarder_check(LsofCheck { lsof, pid, command })
             .with_guest_disk(MgmtDfProbe::new(&sock, mgmt, Duration::from_secs(10)));
         run_deployment_with(
@@ -1743,6 +1790,7 @@ fn live_backend(
     rt: &Runtime,
     sock: &Path,
     mut cfg: DockerConfig,
+    secrets: harpoon_deploy::secrets::SecretBundle,
 ) -> Result<DockerBackend, Fail> {
     let resources = p
         .value("resources-dir")
@@ -1755,6 +1803,7 @@ fn live_backend(
     let mgmt = mgmt_flag(p)?;
     Ok(DockerBackend::new(cfg, Some(Path::new(resources)))
         .map_err(|e| Fail::config(e.to_string()))?
+        .with_secrets(secrets)
         .with_forwarder_check(LsofCheck { lsof, pid, command })
         .with_guest_disk(MgmtDfProbe::new(sock, mgmt, Duration::from_secs(10))))
 }
@@ -1813,7 +1862,7 @@ fn current_release(
 /// `live_replacement_enabled` gate (closed in the shipping binary, open only in the acceptance
 /// binary), the exact authorization phrase and every explicit path; otherwise it is refused before
 /// anything is read. A failed cutover gets one bounded restoration from the previous release's pin.
-fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
         None
@@ -1878,6 +1927,25 @@ fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         owner: serving.container_owner.clone(),
         name: serving.container_name.clone(),
     });
+    // The new configuration, and the serving release's own pinned secrets (the bounded restoration
+    // after a failed cutover would need them): all fetched before anything is stopped or built.
+    let previous_secrets = serving
+        .config
+        .as_ref()
+        .map(|c| c.secrets.clone())
+        .unwrap_or_default();
+    let mut prep = config_cmds::prepare(
+        p,
+        svc,
+        &restored.config,
+        &d.application_id,
+        &s.env,
+        &previous_secrets,
+    )?;
+    journal
+        .config(&prep.snapshot(&d.id, &d.application_id))
+        .map_err(journal_config_err)?;
+    cfg.redactor = prep.redactor.clone();
     let plan = CutoverPlan::new(&d.application_id, &cur_release, &d.id, &cfg);
     let _ = writeln!(
         out,
@@ -1899,10 +1967,18 @@ fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let _ = writeln!(
         out,
         "{}",
-        env_line(&s.env, "from --env, pinned with the candidate")
+        env_line(&prep.runtime_env, "from --env, pinned with the candidate")
     );
+    let _ = writeln!(
+        out,
+        "{}",
+        secrets_line(&prep.runtime_secrets, "pinned with the candidate")
+    );
+    for l in prep.lines() {
+        let _ = writeln!(out, "{l}");
+    }
     match &cfg.previous {
-        Some(prev) if prev.env != s.env => {
+        Some(prev) if prev.env != prep.runtime_env => {
             let _ = writeln!(
                 out,
                 "environment differs from the serving release's pinned environment ({}): the candidate gets exactly the variables given now; a restoration or rollback uses each release's own pin",
@@ -1928,13 +2004,25 @@ fn replace(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let sim_clock = ManualClock::new(now_ms());
     let mut fake = FakeBackend::new(sim_clock.clone())
         .with_runtime(FakeRuntime::world())
-        .with_env(s.env.clone());
+        .with_env(prep.runtime_env.clone())
+        .with_pin_extras(
+            prep.runtime_secrets.clone(),
+            prep.pin_identity(&d.id).0,
+            prep.pin_identity(&d.id).1,
+        );
     let mut real = match &live_sock {
         None => None,
         Some(sock) => {
             let mut live_cfg = s.cfg.clone();
             live_cfg.socket = sock.clone();
-            Some(live_backend(p, &rt, sock, live_cfg)?)
+            prep.apply_to(&mut live_cfg, &d.id);
+            Some(live_backend(
+                p,
+                &rt,
+                sock,
+                live_cfg,
+                std::mem::take(&mut prep.bundle),
+            )?)
         }
     };
     let (b, clock): (&mut dyn Backend, &dyn Clock) = match real.as_mut() {
@@ -2135,7 +2223,7 @@ fn releases(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 /// keeps running until the target is prepared and has passed its preliminary check; the plan, the
 /// interruption and the data warning are printed before anything is stopped; the cutover needs
 /// `--confirm-rollback`. A failed cutover gets the same one bounded restoration as a replacement.
-fn rollback(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+fn rollback(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
         None
@@ -2194,6 +2282,18 @@ fn rollback(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         owner: serving.container_owner.clone(),
         name: serving.container_name.clone(),
     });
+    // The target's own pinned secret versions (never current values) and the serving release's, for the
+    // bounded restoration if the cutover fails: fetched before anything is prepared, stopped or built.
+    let mut needed = target_config.secrets.clone();
+    needed.extend(
+        serving
+            .config
+            .as_ref()
+            .map(|c| c.secrets.clone())
+            .unwrap_or_default(),
+    );
+    let (secret_bundle, redactor) = config_cmds::fetch(svc, &needed)?;
+    cfg.redactor = redactor;
     let mut plan = CutoverPlan::new(&d.application_id, &serving.release, &d.id, &cfg);
     plan.candidate = target.clone();
     plan.rollback = true;
@@ -2249,7 +2349,7 @@ fn rollback(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         Some(sock) => {
             let live_cfg = pinned_only_cfg(&rt, sock, target_config.container_port);
             Some(
-                live_backend(p, &rt, sock, live_cfg)?
+                live_backend(p, &rt, sock, live_cfg, secret_bundle)?
                     .with_rollback(target.deployment(), target_config.clone()),
             )
         }
@@ -2332,7 +2432,7 @@ fn rollback_refused(blockers: &[String]) -> Fail {
 /// per deployment, ever: a recorded attempt, even one that died, forbids another. Dry run unless
 /// `--apply`. `--simulate` runs offline; a live restoration needs the open `live_replacement_enabled`
 /// gate (closed in the shipping binary), the authorization phrase and every explicit path.
-fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+fn restore(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
         None
@@ -2405,6 +2505,20 @@ fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
                 "{}",
                 env_line(&c.env, "pinned with the release being restored")
             );
+            let _ = writeln!(
+                out,
+                "{}",
+                secrets_line(&c.secrets, "pinned with the release being restored")
+            );
+            for (n, r) in &c.secrets {
+                let _ = match svc.secrets.get(r) {
+                    Ok(_) => writeln!(out, "  secret {n} ({r}): available"),
+                    Err(e) => writeln!(
+                        out,
+                        "  secret {n} ({r}): UNAVAILABLE ({e}); --apply would be refused before anything is changed"
+                    ),
+                };
+            }
         }
         None => {
             let _ = writeln!(out, "pinned configuration: none stored; the attempt will be recorded as not_attempted (config_unavailable)");
@@ -2422,6 +2536,13 @@ fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         return Ok(exit::OK);
     }
 
+    // The pinned versions of the release being restored, never current values: fetched before the
+    // journal is opened for writing, so an unavailable secret changes nothing.
+    let pinned_secrets = pinned
+        .as_ref()
+        .map(|c| c.secrets.clone())
+        .unwrap_or_default();
+    let (secret_bundle, redactor) = config_cmds::fetch(svc, &pinned_secrets)?;
     let (mut journal, restored) = store::open_writer(&rt, runtime_kind(simulate))?;
     let mut d = find_dep(&restored.deployments, &dep_id)
         .cloned()
@@ -2432,6 +2553,7 @@ fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         ..RunConfig::default()
     };
     cfg.policy.restore_budget_ms = 60_000;
+    cfg.redactor = redactor;
     let prev = harpoon_deploy::backend::PreviousRelease {
         release: prev_release,
         deployment: prev_dep,
@@ -2444,7 +2566,7 @@ fn restore(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         (Some(sock), Some(c)) => {
             live_banner(out, "restoration");
             let live_cfg = pinned_only_cfg(&rt, sock, c.container_port);
-            Some(live_backend(p, &rt, sock, live_cfg)?)
+            Some(live_backend(p, &rt, sock, live_cfg, secret_bundle)?)
         }
         // No pin: the engine records `not_attempted(config_unavailable)` without touching Docker.
         _ => None,
