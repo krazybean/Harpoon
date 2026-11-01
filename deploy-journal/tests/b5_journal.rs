@@ -1294,7 +1294,11 @@ fn a_second_writer_is_refused_at_once_and_does_not_disturb_the_first() {
     a.persist(&d).unwrap();
     assert_eq!(read_only(&t.0).unwrap().deployments, vec![d.clone()]);
     drop(a);
-    let (_b, r) = FileJournal::open(&t.0).unwrap();
+    // Success is expected here, so the documented fork window is tolerated (see `open_wait`): the
+    // refusals above stay strict. Another test's forked-but-not-yet-exec'd child can briefly hold a
+    // copy of this lock, notably the parked child of
+    // `a_child_forked_while_the_journal_is_open_keeps_the_lock_until_it_execs`.
+    let (_b, r) = open_wait(&t.0).unwrap();
     assert_eq!(r.deployments, vec![d]);
 }
 
@@ -1587,5 +1591,8 @@ fn a_child_forked_while_the_journal_is_open_keeps_the_lock_until_it_execs() {
     let mut go_tx = go_tx;
     go_tx.write_all(&[1]).unwrap(); // let it exec
     spawner.join().unwrap(); // `status()` returns after the exec and the exit
-    FileJournal::open(&t.0).expect("the lock is free once the child has exec'd");
+                             // Free once our child has exec'd. Bounded, like every open that expects success: a lock that is
+                             // never released still fails after the bound. The strict check above (a parked child still holds
+                             // the lock) is the one that proves the mechanism and is unchanged.
+    open_wait(&t.0).expect("the lock is free once the child has exec'd");
 }
