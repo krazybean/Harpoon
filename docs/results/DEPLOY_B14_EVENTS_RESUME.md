@@ -25,14 +25,17 @@ nothing depends on the clock or on anything outside the journal.
 - **Event states:** `held`, `selected`, `dismissed`, `superseded` (with `newer_selected` or `not_chosen` and the delivery
   that superseded it). Nothing is ever deleted; the history of every event stays.
 - **Ingress** is one function, `harpoon_deploy::control::ingest`. A paused application records the event as `held`; an
-  unpaused one records nothing and returns `NotPaused` (the caller decides); the same delivery id with the same content is a
+  unpaused one records nothing, not even a pause of another application, and returns `NotPaused` (the caller decides); the same delivery id with the same content is a
   no-op (`Duplicate`); the same id with different content is refused; tokens are validated (delivery id, source and revision:
   letters, digits and `. _ -`, plus `:` or `/` where noted, at most 128 bytes) before anything is written. Applications
   are isolated (the key is application + delivery id). **No command, fixture generator or server feeds it**; the tests call it
   as a future Git/CI integration would.
 - **Replay fails closed.** A decision naming an unknown or non-held delivery, a dismissal that leaves a held event
   unaccounted for, a second selection while one is pending, a duplicate delivery, a pause recorded twice, a decision clearing a
-  deployment that never paused its application, or a pause naming another application's deployment: the store refuses to open.
+  deployment that never paused its application, or a pause that does not match a pause-causing deployment of its
+  own application: the store refuses to open. A pause must name a deployment whose record causes a pause (failed or
+  interrupted cutover, successful rollback) with the same kind and time; the one legitimate change is an interrupted
+  cutover recorded while open and failed since (its time then lies between the deployment's creation and the failure).
 
 ## 2. Commands
 
@@ -46,7 +49,9 @@ nothing depends on the clock or on anything outside the journal.
 
   It never contacts Docker (it accepts no Docker flag), never builds, starts or stops anything, and creates no journal.
   A refusal (nothing to select, an unknown revision, a selection already pending, a writer holding the journal) writes
-  nothing. Repeating a decision is idempotent: the same revision again, or a second dismissal, writes nothing.
+  nothing, not even a pause record for a legacy deployment whose pause is only derived: every choice is validated
+  before any write, and only an accepted dismissal records that application's pauses and then its one decision.
+  Repeating a decision is idempotent: the same revision again, or a second dismissal, writes nothing.
 - `harpoon-deploy events [--app A]`: read-only history of pause records and every event with its status and decision.
 - `status` shows, per application: paused or not, why, since when (epoch ms), the originating deployment, whether the
   pause is recorded or only derived, the held count with each held revision, delivery id, source and time, the history of

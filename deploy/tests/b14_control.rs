@@ -550,3 +550,149 @@ fn a_crash_at_every_write_of_the_whole_sequence_recovers_to_exactly_the_same_sta
     }
     assert_eq!(crashes, total);
 }
+
+// ---- final correctness review: refusals and NotPaused write nothing; replay checks the cause
+
+/// The record count and content, standing in for the journal hash.
+fn snapshot(j: &MemoryJournal) -> Vec<String> {
+    j.control_records.iter().map(encode).collect()
+}
+
+#[test]
+fn a_refused_resume_writes_nothing_even_when_a_legacy_pause_is_unmaterialized() {
+    let a = app(A);
+    // legacy: a failed cutover whose pause no pause record materialises yet
+    let deps = vec![failed_cutover(A, 10, 100)];
+    let mut j = MemoryJournal::new();
+    let mut ctl = ControlState::default();
+    let before = snapshot(&j);
+    for choice in [
+        Choice::Revision("nope".into()),
+        Choice::Revision("bad revision!".into()),
+        Choice::Newest,
+    ] {
+        assert!(resume(&mut j, &deps, &mut ctl, &a, choice, 900).is_err());
+        assert_eq!(snapshot(&j), before);
+        assert!(j.control_records.is_empty() && ctl == ControlState::default());
+    }
+    // a conflicting pending selection: held and selected, then another choice is refused
+    let mut j = MemoryJournal::new();
+    let mut ctl = ControlState::default();
+    assert_eq!(
+        ingest(&mut j, &deps, &mut ctl, ev(&a, "d1", "aaa", 300)).unwrap(),
+        Ingress::Held
+    );
+    ingest(&mut j, &deps, &mut ctl, ev(&a, "d2", "bbb", 310)).unwrap();
+    resume(&mut j, &deps, &mut ctl, &a, Choice::Revision("aaa".into()), 400).unwrap();
+    let (before, state) = (snapshot(&j), ctl.clone());
+    assert!(resume(&mut j, &deps, &mut ctl, &a, Choice::Newest, 500).is_err());
+    assert!(resume(&mut j, &deps, &mut ctl, &a, Choice::Revision("bbb".into()), 500).is_err());
+    assert_eq!(
+        resume(&mut j, &deps, &mut ctl, &a, Choice::Revision("aaa".into()), 500).unwrap(),
+        Resumed::AlreadySelected { delivery: "d1".into() }
+    );
+    assert_eq!((snapshot(&j), &ctl), (before, &state));
+}
+
+#[test]
+fn a_select_with_nothing_held_on_a_legacy_pause_writes_nothing_and_a_dismissal_records_only_that_app() {
+    let (a, b) = (app(A), app(B));
+    let deps = vec![failed_cutover(A, 10, 100), rolled_back(B, 20, 100)];
+    let mut j = MemoryJournal::new();
+    let mut ctl = ControlState::default();
+    assert!(resume(&mut j, &deps, &mut ctl, &a, Choice::Newest, 1).is_err());
+    assert!(j.control_records.is_empty());
+    // dismissing A records A's pause and its decision; B's unmaterialized pause is untouched
+    resume(&mut j, &deps, &mut ctl, &a, Choice::Dismiss, 2).unwrap();
+    assert_eq!(j.control_records.len(), 2);
+    assert!(ctl.pause_of(&dep(10)).is_some() && ctl.pause_of(&dep(20)).is_none());
+    assert!(is_paused(&b, &deps, &ctl) && !is_paused(&a, &deps, &ctl));
+    assert_eq!(replayed(&j), ctl);
+    // nothing to do for an unpaused application writes nothing
+    let n = j.control_records.len();
+    assert_eq!(
+        resume(&mut j, &deps, &mut ctl, &a, Choice::Dismiss, 3).unwrap(),
+        Resumed::NothingToDo
+    );
+    assert_eq!(j.control_records.len(), n);
+}
+
+#[test]
+fn not_paused_ingress_writes_nothing_for_any_application() {
+    let (a, b) = (app(A), app(B));
+    // A has no pause; B has a failed cutover that no record materialises yet
+    let deps = vec![failed_cutover(B, 20, 100)];
+    let mut j = MemoryJournal::new();
+    let mut ctl = ControlState::default();
+    assert_eq!(
+        ingest(&mut j, &deps, &mut ctl, ev(&a, "d1", "r1", 300)).unwrap(),
+        Ingress::NotPaused
+    );
+    assert!(j.control_records.is_empty(), "no write, not even for B");
+    assert_eq!(ctl, ControlState::default());
+    // B's own event records B's pause and the event, and only those
+    assert_eq!(
+        ingest(&mut j, &deps, &mut ctl, ev(&b, "d1", "r1", 300)).unwrap(),
+        Ingress::Held
+    );
+    assert_eq!(j.control_records.len(), 2);
+    assert_eq!(replayed(&j), ctl);
+}
+
+#[test]
+fn replay_checks_that_a_pause_names_a_pause_causing_deployment_of_a_compatible_kind_and_time() {
+    let pause = |origin, kind, at_ms| {
+        let mut s = ControlState::default();
+        s.apply(&ControlRecord::Pause(PauseRec {
+            app: app(A),
+            origin,
+            kind,
+            at_ms,
+            context: String::new(),
+        }))
+        .unwrap();
+        s
+    };
+    let failed = failed_cutover(A, 10, 100); // failed at 105
+                                             // a deployment of the application that caused no pause: contradiction
+    let plain = failed_before_cutover(A, 13, 100, FailureKind::Build, Step::Build);
+    assert!(pause(dep(13), PauseKind::FailedCutover, 105)
+        .check_against(&[plain])
+        .is_err());
+    // the real thing, and a kind or time that contradicts the record
+    assert!(pause(dep(10), PauseKind::FailedCutover, 105)
+        .check_against(std::slice::from_ref(&failed))
+        .is_ok());
+    assert!(pause(dep(10), PauseKind::Rollback, 105)
+        .check_against(std::slice::from_ref(&failed))
+        .is_err());
+    assert!(pause(dep(10), PauseKind::FailedCutover, 999)
+        .check_against(std::slice::from_ref(&failed))
+        .is_err());
+    assert!(pause(dep(10), PauseKind::InterruptedCutover, 99)
+        .check_against(std::slice::from_ref(&failed))
+        .is_err());
+    // legitimate evolution: recorded while the cutover was open, failed since
+    assert!(pause(dep(10), PauseKind::InterruptedCutover, 104)
+        .check_against(std::slice::from_ref(&failed))
+        .is_ok());
+    // the other direction (a failure recorded, then "interrupted") never happens
+    let open = open_cutover(A, 11, 100);
+    assert!(pause(dep(11), PauseKind::InterruptedCutover, 104)
+        .check_against(std::slice::from_ref(&open))
+        .is_ok());
+    assert!(pause(dep(11), PauseKind::FailedCutover, 104)
+        .check_against(&[open])
+        .is_err());
+    // a rollback pause matches its rollback only
+    let rb = rolled_back(A, 12, 100);
+    assert!(pause(dep(12), PauseKind::Rollback, 103)
+        .check_against(std::slice::from_ref(&rb))
+        .is_ok());
+    assert!(pause(dep(12), PauseKind::Rollback, 104).check_against(&[rb]).is_err());
+    // a restoration after the pause was recorded does not disturb it
+    let mut restored = open_cutover(A, 14, 100);
+    let s = pause(dep(14), PauseKind::InterruptedCutover, 104);
+    restored.start_recovery(60_000, 110).unwrap_or(());
+    assert!(s.check_against(&[restored]).is_ok());
+}

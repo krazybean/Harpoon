@@ -503,3 +503,40 @@ fn a_store_without_any_pause_or_event_reads_exactly_as_before() {
         0,
     );
 }
+
+#[test]
+fn refusals_and_not_paused_ingress_leave_a_legacy_store_byte_identical() {
+    let t = T::new();
+    // legacy: a failed cutover whose pause has no record yet; OTHER has none
+    failed_cutover(&t, APP, 10, 100);
+    let before = t.journal_bytes();
+    let count = |t: &T| {
+        control_of(t).pauses.len() + control_of(t).events.len() + control_of(t).resumes.len()
+    };
+    for extra in [
+        &["--revision", "nope"][..],
+        &["--newest"][..],
+        &["--revision", "bad revision!"][..],
+    ] {
+        let o = resume(&t, APP, extra);
+        assert_ne!(o.code, 0, "{}", o.stderr);
+        assert_eq!(t.journal_bytes(), before, "{extra:?} wrote");
+        assert_eq!(count(&t), 0);
+    }
+    // an event for the unpaused application writes nothing, though APP has an unmaterialized pause
+    assert_eq!(
+        ingest(&t, OTHER, &[("d1", "zzz", 330)]),
+        [Ingress::NotPaused]
+    );
+    assert_eq!(t.journal_bytes(), before);
+    // a pending selection refuses a conflicting choice byte-identically
+    ingest(&t, APP, &[("d1", "aaa", 300), ("d2", "bbb", 310)]);
+    assert_exit(&resume(&t, APP, &["--revision", "aaa"]), 0);
+    let (bytes, n) = (t.journal_bytes(), count(&t));
+    for extra in [&["--newest"][..], &["--revision", "bbb"][..]] {
+        assert_ne!(resume(&t, APP, extra).code, 0);
+        assert_eq!(t.journal_bytes(), bytes);
+        assert_eq!(count(&t), n);
+    }
+    assert_eq!(t.docker_requests(), 0);
+}
