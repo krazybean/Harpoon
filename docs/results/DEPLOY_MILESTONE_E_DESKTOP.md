@@ -145,8 +145,54 @@ screen). The golden file is regenerated with `UPDATE_GOLDEN=1 cargo test`.
 `~/harpoon-b7-evidence-PRESERVED-20261102` (read-only, with a manifest) before any work; the original in `/tmp` is untouched.
 
 **Not done / limits.** Attachments are per session. Pre-C journals have no pinned configuration, repository, secrets or recorded
-step logs; the page says "no repository registered" and offers no build log. Observation is polled, not pushed. A different
-Docker than Harpoon's own is not consulted.
+step logs; the page says "Not recorded" rather than filling values in. Observation is polled, not pushed. A different Docker than
+Harpoon's own is not consulted.
+
+### Follow-up after manual testing of the B7 runtime (same PR)
+
+* **Configuration accuracy.** The Configuration panel, the Settings tab and the status text were showing values nobody recorded:
+  the adapter filled `settings` with defaults (`Dockerfile`, context `.`, health check `HTTP GET /`), the panel hard-coded
+  "stop old → start new", fell back to `folder · <app id>` for the source, and the Settings tab printed "Detected: Dockerfile" and
+  "Published on a loopback port chosen by Harpoon". Each value now comes from one place, `factsOf`, as `{ value, from }` with `from`
+  one of the repository registration, the journal (a pinned release configuration, the ledger, the deployment record) or Docker
+  (observed). Nothing recorded means `null`, shown as "Not recorded"; the engine-mode `settings` are now empty instead of defaulted.
+  For the B7 journal that gives: source, build file, branch and health check "Not recorded" (the fixture answers `/health` and not
+  `/`, but the journal records neither, so neither is claimed); host port 38000 from the recorded port lease; replacement
+  "Nothing was replaced (first deployment)" (journal: no `replaces`, cutover not required); image from the ledger; container port
+  8080 shown as observed in Docker and explicitly not in the journal, and "Not recorded" when Docker was not consulted.
+* **Read-only controls.** An external application has no Edit button (and no settings link) in the Configuration panel. A test
+  walks every tab and the deployment page of an external application and asserts that no enabled control that could change
+  anything exists and that nothing is sent to the engine; the backend protections are unchanged.
+* **Recorded vs observed.** The panel lists what was actually compared (running, container id, the three `io.harpoon.*` labels,
+  the port lease), each as passed, failed or "not checked", and names the journal it came from. A running container whose Docker
+  answer carries no labels is "Running · ownership unverified" (warning), never plain "Running"; the old "ownership labels checked"
+  wording is gone. "Resources & health" no longer says "no running container" for a running one, and a deploy-time final check
+  is shown as "Final check passed (recorded)" instead of "healthy".
+* **Port exposure.** Docker's `0.0.0.0` and `[::]` bindings are a mapping inside Harpoon's VM and are shown exactly as reported.
+  What is actually listening on this Mac comes from a separate read-only check (`host_tcp_listeners`: the engine's own `lsof`
+  runner, fixed arguments, cleared environment, 5 s limit). The two are shown side by side (Containers cards and detail,
+  Deployments panel). Reachability is derived only from the listeners found (loopback only, network, mixed, none); when the check
+  cannot run the line says "not verified" and no exposure is claimed. Docker's wildcard bindings are never rewritten to loopback.
+* **Long identifiers and badges (Deployments and Containers).** Flex and grid children could not shrink, long ids had no break
+  opportunity and badges were squeezed. Rows, cards, banners and panel heads now let children shrink, text breaks where it must,
+  card names, image hashes and port lines are truncated with the full value in a tooltip, wide tables scroll, ids in detail views
+  have a copy button, and badges keep their size. Verified in Chrome (headless) with the real components and the B7 data: with the
+  stylesheets from before this change the same page produced up to 81 layout problems (content wider than its card, badges
+  sticking out by up to 175 px, sideways page scroll, an image hash running off the card); with the new ones, none at 320, 360,
+  420, 560 and 1200 px for both screens (below 500 px the browser window cannot shrink, so those widths were tested in a
+  fixed-width frame, which exercises the view's container queries but not the Containers view's viewport media queries). The
+  harness is a scratch script and is not part of CI; `layoutContract.test.mjs` only guards that the rules stay.
+
+**Test reliability note.** The Tauri `deploy_api` tests share a process with the existing `broadcast` tests, which start child
+processes. A child forked while a journal is open keeps a copy of its lock until it execs, so a test that expects the lock to be
+free the instant its writer is dropped can fail. The `deploy_api` test helpers now wait (with a deadline) for exactly that
+condition and retry only the "another Harpoon process holds the journal" refusal, as the `deploy-cli` tests do; the product stays
+fail-fast. The new host-listener tests start no process. The existing `broadcast::tests::mocked_*` tests are timing-sensitive on
+their own (they fail about 1 run in 10 on a busy machine, as seen at `broadcast.rs:397` in an earlier CI run) and are not changed.
+
+**Still needs eyes (not verifiable here).** The app renders in macOS WKWebView, not Chrome: check the Containers card and the
+B7 application page at a narrow window; that the "Mac listener" line shows `127.0.0.1:38000 · loopback only` for the B7
+container; and that the Configuration panel shows "Not recorded" for source, build file and health check.
 
 ### Noted, not implemented (reported during the B7 manual validation)
 

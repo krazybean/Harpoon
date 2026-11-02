@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, ArrowsClockwise, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check } from "@phosphor-icons/react";
 import type { AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
@@ -9,7 +9,9 @@ import {
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
 import { liveBlock } from "../../lib/deployEngine.ts";
 import type { Ctx, Tab } from "./context.ts";
-import { Banner, Dot, Evidence, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
+import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
+import { describeExposure } from "../../lib/portExposure.ts";
+import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
 
 const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?: boolean; sm?: boolean; title?: string } = {}) => (
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
@@ -80,7 +82,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
     const att = needs.find((n) => n.app.id === app.id);
     return (
       <button key={app.id} className={`dp-card ${att ? (att.attention.tone === "err" ? "dp-card--err" : "dp-card--warn") : ""}`} onClick={() => c.setRoute({ screen: "app", appId: app.id, tab: "overview", env: "production" })}>
-        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>{app.external ? <Tag>External · read-only</Tag> : null}</div>
+        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }} title={app.name}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>{app.external ? <Tag>External · read-only</Tag> : null}</div>
         <div className="dp-muted" style={{ fontSize: 12 }}>
           {app.source.kind === "git" ? <GitBranch size={12} style={{ verticalAlign: -2 }} /> : <Cube size={12} style={{ verticalAlign: -2 }} />} {app.source.label} · {app.source.detail}{st.live && st.releaseId ? ` · release ${st.releaseId}` : ""}
         </div>
@@ -217,6 +219,15 @@ export function AppScreen({ c }: { c: Ctx }) {
 }
 
 /** What was RECORDED about health for the latest deployment, plus what Docker shows now. Evidence, not a guarantee. */
+/** Engine mode: what the record says about health, not a live verdict. A passed check at deploy time is a fact about then. */
+function HealthPill({ app, running, down }: { app: AppModel; running: boolean; down: boolean }) {
+  if (!running) return <Pill tone={down ? "err" : "warn"}>{down ? "Not running" : "Health unknown"}</Pill>;
+  const d = app.deployments.find((x) => x.releaseId === app.currentReleaseId);
+  const fc = d?.steps.find((x) => x.name === "final_check");
+  if (!fc) return <Pill tone="neutral">No health check recorded</Pill>;
+  return <Pill tone={fc.status === "succeeded" ? "ok" : fc.status === "failed" ? "err" : "neutral"}>Final check {fc.status === "succeeded" ? "passed" : fc.status} (recorded)</Pill>;
+}
+
 function healthEvidence(app: AppModel): string {
   const d = app.deployments.find((x) => x.releaseId === app.currentReleaseId);
   const fc = d?.steps.find((x) => x.name === "final_check");
@@ -249,6 +260,8 @@ function pauseText(app: AppModel): string {
 function ResourceBlock({ c, app }: { c: Ctx; app: AppModel }) {
   const st = appStatus(app, c.runtime);
   if (!st.live || !app.resources || !app.currentReleaseId) {
+    // a running container with no figures is not "no running container": say what is actually true
+    if (c.engine && st.live && app.currentReleaseId) return <div className="dp-muted">Per-container resource figures are not collected on this screen (see Containers). Nothing is estimated.</div>;
     return <div className="dp-muted">{st.live ? "No running container, so there are no resource figures. They are not estimated." : "Resource figures are unavailable while Harpoon is stopped. Nothing shown here is current."}</div>;
   }
   const r = app.resources;
@@ -264,24 +277,44 @@ function ResourceBlock({ c, app }: { c: Ctx; app: AppModel }) {
   );
 }
 
+const FACT_FROM: Record<ConfigFact["from"], string> = {
+  registration: "from the repository registration", journal: "from the journal", docker: "observed in Docker, not in the journal", none: "",
+};
+/** A recorded value with its origin, or "Not recorded". Never a default. */
+function Fact({ fact }: { fact: ConfigFact }) {
+  if (fact.value === null) return <span className="dp-muted">Not recorded</span>;
+  return <><span className="dp-fact__value">{fact.value}</span> <span className="dp-faint">· {FACT_FROM[fact.from]}{fact.detail ? ` (${fact.detail})` : ""}</span></>;
+}
+const FACT_ROWS: [string, ConfigFactKey][] = [["Source", "source"], ["Branch", "branch"], ["Build file", "dockerfile"], ["Container port", "containerPort"], ["Host port", "hostPort"], ["Health check", "healthCheck"], ["Replacement", "replacement"], ["Image", "image"]];
+
 const OBS_LABEL: Record<NonNullable<AppModel["observation"]>["kind"], [string, "ok" | "warn" | "err" | "neutral"]> = {
   match: ["Matches Docker", "ok"], unverified: ["Running, ownership unchecked", "warn"], stopped: ["Recorded, not running", "warn"],
   absent: ["Recorded, not in Docker", "err"], mismatch: ["Does not match Docker", "err"], unknown: ["Cannot compare", "neutral"],
 };
 
 /** The journal's record next to what Docker shows now. They are two statements; a difference is reported, not resolved. */
+const CHECK_MARK = { ok: "✓", fail: "✗", unavailable: "—" } as const;
+
 function ObservationPanel({ app }: { app: AppModel }) {
   const o = app.observation!;
   const [label, tone] = OBS_LABEL[o.kind];
+  const exp = o.port ? describeExposure(o.port) : null;
+  const journal = app.external ? (app.external.format === "legacy" ? "the legacy journal.wal" : "the SQLite journal") : "Harpoon's journal";
   return (
     <section className="dp-panel">
       <div className="dp-panel__head"><h2 className="dp-h2">Recorded vs observed</h2><span className="dp-spacer" /><Pill tone={tone}>{label}</Pill></div>
       <div className="dp-panel__body">
         <dl className="dp-kv">
-          <dt>Recorded</dt><dd>{o.recorded}<div className="dp-faint">from the journal; says what was done, not what is true now</div></dd>
+          <dt>Recorded</dt><dd>{o.recorded}<div className="dp-faint">from {journal}: what was done, not what is true now</div></dd>
           <dt>Observed</dt><dd>{o.observed}<div className="dp-faint">from Docker, just now</div></dd>
+          {exp ? <><dt>Exposure</dt><dd>{exp.docker}{exp.host.map((h) => <div key={h} className={exp.hostTone === "warn" ? "dp-warnline" : undefined}>{h}</div>)}<div className="dp-faint">Docker's mapping is inside Harpoon's VM; the listener on this Mac, checked with lsof, is what decides who can connect.</div></dd></> : null}
           {app.url ? <><dt>Loopback URL</dt><dd><span className="mono">{app.url}</span> <span className="dp-faint">{app.urlSource === "lease" ? "from the recorded port lease (no configuration was pinned)" : "from the pinned release configuration"}</span></dd></> : null}
         </dl>
+        {o.checks.length ? (
+          <ul className="dp-checks" aria-label="What was compared">
+            {o.checks.map((k) => <li key={k.id} data-result={k.result}><span className="dp-checks__mark" aria-hidden="true">{CHECK_MARK[k.result]}</span><span><b>{k.label}</b> <span className="dp-muted">{k.result === "unavailable" ? "not checked — " : ""}{k.detail}</span></span></li>)}
+          </ul>
+        ) : null}
         {o.notes.length ? <ul className="dp-muted" style={{ margin: "10px 0 0", paddingLeft: 18 }}>{o.notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
       </div>
     </section>
@@ -315,7 +348,7 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
           <div className="dp-panel__body">
             <ResourceBlock c={c} app={app} />
             <div className="dp-row dp-row--wrap" style={{ marginTop: 12 }}>
-              <Pill tone={st.kind === "running" || st.kind === "building" ? "ok" : st.kind === "down" ? "err" : "warn"}>Health · {st.kind === "running" || st.kind === "building" ? "healthy" : st.kind === "down" ? "down" : "unknown"}</Pill>
+              {c.engine ? <HealthPill app={app} running={st.kind === "running" || st.kind === "building"} down={st.kind === "down"} /> : <Pill tone={st.kind === "running" || st.kind === "building" ? "ok" : st.kind === "down" ? "err" : "warn"}>Health · {st.kind === "running" || st.kind === "building" ? "healthy" : st.kind === "down" ? "down" : "unknown"}</Pill>}
               <span className="dp-muted" style={{ fontSize: 12 }}>{st.live ? (st.kind === "running" || st.kind === "building" ? (c.engine ? healthEvidence(app) : "Docker HEALTHCHECK healthy · HTTP /healthz 200 (2 ms) — simulated") : "No running container") : "Not known while Harpoon is not connected."}</span>
             </div>
           </div>
@@ -344,12 +377,14 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
         </section>
         )}
         <section className="dp-panel">
-          <div className="dp-panel__head"><h2 className="dp-h2">Configuration</h2><span className="dp-spacer" />{btn("btn--secondary", () => c.setRoute({ tab: "settings" }), "Edit", { sm: true })}</div>
-          <div className="dp-panel__body"><dl className="dp-kv">
+          <div className="dp-panel__head"><h2 className="dp-h2">Configuration</h2><span className="dp-spacer" />{app.external ? null : btn("btn--secondary", () => c.setRoute({ tab: "settings" }), c.engine ? "View settings" : "Edit", { sm: true })}</div>
+          {c.engine && app.facts ? <div className="dp-panel__body"><dl className="dp-kv">
+            {FACT_ROWS.filter(([, k]) => k !== "branch" || app.facts![k].value).map(([label, k]) => <Fragment key={k}><dt>{label}</dt><dd><Fact fact={app.facts![k]} /></dd></Fragment>)}
+          </dl><p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Each value shows where it was recorded. A value nothing recorded says so; it is never filled in with a default.</p></div> : <div className="dp-panel__body"><dl className="dp-kv">
             <dt>Source</dt><dd>{app.source.kind} · {app.source.label}</dd><dt>Build</dt><dd>Dockerfile <code>{app.settings.dockerfile}</code></dd>
             <dt>Port</dt><dd>{app.settings.port ?? "—"} → {app.url.replace("http://", "")}</dd><dt>Health check</dt><dd>{app.settings.healthCheck}</dd>
-            <dt>Replacement</dt><dd>stop old → start new (brief interruption, reported)</dd>{c.engine ? null : <><dt>Retention</dt><dd>current + {app.settings.keepReleases} earlier releases</dd></>}
-          </dl></div>
+            <dt>Replacement</dt><dd>stop old → start new (brief interruption, reported)</dd><dt>Retention</dt><dd>current + {app.settings.keepReleases} earlier releases</dd>
+          </dl></div>}
         </section>
       </div>
     </div>
@@ -396,7 +431,7 @@ function DeploymentsTab({ c, app }: { c: Ctx; app: AppModel }) {
       <table className="dp-table"><thead><tr><th>Deployment</th><th>Status</th><th>Revision</th><th className="hide-compact">Trigger</th><th className="hide-compact">Duration</th><th>When</th></tr></thead><tbody>
         {app.deployments.map((x) => (
           <tr key={x.id} className="is-click" onClick={() => c.setRoute({ screen: "dep", depId: x.id })} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && c.setRoute({ screen: "dep", depId: x.id })}>
-            <td><b>{x.id}</b><div className="sub">{x.releaseId ? `release ${x.releaseId}` : "no release"}</div></td>
+            <td><b title={x.id}>{x.id}</b><div className="sub" title={x.releaseId ?? undefined}>{x.releaseId ? `release ${x.releaseId}` : "no release"}</div></td>
             <td><div className="dp-row dp-row--wrap"><DeploymentPills d={x} /></div>{x.failedAt ? <div className="sub">failed at {x.failedAt.replace("_", " ")}</div> : null}</td>
             <td><span className="mono">{x.revision.sha}</span><div className="sub">{x.revision.message}</div></td>
             <td className="hide-compact">{x.trigger}</td><td className="hide-compact">{x.durationLabel}</td><td>{formatAge(x.ageMin)}</td>
@@ -513,22 +548,40 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
 
 function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const f = (label: string, value: string, hint?: string) => <div className="dp-field" key={label}><label>{label}</label><input className="dp-input" defaultValue={value} readOnly aria-readonly="true" />{hint ? <small>{hint}</small> : null}</div>;
+  const fact = (label: string, k: ConfigFactKey) => { const x = app.facts![k]; return f(label, x.value ?? "Not recorded", x.value === null ? undefined : `${FACT_FROM[x.from]}${x.detail ? ` (${x.detail})` : ""}`); };
+  if (c.engine && app.facts) {
+    return (
+      <div className="dp-grid dp-grid--2">
+        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Build</h2></div><div className="dp-panel__body dp-col">
+          {fact("Dockerfile", "dockerfile")}{fact("Build context", "context")}{fact("Target stage", "target")}{fact("Image", "image")}</div></section>
+        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Deployment</h2></div><div className="dp-panel__body dp-col">
+          {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}{fact("Health check", "healthCheck")}{fact("Replacement", "replacement")}</div></section>
+        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Source</h2></div><div className="dp-panel__body dp-col">
+          {fact("Source", "source")}{fact("Branch", "branch")}
+          {app.external ? null : <div className="dp-evidence"><Warning size={12} />New commits are found only when you press Check for new commits. Unattended deployment is not offered.</div>}</div></section>
+        {app.external ? null : <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
+          <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>
+          <div><button className="btn btn--destructive" disabled title="Removing applications is not part of this build."><Trash size={14} /> Remove application…</button></div></div></section>}
+        <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>{app.external ? "Read-only. These are the values that the external journal (and Docker, where marked) shows; nothing here can be changed from Harpoon." : "Read-only. These are the values the repository registration and the journal recorded. To change a registration, register the repository again with the new values."}</p>
+      </div>
+    );
+  }
   const s = app.settings;
   return (
     <div className="dp-grid dp-grid--2">
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Build</h2><span className="dp-spacer" /><Pill tone="info">Detected: Dockerfile</Pill></div><div className="dp-panel__body dp-col">
-        {f("Dockerfile", s.dockerfile)}{f("Build context", s.context)}{f("Target stage", "(default)")}{c.engine ? null : f("Build arguments", s.buildArgs || "(none)")}
+        {f("Dockerfile", s.dockerfile)}{f("Build context", s.context)}{f("Target stage", "(default)")}{f("Build arguments", s.buildArgs || "(none)")}
         <small className="dp-faint">Secrets are never build arguments; they use BuildKit secret mounts.</small></div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Deployment</h2></div><div className="dp-panel__body dp-col">
         {f("Container port", String(s.port ?? ""), "Published on a loopback port chosen by Harpoon")}{f("Health check", s.healthCheck, "Evidence, not a guarantee")}
-        {f("Replacement", "Stop old, start new", "Interruption is shown before you confirm and recorded afterwards")}{c.engine ? null : f("Keep earlier releases", String(s.keepReleases))}</div></section>
+        {f("Replacement", "Stop old, start new", "Interruption is shown before you confirm and recorded afterwards")}{f("Keep earlier releases", String(s.keepReleases))}</div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Automation</h2></div><div className="dp-panel__body dp-col">
-        {f("Source", `${app.source.label}`, c.engine ? "As recorded when the repository was registered" : "Read-only deploy key · host key pinned")}{f("Production branch", s.productionBranch)}{c.engine ? null : f("Poll interval", `${s.pollSeconds} s`)}
-        <div className="dp-evidence"><Warning size={12} />{c.engine ? "New commits are found only when you press Check for new commits. Unattended deployment is not offered." : "Automatic = while Harpoon is running. Unattended deployment is not offered yet."}</div></div></section>
+        {f("Source", `${app.source.label}`, "Read-only deploy key · host key pinned")}{f("Production branch", s.productionBranch)}{f("Poll interval", `${s.pollSeconds} s`)}
+        <div className="dp-evidence"><Warning size={12} />Automatic = while Harpoon is running. Unattended deployment is not offered yet.</div></div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
         <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>
-        <div><button className="btn btn--destructive" disabled title={c.engine ? "Removing applications is not part of this build." : "Not part of this mock"}><Trash size={14} /> Remove application…</button></div></div></section>
-      <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>{c.engine ? "These are the values recorded when the repository was registered. To change them, register the repository again with the new values." : "These fields are read-only in the mock; editing settings is part of the real feature."}</p>
+        <div><button className="btn btn--destructive" disabled title="Not part of this mock"><Trash size={14} /> Remove application…</button></div></div></section>
+      <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>These fields are read-only in the mock; editing settings is part of the real feature.</p>
     </div>
   );
 }
@@ -599,7 +652,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
             <dt>Port</dt><dd>{app.settings.port ?? "—"}</dd>{c.engine && d.note ? <><dt>Changes</dt><dd>{d.note.replace("Configuration changes since the previous snapshot: ", "")}</dd></> : null}</dl>
             <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Rollback uses this snapshot. If a pinned secret version has been deleted, this release can't be restored — you'll be told before you confirm.</p></div></section>
           <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Docker objects</h2></div><div className="dp-panel__body"><div className="dp-muted" style={{ fontSize: 12 }}>{c.engine ? "Labelled" : "Would be labelled"} <code>io.harpoon.deployment={d.id}</code></div>
-            {c.engine && d.recorded?.length ? <table className="dp-table" style={{ marginTop: 8 }}><thead><tr><th>Recorded</th><th>Id</th><th>State</th></tr></thead><tbody>{d.recorded.map((r) => <tr key={`${r.kind}:${r.name}`}><td><b>{r.kind}</b><div className="sub mono" style={{ wordBreak: "break-all" }}>{r.name}</div></td><td className="mono" title={r.id ?? undefined}>{r.id ? r.id.replace(/^sha256:/, "").slice(0, 12) : "—"}</td><td>{r.state.replace("_", " ")}</td></tr>)}</tbody></table> : null}
+            {c.engine && d.recorded?.length ? <table className="dp-table" style={{ marginTop: 8 }}><thead><tr><th>Recorded</th><th>Id</th><th>State</th></tr></thead><tbody>{d.recorded.map((r) => <tr key={`${r.kind}:${r.name}`}><td><b>{r.kind}</b><div className="sub mono" style={{ wordBreak: "break-all" }}>{r.name}</div></td><td>{r.id ? <Ident value={r.id} shown={r.id.replace(/^sha256:/, "").slice(0, 12)} copy /> : "—"}</td><td>{r.state.replace("_", " ")}</td></tr>)}</tbody></table> : null}
             <div style={{ marginTop: 8 }}>{c.engine ? (d.releaseId && d.releaseId === app.currentReleaseId ? <><span className="mono">{app.containerName}</span> <span className="dp-faint">running now</span></> : <span className="dp-faint">{d.releaseId ? "not observed running now" : "none"}</span>) : d.releaseId ? <span className="mono" title="Simulated — this container does not exist in your Containers view">{app.projectId}-{app.name}-{d.releaseId}</span> : <span className="dp-faint">none</span>}{c.engine ? null : <> <Tag>simulated</Tag></>}</div></div></section>
         </div>
       </div>

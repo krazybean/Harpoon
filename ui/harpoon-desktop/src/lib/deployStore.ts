@@ -282,7 +282,9 @@ export function appStatus(app: AppModel, runtime: RuntimeState): AppStatus {
   if (recoveryInProgress(app)) return { kind: "recovering", label: "Recovering", tone: "warn", releaseId: null, live: true };
   if (app.currentReleaseId) {
     const inFlight = app.deployments.some((d) => d.status === "running");
-    return { kind: inFlight ? "building" : "running", label: "Running", tone: "ok", releaseId: app.currentReleaseId, live: true };
+    // running, but Docker's answer carried nothing to check ownership with: say so instead of showing it as fully verified
+    const unverified = app.observation?.kind === "unverified";
+    return { kind: inFlight ? "building" : "running", label: unverified ? "Running · ownership unverified" : "Running", tone: unverified ? "warn" : "ok", releaseId: app.currentReleaseId, live: true };
   }
   if (app.deployments.some((d) => d.status === "running")) return { kind: "building", label: "Deploying", tone: "info", releaseId: null, live: true };
   if (app.lastKnownReleaseId) return { kind: "down", label: "Down", tone: "err", releaseId: null, live: true };

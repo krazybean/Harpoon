@@ -1314,7 +1314,7 @@ fn main() {
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
             context_discovery::discover_contexts,
-            deploy_api::deploy_snapshot, deploy_api::deploy_snapshot_at, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder,
+            deploy_api::deploy_snapshot, deploy_api::deploy_snapshot_at, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder, deploy_api::host_tcp_listeners,
             get_counts,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,

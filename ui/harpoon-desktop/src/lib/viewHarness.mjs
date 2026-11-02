@@ -28,6 +28,7 @@ if (!dom.window.navigator.clipboard) Object.defineProperty(dom.window.navigator,
 const out = buildSync({ // synchronous: no long-lived helper process to keep the test run alive
   stdin: {
     contents: `export { DeployView } from "../views/deploy/DeployView.tsx";
+export { PortsLine } from "../views/PortsLine.tsx";
 export { createRoot } from "react-dom/client";
 export { act, createElement } from "react";`,
     resolveDir: here, loader: "ts", sourcefile: "view-entry.ts",
@@ -38,7 +39,7 @@ export { act, createElement } from "react";`,
 });
 const file = join(mkdtempSync(join(tmpdir(), "hv-views-")), "views.mjs");
 writeFileSync(file, out.outputFiles[0].text);
-export const { DeployView, createRoot, act, createElement: h } = await import(pathToFileURL(file).href);
+export const { DeployView, PortsLine, createRoot, act, createElement: h } = await import(pathToFileURL(file).href);
 export const win = dom.window;
 /** Call once all tests are done: the window's timers would otherwise keep the process running. */
 export const shutdown = () => dom.window.close();

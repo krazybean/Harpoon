@@ -45,7 +45,7 @@ test("no seeded or fabricated content: every app, id and release comes from the 
 test("recorded serving release is only 'running' when Docker was observed running it", () => {
   const serving = { release: "rel_dep_1", deployment: "dep_1", container: "hp-dep_1", via: "original", sinceMs: NOW - 90000, hostPort: 41000, healthPath: "/healthz" };
   const a = app([dep("dep_1")], { serving });
-  const up = st(snap([a]), { observed: { "hp-dep_1": { id: "c1", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1", "io.harpoon.deployment": "dep_1" }, ports: [41000] } } }).apps.app_1;
+  const up = st(snap([a]), { observed: { "hp-dep_1": { id: "c1", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1", "io.harpoon.deployment": "dep_1" }, ports: [41000], mappings: [] } } }).apps.app_1;
   assert.deepEqual([up.currentReleaseId, up.url], ["rel_dep_1", "http://127.0.0.1:41000"]);
   assert.equal(appStatus(up, "connected").kind, "running");
   const gone = st(snap([a]), { observed: {} }).apps.app_1;
@@ -128,7 +128,7 @@ test("recorded step logs: withheld output is stated, truncation is stated, text 
 });
 
 test("observed Docker state parses names and treats a non-answer as unknown", () => {
-  const row = { id: "abc", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1" }, ports: [38000] };
+  const row = { id: "abc", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1" }, ports: [38000], mappings: [{ hostIp: "127.0.0.1", hostPort: 38000, containerPort: 8080, proto: "tcp" }] };
   assert.deepEqual(observedFrom([{ Names: "/a,b", ID: "abc", State: "Running", Labels: "io.harpoon.managed=true,io.harpoon.app=app_1", Ports: "127.0.0.1:38000->8080/tcp" }]), { a: row, b: row });
   assert.equal(observedFrom([{ Names: "x", ID: "1", State: "exited" }]).x.labels, null, "no Labels in Docker's answer means nothing to check, not 'no labels'");
   assert.equal(observedFrom(null), null);

@@ -17,6 +17,41 @@ fn rt(name: &str) -> PathBuf {
     p
 }
 
+/// The journal's lock belongs to an open file description, so a child that another test thread forks while a journal is
+/// open (the `broadcast` tests start processes) holds a copy until it execs, and the lock is not free the instant its owner
+/// lets go. That is the operating system's behaviour and the product stays fail-fast; the tests wait for the condition.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn lock_refused(text: &str) -> bool {
+    text.contains("another Harpoon process holds")
+}
+
+/// Open the journal for writing, waiting out a lock that is still held by a stray copy.
+fn open_journal(dir: &Path) -> (SqliteJournal, harpoon_deploy_journal::Restored) {
+    let end = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match SqliteJournal::open(&journal_dir(dir)) {
+            Ok(x) => return x,
+            Err(e) if lock_refused(&e.0) && std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            Err(e) => panic!("cannot open the journal: {}", e.0),
+        }
+    }
+}
+
+/// A snapshot taken once the writer lock reads as free (it is free as soon as no process holds a copy of it).
+fn snapshot_when_released(dir: &Path, now_ms: u64) -> EngineSnapshot {
+    let end = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        let s = snapshot(dir, now_ms);
+        if !s.writer_held || std::time::Instant::now() >= end {
+            return s;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn dep(id: &str, finish: Option<DeploymentStatus>) -> Deployment {
     let mut d = Deployment::new(id.parse().unwrap(), APP.parse().unwrap(), Trigger::Cli, 100);
     d.transition(DeploymentStatus::Queued, 101).unwrap();
@@ -32,7 +67,7 @@ fn dep(id: &str, finish: Option<DeploymentStatus>) -> Deployment {
 
 fn seed(dir: &Path, deps: &[Deployment]) {
     prepare(dir).unwrap();
-    let (mut j, _) = SqliteJournal::open(&journal_dir(dir)).unwrap();
+    let (mut j, _) = open_journal(dir);
     for d in deps {
         j.persist(d).unwrap();
     }
@@ -195,14 +230,14 @@ fn a_locked_keychain_is_reported_not_swallowed() {
 fn while_a_writer_holds_the_journal_the_snapshot_says_so_and_still_reads() {
     let dir = rt("held");
     prepare(&dir).unwrap();
-    let (mut j, _) = SqliteJournal::open(&journal_dir(&dir)).unwrap();
+    let (mut j, _) = open_journal(&dir);
     j.persist(&dep(D1, None)).unwrap();
     let s = snapshot(&dir, 5);
     assert_eq!(s.store, "ok", "{:?}", s.store_error);
     assert!(s.writer_held && s.apps[0].deployments[0].unfinished);
     drop(j);
     assert!(
-        !snapshot(&dir, 6).writer_held,
+        !snapshot_when_released(&dir, 6).writer_held,
         "after the process is gone the same record is interrupted, not running"
     );
 }
@@ -567,14 +602,22 @@ mod held {
         .chain([dir.display().to_string()])
         .collect();
         let kc = MemorySecretStore::new();
-        let mut input: &[u8] = b"";
-        let mut svc = Services {
-            secrets: &kc,
-            stdin: &mut input,
-            stdin_is_terminal: false,
-            next: None,
+        let end = std::time::Instant::now() + LOCK_WAIT;
+        let o = loop {
+            let mut input: &[u8] = b"";
+            let mut svc = Services {
+                secrets: &kc,
+                stdin: &mut input,
+                stdin_is_terminal: false,
+                next: None,
+            };
+            let o = run_with(&args, &Gate::shipping(), &mut svc);
+            if o.code != 0 && lock_refused(&o.stderr) && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            break o;
         };
-        let o = run_with(&args, &Gate::shipping(), &mut svc);
         assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
     }
 
@@ -904,7 +947,7 @@ mod external {
         let dir = rt("ext-sqlite").join("runtime");
         prepare(&dir).unwrap();
         {
-            let (mut j, _) = SqliteJournal::open(&journal_dir(&dir)).unwrap();
+            let (mut j, _) = open_journal(&dir);
             j.persist(&dep(D1, Some(DeploymentStatus::Succeeded))).unwrap();
         }
         let before = tree(&dir);
@@ -1040,6 +1083,77 @@ mod external {
                 .expect(smuggled)
                 .to_string();
             assert!(e.contains("unknown field"), "{smuggled}: {e}");
+        }
+    }
+}
+
+// ---- host listeners: what is actually bound on this Mac, kept apart from what Docker reports
+// (no process is started here: tests run beside tests that hold journals open, and a child forked meanwhile keeps a copy of a
+// held lock until it execs; the lsof runner and its parser are tested in deploy-docker)
+
+mod listeners {
+    use super::*;
+    use harpoon_deploy_docker::forwarder::parse_lsof_f;
+
+    #[test]
+    fn listeners_are_reported_with_their_real_binding_and_scope() {
+        let out = "p67874\ncharpoon\nn127.0.0.1:38000\np1\nclaunchd\nn*:5000\nn[::1]:631\np9\ncnode\nn192.168.1.5:3000\nn[::]:8080\n";
+        let r = host_listeners_from(parse_lsof_f(out), 7);
+        assert!(r.verified && r.error.is_none());
+        let by = |port: u16| {
+            r.listeners
+                .iter()
+                .filter(|l| l.port == port)
+                .map(|l| (l.address.as_str(), l.scope, l.pid, l.command.as_str()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(by(38000), [("127.0.0.1:38000", "loopback", 67874, "harpoon")]);
+        assert_eq!(by(5000), [("*:5000", "wildcard", 1, "launchd")]);
+        assert_eq!(by(631), [("[::1]:631", "loopback", 1, "launchd")]);
+        assert_eq!(by(3000), [("192.168.1.5:3000", "interface", 9, "node")]);
+        assert_eq!(by(8080), [("[::]:8080", "wildcard", 9, "node")]);
+    }
+
+    #[test]
+    fn a_check_that_cannot_run_is_unverified_and_claims_nothing() {
+        // (what lsof gave, whether the answer can be trusted)
+        let cases = [
+            (
+                "lsof is not there",
+                Err("cannot run /nonexistent/lsof: No such file or directory".to_string()),
+                false,
+            ),
+            ("its output cannot be read", parse_lsof_f("n127.0.0.1:1\n"), false),
+            // lsof exits 1 and prints nothing when no TCP port is listening: a real answer, "none"
+            ("nothing is listening", parse_lsof_f(""), true),
+        ];
+        for (what, found, trusted) in cases {
+            let r = host_listeners_from(found, 7);
+            assert_eq!(r.verified, trusted, "{what}: {r:?}");
+            assert_eq!(r.error.is_some(), !trusted, "{what}");
+            assert!(r.listeners.is_empty(), "{what}");
+        }
+        let r = host_listeners_from(
+            Err("lsof did not finish in 5 s; the host listeners are unverified".into()),
+            7,
+        );
+        assert!(!r.verified && r.error.as_deref().unwrap().contains("did not finish"));
+    }
+
+    #[test]
+    fn scope_is_classified_from_the_bound_address_alone() {
+        for (host, scope) in [
+            ("127.0.0.1", "loopback"),
+            ("127.5.5.5", "loopback"),
+            ("[::1]", "loopback"),
+            ("localhost", "loopback"),
+            ("*", "wildcard"),
+            ("0.0.0.0", "wildcard"),
+            ("[::]", "wildcard"),
+            ("10.0.0.7", "interface"),
+            ("[fe80::1]", "interface"),
+        ] {
+            assert_eq!(listener_scope(host), scope, "{host}");
         }
     }
 }

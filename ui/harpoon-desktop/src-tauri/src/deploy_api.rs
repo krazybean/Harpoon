@@ -1196,9 +1196,18 @@ pub fn build_args(
 /// Test seam with no runtime: the shipping gate and a runtime that cannot be found.
 #[cfg(test)]
 pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult {
-    run_op_with(rt, op, keychain, &Gate::shipping(), &|| {
-        Err("no runtime in this test".into())
-    })
+    // a lock refusal caused only by a stray copy of the lock (see `tests::LOCK_WAIT`) is waited out; every other answer is returned as is
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let r = run_op_with(rt, op, keychain, &Gate::shipping(), &|| {
+            Err("no runtime in this test".into())
+        });
+        if !r.ok && r.detail.contains("another Harpoon process holds") && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+        return r;
+    }
 }
 
 /// Run one operation through the engine's CLI library. The app passes `Gate::shipping()`. The store is
@@ -1348,6 +1357,94 @@ pub async fn deploy_op(app: tauri::AppHandle, op: DeployOp) -> Result<OpResult, 
         run_op_with(&dir, &op, &kc, &Gate::shipping(), &|| {
             discover_runtime(&support, Path::new(MGMT_SOCKET), &resources, &process_command)
         })
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))
+}
+
+// ------------------------------------------------------------------ host listeners (effective exposure)
+
+/// One TCP listener on this Mac, as `lsof` reports it. This is what is actually bound on the host, as opposed to
+/// what Docker reports for a container's published ports (a mapping inside Harpoon's VM).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostListenerDto {
+    pub port: u16,
+    /// As `lsof` prints it: `127.0.0.1:38000`, `*:38000`, `[::1]:38000`.
+    pub address: String,
+    /// `loopback` (reachable from this Mac only), `wildcard` (every interface) or `interface` (one non-loopback address).
+    pub scope: &'static str,
+    pub pid: u32,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostListenersDto {
+    /// The check ran and `listeners` is complete. When `false`, `listeners` is empty and nothing may be concluded from it.
+    pub verified: bool,
+    pub error: Option<String>,
+    pub checked_ms: u64,
+    pub listeners: Vec<HostListenerDto>,
+}
+
+pub fn listener_scope(host: &str) -> &'static str {
+    match host {
+        "*" | "0.0.0.0" | "[::]" => "wildcard",
+        "[::1]" | "localhost" => "loopback",
+        h if h.starts_with("127.") => "loopback",
+        _ => "interface",
+    }
+}
+
+/// Every TCP listener on this Mac. Read-only: the engine's own `lsof` runner (fixed arguments, cleared
+/// environment, 5 s limit). A failure is reported as unverified, never as "nothing is listening".
+pub fn host_listeners(lsof: &Path, now_ms: u64) -> HostListenersDto {
+    host_listeners_from(
+        harpoon_deploy_docker::forwarder::listeners_in_range(lsof, 1, u16::MAX),
+        now_ms,
+    )
+}
+
+/// The same, from what `lsof` answered (kept apart so it can be tested without starting a process).
+pub fn host_listeners_from(
+    found: Result<Vec<harpoon_deploy_docker::forwarder::Listener>, String>,
+    now_ms: u64,
+) -> HostListenersDto {
+    match found {
+        Ok(found) => HostListenersDto {
+            verified: true,
+            error: None,
+            checked_ms: now_ms,
+            listeners: found
+                .into_iter()
+                .filter_map(|l| {
+                    Some(HostListenerDto {
+                        port: l.port()?,
+                        scope: listener_scope(l.host()),
+                        address: l.address.clone(),
+                        pid: l.pid,
+                        command: l.command.clone(),
+                    })
+                })
+                .collect(),
+        },
+        Err(e) => HostListenersDto {
+            verified: false,
+            error: Some(e),
+            checked_ms: now_ms,
+            listeners: vec![],
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn host_tcp_listeners() -> Result<HostListenersDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        host_listeners(
+            Path::new(harpoon_deploy_docker::forwarder::LsofCheck::DEFAULT_PATH),
+            now_ms(),
+        )
     })
     .await
     .map_err(|e| format!("background task failed: {e}"))

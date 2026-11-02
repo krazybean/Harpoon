@@ -9,8 +9,9 @@
 //  * A deployment that never finished and has no live writer is "interrupted", not "running".
 //  * Secrets are names, ids and versions. Values are never in the snapshot.
 // Strip-types friendly: no enums, no parameter properties.
+import { exposureOf, parseDockerPorts, type HostListeners, type PortMapping } from "./portExposure.ts";
 import type {
-  AppModel, Automation, Deployment, DeployState, Observation, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
+  AppModel, Automation, ConfigFact, ConfigFacts, Deployment, DeployState, Observation, ObservationCheck, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
   Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
 } from "./deployTypes.ts";
 
@@ -51,7 +52,7 @@ export type LastResult = OpResult & { op: string };
 export type StepLog = { step: string; text: string; withheld: boolean; truncated: boolean; atMs: number };
 
 /** What Docker shows for one container right now. `labels` is `null` when Docker's answer carried none to check. */
-export type ObservedContainer = { id: string; state: string; labels: Record<string, string> | null; ports: number[] };
+export type ObservedContainer = { id: string; state: string; labels: Record<string, string> | null; ports: number[]; mappings: PortMapping[] };
 /** Container name -> what Docker shows, as observed now. `null` = Docker could not be asked. */
 export type Observed = Record<string, ObservedContainer> | null;
 
@@ -180,8 +181,45 @@ export function engineMeta(snap: EngineSnapshot | null, loadError: string | null
   };
 }
 
+const NOT: ConfigFact = { value: null, from: "none" };
+
+/**
+ * Configuration as RECORDED, field by field, each with where it came from: the repository registration, the
+ * journal (a pinned release configuration, the ledger, the deployment record) or Docker (observed, and not in the
+ * journal). A value nothing recorded stays `null` and is shown as "Not recorded": no default, placeholder or guess
+ * is ever presented as history.
+ */
+function factsOf(a: SnapApp, repo: SnapRepo | null, servDep: SnapDeployment | undefined, row: ObservedContainer | undefined, leasePort: number | null): ConfigFacts {
+  const latest = a.deployments[a.deployments.length - 1];
+  const pin = servDep?.pin ?? [...a.deployments].reverse().find((d) => d.pin)?.pin ?? null;
+  const src = [...a.deployments].reverse().find((d) => d.source)?.source ?? null;
+  const reg = (v: string | null | undefined): ConfigFact => (v ? { value: v, from: "registration" } : NOT);
+  const dep = servDep ?? latest;
+  const healthPath = a.serving?.healthPath ?? pin?.healthPath ?? null;
+  let containerPort: ConfigFact = NOT;
+  if (pin) containerPort = { value: String(pin.containerPort), from: "journal", detail: "pinned in the release configuration" };
+  else if (repo) containerPort = { value: String(repo.containerPort), from: "registration" };
+  else if (row?.mappings.length) {
+    const m = row.mappings.find((x) => x.hostPort === leasePort) ?? row.mappings[0];
+    containerPort = { value: String(m.containerPort), from: "docker", detail: `Docker maps ${m.hostPort}→${m.containerPort}; the journal does not record it` };
+  }
+  let replacement: ConfigFact = NOT;
+  if (dep?.replaces) replacement = { value: `Replaced release ${dep.replaces}${dep.interruption ? `, interruption ${dep.interruption.endedMs == null ? "not ended" : durationLabel(dep.interruption.endedMs - dep.interruption.startedMs)} (measured)` : ""}`, from: "journal" };
+  else if (dep && dep.cutover === "not_required") replacement = { value: "Nothing was replaced (first deployment)", from: "journal", detail: "cutover not required" };
+  const image = dep?.resources.find((r) => r.kind === "image");
+  return {
+    source: repo ? { value: `${displayUrl(repo.url)}`, from: "registration" } : src ? { value: `${displayUrl(src.url)} @ ${src.commit.slice(0, 7)}`, from: "journal", detail: "recorded with the deployment" } : NOT,
+    branch: reg(repo?.branch), dockerfile: reg(repo?.dockerfile), context: reg(repo?.context), target: reg(repo?.target),
+    containerPort,
+    hostPort: a.serving?.hostPort != null ? { value: String(a.serving.hostPort), from: "journal", detail: "pinned in the release configuration" } : leasePort ? { value: String(leasePort), from: "journal", detail: "recorded port lease" } : NOT,
+    healthCheck: healthPath ? { value: `HTTP GET ${healthPath}`, from: "journal", detail: "pinned in the release configuration" } : repo?.healthPath ? { value: `HTTP GET ${repo.healthPath}`, from: "registration" } : NOT,
+    replacement,
+    image: image ? { value: `${image.name}${image.id ? ` (${shortId(image.id)})` : ""}`, from: "journal", detail: "recorded in the ledger" } : pin?.imageTag ? { value: pin.imageTag, from: "journal" } : NOT,
+  };
+}
+
 /** The applications of one snapshot. `ext` marks a runtime attached read-only: ids are prefixed so they can never collide with, or be mistaken for, Harpoon's own. */
-function appsFrom(snap: EngineSnapshot, observed: Observed, ext?: { id: string; path: string }): { apps: Record<string, AppModel>; projects: Project[] } {
+function appsFrom(snap: EngineSnapshot, observed: Observed, hostListeners: HostListeners, ext?: { id: string; path: string }): { apps: Record<string, AppModel>; projects: Project[] } {
   const now = snap.generatedMs;
   const apps: Record<string, AppModel> = {};
   const projects: Record<string, Project> = {};
@@ -195,28 +233,30 @@ function appsFrom(snap: EngineSnapshot, observed: Observed, ext?: { id: string; 
       secrets: (d.pin?.secrets ?? []).map((s) => ({ name: s.name, version: s.version })),
     })).sort((x, y) => x.ageMin - y.ageMin);
     const sv = a.serving;
-    const observation = correlate(a, observed) ?? undefined;
+    const observation = correlate(a, observed, hostListeners) ?? undefined;
     // current = recorded as serving AND observed running as that deployment's container (labels checked when Docker gave them)
     const running = !!sv && (observation?.kind === "match" || observation?.kind === "unverified");
     const servDep = sv ? a.deployments.find((d) => d.id === sv.deployment) : undefined;
     const lease = servDep?.resources.find((r) => r.kind === "port" && r.state === "created");
     const leasePort = lease ? Number(lease.name) : null;
     const port = sv?.hostPort ?? leasePort;
-    const healthPath = sv?.healthPath ?? repo?.healthPath ?? "/";
+    const healthPath = sv?.healthPath ?? repo?.healthPath ?? null;
     const pin = [...a.deployments].reverse().find((d) => d.pin)?.pin ?? null;
+    const row = sv && observed ? observed[sv.container] : undefined;
     const projectId = ext ? ext.id : repo?.project ?? repo?.name ?? "ungrouped";
     apps[idOf(a.id)] = {
       id: idOf(a.id), projectId, name: repo?.name ?? a.id,
       ...(ext ? { external: { path: ext.path, format: snap.source.journalFormat } } : {}),
-      observation, urlSource: sv?.hostPort != null ? "pin" : leasePort ? "lease" : undefined,
+      observation, facts: factsOf(a, repo, servDep, row, leasePort), urlSource: sv?.hostPort != null ? "pin" : leasePort ? "lease" : undefined,
       source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: ext ? "recorded in an external runtime" : "no repository registered" },
       url: running && port ? `http://127.0.0.1:${port}` : "", containerName: sv?.container ?? "",
       currentReleaseId: running ? sv!.release : null, lastKnownReleaseId: sv?.release ?? null,
       deployments, releases, automation: automationOf(a, now, (id) => byId.get(id)),
       variables: variablesOf(snap, a, now),
+      // Engine mode never invents a setting: what the views show comes from `facts`; these stay empty when nothing was recorded.
       settings: {
-        dockerfile: repo?.dockerfile ?? "Dockerfile", context: repo?.context ?? ".", buildArgs: "", port: repo?.containerPort ?? pin?.containerPort ?? null,
-        healthCheck: `HTTP GET ${healthPath}`, keepReleases: 0, productionBranch: repo?.branch ?? "", pollSeconds: 0,
+        dockerfile: repo?.dockerfile ?? "", context: repo?.context ?? "", buildArgs: "", port: pin?.containerPort ?? repo?.containerPort ?? null,
+        healthCheck: healthPath ? `HTTP GET ${healthPath}` : "", keepReleases: 0, productionBranch: repo?.branch ?? "", pollSeconds: 0,
       },
       previews: [], resources: null,
     };
@@ -233,17 +273,17 @@ function appsFrom(snap: EngineSnapshot, observed: Observed, ext?: { id: string; 
  * seen running and carries its ownership labels; otherwise that release is only "last known", and the mismatch is
  * reported on the application (`observation`). `externals` are runtimes attached read-only.
  */
-export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observed; keychain: KeychainState; loadError?: string | null; stale?: boolean; externals?: ExternalInput[] }): DeployState {
+export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observed; keychain: KeychainState; loadError?: string | null; stale?: boolean; externals?: ExternalInput[]; hostListeners?: HostListeners }): DeployState {
   const externals = o.externals ?? [];
   const engine = engineMeta(snap, o.loadError ?? null, o.stale ?? false, externals);
   const base = { keychain: o.keychain, nextOutcome: "success" as const, job: null, nextDeploymentNumber: 1, engine };
   if (!snap) return { ...base, scenario: o.loadError ? "empty" : "loading", projects: [], apps: {} };
-  const own = snap.store === "error" ? { apps: {}, projects: [] as Project[] } : appsFrom(snap, o.observed);
+  const own = snap.store === "error" ? { apps: {}, projects: [] as Project[] } : appsFrom(snap, o.observed, o.hostListeners ?? null);
   const apps: Record<string, AppModel> = { ...own.apps };
   const projects: Project[] = [...own.projects];
   externals.forEach((x, i) => {
     if (!x.snapshot || x.snapshot.store === "error") return;
-    const e = appsFrom(x.snapshot, o.observed, { id: `ext${i}`, path: x.path });
+    const e = appsFrom(x.snapshot, o.observed, o.hostListeners ?? null, { id: `ext${i}`, path: x.path });
     Object.assign(apps, e.apps);
     projects.push(...e.projects);
   });
@@ -282,8 +322,8 @@ export function observedFrom(rows: unknown): Observed {
   for (const r of rows as Record<string, unknown>[]) {
     const labelText = typeof r.Labels === "string" ? r.Labels : null;
     const labels = labelText === null ? null : Object.fromEntries(labelText.split(",").filter(Boolean).map((kv) => { const i = kv.indexOf("="); return i < 0 ? [kv, ""] : [kv.slice(0, i), kv.slice(i + 1)]; }));
-    const ports = [...String(r.Ports ?? "").matchAll(/:(\d+)->/g)].map((m) => Number(m[1]));
-    const row: ObservedContainer = { id: String(r.ID ?? r.Id ?? ""), state: String(r.State ?? "").toLowerCase(), labels, ports };
+    const mappings = parseDockerPorts(typeof r.Ports === "string" ? r.Ports : "");
+    const row: ObservedContainer = { id: String(r.ID ?? r.Id ?? ""), state: String(r.State ?? "").toLowerCase(), labels, ports: [...new Set(mappings.map((m) => m.hostPort))], mappings };
     for (const n of String(r.Names ?? r.Name ?? "").split(",")) if (n) out[n.replace(/^\//, "")] = row;
   }
   return out;
@@ -296,7 +336,7 @@ const shortId = (id: string) => id.replace(/^sha256:/, "").slice(0, 12);
  * wrote it) did; Docker says what exists now. They are compared, never merged: a record is "current" only when the
  * container it names is there, running, and carries this application's and this deployment's ownership labels.
  */
-export function correlate(app: SnapApp, observed: Observed): Observation | null {
+export function correlate(app: SnapApp, observed: Observed, hostListeners: HostListeners = null): Observation | null {
   const sv = app.serving;
   if (!sv) return null;
   const dep = app.deployments.find((d) => d.id === sv.deployment);
@@ -304,22 +344,38 @@ export function correlate(app: SnapApp, observed: Observed): Observation | null 
   const lease = dep?.resources.find((r) => r.kind === "port" && r.state === "created");
   const leasePort = lease ? Number(lease.name) : null;
   const recorded = `release ${sv.release} serving in container ${sv.container}${rec?.id ? ` (${shortId(rec.id)})` : ""}${leasePort ? `, port lease ${leasePort}` : ""}`;
-  if (observed === null) return { kind: "unknown", recorded, observed: "Docker could not be asked", notes: ["The record cannot be compared with Docker right now."] };
+  if (observed === null) return { kind: "unknown", recorded, observed: "Docker could not be asked", notes: ["The record cannot be compared with Docker right now."], checks: [] };
   const row = observed[sv.container];
-  if (!row) return { kind: "absent", recorded, observed: "no container with that name", notes: ["Recorded as serving, but Docker has no such container."] };
-  const notes: string[] = [];
-  if (rec?.id && row.id && !(row.id === rec.id || row.id.startsWith(rec.id) || rec.id.startsWith(row.id))) notes.push(`The container id differs: recorded ${shortId(rec.id)}, observed ${shortId(row.id)}.`);
-  if (row.labels) {
-    if (row.labels[LABEL_MANAGED] !== "true") notes.push(`The container is not labelled ${LABEL_MANAGED}=true.`);
-    if (row.labels[LABEL_APP] !== app.id) notes.push(`Its ${LABEL_APP} label is ${JSON.stringify(row.labels[LABEL_APP] ?? "")}, not ${app.id}.`);
-    if (row.labels[LABEL_DEPLOYMENT] !== sv.deployment) notes.push(`Its ${LABEL_DEPLOYMENT} label is ${JSON.stringify(row.labels[LABEL_DEPLOYMENT] ?? "")}, not ${sv.deployment}.`);
-  }
-  if (leasePort && row.ports.length && !row.ports.includes(leasePort)) notes.push(`The recorded port lease ${leasePort} is not among the published ports (${row.ports.join(", ")}).`);
-  const observedText = `container ${shortId(row.id)} ${row.state}${row.labels ? ", ownership labels checked" : ", no labels to check"}${row.ports.length ? `, published ${row.ports.join(", ")}` : ""}`;
-  if (notes.length) return { kind: "mismatch", recorded, observed: observedText, notes };
-  if (row.state !== "running") return { kind: "stopped", recorded, observed: observedText, notes: [`Recorded as serving, but the container is ${row.state || "not running"}.`] };
-  if (!row.labels) return { kind: "unverified", recorded, observed: observedText, notes: ["Docker's answer carried no labels, so ownership could not be checked."] };
-  return { kind: "match", recorded, observed: observedText, notes: [] };
+  if (!row) return { kind: "absent", recorded, observed: "no container with that name", notes: ["Recorded as serving, but Docker has no such container."], checks: [] };
+
+  const checks: ObservationCheck[] = [];
+  const add = (id: ObservationCheck["id"], label: string, result: ObservationCheck["result"], detail: string) => checks.push({ id, label, result, detail });
+  add("state", "Running", row.state === "running" ? "ok" : "fail", `Docker reports the container as ${row.state || "not running"}.`);
+  if (!rec?.id) add("id", "Container id", "unavailable", "The journal recorded no container id to compare.");
+  else if (!row.id) add("id", "Container id", "unavailable", "Docker's answer carried no id.");
+  else if (row.id === rec.id || row.id.startsWith(rec.id) || rec.id.startsWith(row.id)) add("id", "Container id", "ok", `Both are ${shortId(rec.id)}.`);
+  else add("id", "Container id", "fail", `The container id differs: recorded ${shortId(rec.id)}, observed ${shortId(row.id)}.`);
+  const label = (id: "managed" | "app" | "deployment", key: string, want: string, text: string) => {
+    if (!row.labels) return add(id, text, "unavailable", "Docker's answer carried no labels, so this was not checked.");
+    const got = row.labels[key];
+    if (got === want) add(id, text, "ok", `${key} is ${JSON.stringify(got)}.`);
+    else add(id, text, "fail", id === "managed" ? `The container is not labelled ${key}=true.` : `Its ${key} label is ${JSON.stringify(got ?? "")}, not ${want}.`);
+  };
+  label("managed", LABEL_MANAGED, "true", "Managed by Harpoon");
+  label("app", LABEL_APP, app.id, "Belongs to this application");
+  label("deployment", LABEL_DEPLOYMENT, sv.deployment, "Created by this deployment");
+  if (leasePort && row.mappings.length) {
+    if (row.ports.includes(leasePort)) add("port", "Port lease", "ok", `Docker publishes the leased port ${leasePort}.`);
+    else add("port", "Port lease", "fail", `The recorded port lease ${leasePort} is not among the published ports (${row.ports.join(", ")}).`);
+  } else add("port", "Port lease", "unavailable", leasePort ? "Docker reports no published ports to compare." : "The journal recorded no port lease.");
+
+  const identityFailed = checks.some((c) => c.id !== "state" && c.result === "fail");
+  const ownership = checks.filter((c) => c.id === "managed" || c.id === "app" || c.id === "deployment");
+  const kind: Observation["kind"] = identityFailed ? "mismatch" : row.state !== "running" ? "stopped" : ownership.every((c) => c.result === "ok") ? "match" : "unverified";
+  const notes = checks.filter((c) => c.result === "fail" && (c.id !== "state" || !identityFailed)).map((c) => c.detail);
+  if (kind === "unverified") notes.push("Docker's answer carried no labels, so ownership could not be checked.");
+  const observedText = `container ${shortId(row.id)} ${row.state}${row.mappings.length ? `, Docker publishes ${row.mappings.map((m) => `${m.hostIp}:${m.hostPort}→${m.containerPort}`).join(", ")}` : ", no published ports"}`;
+  return { kind, recorded, observed: observedText, notes, checks, port: exposureOf(row.mappings, hostListeners) };
 }
 
 /**

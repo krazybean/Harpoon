@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, Check, Info, Pause, Warning, X, CaretRight } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, Check, Copy, Info, Pause, Warning, X, CaretRight } from "@phosphor-icons/react";
 import type { LogLine, StepRecord } from "../../lib/deployTypes.ts";
 import type { Tone } from "../../lib/deployPresentation.ts";
 import { EVIDENCE_NOTE, stepLabel } from "../../lib/deployPresentation.ts";
@@ -27,6 +27,16 @@ export function Banner({ tone, title, children, actions, icon }: { tone: "info" 
       <div><h3>{title}</h3><p>{children}</p></div>
       {actions ? <div className="dp-banner__actions">{actions}</div> : null}
     </div>
+  );
+}
+
+/** A long identifier: wraps (never pushes a neighbour away), keeps the whole value in its tooltip, and copies it on request. */
+export function Ident({ value, shown, copy = false }: { value: string; shown?: string; copy?: boolean }) {
+  return (
+    <span className="dp-id">
+      <span className="mono dp-id__text" title={value}>{shown ?? value}</span>
+      {copy ? <button type="button" className="dp-id__copy" aria-label={`Copy ${value}`} title="Copy" onClick={() => void navigator.clipboard?.writeText(value)}><Copy size={12} /></button> : null}
+    </span>
   );
 }
 

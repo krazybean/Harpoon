@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { HostListeners } from "../lib/portExposure.ts";
 import { announceHeld, externalOpProblem, logLines, observedFrom, toDeployState, type EngineApi, type ExternalInput, type EngineSnapshot, type LastResult, type NewHeld, type Observed, type OpResult, type StepLog } from "../lib/deployEngine.ts";
 import type { DeployState, KeychainState, LogLine, RuntimeState } from "../lib/deployTypes.ts";
 
@@ -24,6 +25,10 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const externalPaths = useRef<string[]>([]);
   const [keychain, setKeychain] = useState<KeychainState>("unlocked");
   const inflight = useRef(false);
+  // what is actually listening on this Mac (lsof), kept apart from what Docker reports; refreshed only while Deployments is showing
+  const [hostListeners, setHostListeners] = useState<HostListeners>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   const refresh = useCallback(async () => {
     if (inflight.current) return;
@@ -46,6 +51,9 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
         catch (e) { return { path, snapshot: null as EngineSnapshot | null, error: String(e) }; }
       }));
       setExternals((prev) => got.map((g) => (g.snapshot ? g : { ...g, snapshot: prev.find((p) => p.path === g.path)?.snapshot ?? null })));
+    }
+    if (activeRef.current) {
+      try { setHostListeners(await invoke<NonNullable<HostListeners>>("host_tcp_listeners")); } catch (e) { setHostListeners({ verified: false, error: String(e), checkedMs: Date.now(), listeners: [] }); }
     }
     if (realRuntime === "connected") {
       try { setObserved(observedFrom(await invoke<unknown>("list_containers", { all: true }))); } catch { setObserved(null); }
@@ -99,7 +107,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   }, []);
 
   const stale = loadError != null && snap != null;
-  const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals }), [snap, observed, keychain, loadError, stale, externals]);
+  const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals, hostListeners }), [snap, observed, keychain, loadError, stale, externals, hostListeners]);
   // Docker could not be asked although the VM says it is up: do not claim to know the current state.
   const runtime: RuntimeState = realRuntime === "connected" && observed === null && snap != null ? "docker-not-ready" : realRuntime;
   const api: EngineApi = useMemo(() => ({ run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, stepLogs, runtimeLogs }), [run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, stepLogs, runtimeLogs]);
