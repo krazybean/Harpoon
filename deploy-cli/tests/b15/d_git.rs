@@ -7,14 +7,9 @@
 //! covered by command-construction tests in `deploy-git` (no SSH server is available offline); real
 //! GitHub or GitLab deliveries are not exercised.
 
-// formatted by deploy-git (its rustfmt.toml); this crate must not reformat the shared file
-#[rustfmt::skip]
-#[path = "../../../deploy-git/tests/support/mod.rs"]
-mod gitsupport;
-
 use super::milestone_c::running_app_ports;
 use super::*;
-use gitsupport::{fixture, git, HttpGit, Tmp};
+use crate::gitsupport::{fixture, git, HttpGit, Tmp};
 use harpoon_deploy::secrets::MemorySecretStore;
 use harpoon_deploy_cli::{run_with, Services};
 use harpoon_deploy_git::sha256::{hmac_sha256, to_hex};
@@ -30,18 +25,20 @@ fn crun(t: &T, gate: &Gate, kc: &MemorySecretStore, stdin: &[u8], args: &[&str])
         args.first().copied(),
         Some("git-deploy" | "git-run" | "watch")
     ) || a.iter().any(|x| x == "--lsof-path");
-    let mut input: &[u8] = stdin;
-    let mut svc = Services {
-        secrets: kc,
-        stdin: &mut input,
-        stdin_is_terminal: false,
-        next: None,
-    };
     // The product is fail-fast about the journal lock. A fixture process (the smart-HTTP server's
     // `git http-backend`) that another test forks can briefly hold a copy of this test's lock until it
     // execs, which is operating-system behaviour, so only that refusal is retried, a few times, here.
     let mut attempt = 0;
     loop {
+        // Every attempt gets the whole standard input: `repo-secret` and `secret-set` read it before they
+        // take the journal lock, so a retry after a lock refusal would otherwise see an empty input.
+        let mut input: &[u8] = stdin;
+        let mut svc = Services {
+            secrets: kc,
+            stdin: &mut input,
+            stdin_is_terminal: false,
+            next: None,
+        };
         let o = if spawns {
             spawning(|| run_with(&a, gate, &mut svc))
         } else {
@@ -654,17 +651,26 @@ fn a_paused_application_holds_pushed_events_until_a_decision_selects_one() {
     );
 }
 
+/// Connect to the listener once it is up. The listener starts only after the CLI call has been through the
+/// fork gate (it waits for every open journal in the other test threads), so how long that takes depends on
+/// the machine. Wait for the condition, with a deadline that only a genuinely failed start can reach.
+fn connect_when_up(port: u16, deadline: std::time::Duration) -> std::net::TcpStream {
+    let end = std::time::Instant::now() + deadline;
+    loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => return c,
+            Err(e) if std::time::Instant::now() >= end => {
+                panic!("the listener on port {port} did not come up within {deadline:?}: {e}")
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
+const LISTENER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn post(port: u16, path: &str, headers: &[(&str, String)], body: &str) -> String {
-    let mut c = (0..60)
-        .find_map(|_| {
-            std::net::TcpStream::connect(("127.0.0.1", port))
-                .ok()
-                .or_else(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    None
-                })
-        })
-        .expect("the listener is up");
+    let mut c = connect_when_up(port, LISTENER_DEADLINE);
     let mut req = format!("POST {path} HTTP/1.1\r\nContent-Length: {}\r\n", body.len());
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -678,6 +684,72 @@ fn post(port: u16, path: &str, headers: &[(&str, String)], body: &str) -> String
         return "HTTP/1.1 RESET".to_string();
     }
     out.lines().next().unwrap_or("").to_string()
+}
+
+/// The fixture's retry after a journal-lock refusal must give the command its whole standard input again.
+#[test]
+fn crun_retries_a_lock_refusal_with_the_whole_standard_input() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(
+        &add_repo(&t, &kc, "shop", &url(&repo), APP, &["--webhook", "github"]),
+        0,
+    );
+    // another writer holds the journal for a moment: the first attempts are refused with exit 4
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let dir = t.journal_dir();
+    let holder = std::thread::spawn(move || {
+        let (j, _) = open_j(&dir).unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(j);
+    });
+    locked_rx.recv().unwrap();
+    let o = crun(
+        &t,
+        &SHIPPING,
+        &kc,
+        b"gh-secret\n",
+        &[
+            "repo-secret",
+            "--simulate",
+            "--name",
+            "shop",
+            "--kind",
+            "webhook",
+        ],
+    );
+    holder.join().unwrap();
+    assert_exit(&o, 0);
+}
+
+/// `post` waits for the listener to come up instead of giving up after a fixed few seconds.
+#[test]
+fn post_waits_for_a_listener_that_starts_late() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(3500)); // later than the old fixed window
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let (mut c, _) = l.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = std::io::Read::read(&mut c, &mut buf);
+        std::io::Write::write_all(
+            &mut c,
+            b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+    });
+    assert_eq!(
+        post(port, "/webhook/github/shop", &[], "{}"),
+        "HTTP/1.1 202 Accepted"
+    );
+    server.join().unwrap();
 }
 
 #[test]

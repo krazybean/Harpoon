@@ -390,15 +390,61 @@ fn responder(t: &T, port: u16, lazy: bool) -> Serving {
 /// Occupy every preliminary-check port but the first, so the engine's own free-port check can only
 /// choose `TEST_PORT`. Dropped as soon as the preliminary check has been made.
 fn occupy_all_but_first() -> Vec<TcpListener> {
-    let held: Vec<TcpListener> = (TEST_PORT + 1..TEST_PORT + 100)
-        .filter_map(|p| TcpListener::bind(("127.0.0.1", p)).ok())
-        .collect();
-    assert_eq!(
-        held.len(),
-        99,
-        "the preliminary-check port range must be free on this machine"
-    );
+    occupy_ports(TEST_PORT + 1..TEST_PORT + 100)
+}
+
+/// Bind every port in `range`. What matters to the engine is that none of them is free, not that this
+/// test is the one holding it: the range sits inside the operating system's ephemeral port range on
+/// Linux, so another socket in this process (a client connection, a fixture listener) can have a port
+/// for a moment, or for good. A port that is busy is retried until it is ours, since a transient holder
+/// lets go at once; one that is still busy after the wait belongs to someone else for now and is as
+/// unavailable to the engine as one we hold. Any other bind error means the machine cannot run this test.
+fn occupy_ports(range: std::ops::Range<u16>) -> Vec<TcpListener> {
+    let mut held = Vec::new();
+    for port in range {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => {
+                    held.push(l);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if std::time::Instant::now() >= end {
+                        break; // held by someone else: unavailable all the same
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!(
+                    "cannot bind 127.0.0.1:{port} to occupy the preliminary-check range: {e}"
+                ),
+            }
+        }
+    }
     held
+}
+
+#[test]
+fn occupying_a_port_range_holds_what_it_can_and_waits_out_a_transient_holder() {
+    // a free block well away from the ports the other tests use
+    let base = 41_500u16;
+    let foreign = TcpListener::bind(("127.0.0.1", base + 3)).unwrap(); // held for good
+    let transient = TcpListener::bind(("127.0.0.1", base + 7)).unwrap(); // let go shortly
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(transient);
+    });
+    let held = occupy_ports(base..base + 10);
+    releaser.join().unwrap();
+    assert_eq!(held.len(), 9, "everything but the port someone else keeps");
+    // none of the ten is free for anyone else
+    for p in base..base + 10 {
+        assert!(
+            TcpListener::bind(("127.0.0.1", p)).is_err(),
+            "{p} must be unavailable"
+        );
+    }
+    drop(foreign);
 }
 
 fn replace_args(t: &T, extra: &[&str]) -> Vec<String> {
