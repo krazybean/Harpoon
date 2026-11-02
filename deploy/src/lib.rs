@@ -18,6 +18,7 @@ pub mod config;
 pub mod control;
 pub mod engine;
 pub mod envvars;
+pub mod git;
 pub mod health;
 pub mod ids;
 pub mod journal_format;

@@ -124,11 +124,34 @@ impl SupersededWhy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// A deployment was created for the event (it may still have failed; the deployment says).
+    Deployed,
+    /// Nothing was deployed (the checkout failed, the repository was unavailable, ...).
+    Failed,
+}
+
+/// The source executor consumed an event (Milestone D): it was deployed, or could not be. The events
+/// that were queued behind it, older than it, are superseded by it (newest wins).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecRec {
+    pub app: ApplicationId,
+    pub delivery: String,
+    pub outcome: ExecOutcome,
+    pub deployment: Option<DeploymentId>,
+    /// Why nothing was deployed (free text, never a credential); empty for `Deployed`.
+    pub reason: String,
+    pub superseded: Vec<String>,
+    pub at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlRecord {
     Pause(PauseRec),
     Event(EventRec),
     Resume(ResumeRec),
+    Exec(ExecRec),
 }
 
 // ------------------------------------------------------------------ validation
@@ -221,6 +244,22 @@ pub fn encode(r: &ControlRecord) -> String {
         ControlRecord::Event(e) => format!(
             "event\t1\t{}\t{}\t{}\t{}\t{}",
             e.app, e.delivery, e.source, e.revision, e.received_ms
+        ),
+        ControlRecord::Exec(x) => format!(
+            "exec\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            x.app,
+            x.delivery,
+            match x.outcome {
+                ExecOutcome::Deployed => "deployed",
+                ExecOutcome::Failed => "failed",
+            },
+            x.deployment
+                .as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "-".into()),
+            x.reason.bytes().map(|b| format!("{b:02x}")).collect::<String>(),
+            csv(&x.superseded),
+            x.at_ms
         ),
         ControlRecord::Resume(x) => {
             let (choice, rev) = match &x.choice {
@@ -335,6 +374,30 @@ pub fn decode(f: &[&str]) -> Result<ControlRecord, String> {
                 cleared,
             }))
         }
+        "exec" => {
+            if f.len() != 9 {
+                return bad("an exec record has the wrong number of fields");
+            }
+            check_delivery(f[3])?;
+            let outcome = match f[4] {
+                "deployed" => ExecOutcome::Deployed,
+                "failed" => ExecOutcome::Failed,
+                _ => return bad("unknown exec outcome"),
+            };
+            let superseded = list(f[7]);
+            for d in &superseded {
+                check_delivery(d)?;
+            }
+            Ok(ControlRecord::Exec(ExecRec {
+                app: app(f[2])?,
+                delivery: f[3].into(),
+                outcome,
+                deployment: if f[5] == "-" { None } else { Some(dep(f[5])?) },
+                reason: unhex(f[6]).ok_or("bad exec reason")?,
+                superseded,
+                at_ms: n(f[8], "exec time")?,
+            }))
+        }
         other => bad(format!("unknown control record {other:?}")),
     }
 }
@@ -348,6 +411,10 @@ pub enum EventStatus {
     Selected,
     Dismissed,
     Superseded(SupersededWhy),
+    /// The source executor deployed it (`Event.related` holds the deployment id).
+    Executed,
+    /// The source executor could not deploy it (`Event.related` holds the reason).
+    Failed,
 }
 
 impl EventStatus {
@@ -357,6 +424,8 @@ impl EventStatus {
             EventStatus::Selected => "selected",
             EventStatus::Dismissed => "dismissed",
             EventStatus::Superseded(_) => "superseded",
+            EventStatus::Executed => "executed",
+            EventStatus::Failed => "failed",
         }
     }
 }
@@ -377,6 +446,7 @@ pub struct ControlState {
     pub pauses: Vec<PauseRec>,
     pub events: Vec<Event>,
     pub resumes: Vec<ResumeRec>,
+    pub execs: Vec<ExecRec>,
 }
 
 impl ControlState {
@@ -406,7 +476,60 @@ impl ControlState {
                 });
             }
             ControlRecord::Resume(x) => self.apply_resume(x)?,
+            ControlRecord::Exec(x) => self.apply_exec(x)?,
         }
+        Ok(())
+    }
+
+    fn apply_exec(&mut self, x: &ExecRec) -> Result<(), String> {
+        let find = |s: &ControlState, d: &str| s.events.iter().position(|e| e.rec.app == x.app && e.rec.delivery == d);
+        let i = find(self, &x.delivery).ok_or_else(|| {
+            format!(
+                "an execution names delivery {}, which is not recorded for {}",
+                x.delivery, x.app
+            )
+        })?;
+        if !matches!(self.events[i].status, EventStatus::Held | EventStatus::Selected) {
+            return bad(format!(
+                "delivery {} is {}, not waiting to be executed",
+                x.delivery,
+                self.events[i].status.as_str()
+            ));
+        }
+        match (x.outcome, &x.deployment) {
+            (ExecOutcome::Deployed, Some(_)) | (ExecOutcome::Failed, None) => {}
+            _ => return bad("an execution's outcome and deployment disagree"),
+        }
+        let mut sup = Vec::new();
+        for d in &x.superseded {
+            let j =
+                find(self, d).ok_or_else(|| format!("an execution supersedes delivery {d}, which is not recorded"))?;
+            if j == i || self.events[j].status != EventStatus::Held {
+                return bad(format!("superseded delivery {d} is not held"));
+            }
+            if self.events[j].rec.received_ms > self.events[i].rec.received_ms {
+                return bad(format!(
+                    "delivery {d} is newer than the one executed, so it cannot be superseded by it"
+                ));
+            }
+            sup.push(j);
+        }
+        self.events[i].status = if x.outcome == ExecOutcome::Deployed {
+            EventStatus::Executed
+        } else {
+            EventStatus::Failed
+        };
+        self.events[i].decided_ms = Some(x.at_ms);
+        self.events[i].related = Some(match &x.deployment {
+            Some(d) => d.to_string(),
+            None => x.reason.clone(),
+        });
+        for j in sup {
+            self.events[j].status = EventStatus::Superseded(SupersededWhy::NewerSelected);
+            self.events[j].decided_ms = Some(x.at_ms);
+            self.events[j].related = Some(x.delivery.clone());
+        }
+        self.execs.push(x.clone());
         Ok(())
     }
 
@@ -559,6 +682,19 @@ impl ControlState {
                     c.kind.as_str(),
                     c.at_ms
                 ));
+            }
+        }
+        for x in &self.execs {
+            if let Some(d) = &x.deployment {
+                if !deployments
+                    .iter()
+                    .any(|dep| dep.id == *d && dep.application_id == x.app)
+                {
+                    return bad(format!(
+                        "an execution names deployment {d}, which is not a deployment of {}",
+                        x.app
+                    ));
+                }
             }
         }
         for r in &self.resumes {
@@ -755,6 +891,86 @@ pub fn ingest<J: Journal>(
     j.control(&r)?;
     ctl.apply(&r).map_err(ControlError::Conflict)?;
     Ok(Ingress::Held)
+}
+
+/// Queue an event for the source executor whether or not the application is paused (Milestone D). A
+/// paused application keeps it `held` for the developer to decide on; an unpaused one will execute the
+/// newest queued event. Idempotent on the delivery id: a repeat with the same source and revision (the
+/// arrival time may differ) is a `Duplicate` and writes nothing; the same id with another revision is
+/// refused. Nothing is written for a refused or duplicate event.
+pub fn queue_event<J: Journal>(j: &mut J, ctl: &mut ControlState, ev: Incoming<'_>) -> Result<Ingress, ControlError> {
+    check_delivery(ev.delivery_id).map_err(ControlError::Invalid)?;
+    check_source(ev.source).map_err(ControlError::Invalid)?;
+    check_revision(ev.revision).map_err(ControlError::Invalid)?;
+    if let Some(old) = ctl.event(ev.app, ev.delivery_id) {
+        return if old.rec.source == ev.source && old.rec.revision == ev.revision {
+            Ok(Ingress::Duplicate)
+        } else {
+            Err(ControlError::Conflict(format!(
+                "delivery {} of application {} is already recorded with a different source or revision; refused",
+                ev.delivery_id, ev.app
+            )))
+        };
+    }
+    let r = ControlRecord::Event(EventRec {
+        app: ev.app.clone(),
+        delivery: ev.delivery_id.into(),
+        source: ev.source.into(),
+        revision: ev.revision.into(),
+        received_ms: ev.received_ms,
+    });
+    j.control(&r)?;
+    ctl.apply(&r).map_err(ControlError::Conflict)?;
+    Ok(Ingress::Held)
+}
+
+/// What the source executor does next for one application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    /// A developer's `resume --newest|--revision` selected this event: execute it (attended).
+    Selected(Event),
+    /// The application is not paused and events are queued: execute the newest, supersede the rest.
+    Newest { chosen: Event, superseded: Vec<String> },
+    /// Nothing to do: nothing is queued, or the application is paused and nothing was selected.
+    Nothing,
+}
+
+pub fn next_execution(deployments: &[Deployment], ctl: &ControlState, app: &ApplicationId) -> Next {
+    if let Some(e) = ctl.pending_selection(app) {
+        return Next::Selected(e.clone());
+    }
+    if is_paused(app, deployments, ctl) {
+        return Next::Nothing;
+    }
+    let held = ctl.held(app);
+    // newest = latest received, then latest recorded
+    let chosen = held
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, e)| (e.rec.received_ms, *i))
+        .map(|(_, e)| (*e).clone());
+    match chosen {
+        None => Next::Nothing,
+        Some(c) => {
+            let superseded = held
+                .iter()
+                .filter(|e| e.rec.delivery != c.rec.delivery)
+                .map(|e| e.rec.delivery.clone())
+                .collect();
+            Next::Newest { chosen: c, superseded }
+        }
+    }
+}
+
+/// Record that the executor consumed an event.
+pub fn record_exec<J: Journal>(j: &mut J, ctl: &mut ControlState, rec: ExecRec) -> Result<(), ControlError> {
+    let r = ControlRecord::Exec(rec);
+    // validate against the state first, so a refused record writes nothing
+    let mut probe = ctl.clone();
+    probe.apply(&r).map_err(ControlError::Conflict)?;
+    j.control(&r)?;
+    *ctl = probe;
+    Ok(())
 }
 
 // ------------------------------------------------------------------ resume

@@ -862,3 +862,156 @@ mod config_records {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+// ---------------------------------------------------------------- Milestone D: Git records
+
+mod git_records {
+    use super::*;
+    use harpoon_deploy::control::{queue_event, record_exec, ExecOutcome, ExecRec, Incoming};
+    use harpoon_deploy::git::*;
+
+    fn repo(app: &ApplicationId) -> RepoRec {
+        RepoRec {
+            name: "shop".into(),
+            url: "https://example.com/acme/shop.git".into(),
+            username: Some("x-access-token".into()),
+            cred: CredKind::Token,
+            known_host: None,
+            webhook: Some(WebhookKind::GitLab),
+            app: app.clone(),
+            project: None,
+            environment: None,
+            branch: "main".into(),
+            filters: vec![],
+            container_port: 8080,
+            dockerfile: None,
+            context: None,
+            target: None,
+            health_path: None,
+            at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn repositories_observations_and_sources_replay_and_a_store_without_them_reads_as_before() {
+        let dir = temp_dir();
+        let (app, dep) = ids();
+        {
+            let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+            db.git(&GitRecord::Repo(Box::new(repo(&app)))).unwrap();
+            db.git(&GitRecord::Seen(SeenRec {
+                repo: "shop".into(),
+                ref_name: "refs/heads/main".into(),
+                commit: "a".repeat(40),
+                at_ms: 2,
+            }))
+            .unwrap();
+            db.git(&GitRecord::Source(SourceRec {
+                deployment: dep.clone(),
+                repo: "shop".into(),
+                url: "https://example.com/acme/shop.git".into(),
+                selector: SelectorKind::Commit,
+                requested: "-".into(),
+                commit: "a".repeat(40),
+                trigger: "manual".into(),
+                delivery: None,
+                at_ms: 3,
+            }))
+            .unwrap();
+        }
+        let r = SqliteJournal::read_only(&dir).unwrap();
+        assert_eq!(r.git.repos["shop"].app, app);
+        assert_eq!(
+            r.git.seen[&("shop".to_string(), "refs/heads/main".to_string())].commit,
+            "a".repeat(40)
+        );
+        assert_eq!(r.git.source_of(&dep).unwrap().trigger, "manual");
+        let old = temp_dir();
+        drop(SqliteJournal::open(&old).unwrap());
+        assert_eq!(
+            SqliteJournal::read_only(&old).unwrap().git,
+            GitState::default()
+        );
+        // an observation of a repository nobody registered, or a damaged record, fails closed
+        {
+            let (mut db, _) = SqliteJournal::open(&old).unwrap();
+            db.append_unchecked(
+                "git",
+                &encode(&GitRecord::Seen(SeenRec {
+                    repo: "ghost".into(),
+                    ref_name: "r".into(),
+                    commit: "a".repeat(40),
+                    at_ms: 1,
+                })),
+            )
+            .unwrap();
+        }
+        let e = SqliteJournal::read_only(&old).unwrap_err();
+        assert!(e.0.contains("git record does not apply"), "{}", e.0);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(old);
+    }
+
+    #[test]
+    fn queued_events_and_their_execution_survive_a_restart_and_a_cut_between_the_records() {
+        let (app, dep) = ids();
+        let dir = temp_dir();
+        let mut deployment = Deployment::new(dep.clone(), app.clone(), Trigger::Poll, 5);
+        deployment.transition(DeploymentStatus::Queued, 6).unwrap();
+        {
+            let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+            let mut ctl = restored.control;
+            for (id, rev, at) in [("d1", "r1", 10), ("d2", "r2", 20)] {
+                queue_event(
+                    &mut db,
+                    &mut ctl,
+                    Incoming {
+                        app: &app,
+                        delivery_id: id,
+                        source: "poll",
+                        revision: rev,
+                        received_ms: at,
+                    },
+                )
+                .unwrap();
+            }
+            db.persist(&deployment).unwrap();
+            // a crash here: the deployment exists, the execution is not recorded yet
+        }
+        let r = SqliteJournal::read_only(&dir).unwrap();
+        assert_eq!(
+            r.control.held(&app).len(),
+            2,
+            "both events are still queued after a restart"
+        );
+        {
+            let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+            let mut ctl = restored.control;
+            record_exec(
+                &mut db,
+                &mut ctl,
+                ExecRec {
+                    app: app.clone(),
+                    delivery: "d2".into(),
+                    outcome: ExecOutcome::Deployed,
+                    deployment: Some(dep.clone()),
+                    reason: String::new(),
+                    superseded: vec!["d1".into()],
+                    at_ms: 30,
+                },
+            )
+            .unwrap();
+        }
+        let r = SqliteJournal::read_only(&dir).unwrap();
+        assert!(r.control.held(&app).is_empty());
+        assert_eq!(
+            r.control.event(&app, "d2").unwrap().status.as_str(),
+            "executed"
+        );
+        assert_eq!(
+            r.control.event(&app, "d1").unwrap().status.as_str(),
+            "superseded"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

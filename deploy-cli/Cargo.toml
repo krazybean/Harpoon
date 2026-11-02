@@ -28,3 +28,4 @@ harpoon-deploy = { path = "../deploy" }
 harpoon-deploy-docker = { path = "../deploy-docker" }
 harpoon-deploy-journal = { path = "../deploy-journal" }
 harpoon-deploy-keychain = { path = "../deploy-keychain" }
+harpoon-deploy-git = { path = "../deploy-git" }

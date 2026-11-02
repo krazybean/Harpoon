@@ -23,6 +23,7 @@ fn crun(t: &T, gate: &Gate, kc: &MemorySecretStore, stdin: &[u8], args: &[String
         secrets: kc,
         stdin: &mut input,
         stdin_is_terminal: false,
+        next: None,
     };
     if spawns {
         spawning(|| run_with(&a, gate, &mut svc))
@@ -83,7 +84,7 @@ fn project_args(t: &T) -> Vec<String> {
     v
 }
 
-fn running_app_ports(t: &T) -> Vec<u16> {
+pub(super) fn running_app_ports(t: &T) -> Vec<u16> {
     containers(t)
         .into_iter()
         .filter(|c| c.1)
@@ -559,6 +560,7 @@ fn secret_input_is_stdin_only_and_no_diagnostic_echoes_a_value() {
         secrets: &kc,
         stdin: &mut input,
         stdin_is_terminal: true,
+        next: None,
     };
     let o = run_with(&a, &SHIPPING, &mut svc);
     assert_exit(&o, 2);

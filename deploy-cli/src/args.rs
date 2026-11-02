@@ -112,19 +112,124 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "confirm-cutover"],
     },
     Spec {
+        command: "repo-add",
+        values: &[
+            "runtime-dir",
+            "name",
+            "url",
+            "app",
+            "project",
+            "environment",
+            "branch",
+            "filter",
+            "container-port",
+            "dockerfile",
+            "context",
+            "target",
+            "health-path",
+            "username",
+            "known-host",
+            "webhook",
+        ],
+        switches: &["simulate"],
+    },
+    Spec {
+        command: "repo-secret",
+        values: &["runtime-dir", "name", "kind"],
+        switches: &["simulate"],
+    },
+    Spec {
+        command: "repo-list",
+        values: &["runtime-dir"],
+        switches: &[],
+    },
+    Spec {
+        command: "git-deploy",
+        values: &[
+            "runtime-dir",
+            "repo",
+            "branch",
+            "tag",
+            "commit",
+            "resources-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+            "health-timeout-secs",
+            "git-timeout-secs",
+            "git-max-mb",
+        ],
+        switches: &["simulate", "confirm-cutover"],
+    },
+    Spec {
+        command: "git-trigger",
+        values: &[
+            "runtime-dir",
+            "repo",
+            "ref",
+            "revision",
+            "delivery",
+            "source",
+        ],
+        switches: &["simulate"],
+    },
+    Spec {
+        command: "git-run",
+        values: &[
+            "runtime-dir",
+            "repo",
+            "resources-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+            "health-timeout-secs",
+            "git-timeout-secs",
+            "git-max-mb",
+        ],
+        switches: &["simulate", "confirm-cutover"],
+    },
+    Spec {
+        command: "watch",
+        values: &[
+            "runtime-dir",
+            "repo",
+            "interval-secs",
+            "iterations",
+            "webhook-port",
+            "webhook-wait-secs",
+            "resources-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "forwarder-pid",
+            "forwarder-command",
+            "lsof-path",
+            AUTH_FLAG,
+            "health-timeout-secs",
+            "git-timeout-secs",
+            "git-max-mb",
+        ],
+        switches: &["simulate", "confirm-cutover", "once"],
+    },
+    Spec {
         command: "config-set",
         values: &["runtime-dir", "scope", "name", "value"],
-        switches: &["build", "runtime"],
+        switches: &["build", "runtime", "simulate"],
     },
     Spec {
         command: "secret-set",
         values: &["runtime-dir", "scope", "name"],
-        switches: &["build", "runtime"],
+        switches: &["build", "runtime", "simulate"],
     },
     Spec {
         command: "config-unset",
         values: &["runtime-dir", "scope", "name"],
-        switches: &[],
+        switches: &["simulate"],
     },
     Spec {
         command: "config-defs",
@@ -224,7 +329,7 @@ const SPECS: &[Spec] = &[
 
 /// Value flags that may be given more than once (collected in order). Every other value flag still
 /// rejects a repeat.
-const REPEATABLE: &[&str] = &["env", "build-arg"];
+const REPEATABLE: &[&str] = &["env", "build-arg", "filter"];
 
 #[derive(Debug, Default)]
 pub struct Parsed {
@@ -318,6 +423,15 @@ COMMANDS
   events          read-only: pause records and held/selected/dismissed/superseded events with their decisions
   rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only in the separate acceptance build (closed in this one); offline with --simulate
   restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only in the separate acceptance build (closed in this one); offline with --simulate
+  repo-add        register a Git repository for an application (--name N --url U --app A --container-port P [--branch B] [--filter PATTERN]... [--webhook github|gitlab]
+                  [--known-host LINE, required for SSH: there is no trust on first use])
+  repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
+  repo-list       registered repositories, what was last observed, and the last deployment from each
+  git-deploy      check out a branch, tag or exact commit into a bounded private workspace and deploy it; the immutable commit is recorded
+  git-trigger     queue one push event (--repo N --delivery ID --revision FULL_SHA) for a CI job that can reach this machine; deploys nothing by itself
+  git-run         execute what is queued: the newest event of an unpaused application (older ones are superseded); a paused application waits for `resume`
+  watch           foreground only: poll the remotes (--interval-secs N, at least 60), optionally listen for signed webhooks on loopback (--webhook-port P), and run the queue.
+                  Automatic WHILE HARPOON IS RUNNING; nothing runs when it is not, and nothing here is unattended
   config-set      define a NON-SECRET Config value at a scope (--scope global|project:NAME|app:ID[@ENV] --name N --value V [--build] [--runtime])
   secret-set      save a Secret at a scope; the value is read from standard input only (never argv). Saving again creates the next
                   immutable version (a rotation); the value goes to the macOS Keychain and is never shown again

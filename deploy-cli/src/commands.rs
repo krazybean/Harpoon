@@ -1,6 +1,6 @@
 use crate::args::{Parsed, AUTH_FLAG, AUTH_PHRASE};
 use crate::store::{self, Kind, Runtime};
-use crate::{config_cmds, exit, Fail, Gate, Services};
+use crate::{config_cmds, exit, git_cmds, Fail, Gate, Services};
 use harpoon_deploy::backend::{Backend, FakeBackend, FakeRuntime, ResourceOps};
 use harpoon_deploy::buildx;
 use harpoon_deploy::engine::{
@@ -33,6 +33,13 @@ type R = Result<i32, Fail>;
 
 pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     match p.command.as_str() {
+        "repo-add" => git_cmds::repo_add(p, out),
+        "repo-secret" => git_cmds::repo_secret(p, svc, out),
+        "repo-list" => git_cmds::repo_list(p, out),
+        "git-deploy" => git_cmds::git_deploy(p, gate, svc, out),
+        "git-trigger" => git_cmds::git_trigger(p, out),
+        "git-run" => git_cmds::git_run(p, gate, svc, out),
+        "watch" => git_cmds::watch(p, gate, svc, out),
         "config-set" => config_cmds::config_set(p, out),
         "secret-set" => config_cmds::secret_set(p, svc, out),
         "config-unset" => config_cmds::config_unset(p, out),
@@ -59,13 +66,13 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemClock.now_ms()
 }
 
 // ------------------------------------------------------------------ shared pieces
 
-fn socket_flag(p: &Parsed) -> Result<Option<PathBuf>, Fail> {
+pub(crate) fn socket_flag(p: &Parsed) -> Result<Option<PathBuf>, Fail> {
     match p.value("docker-socket") {
         None => Ok(None),
         Some("") => Err(Fail::usage("--docker-socket must not be empty")),
@@ -581,7 +588,8 @@ fn status(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     print_lease_and_problems(out, &r);
     // Read-only: say so if a killed build left secret files behind (the next writing command, such
     // as `recover`, removes them).
-    let residue = harpoon_deploy_docker::buildx_run::SecretFiles::leftovers(&rt.scratch_dir());
+    let residue = harpoon_deploy_docker::buildx_run::SecretFiles::leftovers(&rt.scratch_dir())
+        + harpoon_deploy_git::leftovers(&rt.scratch_dir());
     if residue > 0 {
         let _ = writeln!(
             out,
@@ -1610,7 +1618,7 @@ fn reconcile_cmd(p: &Parsed, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ deploy
 
-fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
+pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let simulate = p.switch("simulate");
     let socket = socket_flag(p)?;
@@ -1668,10 +1676,15 @@ fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
         return Err(Fail::refused(m));
     }
 
-    let dep_id = gen
-        .deployment()
-        .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?;
-    let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
+    let (dep_id, trigger) = match svc.next.take() {
+        Some(x) => x,
+        None => (
+            gen.deployment()
+                .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?,
+            Trigger::Cli,
+        ),
+    };
+    let mut d = Deployment::new(dep_id, app, trigger, now_ms());
     d.transition(DeploymentStatus::Queued, now_ms())
         .map_err(|e| Fail::failed(e.to_string()))?;
     // Configuration and secrets, resolved and fetched before the journal is written to, anything is
@@ -1859,7 +1872,7 @@ fn live_banner(out: &mut String, what: &str) {
 
 /// The release currently serving `app` and the container that really serves it (after a
 /// restoration that is the restored container, recorded under the deployment that restored it).
-fn current_release(
+pub(crate) fn current_release(
     ledger: &Ledger,
     deps: &[Deployment],
     app: &ApplicationId,
@@ -1875,7 +1888,7 @@ fn current_release(
 /// `live_replacement_enabled` gate (closed in the shipping binary, open only in the acceptance
 /// binary), the exact authorization phrase and every explicit path; otherwise it is refused before
 /// anything is read. A failed cutover gets one bounded restoration from the previous release's pin.
-fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
+pub(crate) fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     let simulate = p.switch("simulate");
     let live_sock = if simulate {
         None
@@ -1928,10 +1941,15 @@ fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
     }
 
     let mut gen = IdGenerator::new(SystemClock, OsEntropy::new());
-    let dep_id = gen
-        .deployment()
-        .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?;
-    let mut d = Deployment::new(dep_id, app, Trigger::Cli, now_ms());
+    let (dep_id, trigger) = match svc.next.take() {
+        Some(x) => x,
+        None => (
+            gen.deployment()
+                .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?,
+            Trigger::Cli,
+        ),
+    };
+    let mut d = Deployment::new(dep_id, app, trigger, now_ms());
     d.transition(DeploymentStatus::Queued, now_ms())
         .map_err(|e| Fail::failed(e.to_string()))?;
     let mut cfg = deployment_config(s.cfg.health.startup_deadline_ms, restored.ledger.clone());

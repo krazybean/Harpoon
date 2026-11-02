@@ -62,8 +62,12 @@ fn name_flag(p: &Parsed) -> Result<String, Fail> {
 }
 
 /// The kind of an existing runtime, or Docker for a new one (as `deploy` does).
-fn kind_of(rt: &Runtime) -> Result<Kind, Fail> {
-    Ok(rt.kind()?.unwrap_or(Kind::Docker))
+fn kind_of(rt: &Runtime, p: &Parsed) -> Result<Kind, Fail> {
+    Ok(rt.kind()?.unwrap_or(if p.switch("simulate") {
+        Kind::Simulated
+    } else {
+        Kind::Docker
+    }))
 }
 
 fn read_state(rt: &Runtime) -> Result<ConfigState, Fail> {
@@ -86,7 +90,7 @@ pub fn config_set(p: &Parsed, out: &mut String) -> R {
     })?;
     config::check_config_value(&name, value).map_err(Fail::usage)?;
     let flags = flags(p);
-    let (mut j, _) = store::open_writer(&rt, kind_of(&rt)?)?;
+    let (mut j, _) = store::open_writer(&rt, kind_of(&rt, p)?)?;
     j.config(&ConfigRecord::Def(Def {
         scope: scope.clone(),
         name: name.clone(),
@@ -108,7 +112,7 @@ pub fn config_set(p: &Parsed, out: &mut String) -> R {
 pub fn config_unset(p: &Parsed, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let (scope, name) = (scope_flag(p)?, name_flag(p)?);
-    let (mut j, _) = store::open_writer(&rt, kind_of(&rt)?)?;
+    let (mut j, _) = store::open_writer(&rt, kind_of(&rt, p)?)?;
     j.config(&ConfigRecord::Def(Def {
         scope: scope.clone(),
         name: name.clone(),
@@ -149,7 +153,7 @@ pub fn secret_set(p: &Parsed, svc: &mut Services, out: &mut String) -> R {
     let (scope, name) = (scope_flag(p)?, name_flag(p)?);
     let flags = flags(p);
     let value = read_secret(svc)?;
-    let (mut j, restored) = store::open_writer(&rt, kind_of(&rt)?)?;
+    let (mut j, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
     let id = config::secret_id(&scope, &name);
     let first = restored.config.next_version(&id);
     let mut version = first;

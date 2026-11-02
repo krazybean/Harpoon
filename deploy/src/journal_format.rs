@@ -41,6 +41,8 @@ pub enum Line {
     /// A configuration definition, a saved secret version or a configuration snapshot (see
     /// [`crate::config`]). References only; never a secret value.
     Config(crate::config::ConfigRecord),
+    /// A registered repository, an observed remote commit or a deployment's source (see [`crate::git`]).
+    Git(crate::git::GitRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,13 +509,21 @@ pub fn decode_line(line: &str) -> Result<Line, DecodeError> {
                 decode_snapshot(&f).map(|d| Line::Snapshot(Box::new(d)))
             }
         }
-        "pause" | "event" | "resume" => {
+        "pause" | "event" | "resume" | "exec" => {
             let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
             if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
                 return err("checksum mismatch");
             }
             let f: Vec<&str> = body.split('\t').collect();
             crate::control::decode(&f).map(Line::Control).map_err(DecodeError)
+        }
+        "gitrepo" | "gitseen" | "gitsrc" => {
+            let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
+            if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
+                return err("checksum mismatch");
+            }
+            let f: Vec<&str> = body.split('\t').collect();
+            crate::git::decode(&f).map(Line::Git).map_err(DecodeError)
         }
         "cfgdef" | "cfgsec" | "cfgsnap" => {
             let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
@@ -646,6 +656,8 @@ pub struct State {
     pub control: crate::control::ControlState,
     /// Configuration definitions, secret versions and snapshots, rebuilt in order.
     pub config: crate::config::ConfigState,
+    /// Registered repositories, observed remote commits and deployment sources.
+    pub git: crate::git::GitState,
 }
 
 fn bad_ledger(i: usize, e: LedgerError) -> FormatError {
@@ -717,6 +729,10 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
                 .control
                 .apply(c)
                 .map_err(|e| FormatError::Inconsistent(format!("control record does not apply: {e}")))?,
+            Line::Git(g) => st
+                .git
+                .apply(g)
+                .map_err(|e| FormatError::Inconsistent(format!("git record does not apply: {e}")))?,
             Line::Config(c) => st
                 .config
                 .apply(c)

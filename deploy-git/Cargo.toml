@@ -1,0 +1,11 @@
+[package]
+name = "harpoon-deploy-git"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Git sources and triggers for Harpoon deployments (Milestone D): a bounded host-side checkout with Keychain-backed credentials, polling, and a loopback-only signed-webhook listener. Attended use only. No registry dependencies."
+
+# The engine crate (secrets, redaction, URL policy) and the Docker crate's JSON parser, reused as is.
+[dependencies]
+harpoon-deploy = { path = "../deploy" }
+harpoon-deploy-docker = { path = "../deploy-docker" }
