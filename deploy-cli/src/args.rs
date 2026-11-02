@@ -214,7 +214,7 @@ const SPECS: &[Spec] = &[
             "git-timeout-secs",
             "git-max-mb",
         ],
-        switches: &["simulate", "confirm-cutover", "once"],
+        switches: &["simulate", "confirm-cutover", "once", "queue-only"],
     },
     Spec {
         command: "config-set",
