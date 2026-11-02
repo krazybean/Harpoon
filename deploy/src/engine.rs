@@ -41,6 +41,11 @@ pub trait Journal {
             "this journal cannot store pause and event records".into(),
         ))
     }
+    /// Append one Git record (a registered repository, an observed remote commit, or a deployment's
+    /// source; see [`crate::git`]). Never contains a credential.
+    fn git(&mut self, _r: &crate::git::GitRecord) -> Result<(), JournalError> {
+        Err(JournalError::Io("this journal cannot store Git records".into()))
+    }
     /// Append one configuration record (a definition, a saved secret version, or a deployment's
     /// configuration snapshot; see [`crate::config`]). Never contains a secret value.
     fn config(&mut self, _r: &crate::config::ConfigRecord) -> Result<(), JournalError> {
@@ -66,6 +71,7 @@ pub struct MemoryJournal {
     pub ledger_records: Vec<LedgerRecord>,
     pub control_records: Vec<crate::control::ControlRecord>,
     pub config_records: Vec<crate::config::ConfigRecord>,
+    pub git_records: Vec<crate::git::GitRecord>,
     writes: usize,
     crash_at: Option<usize>,
     trace: Option<Trace>,
@@ -153,6 +159,12 @@ impl Journal for MemoryJournal {
     fn config(&mut self, r: &crate::config::ConfigRecord) -> Result<(), JournalError> {
         self.gate()?;
         self.config_records.push(r.clone());
+        Ok(())
+    }
+
+    fn git(&mut self, r: &crate::git::GitRecord) -> Result<(), JournalError> {
+        self.gate()?;
+        self.git_records.push(r.clone());
         Ok(())
     }
 }
