@@ -41,6 +41,13 @@ pub trait Journal {
             "this journal cannot store pause and event records".into(),
         ))
     }
+    /// Append one configuration record (a definition, a saved secret version, or a deployment's
+    /// configuration snapshot; see [`crate::config`]). Never contains a secret value.
+    fn config(&mut self, _r: &crate::config::ConfigRecord) -> Result<(), JournalError> {
+        Err(JournalError::Io(
+            "this journal cannot store configuration records".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +65,7 @@ pub struct MemoryJournal {
     pub snapshots: Vec<Deployment>,
     pub ledger_records: Vec<LedgerRecord>,
     pub control_records: Vec<crate::control::ControlRecord>,
+    pub config_records: Vec<crate::config::ConfigRecord>,
     writes: usize,
     crash_at: Option<usize>,
     trace: Option<Trace>,
@@ -139,6 +147,12 @@ impl Journal for MemoryJournal {
     fn control(&mut self, r: &crate::control::ControlRecord) -> Result<(), JournalError> {
         self.gate()?;
         self.control_records.push(r.clone());
+        Ok(())
+    }
+
+    fn config(&mut self, r: &crate::config::ConfigRecord) -> Result<(), JournalError> {
+        self.gate()?;
+        self.config_records.push(r.clone());
         Ok(())
     }
 }
@@ -826,7 +840,8 @@ impl Run<'_> {
         };
         let elapsed = self.clock.now_ms().saturating_sub(start);
         let cap = sink.capture();
-        if cap.summary.lines_seen > 0 {
+        // A capture that was withheld (redaction failed) is kept: the record says the output exists.
+        if cap.summary.lines_seen > 0 || cap.summary.withheld {
             self.logs.push((step, cap));
         }
         let res = match res {

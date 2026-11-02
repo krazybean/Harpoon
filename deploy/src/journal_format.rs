@@ -38,6 +38,9 @@ pub enum Line {
     Ledger(LedgerRecord),
     /// A pause, held event or resume decision (see [`crate::control`]).
     Control(crate::control::ControlRecord),
+    /// A configuration definition, a saved secret version or a configuration snapshot (see
+    /// [`crate::config`]). References only; never a secret value.
+    Config(crate::config::ConfigRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +515,14 @@ pub fn decode_line(line: &str) -> Result<Line, DecodeError> {
             let f: Vec<&str> = body.split('\t').collect();
             crate::control::decode(&f).map(Line::Control).map_err(DecodeError)
         }
+        "cfgdef" | "cfgsec" | "cfgsnap" => {
+            let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
+            if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
+                return err("checksum mismatch");
+            }
+            let f: Vec<&str> = body.split('\t').collect();
+            crate::config::decode(&f).map(Line::Config).map_err(DecodeError)
+        }
         _ => codec::decode(line)
             .map(Line::Ledger)
             .map_err(|e| DecodeError(e.0.to_string())),
@@ -633,6 +644,8 @@ pub struct State {
     pub ledger: Ledger,
     /// Pauses, held events and resume decisions, rebuilt in order.
     pub control: crate::control::ControlState,
+    /// Configuration definitions, secret versions and snapshots, rebuilt in order.
+    pub config: crate::config::ConfigState,
 }
 
 fn bad_ledger(i: usize, e: LedgerError) -> FormatError {
@@ -704,8 +717,15 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
                 .control
                 .apply(c)
                 .map_err(|e| FormatError::Inconsistent(format!("control record does not apply: {e}")))?,
+            Line::Config(c) => st
+                .config
+                .apply(c)
+                .map_err(|e| FormatError::Inconsistent(format!("configuration record does not apply: {e}")))?,
         }
     }
+    st.config
+        .check_pins(&st.deployments)
+        .map_err(|e| FormatError::Inconsistent(format!("configuration state: {e}")))?;
     st.control
         .check_against(&st.deployments)
         .map_err(|e| FormatError::Inconsistent(format!("control state: {e}")))?;

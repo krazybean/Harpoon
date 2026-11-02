@@ -10,6 +10,7 @@ on:
       - main
     paths:
       - "deploy-cli/**"
+      - "deploy-keychain/**"
       - "deploy-journal/**"
       - "deploy-docker/**"
       - "deploy/**"
@@ -19,6 +20,7 @@ on:
       - main
     paths:
       - "deploy-cli/**"
+      - "deploy-keychain/**"
       - "deploy-journal/**"
       - "deploy-docker/**"
       - "deploy/**"
@@ -54,7 +56,7 @@ jobs:
       - name: Path dependencies only; no environment, process, live-socket or prune references in the sources
         run: |
           deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
-          if echo "$deps" | grep -vE '^harpoon-deploy(-docker|-journal)? = \{ path = "\.\./deploy(-docker|-journal)?" \}$' | grep -q .; then
+          if echo "$deps" | grep -vE '^harpoon-deploy(-docker|-journal|-keychain)? = \{ path = "\.\./deploy(-docker|-journal|-keychain)?" \}$' | grep -q .; then
             echo "unexpected dependencies in deploy-cli/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
           fi
           live='/tmp/harpoon-docker''.sock'

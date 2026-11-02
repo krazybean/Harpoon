@@ -195,9 +195,20 @@ pub fn open_error(rt: &Runtime, e: SqliteOpenError) -> Fail {
     ))
 }
 
+/// Holding the writer lock means no build is running, so any build-secret directory under the
+/// runtime's scratch is the residue of a process that was killed mid-build. Remove it now: every
+/// command that writes (and so `recover`, the explicit post-crash step) closes that exposure.
+/// ponytail: nothing can run while no command writes, so plaintext can sit in the 0700 scratch
+/// directory from a hard kill until the next writing command; `status` reports it. Not a guarantee.
+fn sweep_secret_residue(rt: &Runtime) {
+    harpoon_deploy_docker::buildx_run::SecretFiles::sweep(&rt.scratch_dir());
+}
+
 pub fn open_writer(rt: &Runtime, kind: Kind) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    SqliteJournal::open(&rt.journal_dir()).map_err(|e| open_error(rt, e))
+    let opened = SqliteJournal::open(&rt.journal_dir()).map_err(|e| open_error(rt, e))?;
+    sweep_secret_residue(rt);
+    Ok(opened)
 }
 
 pub fn open_writer_recovered(
@@ -206,7 +217,10 @@ pub fn open_writer_recovered(
     now_ms: u64,
 ) -> Result<(SqliteJournal, Restored), Fail> {
     prepare_for_writing(rt, kind)?;
-    SqliteJournal::open_recovered(&rt.journal_dir(), now_ms).map_err(|e| open_error(rt, e))
+    let opened =
+        SqliteJournal::open_recovered(&rt.journal_dir(), now_ms).map_err(|e| open_error(rt, e))?;
+    sweep_secret_residue(rt);
+    Ok(opened)
 }
 
 /// Read-only restore; `None` when there is no journal yet. Never creates or writes anything.

@@ -621,3 +621,244 @@ mod control_records {
         }
     }
 }
+
+// ---------------------------------------------------------------- Milestone C: configuration records
+
+mod config_records {
+    use super::*;
+    use harpoon_deploy::config::*;
+    use harpoon_deploy::secrets::SecretRef;
+
+    fn scope() -> Scope {
+        Scope::global(None)
+    }
+
+    fn records(app: &ApplicationId, dep: &DeploymentId) -> Vec<ConfigRecord> {
+        let id = secret_id(&scope(), "DB");
+        vec![
+            ConfigRecord::Def(Def {
+                scope: scope(),
+                name: "REGION".into(),
+                setting: Setting::Set {
+                    flags: Flags {
+                        build: false,
+                        runtime: true,
+                    },
+                    value: Value::Config("eu".into()),
+                },
+                at_ms: 1,
+            }),
+            ConfigRecord::SecretSaved(SecretSaved {
+                id: id.clone(),
+                version: 1,
+                at_ms: 2,
+            }),
+            ConfigRecord::Def(Def {
+                scope: scope(),
+                name: "DB".into(),
+                setting: Setting::Set {
+                    flags: Flags {
+                        build: true,
+                        runtime: true,
+                    },
+                    value: Value::Secret(SecretRef::new(&id, 1)),
+                },
+                at_ms: 3,
+            }),
+            ConfigRecord::SecretSaved(SecretSaved {
+                id: id.clone(),
+                version: 2,
+                at_ms: 4,
+            }),
+            ConfigRecord::Snapshot(Box::new(Snapshot {
+                deployment: dep.clone(),
+                app: app.clone(),
+                project: None,
+                environment: None,
+                at_ms: 5,
+                entries: vec![Entry {
+                    name: "DB".into(),
+                    flags: Flags {
+                        build: true,
+                        runtime: true,
+                    },
+                    source: Some(scope()),
+                    value: Value::Secret(SecretRef::new(&id, 1)),
+                }],
+            })),
+        ]
+    }
+
+    fn write(dir: &std::path::Path, recs: &[ConfigRecord]) {
+        let (mut db, _) = SqliteJournal::open(dir).unwrap();
+        for r in recs {
+            db.config(r).unwrap();
+        }
+    }
+
+    #[test]
+    fn definitions_secret_versions_and_snapshots_replay_exactly_and_hold_no_value() {
+        let dir = temp_dir();
+        let (app, dep) = ids();
+        let recs = records(&app, &dep);
+        write(&dir, &recs);
+        let r = SqliteJournal::read_only(&dir).unwrap();
+        let mut want = ConfigState::default();
+        for x in &recs {
+            want.apply(x).unwrap();
+        }
+        assert_eq!(r.config, want);
+        assert_eq!(r.config.next_version(&secret_id(&scope(), "DB")), 3);
+        assert!(r.config.snapshot_of(&dep).is_some());
+        // a writer open sees the same, and a store that never held configuration reads as empty
+        assert_eq!(SqliteJournal::open(&dir).unwrap().1.config, want);
+        let old = temp_dir();
+        {
+            let (mut db, _) = SqliteJournal::open(&old).unwrap();
+            let mut d = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 1);
+            d.transition(DeploymentStatus::Queued, 2).unwrap();
+            db.persist(&d).unwrap();
+        }
+        let r = SqliteJournal::read_only(&old).unwrap();
+        assert_eq!(r.config, ConfigState::default());
+        assert_eq!(r.deployments.len(), 1);
+        // the file holds references and Config values, never anything a secret store would hold
+        let bytes = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        assert!(
+            bytes.windows(5).any(|w| w == b"\tcfg") || bytes.windows(6).any(|w| w == b"cfgdef")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(old);
+    }
+
+    #[test]
+    fn a_damaged_or_contradictory_configuration_record_fails_closed() {
+        let dir = temp_dir();
+        let (app, dep) = ids();
+        write(&dir, &records(&app, &dep));
+        let path = dir.join(SQLITE_FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        // damage inside a stored definition: its checksum no longer verifies
+        let at = bytes.windows(8).position(|w| w == b"cfgdef\t1").unwrap() + 20;
+        let mut bad = bytes.clone();
+        bad[at] = if bad[at] == b'g' { b'h' } else { b'g' };
+        std::fs::write(&path, &bad).unwrap();
+        assert!(SqliteJournal::read_only(&dir).is_err());
+        assert!(SqliteJournal::open(&dir).is_err());
+        std::fs::write(&path, &bytes).unwrap();
+        // intact records that contradict the state: a reference to a version never saved, a version that
+        // goes backwards, a second snapshot for one deployment
+        let id = secret_id(&scope(), "DB");
+        let contradictions = [
+            ConfigRecord::Def(Def {
+                scope: scope(),
+                name: "X".into(),
+                setting: Setting::Set {
+                    flags: Flags {
+                        build: false,
+                        runtime: true,
+                    },
+                    value: Value::Secret(SecretRef::new(&id, 9)),
+                },
+                at_ms: 9,
+            }),
+            ConfigRecord::SecretSaved(SecretSaved {
+                id: id.clone(),
+                version: 2,
+                at_ms: 9,
+            }),
+            records(&app, &dep).pop().unwrap(),
+        ];
+        for c in contradictions {
+            write_unchecked(&dir, &c);
+            let e = SqliteJournal::read_only(&dir).unwrap_err();
+            assert!(
+                e.0.contains("configuration record does not apply"),
+                "{}",
+                e.0
+            );
+            assert!(SqliteJournal::open(&dir).is_err());
+            std::fs::write(&path, &bytes).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn write_unchecked(dir: &std::path::Path, c: &ConfigRecord) {
+        let (mut db, _) = SqliteJournal::open(dir).unwrap();
+        db.append_unchecked("config", &encode(c)).unwrap();
+    }
+
+    #[test]
+    fn a_pin_that_names_an_unknown_snapshot_or_an_unsaved_secret_fails_closed() {
+        let dir = temp_dir();
+        let (app, dep) = ids();
+        let mut d = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 1);
+        d.transition(DeploymentStatus::Queued, 2).unwrap();
+        d.transition(DeploymentStatus::Running, 3).unwrap();
+        let mut pin = harpoon_deploy::release::ReleaseConfig::simulated(38000);
+        pin.snapshot = Some(dep.to_string());
+        d.pinned = Some(pin);
+        d.release = Some(harpoon_deploy::ids::ReleaseId::from_deployment(&dep));
+        d.transition(DeploymentStatus::Succeeded, 4).unwrap();
+        {
+            let (mut db, _) = SqliteJournal::open(&dir).unwrap();
+            db.persist(&d).unwrap();
+        }
+        let e = SqliteJournal::read_only(&dir).unwrap_err();
+        assert!(
+            e.0.contains("pins snapshot") && e.0.contains("not recorded"),
+            "{}",
+            e.0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A save that crashes between its records leaves a prefix; every prefix replays, and completing it
+    /// reaches the same state as an uninterrupted run.
+    #[test]
+    fn a_store_cut_after_every_configuration_write_replays_and_completes_to_the_same_state() {
+        let (app, dep) = ids();
+        let recs = records(&app, &dep);
+        let mut want = ConfigState::default();
+        for r in &recs {
+            want.apply(r).unwrap();
+        }
+        for n in 0..=recs.len() {
+            let dir = temp_dir();
+            write(&dir, &recs[..n]);
+            let (mut db, restored) = SqliteJournal::open(&dir).unwrap();
+            assert_eq!(
+                restored.config.defs.len()
+                    + restored.config.versions.len()
+                    + restored.config.snapshots.len()
+                    > 0,
+                n > 0
+            );
+            for r in &recs[n..] {
+                db.config(r).unwrap();
+            }
+            drop(db);
+            assert_eq!(
+                SqliteJournal::read_only(&dir).unwrap().config,
+                want,
+                "cut after {n}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_second_writer_is_refused_and_the_configuration_file_is_untouched() {
+        let dir = temp_dir();
+        let (app, dep) = ids();
+        write(&dir, &records(&app, &dep));
+        let (held, _) = SqliteJournal::open(&dir).unwrap();
+        let before = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        for _ in 0..3 {
+            assert!(SqliteJournal::open(&dir).is_err());
+        }
+        assert_eq!(std::fs::read(dir.join(SQLITE_FILE)).unwrap(), before);
+        drop(held);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

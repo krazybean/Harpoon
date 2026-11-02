@@ -27,7 +27,7 @@ pub fn parse_one(arg: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.to_string()))
 }
 
-fn check_name(name: &str) -> Result<(), String> {
+pub fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("an --env name is empty".into());
     }
@@ -54,7 +54,7 @@ fn check_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_value(name: &str, value: &str) -> Result<(), String> {
+pub fn check_value(name: &str, value: &str) -> Result<(), String> {
     if value.len() > MAX_VALUE_BYTES {
         return Err(format!(
             "the value of --env {name} is longer than {MAX_VALUE_BYTES} bytes"

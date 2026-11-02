@@ -13,6 +13,7 @@ use harpoon_deploy::state::Step;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+mod milestone_c;
 mod packaging;
 
 const APP: &str = "app_00000000000000000000000001";
@@ -311,8 +312,7 @@ fn control_of(t: &T) -> ControlState {
 
 /// Tests that bind loopback ports (the preliminary range, the application ports) run one at a time.
 fn ports() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    crate::port_range()
 }
 
 struct Serving(std::sync::Arc<std::sync::atomic::AtomicBool>);
