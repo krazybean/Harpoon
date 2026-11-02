@@ -101,17 +101,34 @@ pub struct Workspace {
 impl Workspace {
     pub fn create(parent: &Path, nonce: &str) -> Result<Workspace, GitError> {
         let io = |e: std::io::Error| GitError::Io(format!("cannot create the Git workspace: {e}"));
-        std::fs::create_dir_all(parent).map_err(io)?;
-        let root = parent.join(format!("{WORKSPACE_PREFIX}{nonce}"));
-        let ok = root
-            .to_string_lossy()
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
-        if !ok {
+        // The nonce becomes one path component: no separators, no dot-dot.
+        if nonce.is_empty()
+            || nonce == ".."
+            || !nonce
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
             return Err(GitError::Invalid(
-                "the workspace path may only contain letters, digits and / _ . -".into(),
+                "the workspace name may only contain letters, digits and _ . -".into(),
             ));
         }
+        let root = parent.join(format!("{WORKSPACE_PREFIX}{nonce}"));
+        // The directory above may be an ordinary macOS path (spaces, non-ASCII, quotes in names are fine:
+        // Git is started with structured arguments, and the one shell-parsed string, GIT_SSH_COMMAND,
+        // quotes every path). What cannot be made safe in every consumer is refused: control characters,
+        // backslash and double quote (ssh's option parser), `$` and `%` (ssh expands them in paths).
+        let Some(text) = root.to_str() else {
+            return Err(GitError::Invalid("the workspace path must be valid UTF-8".into()));
+        };
+        if text
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\\' | '$' | '%'))
+        {
+            return Err(GitError::Invalid(
+                "the workspace path may not contain control characters or any of \" \\ $ %".into(),
+            ));
+        }
+        std::fs::create_dir_all(parent).map_err(io)?;
         std::fs::DirBuilder::new().mode(0o700).create(&root).map_err(io)?;
         let ws = Workspace { root };
         for d in ["home", "cred", "src"] {
@@ -194,12 +211,39 @@ pub fn leftovers(parent: &Path) -> usize {
 
 /// The `GIT_SSH_COMMAND` for a workspace: the key and the pinned `known_hosts` are the only inputs.
 pub fn ssh_command(cred_dir: &Path) -> String {
-    let c = cred_dir.display();
+    let c = cred_dir.display().to_string();
+    let (id, known) = (format!("{c}/id"), format!("{c}/known_hosts"));
     format!(
-        "ssh -i {c}/id -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o PasswordAuthentication=no \
-         -o StrictHostKeyChecking=yes -o UserKnownHostsFile={c}/known_hosts -o GlobalKnownHostsFile=/dev/null \
-         -o ConnectTimeout=20"
+        "ssh -i {} -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o PasswordAuthentication=no \
+         -o StrictHostKeyChecking=yes -o {} -o GlobalKnownHostsFile=/dev/null \
+         -o ConnectTimeout=20",
+        sh_word(&id),
+        ssh_option("UserKnownHostsFile", &known),
     )
+}
+
+fn plain(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+}
+
+/// One word for the shell that Git runs `GIT_SSH_COMMAND` through. Ordinary paths are left as they are.
+fn sh_word(s: &str) -> String {
+    if plain(s) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// `-o Name=value` where the value is a path: double-quoted for ssh's own parser when it has anything
+/// unusual in it (so a space does not end the value), then quoted for the shell.
+fn ssh_option(name: &str, path: &str) -> String {
+    if plain(path) {
+        format!("{name}={path}")
+    } else {
+        sh_word(&format!("{name}=\"{path}\""))
+    }
 }
 
 const ASKPASS: &str = "#!/bin/sh\ncase \"$1\" in\n  [Uu]sername*) cat \"$HARPOON_GIT_USER_FILE\" ;;\n  *) cat \"$HARPOON_GIT_TOKEN_FILE\" ;;\nesac\n";

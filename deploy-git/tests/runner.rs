@@ -503,3 +503,153 @@ fn an_unreachable_remote_is_reported_as_unavailable_and_bounded() {
     assert!(matches!(e, GitError::Unavailable(_)), "{e:?}");
     assert!(started.elapsed() < Duration::from_secs(20));
 }
+
+// ---------------------------------------------------------------- ordinary macOS paths (Milestone E.2)
+
+/// `<tmp>/Library/Application Support/com.example app's/deploy/scratch`: spaces, a dot and an apostrophe,
+/// like the desktop's data directory. The repository itself stays elsewhere.
+fn spaced(t: &Tmp) -> PathBuf {
+    t.0.join("Library/Application Support/com.example app's/deploy/scratch")
+}
+
+#[test]
+fn a_workspace_under_a_path_with_spaces_polls_and_checks_out_with_real_git() {
+    let t = Tmp::new();
+    let (repo, first, second) = fixture(&t.0);
+    let (u, s) = (url(&repo), Settings::default());
+    let scratch = spaced(&t);
+    let w = Workspace::create(&scratch, "poll").unwrap();
+    assert!(w.root().to_str().unwrap().contains("Application Support"));
+    // polling
+    let refs = ls_remote(&w, &u, &Credential::None, &s, &none()).unwrap();
+    assert!(
+        branch_heads(&refs).iter().any(|(b, c)| b == "main" && *c == second),
+        "{refs:?}"
+    );
+    // checkout of a branch and of an exact commit
+    let c = checkout(&w, &u, &Credential::None, &Selector::Branch("main".into()), &s, &none()).unwrap();
+    assert_eq!(c.commit, second);
+    assert_eq!(std::fs::read_to_string(c.src.join("VERSION")).unwrap(), "two\n");
+    assert!(c.src.starts_with(&scratch) && !c.src.join(".git").exists());
+    let w2 = Workspace::create(&scratch, "exact").unwrap();
+    let c = checkout(
+        &w2,
+        &u,
+        &Credential::None,
+        &Selector::Commit(first.clone()),
+        &s,
+        &none(),
+    )
+    .unwrap();
+    assert_eq!(c.commit, first);
+    drop((w, w2));
+    assert_eq!(leftovers(&scratch), 0, "the workspaces were removed");
+}
+
+#[test]
+fn the_ssh_command_survives_the_shell_and_sshs_own_parser_with_spaces_and_an_apostrophe() {
+    let t = Tmp::new();
+    let w = Workspace::create(&spaced(&t), "ssh").unwrap();
+    let cred = w.root().join("cred");
+    let cmd = ssh_command(&cred);
+    // ssh -G leaves out a -i file that does not exist
+    std::fs::write(cred.join("id"), b"k").unwrap();
+    // Git hands GIT_SSH_COMMAND to `sh -c`; here `ssh` is a stand-in that asks the real ssh to print the
+    // configuration it would use (-G never connects).
+    let bin = t.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("ssh");
+    std::fs::write(&fake, "#!/bin/sh\nexec /usr/bin/ssh -G \"$@\" dummyhost\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&cmd)
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HOME", &t.0)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    let line = |k: &str| text.lines().find(|l| l.starts_with(k)).unwrap_or("").to_string();
+    assert_eq!(
+        line("userknownhostsfile "),
+        format!("userknownhostsfile {}/known_hosts", cred.display()),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|l| l == format!("identityfile {}/id", cred.display())),
+        "{text}"
+    );
+    for fixed in [
+        "stricthostkeychecking true",
+        "globalknownhostsfile /dev/null",
+        "identitiesonly yes",
+        "batchmode yes",
+    ] {
+        assert!(text.lines().any(|l| l == fixed), "{fixed} in {text}");
+    }
+    // an ordinary path still produces the unquoted command it always did
+    assert!(ssh_command(Path::new("/w/cred")).contains("-i /w/cred/id -o"));
+}
+
+#[test]
+fn credential_files_in_a_spaced_workspace_reach_an_askpass_run_the_way_git_runs_it() {
+    let t = Tmp::new();
+    let rec = t.0.join("rec");
+    std::fs::create_dir_all(&rec).unwrap();
+    // Git executes GIT_ASKPASS directly (no shell); the fake git does the same and records the answer.
+    let g = fake_git(
+        &t.0,
+        &format!(
+            "\"$GIT_ASKPASS\" 'Username for x' > {r}/user\n\"$GIT_ASKPASS\" 'Password for x' > {r}/pass\nexit 1",
+            r = rec.display()
+        ),
+    );
+    let s = Settings {
+        git: g,
+        ..Settings::default()
+    };
+    let token = SecretValue::new(b"planted-token-value".to_vec()).unwrap();
+    let w = Workspace::create(&spaced(&t), "tok").unwrap();
+    let _ = ls_remote(
+        &w,
+        "https://example.com/acme/shop.git",
+        &Credential::Token {
+            username: "bot",
+            token: &token,
+        },
+        &s,
+        &Redactor::new(&[("TOKEN", "planted-token-value")]),
+    );
+    assert_eq!(std::fs::read_to_string(rec.join("user")).unwrap(), "bot");
+    assert_eq!(
+        std::fs::read_to_string(rec.join("pass")).unwrap(),
+        "planted-token-value"
+    );
+}
+
+#[test]
+fn unsafe_workspace_names_and_paths_are_still_refused_and_create_nothing() {
+    let t = Tmp::new();
+    let base = t.0.join("scratch");
+    // the name is one path component of plain characters
+    for nonce in ["", "..", "../x", "a/b", "a b", "a;b", "a\nb", "$(x)"] {
+        assert!(
+            matches!(Workspace::create(&base, nonce), Err(GitError::Invalid(_))),
+            "nonce {nonce:?}"
+        );
+    }
+    // characters no consumer can treat safely are refused even though spaces are not
+    for bad in ["we\"ird", "we\\ird", "we$ird", "we%ird", "we\nird", "we\x07ird"] {
+        let parent = t.0.join(bad);
+        assert!(
+            matches!(Workspace::create(&parent, "n"), Err(GitError::Invalid(_))),
+            "{bad:?}"
+        );
+        assert!(!parent.exists(), "refused before anything was created: {bad:?}");
+    }
+    assert!(!base.exists());
+    // a refused request never leaves a workspace behind
+    assert_eq!(leftovers(&base), 0);
+}
