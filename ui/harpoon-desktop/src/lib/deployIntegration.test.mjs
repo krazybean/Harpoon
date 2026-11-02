@@ -101,3 +101,10 @@ test("non-Production routes can never open a Production-changing dialog", () => 
   assert.match(view, /dialogAllowed\(dialog, route\.env\)/);
   assert.match(view, /open: guardedOpen/);
 });
+
+test("the shared Dialog takes its focus handling from useDialogFocus and does not manage focus itself", () => {
+  const d = read("../views/deploy/Dialogs.tsx");
+  assert.match(d, /useDialogFocus\(ref, onClose\)/);
+  assert.doesNotMatch(d, /\.focus\(\)/, "no ad-hoc focus() calls in the dialogs");
+  assert.doesNotMatch(read("../hooks/useDialogFocus.ts"), /\[\s*onClose\s*\]/, "the effect must not depend on onClose");
+});

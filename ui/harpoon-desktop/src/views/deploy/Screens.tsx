@@ -4,7 +4,7 @@ import { ArrowCounterClockwise, ArrowsClockwise, ArrowUp, Copy, Cube, FolderSimp
 import type { AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
-  EVIDENCE_NOTE, formatAge, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
+  EVIDENCE_NOTE, formatAge, heroClassFor, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
 } from "../../lib/deployPresentation.ts";
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
 import { liveBlock } from "../../lib/deployEngine.ts";
@@ -77,7 +77,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
       {needs.map((n) => (
         <Banner key={n.app.id} tone={n.attention.tone === "err" ? "err" : "warn"} title={`${n.app.projectId} / ${n.app.name} needs attention`}
           actions={btn("btn--primary", () => c.setRoute({ screen: "app", appId: n.app.id, tab: "overview", env: "production" }), `Open ${n.app.name}`)}>
-          {n.attention.text}{n.app.automation.state === "paused" ? " Automatic deployments are paused." : ""}
+          {n.attention.text}{n.app.automation.state === "paused" ? (c.engine ? " Git triggers are paused." : " Automatic deployments are paused.") : ""}
         </Banner>
       ))}
       {state.projects.map((p) => (
@@ -111,8 +111,8 @@ export function AppScreen({ c }: { c: Ctx }) {
   const gate = gated(c);
   const prodOnly = gate ?? (prod ? undefined : SIM_ONLY);
 
-  const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : <Check size={20} />;
-  const heroClass = st.kind === "down" ? "err" : st.kind === "recovering" ? "info" : st.kind === "unknown" ? "idle" : "";
+  const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : st.kind === "idle" ? <Cube size={20} /> : <Check size={20} />;
+  const heroClass = heroClassFor(st.kind);
   const lastKnown = app.lastKnownReleaseId;
   const subline = st.kind === "unknown"
     ? `Last known: ${lastKnown ? `running release ${lastKnown}` : "no release"}. Harpoon is ${c.runtime === "stopped" ? "stopped" : "not ready"}, so the current state is not known.`
@@ -133,10 +133,16 @@ export function AppScreen({ c }: { c: Ctx }) {
           {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !ok || !prod, title: prodOnly })}
           {latest && btn("btn--secondary", () => c.setRoute({ screen: "dep", depId: latest.id }), `Inspect ${latest.id}`)}
         </>}>{att.text}</Banner>}
-      {paused && ok && (
-        <Banner tone="warn" icon={<PausedIcon />} title="Automatic deployments are paused"
-          actions={btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: !prod, title: prodOnly })}>
-          {pauseText(app)} <b>{app.automation.held.length} push{app.automation.held.length === 1 ? "" : "es"} held</b> — nothing was discarded. Manual deployments still work.
+      {paused && (ok || c.engine) && (
+        <Banner tone="warn" icon={<PausedIcon />} title={c.engine ? "Git triggers are paused" : "Automatic deployments are paused"}
+          actions={btn("btn--primary", () => c.open({ kind: "resume" }), c.engine ? <><Play size={14} /> Review held events…</> : <><Play size={14} /> Review &amp; resume…</>, { disabled: !prod, title: prodOnly })}>
+          {pauseText(app)} <b>{app.automation.held.length} {c.engine ? "commit" : "push"}{app.automation.held.length === 1 ? "" : "es"} held</b> — nothing was discarded. {c.engine ? "Nothing is deployed by itself." : "Manual deployments still work."}
+        </Banner>
+      )}
+      {c.engine && !paused && app.automation.held.length > 0 && (
+        <Banner tone="info" icon={<GitBranch size={18} />} title={`${app.automation.held.length} held Git event${app.automation.held.length === 1 ? "" : "s"}`}
+          actions={btn("btn--primary", () => c.open({ kind: "resume" }), <>Review held events…</>, { disabled: !prod, title: prodOnly })}>
+          {app.automation.held.map((h) => h.revision.sha).slice(0, 3).join(", ")}{app.automation.held.length > 3 ? ", …" : ""} — recorded, not deployed. Review them to dismiss or select one.
         </Banner>
       )}
       <div className="dp-panel"><div className="dp-panel__body dp-hero">
@@ -198,7 +204,7 @@ function useStepLog(c: Ctx, id: string | null): { lines: LogLine[]; error: strin
 function pauseText(app: AppModel): string {
   const r = app.automation.reason;
   if (!r) return "Paused.";
-  if (r.kind === "rollback") return `You rolled back to ${r.releaseId}. Automatic deployments stay paused until you resume them.`;
+  if (r.kind === "rollback") return `You rolled back to ${r.releaseId}. Git triggers stay paused until you resume them.`;
   if (r.kind === "interrupted_cutover") return `Harpoon stopped during the cutover of ${r.deploymentId}; the application may need checking.`;
   return `A cutover to ${r.deploymentId} failed (restore outcome: ${r.outcome.replace("_", " ")}).`;
 }
@@ -257,18 +263,19 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
       <div className="dp-col">
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Automation</h2><span className="dp-spacer" />
-            {!ok ? <Pill icon={<Pause size={11} />}>Not running</Pill> : <Pill tone={a.state === "paused" ? "warn" : "ok"} icon={a.state === "paused" ? <Pause size={11} /> : <Check size={11} />}>{a.state === "paused" ? "Paused" : "Active"}</Pill>}
+            {c.engine ? <Pill tone={a.state === "paused" ? "warn" : "neutral"} icon={a.state === "paused" ? <Pause size={11} /> : undefined}>{a.state === "paused" ? "Paused" : "Manual"}</Pill> : !ok ? <Pill icon={<Pause size={11} />}>Not running</Pill> : <Pill tone={a.state === "paused" ? "warn" : "ok"} icon={a.state === "paused" ? <Pause size={11} /> : <Check size={11} />}>{a.state === "paused" ? "Paused" : "Active"}</Pill>}
           </div>
           <div className="dp-panel__body">
             <dl className="dp-kv">
               <dt>Trigger</dt><dd>{c.engine ? <>Attended: Harpoon checks <code>origin/{app.settings.productionBranch}</code> when you ask it to</> : <>Poll <code>origin/{app.settings.productionBranch}</code> every {app.settings.pollSeconds} s</>}</dd>
-              <dt>Mode</dt><dd>Attended — runs while Harpoon is open</dd>
-              <dt>State</dt><dd>{c.engine ? (a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Nothing is paused. Nothing runs by itself.") : !ok ? "Not watching — automatic deployment only runs while Harpoon is running" : a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Watching for pushes"}</dd>
+              <dt>Mode</dt><dd>{c.engine ? "Manual check. Harpoon looks for new commits only when you press Check for new commits; it does not poll in the background." : "Attended — runs while Harpoon is open"}</dd>
+              <dt>State</dt><dd>{c.engine ? (a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Nothing is paused. Nothing is checked or deployed by itself.") : !ok ? "Not watching — automatic deployment only runs while Harpoon is running" : a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Watching for pushes"}</dd>
               <dt>Held events</dt><dd>{a.held.length ? a.held.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> {h.revision.message} <span className="dp-faint">{formatAge(h.ageMin)}{h.status ? ` · ${h.status === "selected" ? "selected, not yet run" : h.status}` : ""}</span></div>) : "None"}</dd>
             </dl>
             {c.engine && app.settings.productionBranch ? <div style={{ marginTop: 12 }}>{btn("btn--secondary", () => void c.engine!.run({ op: "poll" }), <><ArrowsClockwise size={14} /> Check for new commits</>, { disabled: c.engine.busy, title: "Looks for new commits and queues them. It does not deploy.", sm: true })}</div> : null}
-            {a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: c.route.env !== "production", title: c.route.env !== "production" ? SIM_ONLY : undefined })}</div>}
-            <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered.</p>
+            {c.engine && (a.held.length > 0 || a.state === "paused") ? <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <>Review held events{a.held.length ? ` (${a.held.length})` : ""}…</>, { disabled: c.route.env !== "production" })}</div> : null}
+            {!c.engine && a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: c.route.env !== "production", title: c.route.env !== "production" ? SIM_ONLY : undefined })}</div>}
+            <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>{c.engine ? "Nothing is polled or deployed in the background, and unattended deployment is not offered. Commits you find are recorded as held events; deploying one is a separate, attended step." : "Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered."}</p>
           </div>
         </section>
         <section className="dp-panel">
@@ -450,8 +457,8 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
         {f("Container port", String(s.port ?? ""), "Published on a loopback port chosen by Harpoon")}{f("Health check", s.healthCheck, "Evidence, not a guarantee")}
         {f("Replacement", "Stop old, start new", "Interruption is shown before you confirm and recorded afterwards")}{c.engine ? null : f("Keep earlier releases", String(s.keepReleases))}</div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Automation</h2></div><div className="dp-panel__body dp-col">
-        {f("Source", `${app.source.label}`, "Read-only deploy key · host key pinned")}{f("Production branch", s.productionBranch)}{c.engine ? null : f("Poll interval", `${s.pollSeconds} s`)}
-        <div className="dp-evidence"><Warning size={12} />Automatic = while Harpoon is running. Unattended deployment is not offered yet.</div></div></section>
+        {f("Source", `${app.source.label}`, c.engine ? "As recorded when the repository was registered" : "Read-only deploy key · host key pinned")}{f("Production branch", s.productionBranch)}{c.engine ? null : f("Poll interval", `${s.pollSeconds} s`)}
+        <div className="dp-evidence"><Warning size={12} />{c.engine ? "New commits are found only when you press Check for new commits. Unattended deployment is not offered." : "Automatic = while Harpoon is running. Unattended deployment is not offered yet."}</div></div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
         <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>
         <div><button className="btn btn--destructive" disabled title={c.engine ? "Removing applications is not part of this build." : "Not part of this mock"}><Trash size={14} /> Remove application…</button></div></div></section>

@@ -176,3 +176,100 @@ test("an existing journal directory with no store is the empty state, not 'canno
   const s = toDeployState({ schema: 1, generatedMs: 1, runtimeDir: "/x", store: "missing", storeError: null, writerHeld: false, gate: GATE, repos: [], apps: [], definitions: [] }, { observed: {}, keychain: "unlocked" });
   assert.deepEqual([s.scenario, s.engine.store, s.engine.storeError], ["empty", "missing", null]);
 });
+
+import { allEventKeys, announceHeld, configValueProblem, newHeldEvents, suggestRepoName, summarizePoll, variableNameProblem } from "./deployEngine.ts";
+import { heroClassFor } from "./deployPresentation.ts";
+
+const A = "a".repeat(40), B = "b".repeat(40);
+const ev = (delivery, revision, status = "held", source = "poll") => ({ delivery, source, revision, receivedMs: NOW - 5000, status, decidedMs: null, related: null });
+const withEvents = (events, extra = {}) => snap([app([dep("dep_1")], { events })], extra);
+
+test("variable names follow the engine's rules, and the reserved prefix is explained", () => {
+  assert.equal(variableNameProblem(""), null);
+  assert.equal(variableNameProblem("DATABASE_URL"), null);
+  assert.equal(variableNameProblem("_private1"), null);
+  assert.match(variableNameProblem("HARPOON_ANYTHING"), /reserved for Harpoon/);
+  assert.match(variableNameProblem("HARPOON_DEPLOYMENT_MARKER"), /reserved/);
+  assert.equal(variableNameProblem("HARPOONX"), null, "only the HARPOON_ prefix is reserved");
+  assert.match(variableNameProblem("1ABC"), /start with a letter/);
+  assert.match(variableNameProblem("MY-VAR"), /letters, digits and underscores/);
+  assert.match(variableNameProblem("MY VAR"), /letters, digits and underscores/);
+  assert.match(variableNameProblem("A".repeat(129)), /at most 128/);
+  assert.equal(variableNameProblem("A".repeat(128)), null);
+});
+
+test("config values follow the engine's limits", () => {
+  assert.equal(configValueProblem("ui-test"), null);
+  assert.equal(configValueProblem(""), null);
+  assert.match(configValueProblem("line1\nline2"), /control characters/);
+  assert.match(configValueProblem("tab\there"), /control characters/);
+  assert.match(configValueProblem("x".repeat(4097)), /at most 4096/);
+  assert.equal(configValueProblem("x".repeat(4096)), null);
+});
+
+test("held events carry the full commit, status, source and time for the review dialog", () => {
+  const s = st(withEvents([ev("d1", A), ev("d2", B, "selected", "github")]));
+  const held = s.apps.app_1.automation.held;
+  assert.deepEqual(held.map((h) => [h.revisionFull, h.status, h.source, h.receivedMs]), [[A, "held", "poll", NOW - 5000], [B, "selected", "github", NOW - 5000]]);
+  const decided = st(withEvents([ev("d1", A, "dismissed"), ev("d2", B, "executed")]));
+  assert.deepEqual(decided.apps.app_1.automation.held, [], "decided events are history, not held");
+});
+
+test("a new held commit is announced once; opening the app and decided events are not", () => {
+  // first snapshot only seeds: an event that was already there is not news
+  let r = announceHeld(withEvents([ev("d1", A)]), null);
+  assert.deepEqual(r.fresh, []);
+  // the same snapshot again: still nothing
+  r = announceHeld(withEvents([ev("d1", A)]), r.seen);
+  assert.deepEqual(r.fresh, []);
+  // a new commit lands
+  r = announceHeld(withEvents([ev("d1", A), ev("d2", B)]), r.seen);
+  assert.deepEqual(r.fresh.map((n) => [n.app, n.sha]), [["shop", B.slice(0, 7)]]);
+  // and is not announced again on the next polls
+  r = announceHeld(withEvents([ev("d1", A), ev("d2", B)]), r.seen);
+  assert.deepEqual(r.fresh, []);
+  // a decision on it is never news
+  r = announceHeld(withEvents([ev("d1", A, "dismissed"), ev("d2", B, "selected")]), r.seen);
+  assert.deepEqual(r.fresh, []);
+});
+
+test("announcements survive a store that starts out empty and an unreadable one", () => {
+  let r = announceHeld(snap([], { store: "missing" }), null);
+  assert.deepEqual([r.fresh, r.seen.size], [[], 0]);
+  r = announceHeld(withEvents([ev("d1", A)]), r.seen); // the store appears with an event: that is news
+  assert.equal(r.fresh.length, 1);
+  const bad = announceHeld(snap([], { store: "error", storeError: "x" }), r.seen);
+  assert.deepEqual(bad.fresh, []);
+  assert.equal(bad.seen, r.seen, "an unreadable store forgets nothing");
+  assert.deepEqual(newHeldEvents(st(withEvents([ev("d1", A)])), new Set(allEventKeys(withEvents([ev("d1", A)])))), []);
+});
+
+test("a manual check is summarised in plain words from the engine's own lines", () => {
+  const queued = "watching 1 repository (one pass): …\nLATE: shop branch main moved aaa -> bbb while Harpoon was not running; queued as poll:shop:bbb\n";
+  assert.match(summarizePoll(true, queued), /^1 new commit recorded as held event\. Nothing was deployed\./);
+  assert.match(summarizePoll(true, queued + queued.split("\n")[1] + "\n"), /^2 new commits recorded as held events/);
+  assert.match(summarizePoll(true, "shop branch main first seen at aaa (baseline; nothing is deployed for history that already existed)\n"), /Starting point recorded for 1 repository/);
+  assert.equal(summarizePoll(true, "watching 1 repository (one pass)\n"), "No new commits since the last check.");
+  assert.match(summarizePoll(false, ""), /did not complete/);
+});
+
+test("a repository name is suggested from the folder, in the characters the engine accepts", () => {
+  assert.equal(suggestRepoName("/Users/juan/Harpoon UI Test"), "Harpoon-UI-Test");
+  assert.equal(suggestRepoName("/Users/juan/code/shop/"), "shop");
+  assert.equal(suggestRepoName("/Users/juan/.hidden repo"), "hidden-repo");
+  assert.match(suggestRepoName("/a/café ☕"), /^caf-?$/);
+  assert.equal(suggestRepoName("/"), "");
+});
+
+test("only something running gets the green badge; 'No release' and 'unknown' are neutral", () => {
+  assert.equal(heroClassFor("running"), "");
+  assert.equal(heroClassFor("building"), "");
+  assert.equal(heroClassFor("idle"), "idle");
+  assert.equal(heroClassFor("unknown"), "idle");
+  assert.equal(heroClassFor("down"), "err");
+  assert.equal(heroClassFor("recovering"), "info");
+  // the real status of an application with a repository and no release is 'idle'
+  const idle = st(snap([app([])])).apps.app_1;
+  assert.equal(appStatus(idle, "connected").kind, "idle");
+  assert.equal(heroClassFor(appStatus(idle, "connected").kind), "idle");
+});

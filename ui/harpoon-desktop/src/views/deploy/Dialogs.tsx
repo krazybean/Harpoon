@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { fileUrlFor, liveBlock } from "../../lib/deployEngine.ts";
+import { configValueProblem, fileUrlFor, liveBlock, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -11,12 +12,7 @@ import { Banner } from "./parts.tsx";
 
 function Dialog({ title, sub, wide, onClose, children, footer }: { title: string; sub?: string; wide?: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    ref.current?.querySelector<HTMLElement>("input, select, button.btn--primary, button")?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useDialogFocus(ref, onClose);
   return (
     <div className="dp-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`dp-dialog ${wide ? "dp-dialog--wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}>
@@ -83,7 +79,7 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
         <Plan>
           <Row icon={<ArrowCounterClockwise size={14} />}>Restart <b>{rel.id}</b> from its retained image with its pinned configuration snapshot ({rel.secrets.map((s) => `${s.name}@v${s.version}`).join(", ") || "no secrets"})</Row>
           <Row icon={<Warning size={14} />}>Brief interruption{c.engine ? "" : " (about 4 s in this simulation)"}: Harpoon stops {app.currentReleaseId ?? "nothing — the application is down"} first.</Row>
-          <Row icon={<Pause size={14} />}>Automatic deployments for this application will be <b>paused</b> until you resume them. New pushes are held, not discarded.</Row>
+          <Row icon={<Pause size={14} />}>{c.engine ? "Git triggers for this application will be" : "Automatic deployments for this application will be"} <b>paused</b> until you resume them. New commits are held, not discarded.</Row>
         </Plan>
         <Banner tone="warn" title="Application rollback only">{ROLLBACK_WARNING.replace("Application rollback only. ", "")}</Banner>
       </Dialog>
@@ -105,7 +101,7 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   }
 
   if (dialog.kind === "resume") {
-    return <ResumeDialog c={c} app={app} close={close} />;
+    return c.engine ? <HeldEventsDialog c={c} app={app} close={close} /> : <ResumeDialog c={c} app={app} close={close} />;
   }
 
   if (dialog.kind === "recover") {
@@ -144,6 +140,48 @@ function ResumeDialog({ c, app, close }: { c: Ctx; app: AppModel; close: () => v
       <Plan>
         <Row icon={<Play size={14} />}>{c.engine ? <><b>Resume &amp; select the revision</b> — it is recorded as chosen and waits for an attended deployment; nothing runs by itself{liveBlock(c.state) ? ", and this build cannot run live deployments" : ""}</> : <><b>Resume &amp; deploy the selected revision</b> — a normal deployment with the interruption notice</>}</Row>
         <Row icon={<Pause size={14} />}><b>Resume without deploying</b> — held events are kept in history as dismissed by you</Row>
+      </Plan>
+    </Dialog>
+  );
+}
+
+const SOURCE_LABEL: Record<string, string> = { poll: "found by Check for new commits", "poll-late": "found late by Check for new commits (the branch moved while nothing was checking)", github: "GitHub webhook", gitlab: "GitLab webhook", ci: "CI trigger" };
+
+/**
+ * Held Git events in the real engine: what was recorded, and the decisions the engine offers. A decision is
+ * recorded in the journal and deploys nothing; running a selected revision is a separate, attended, gated step.
+ */
+function HeldEventsDialog({ c, app, close }: { c: Ctx; app: AppModel; close: () => void }) {
+  const events = app.automation.held;
+  const waiting = events.filter((e) => e.status === "held");
+  const [pick, setPick] = useState("");
+  const chosen = waiting.find((e) => e.id === pick) ?? waiting[waiting.length - 1];
+  const paused = app.automation.state === "paused";
+  const gate = liveBlock(c.state);
+  const busy = !!c.engine?.busy;
+  return (
+    <Dialog wide title={`Held Git events · ${app.name}`} sub="Recorded in Harpoon's journal. Choosing here records a decision and deploys nothing." onClose={close}
+      footer={<>
+        <button className="btn btn--secondary" disabled={busy || (!events.length && !paused)} title={!events.length && !paused ? "Nothing is held and nothing is paused" : undefined}
+          onClick={() => { void c.engine!.run({ op: "resume", app: app.id, mode: "dismiss" }); close(); }}>{events.length ? "Dismiss all" : "Lift the pause"}</button>
+        <button className="btn btn--primary" disabled={busy || !chosen} title={!chosen ? "No held revision to select" : undefined}
+          onClick={() => { void c.engine!.run({ op: "resume", app: app.id, mode: "revision", revision: chosen!.revisionFull }); close(); }}><Play size={14} /> Select this revision</button>
+      </>}>
+      {paused && <Banner tone="warn" icon={<Pause size={18} />} title="Git triggers are paused for this application">Dismissing the held events also lifts the pause. Selecting a revision records it and keeps the application blocked until you dismiss.</Banner>}
+      <div className="dp-h2">Events ({events.length})</div>
+      <div className="dp-tablewrap"><table className="dp-table"><thead><tr><th /><th>Commit</th><th>Status</th><th>Recorded</th></tr></thead><tbody>
+        {events.length ? events.map((e) => (
+          <tr key={e.id}>
+            <td style={{ width: 30 }}><input type="radio" name="held" disabled={e.status !== "held"} checked={chosen?.id === e.id} onChange={() => setPick(e.id)} aria-label={`Select ${e.revision.sha}`} /></td>
+            <td><span className="mono" title={e.revisionFull}>{e.revision.sha}</span><div className="sub mono" style={{ wordBreak: "break-all" }}>{e.revisionFull}</div><div className="sub">{SOURCE_LABEL[e.source ?? ""] ?? e.source ?? "unknown source"}</div></td>
+            <td>{e.status === "selected" ? "Selected — waiting for an attended deployment" : "Held"}</td>
+            <td className="dp-faint">{e.receivedMs ? new Date(e.receivedMs).toLocaleString() : "—"}<div className="sub">{e.ageMin < 1 ? "just now" : `${Math.round(e.ageMin)} min ago`}</div></td>
+          </tr>
+        )) : <tr><td colSpan={4} className="dp-muted">No held events.</td></tr>}
+      </tbody></table></div>
+      <Plan>
+        <Row icon={<Pause size={14} />}><b>Dismiss all</b> — every held event is kept in the history as dismissed by you; nothing is deployed.</Row>
+        <Row icon={<Play size={14} />}><b>Select this revision</b> — recorded as chosen; it waits for an attended deployment and nothing runs by itself{gate ? ". This build cannot run live deployments, so it will stay selected" : ""}.</Row>
       </Plan>
     </Dialog>
   );
@@ -199,9 +237,12 @@ function VariableDialog({ c, name, close }: { c: Ctx; name?: string; close: () =
   const [used, setUsed] = useState<VariableUse>(existing?.used ?? "runtime");
   const [scope, setScope] = useState<VariableScope>(existing?.scope ?? "environment");
   const [value, setValue] = useState(existing?.type === "config" ? existing.value ?? "" : "");
+  // the engine's own rules, applied before anything is sent (it still has the last word)
+  const nameProblem = c.engine && !name ? variableNameProblem(vname.trim()) : null;
+  const valueProblem = c.engine && type === "config" ? configValueProblem(value) : null;
   return (
     <Dialog title={name ? `${type === "secret" ? "Replace" : "Edit"} ${name}` : "Add variable"} sub="Applies to new deployments only. Running releases keep the snapshot they were built with." onClose={close}
-      footer={<button className="btn btn--primary" disabled={!vname.trim() || !app || !!c.engine?.busy || (type === "secret" && !value)}
+      footer={<button className="btn btn--primary" disabled={!vname.trim() || !app || !!c.engine?.busy || (type === "secret" && !value) || (!!c.engine && (!!nameProblem || (type === "config" && !!valueProblem)))}
         onClick={() => {
           // A secret's value never leaves this component: only its name, type and scope are dispatched.
           if (c.engine) {
@@ -214,10 +255,11 @@ function VariableDialog({ c, name, close }: { c: Ctx; name?: string; close: () =
           c.dispatch({ type: "save-variable", appId: app!.id, name: vname.trim(), varType: type, used, scope, value: type === "config" ? value : undefined });
           setValue(""); close();
         }}>{type === "secret" ? "Save as new version" : "Save"}</button>}>
-      <div className="dp-field"><label htmlFor="vn">Name</label><input id="vn" className="dp-input mono" value={vname} onChange={(e) => setVname(e.target.value.toUpperCase())} placeholder="API_KEY" readOnly={!!name} /></div>
+      <div className="dp-field"><label htmlFor="vn">Name</label><input id="vn" className="dp-input mono" value={vname} onChange={(e) => setVname(e.target.value.toUpperCase())} placeholder="API_KEY" readOnly={!!name} aria-invalid={!!nameProblem} aria-describedby="vn-help" />
+        {c.engine ? <small id="vn-help" style={nameProblem ? { color: "var(--error-fg)" } : undefined}>{nameProblem ?? `Letters, digits and underscores. Names starting with ${RESERVED_ENV_PREFIX} are reserved for Harpoon and cannot be used.`}</small> : null}</div>
       <div className="dp-field"><label>Type</label><div className="dp-seg"><button aria-pressed={type === "config"} onClick={() => setType("config")}>Config</button><button aria-pressed={type === "secret"} onClick={() => setType("secret")}>Secret</button></div>
         <small>{type === "secret" ? (c.engine ? "Secrets are write-only after saving. The value goes to the macOS Keychain and is never shown again." : "Secrets are write-only after saving. This simulation keeps no value at all; the real feature stores it in the macOS Keychain.") : "Config values stay readable."}</small></div>
-      <div className="dp-field"><label htmlFor="vv">Value</label><input id="vv" className="dp-input" type={type === "secret" ? "password" : "text"} autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder={type === "secret" ? "•••••••••••" : ""} /></div>
+      <div className="dp-field"><label htmlFor="vv">Value</label><input id="vv" className="dp-input" type={type === "secret" ? "password" : "text"} autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder={type === "secret" ? "•••••••••••" : ""} aria-invalid={!!valueProblem} />{valueProblem ? <small style={{ color: "var(--error-fg)" }}>{valueProblem}</small> : null}</div>
       <div className="dp-field"><label>Used in</label><select className="dp-select" value={used} onChange={(e) => setUsed(e.target.value as VariableUse)}><option value="runtime">Runtime</option><option value="build">Build</option><option value="build+runtime">Build + runtime</option><option value="build secret">Build secret (BuildKit mount)</option></select>
         <small>Build-time secrets use BuildKit secret mounts, never build arguments.</small></div>
       <div className="dp-field"><label>Scope</label><select className="dp-select" value={scope} onChange={(e) => setScope(e.target.value as VariableScope)}><option value="environment">Environment · Production</option><option value="application">Application · {app?.name ?? "api"}</option><option value="project">Project · {app?.projectId ?? "storefront"}</option><option value="global">Global</option></select></div>
@@ -238,6 +280,7 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   const [project, setProject] = useState("");
   const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
+  const [picking, setPicking] = useState(false);
   const folderUrl = kind === "folder" ? fileUrlFor(location.trim()) : null;
   const url = kind === "folder" ? folderUrl ?? "" : location;
   const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || folderUrl !== null);
@@ -253,7 +296,10 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
       <div className="dp-field"><label>Source</label><div className="dp-seg"><button aria-pressed={kind === "git"} onClick={() => setKind("git")}>Git repository</button><button aria-pressed={kind === "folder"} onClick={() => setKind("folder")}>Local folder (a Git repository on this Mac)</button></div></div>
       <div className="dp-grid dp-grid--2">
         <div className="dp-field"><label htmlFor="rname">Name</label><input id="rname" className="dp-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="storefront" /></div>
-        <div className="dp-field"><label htmlFor="rloc">{kind === "git" ? "Repository URL" : "Absolute path"}</label><input id="rloc" className="dp-input" value={location} onChange={(e) => setLocation(e.target.value)} placeholder={kind === "git" ? "https://github.com/acme/storefront.git" : "/Users/you/code/My Project"} /></div>
+        <div className="dp-field"><label htmlFor="rloc">{kind === "git" ? "Repository URL" : "Absolute path"}</label>
+          <div className="dp-row"><input id="rloc" className="dp-input" style={{ flex: 1 }} value={location} onChange={(e) => setLocation(e.target.value)} placeholder={kind === "git" ? "https://github.com/acme/storefront.git" : "/Users/you/code/My Project"} />
+            {kind === "folder" ? <button type="button" className="btn btn--secondary" disabled={picking} onClick={() => { setPicking(true); c.engine!.pickFolder().then((p) => { if (p) { setLocation(p); if (!name) setName(suggestName(p)); } }, () => {}).finally(() => setPicking(false)); }}><FolderSimple size={14} /> Choose…</button> : null}</div>
+          {kind === "folder" && location.trim() !== "" && folderUrl === null ? <small style={{ color: "var(--error-fg)" }}>Enter an absolute folder path (starting with /, without . or .. parts).</small> : null}</div>
         <div className="dp-field"><label>Branch</label><input className="dp-input" value={branch} onChange={(e) => setBranch(e.target.value)} /></div>
         <div className="dp-field"><label>Container port</label><input className="dp-input" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} /></div>
         <div className="dp-field"><label>Dockerfile</label><input className="dp-input" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} /></div>
@@ -264,7 +310,7 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
       {kind === "git" && username && <div className="dp-field"><label htmlFor="rtok">Access token</label><input id="rtok" className="dp-input" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} /><small>Stored in the macOS Keychain. Never shown again.</small></div>}
       <Plan>
         <Row icon={<Check size={14} />}>Record <b>{name || "the repository"}</b> ({kind === "git" ? "Git" : "local"}) tracking <span className="mono">{branch || "its default branch"}</span></Row>
-        <Row icon={<Info size={14} />}>Automatic deployments are attended-only: Harpoon checks for new commits when you ask it to.</Row>
+        <Row icon={<Info size={14} />}>Harpoon does not poll in the background: it looks for new commits only when you press <b>Check for new commits</b>, and records what it finds as held events.</Row>
         <Row icon={<RocketLaunch size={14} />}>Nothing deploys until you choose <b>Deploy</b></Row>
       </Plan>
     </Dialog>
