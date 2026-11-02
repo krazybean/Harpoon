@@ -262,3 +262,215 @@ fn adding_a_repository_records_it_and_deploying_it_is_refused_by_the_gate() {
         "a refused deployment leaves no record"
     );
 }
+
+// ---- E.1: the runtime's coordinates reach Docker-touching commands, and only when they are true
+
+mod runtime {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    struct Fixture {
+        support: PathBuf,
+        mgmt: PathBuf,
+        resources: PathBuf,
+        _socks: Vec<UnixListener>,
+    }
+
+    fn fixture(name: &str, pid: u32) -> Fixture {
+        let base = rt(&format!("runtime-{name}"));
+        let support = base.join("support");
+        let resources = base.join("resources");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::create_dir_all(resources.join("harpoon/bin")).unwrap();
+        std::fs::write(resources.join("harpoon/bin/docker-buildx"), b"#!/bin/sh\n").unwrap();
+        // short socket paths: unix socket names are limited to about 100 bytes
+        let short = std::env::temp_dir().join(format!("hpe1-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&short).unwrap();
+        let docker = short.join("d.sock");
+        let mgmt = short.join("m.sock");
+        let socks = vec![UnixListener::bind(&docker).unwrap(), UnixListener::bind(&mgmt).unwrap()];
+        std::fs::write(
+            support.join("runtime.json"),
+            format!(r#"{{"socketPath":"{}","pid":{pid}}}"#, docker.display()),
+        )
+        .unwrap();
+        std::fs::write(support.join("runtime.pid"), format!("{pid}\n")).unwrap();
+        Fixture {
+            support,
+            mgmt,
+            resources,
+            _socks: socks,
+        }
+    }
+
+    fn runtime_of(f: &Fixture, cmd: Option<&'static str>) -> Result<RuntimeInfo, String> {
+        discover_runtime(&f.support, &f.mgmt, &f.resources, &|_| cmd.map(str::to_string))
+    }
+
+    #[test]
+    fn a_live_runtime_is_read_from_its_own_state_and_verified() {
+        let f = fixture("ok", 4242);
+        let r = runtime_of(&f, Some("harpoon")).unwrap();
+        assert_eq!((r.forwarder_pid, r.forwarder_command.as_str()), (4242, "harpoon"));
+        assert_eq!(r.docker_socket.file_name().unwrap(), "d.sock");
+        assert_eq!(
+            (r.mgmt_socket.as_path(), r.resources_dir.as_path()),
+            (f.mgmt.as_path(), f.resources.as_path())
+        );
+    }
+
+    #[test]
+    fn missing_or_stale_runtime_state_is_refused_with_a_reason() {
+        let f = fixture("stale", 4242);
+        assert!(runtime_of(&f, None).unwrap_err().contains("not running"));
+        assert!(runtime_of(&f, Some("bash"))
+            .unwrap_err()
+            .contains("not the Harpoon runtime"));
+        std::fs::write(f.support.join("runtime.pid"), "999\n").unwrap();
+        assert!(runtime_of(&f, Some("harpoon")).unwrap_err().contains("disagree"));
+        std::fs::write(f.support.join("runtime.json"), "{not json").unwrap();
+        assert!(runtime_of(&f, Some("harpoon")).unwrap_err().contains("unreadable"));
+        std::fs::remove_file(f.support.join("runtime.json")).unwrap();
+        assert!(runtime_of(&f, Some("harpoon")).unwrap_err().contains("missing"));
+    }
+
+    #[test]
+    fn missing_sockets_and_buildx_are_refused_and_nothing_is_taken_from_a_default() {
+        let f = fixture("parts", 4242);
+        let no_mgmt = discover_runtime(&f.support, &f.support.join("none.sock"), &f.resources, &|_| {
+            Some("harpoon".into())
+        });
+        assert!(no_mgmt.unwrap_err().contains("management socket"));
+        let no_buildx = discover_runtime(&f.support, &f.mgmt, &f.support, &|_| Some("harpoon".into()));
+        assert!(no_buildx.unwrap_err().contains("Buildx"));
+        std::fs::write(
+            f.support.join("runtime.json"),
+            r#"{"socketPath":"/nonexistent/d.sock","pid":4242}"#,
+        )
+        .unwrap();
+        assert!(runtime_of(&f, Some("harpoon")).unwrap_err().contains("Docker socket"));
+    }
+
+    fn info() -> RuntimeInfo {
+        RuntimeInfo {
+            docker_socket: "/d.sock".into(),
+            mgmt_socket: "/m.sock".into(),
+            resources_dir: "/res".into(),
+            forwarder_pid: 4242,
+            forwarder_command: "harpoon".into(),
+        }
+    }
+    const OPEN: Gate = Gate {
+        live_deploy_enabled: true,
+        live_replacement_enabled: true,
+    };
+
+    fn args_of(op: &DeployOp, gate: &Gate, r: Result<RuntimeInfo, String>) -> Result<Vec<String>, OpResult> {
+        build_args(op, gate, &|| r.clone()).map(|(a, _)| a)
+    }
+    fn pair<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
+        a.iter().position(|x| x == flag).map(|i| a[i + 1].as_str())
+    }
+
+    #[test]
+    fn docker_touching_commands_receive_every_coordinate_explicitly_and_never_the_authorization() {
+        for op in [
+            DeployOp::Deploy {
+                repo: "shop".into(),
+                branch: None,
+                tag: None,
+                commit: None,
+            },
+            DeployOp::RunQueue { repo: None },
+            DeployOp::Rollback {
+                app: "app_x".into(),
+                release: "rel_x".into(),
+            },
+            DeployOp::Restore {
+                deployment: "dep_x".into(),
+            },
+        ] {
+            for gate in [Gate::shipping(), OPEN] {
+                let a = args_of(&op, &gate, Ok(info())).unwrap();
+                assert_eq!(
+                    [
+                        pair(&a, "--docker-socket"),
+                        pair(&a, "--mgmt-socket"),
+                        pair(&a, "--resources-dir"),
+                        pair(&a, "--forwarder-pid"),
+                        pair(&a, "--forwarder-command")
+                    ],
+                    [
+                        Some("/d.sock"),
+                        Some("/m.sock"),
+                        Some("/res"),
+                        Some("4242"),
+                        Some("harpoon")
+                    ]
+                );
+                assert!(
+                    !a.iter()
+                        .any(|x| x.contains("authorize-live") || x.contains("I-UNDERSTAND")),
+                    "the opt-in is the user's act, never implicit: {a:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_that_do_not_reach_docker_get_no_coordinates() {
+        for op in [
+            DeployOp::Poll { repo: None },
+            DeployOp::Recover,
+            DeployOp::Resume {
+                app: "app_x".into(),
+                mode: "dismiss".into(),
+                revision: None,
+            },
+            DeployOp::SetConfig {
+                scope: "global".into(),
+                name: "A".into(),
+                value: "1".into(),
+                build: false,
+                runtime: true,
+            },
+        ] {
+            let a = args_of(&op, &OPEN, Ok(info())).unwrap();
+            assert!(
+                !a.iter().any(|x| x == "--docker-socket" || x == "--forwarder-pid"),
+                "{a:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn once_the_gate_would_let_it_through_a_missing_runtime_refuses_before_the_engine() {
+        let op = DeployOp::Deploy {
+            repo: "shop".into(),
+            branch: None,
+            tag: None,
+            commit: None,
+        };
+        let r = args_of(&op, &OPEN, Err("process 4242 is not running".into())).unwrap_err();
+        assert!(!r.ok && r.exit_code == harpoon_deploy_cli::exit::REFUSED && !r.refused_by_gate);
+        assert!(r.summary.contains("Refused before contacting Docker") && r.summary.contains("not running"));
+    }
+
+    #[test]
+    fn while_the_gate_is_closed_the_gate_stays_the_first_and_only_reason() {
+        let dir = rt("e1-gate");
+        let kc = MemorySecretStore::new();
+        let op = DeployOp::Deploy {
+            repo: "shop".into(),
+            branch: None,
+            tag: None,
+            commit: None,
+        };
+        // a runtime that is found: still refused by the gate; one that is not found: the same refusal
+        for found in [Ok(info()), Err("no runtime".to_string())] {
+            let r = run_op_with(&dir, &op, &kc, &Gate::shipping(), &|| found.clone());
+            assert!(!r.ok && r.refused_by_gate, "{}", r.detail);
+        }
+        assert!(snapshot(&dir, 1).apps.is_empty(), "nothing was recorded");
+    }
+}
