@@ -40,6 +40,8 @@ export type StepRecord = { name: StepName; status: StepStatus; durationLabel: st
 
 export type Deployment = {
   id: string;
+  /** Engine mode: what the ledger recorded creating for this deployment. */
+  recorded?: { kind: string; name: string; id: string | null; state: string }[];
   env: Env;
   status: DeploymentStatus;
   trigger: Trigger;
@@ -105,7 +107,28 @@ export type AppSettings = {
   pollSeconds: number;
 };
 
+/** Recorded (journal) vs observed (Docker) for an application's serving container. Never merged into one claim. */
+export type ObservationKind = "match" | "unverified" | "stopped" | "absent" | "mismatch" | "unknown";
+/** One thing compared between the record and Docker. `unavailable` = Docker's answer did not carry it, so it was NOT checked. */
+export type ObservationCheck = { id: "state" | "id" | "managed" | "app" | "deployment" | "port"; label: string; result: "ok" | "fail" | "unavailable"; detail: string };
+export type Observation = { kind: ObservationKind; recorded: string; observed: string; notes: string[]; checks: ObservationCheck[]; port?: PortExposureView };
+
+/** Where a configuration value comes from. A value is shown only with its origin; with none, it is "Not recorded". */
+export type ConfigFact = { value: string | null; from: "registration" | "journal" | "docker" | "none"; detail?: string };
+export type ConfigFactKey = "source" | "branch" | "dockerfile" | "context" | "target" | "containerPort" | "hostPort" | "healthCheck" | "replacement" | "image";
+export type ConfigFacts = Record<ConfigFactKey, ConfigFact>;
+
+/** Filled in by the port-exposure logic: what Docker reports for the container beside what is actually listening on this Mac. */
+export type PortExposureView = import("./portExposure.ts").Exposure;
+
 export type AppModel = {
+  /** Set when this application comes from a runtime attached read-only by path: Harpoon did not create it here and cannot change it. */
+  external?: { path: string; format: string };
+  observation?: Observation;
+  /** Engine mode: configuration as recorded, each value with its origin; never a default or a guess. */
+  facts?: ConfigFacts;
+  /** Where the loopback URL comes from: the pinned release configuration, or a recorded port lease when nothing was pinned. */
+  urlSource?: "pin" | "lease";
   id: string;
   projectId: string;
   name: string;
@@ -141,6 +164,8 @@ export type EngineMeta = {
   /** The last refresh failed; what is shown is the last good snapshot (or nothing). */
   loadError: string | null;
   stale: boolean;
+  /** Runtimes attached read-only by path (engine mode). */
+  externals: { id: string; path: string; format: string; store: string; error: string | null }[];
 };
 export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; seen: { refName: string; commit: string; atMs: number }[] };
 

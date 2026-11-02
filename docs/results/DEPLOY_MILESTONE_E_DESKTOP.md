@@ -102,3 +102,128 @@ Eight findings from manual UI acceptance, each checked against the code first.
 Tests added: `dialogFocus.test.mjs` (6, jsdom), logic tests in `deployEngine.test.mjs` (names, values, announcements, poll summaries, repository names, badge mapping), an integration assertion, and 5 Tauri tests (held events, decisions, persistence, the picker's parser). `jsdom` is a new devDependency (test-only); the lockfile change is additions only.
 
 **Next manual retest.** Restart is not needed for the data: it is read from the journal. In Deployments → your application: (a) Add variable, open "Used in" and wait 10 s: it stays open; type in Value for 10 s: focus stays; (b) try the name `HARPOON_X`: it is explained and Save is disabled; (c) the held commit is shown with a banner and "Review held events", with commit, status, source and time; do not choose Dismiss if you want to keep it; (d) press Check for new commits after adding a commit to the test repository: the result says what was found, and a notice appears for a commit found some other way; (e) scroll with the gate banner showing: the header no longer lets it show through; (f) an application with no release shows a grey badge; (g) Add repository → Local folder → Choose…; (h) the Automation panel says "Manual", with no "Active" or "runs while Harpoon is open".
+
+## 13. External runtime viewer (read-only)
+
+Found when the successful B7 live-acceptance deployment (`dep_01M6DPQ543ASWBHW7PW17ZAJ3C`) could not be seen in the desktop: the
+desktop reads only its own store (`<app data>/deploy`), and the B7 runtime is a different directory written by the experimental
+B7 build (`236ccec`, one local-only commit on a pre-B9 main) in the legacy `journal.wal` format. The same engine lineage, older.
+
+**What it does.** "Open runtime…" (Projects) picks a runtime folder; `deploy_snapshot_at(path)` validates it and returns the same
+snapshot the adapter always produced, tagged `source.kind = "external"`, `readOnly = true`, with its journal format. The
+applications appear in their own group, labelled **External · read-only**. Harpoon's own store, its alerts and the sidebar badge
+are unaffected. Attachments are remembered across restarts as folder references only (see "Remembered attachments" below).
+
+**Read-only, enforced in the backend.**
+* `ExternalRuntime::attach` is the only way to get one. The path must be absolute, free of `..` and control characters, a real
+  folder that is not Harpoon's own store, with a real (not symlinked) `deploy-journal` directory holding a regular
+  `deployments.sqlite3` or `journal.wal`.
+* Its only capability is `snapshot`, which uses `SqliteJournal::read_only` and `writer_lock_status` and nothing else: no writer is
+  opened, nothing is locked, created, repaired or migrated. A legacy journal is decoded where it is.
+* An operation names no runtime (it always acts on Harpoon's own store); `DeployOp` rejects unknown fields (`recover` became a
+  struct variant so that applies to it as well), so a path cannot be smuggled in. In addition, every attached root is remembered
+  and `run_op_with` refuses any target that is, contains or lies inside one, before creating or opening anything.
+* The frontend repeats this (no mutating dialog opens, controls are disabled with the reason, ops naming an external application
+  are not sent), but the backend does not depend on it.
+
+**Recorded vs observed.** The snapshot now carries each deployment's ledger (images, containers, port leases, with ids and
+states). For an application recorded as serving, the adapter compares the record with `docker ps`: container id, the three
+ownership labels (`io.harpoon.managed`, `.app`, `.deployment`), running state and published ports. The result (`match`,
+`unverified` when Docker gave no labels, `stopped`, `absent`, `mismatch`, `unknown`) is shown beside the record; an application is
+treated as running only for `match` or `unverified`, and a mismatch is explained instead of being shown as current. This applies to
+Harpoon's own applications too. When a journal pinned no release configuration (anything before milestone C), the loopback URL
+comes from the recorded port lease and says so.
+
+**Tests.** The B7 journal is a byte-identical fixture (`src-tauri/tests/fixtures/b7-legacy-runtime`; it holds only ids,
+timestamps and statuses). Backend: decoding, no write and no migration (tree, bytes and timestamps unchanged; also from a
+read-only folder; also for a SQLite runtime), every rejected path form, operations refused for every way of naming an attached
+runtime, unknown fields rejected, and a golden file (`b7-legacy-snapshot.json`) of the exact JSON. Frontend: the adapter and the
+comparison matrix on that golden file, and the real components in jsdom (workflow, badges, disabled actions, panel, deployment
+screen). The golden file is regenerated with `UPDATE_GOLDEN=1 cargo test`.
+
+**Preserved evidence.** The B7 session was copied byte for byte (1032 files, hashes, `diff -r` and permissions identical) to
+`~/harpoon-b7-evidence-PRESERVED-20261102` (read-only, with a manifest) before any work; the original in `/tmp` is untouched.
+
+**Not done / limits.** Pre-C journals have no pinned configuration, repository, secrets or recorded
+step logs; the page says "Not recorded" rather than filling values in. Observation is polled, not pushed. A different Docker than
+Harpoon's own is not consulted.
+
+### Follow-up after manual testing of the B7 runtime (same PR)
+
+* **Configuration accuracy.** The Configuration panel, the Settings tab and the status text were showing values nobody recorded:
+  the adapter filled `settings` with defaults (`Dockerfile`, context `.`, health check `HTTP GET /`), the panel hard-coded
+  "stop old → start new", fell back to `folder · <app id>` for the source, and the Settings tab printed "Detected: Dockerfile" and
+  "Published on a loopback port chosen by Harpoon". Each value now comes from one place, `factsOf`, as `{ value, from }` with `from`
+  one of the repository registration, the journal (a pinned release configuration, the ledger, the deployment record) or Docker
+  (observed). Nothing recorded means `null`, shown as "Not recorded"; the engine-mode `settings` are now empty instead of defaulted.
+  For the B7 journal that gives: source, build file, branch and health check "Not recorded" (the fixture answers `/health` and not
+  `/`, but the journal records neither, so neither is claimed); host port 38000 from the recorded port lease; replacement
+  "Nothing was replaced (first deployment)" (journal: no `replaces`, cutover not required); image from the ledger; container port
+  8080 shown as observed in Docker and explicitly not in the journal, and "Not recorded" when Docker was not consulted.
+* **Read-only controls.** An external application has no Edit button (and no settings link) in the Configuration panel. A test
+  walks every tab and the deployment page of an external application and asserts that no enabled control that could change
+  anything exists and that nothing is sent to the engine; the backend protections are unchanged.
+* **Recorded vs observed.** The panel lists what was actually compared (running, container id, the three `io.harpoon.*` labels,
+  the port lease), each as passed, failed or "not checked", and names the journal it came from. A running container whose Docker
+  answer carries no labels is "Running · ownership unverified" (warning), never plain "Running"; the old "ownership labels checked"
+  wording is gone. "Resources & health" no longer says "no running container" for a running one, and a deploy-time final check
+  is shown as "Final check passed (recorded)" instead of "healthy".
+* **Port exposure.** Docker's `0.0.0.0` and `[::]` bindings are a mapping inside Harpoon's VM and are shown exactly as reported.
+  What is actually listening on this Mac comes from a separate read-only check (`host_tcp_listeners`: the engine's own `lsof`
+  runner, fixed arguments, cleared environment, 5 s limit). The two are shown side by side (Containers cards and detail,
+  Deployments panel). Reachability is derived only from the listeners found (loopback only, network, mixed, none); when the check
+  cannot run the line says "not verified" and no exposure is claimed. Docker's wildcard bindings are never rewritten to loopback.
+* **Long identifiers and badges (Deployments and Containers).** Flex and grid children could not shrink, long ids had no break
+  opportunity and badges were squeezed. Rows, cards, banners and panel heads now let children shrink, text breaks where it must,
+  card names, image hashes and port lines are truncated with the full value in a tooltip, wide tables scroll, ids in detail views
+  have a copy button, and badges keep their size. Verified in Chrome (headless) with the real components and the B7 data: with the
+  stylesheets from before this change the same page produced up to 81 layout problems (content wider than its card, badges
+  sticking out by up to 175 px, sideways page scroll, an image hash running off the card); with the new ones, none at 320, 360,
+  420, 560 and 1200 px for both screens (below 500 px the browser window cannot shrink, so those widths were tested in a
+  fixed-width frame, which exercises the view's container queries but not the Containers view's viewport media queries). The
+  harness is a scratch script and is not part of CI; `layoutContract.test.mjs` only guards that the rules stay.
+
+**Test reliability note.** The Tauri `deploy_api` tests share a process with the existing `broadcast` tests, which start child
+processes. A child forked while a journal is open keeps a copy of its lock until it execs, so a test that expects the lock to be
+free the instant its writer is dropped can fail. The `deploy_api` test helpers now wait (with a deadline) for exactly that
+condition and retry only the "another Harpoon process holds the journal" refusal, as the `deploy-cli` tests do; the product stays
+fail-fast. The new host-listener tests start no process. The existing `broadcast::tests::mocked_*` tests are timing-sensitive on
+their own (they fail about 1 run in 10 on a busy machine, as seen at `broadcast.rs:397` in an earlier CI run) and are not changed.
+
+**Still needs eyes (not verifiable here).** The app renders in macOS WKWebView, not Chrome: check the Containers card and the
+B7 application page at a narrow window; that the "Mac listener" line shows `127.0.0.1:38000 · loopback only` for the B7
+container; and that the Configuration panel shows "Not recorded" for source, build file and health check.
+
+### Remembered attachments (same PR)
+The attached B7 runtime used to disappear on every restart because the attachment lived in the page only.
+
+- **What is stored:** `external-runtimes.json` in the desktop's own data directory (next to, not inside, the deployment journals):
+  `{"version":1,"runtimes":[{"path":"<canonical folder>"}]}`, mode 0600, written atomically (temp file, `fsync`, rename). Nothing from
+  a journal is stored: no deployment, container, image or id. At most 32 references; an alias of the same folder is the same reference.
+- **Restore:** on start and on every refresh the list is read and each folder is validated and read again through the same
+  read-only path as "Open runtime…" (no lock, no migration, no creation; the legacy `journal.wal` stays legacy). Every remembered folder
+  is guarded against mutation from the moment the list is read, also while it is unavailable, so the backend still refuses any operation aimed
+  at it, at or above it.
+- **Unavailable is not forgotten:** a missing, unreadable or invalid folder keeps its reference and is listed as "An attached runtime
+  is unavailable" with the path and the reason, plus **Retry** and **Detach runtime**. It returns by itself when the folder is back.
+- **Detach runtime** removes only the reference (also for a folder that is gone). The folder and its files are never touched.
+- **A damaged list** (bad JSON, other version, relative path, unknown field, more than 32) is reported, left byte-for-byte as it was, and
+  refuses further adds/removes until fixed; attachments are never silently dropped or overwritten.
+- **Tests (Rust, `deploy_api::tests::external`):** file content is only the version and paths, mode 0600, outside the runtime; restart
+  restore from a new store instance with the runtime tree byte- and mtime-identical and no SQLite file created; missing folder kept and
+  back when restored; no-journal and undecodable-journal folders shown unavailable and unrepaired; detach leaves both trees identical;
+  damaged list untouched; dedupe and limit; refused paths not remembered; a remembered-but-missing folder is guarded. Frontend: restored
+  state shown without attaching, unavailable banner with Retry/Detach runtime, Detach runtime calls `detachRuntime(path)`.
+- **Configuration panel image names:** the repository wraps, a long tag is shortened in the middle (`dep_01M6DPQ543…b330bb5b659e3`), the
+  image id sits on its own line; the complete reference is the tooltip and behind a copy button, and the Settings tab field carries it as its tooltip.
+
+### Noted, not implemented (reported during the B7 manual validation)
+
+* **Container-card overflow.** In the Containers view, a card's content can overflow its bounds (long names, many ports or
+  labels). Reported from screenshots; not investigated or changed here.
+* **Effective port exposure display.** Show what is reachable (binding address and host port against the container port, loopback
+  against all interfaces) rather than a recorded or requested port. This change shows the recorded lease beside Docker's published
+  ports and reports disagreement, but does not build a reachability view.
+* **`*.harpoon.localhost` reverse proxy and DNS.** Friendly per-deployment names (`app.harpoon.localhost`) need a local reverse
+  proxy, resolution of `*.localhost` on macOS and a routing and TLS story. This is routing work beyond Milestone E (the roadmap
+  keeps zero-downtime routing out of the first release) and is unstarted.

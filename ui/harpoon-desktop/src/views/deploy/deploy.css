@@ -175,3 +175,45 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 @container dp (max-width: 560px) {
   .dp-h1 { font-size: 18px; } .dp-sim { position: static; }
 }
+
+/* ---- long identifiers and badges: nothing pushes a neighbour off screen ---------------------------------------------
+   Application, release, deployment and container ids and image hashes are 20-70 characters with no spaces. Every flex
+   or grid child that may hold one is allowed to shrink (min-width: 0), long text wraps where it must or is truncated with
+   its full value in a tooltip, and badges keep their size instead of being squeezed. */
+.dp-root { min-width: 0; max-width: 100%; overflow-wrap: break-word; }
+.dp-root .mono, .dp-root code { overflow-wrap: anywhere; }
+.dp-row > * { min-width: 0; }
+.dp-row > .dp-pill, .dp-row > .dp-tag, .dp-row > .btn, .dp-row > svg, .dp-row > .dp-statusdot { flex: 0 0 auto; }
+.dp-pill, .dp-tag { flex: 0 0 auto; white-space: nowrap; }
+.dp-card { min-width: 0; }
+.dp-card > .dp-row { flex-wrap: wrap; row-gap: 4px; }
+.dp-card > .dp-row > b { flex: 1 1 8ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-card .dp-muted, .dp-card .dp-env { overflow-wrap: anywhere; min-width: 0; }
+.dp-hero__state > div:not(.big) { min-width: 0; }
+.dp-hero__state b, .dp-hero__state .mono { overflow-wrap: anywhere; }
+.dp-actions { flex-wrap: wrap; min-width: 0; }
+.dp-hero__state .big { flex: 0 0 auto; }
+.dp-banner > div:not(.dp-banner__actions) { min-width: 0; overflow-wrap: anywhere; }
+.dp-banner__actions { flex: 0 0 auto; }
+.dp-panel__head { flex-wrap: wrap; row-gap: 6px; min-width: 0; }
+.dp-panel__head > h2 { min-width: 0; overflow-wrap: anywhere; }
+.dp-h2 { overflow-wrap: anywhere; }
+.dp-tablewrap { overflow-x: auto; }
+.dp-table td { height: auto; min-height: 44px; padding-top: 6px; padding-bottom: 6px; overflow-wrap: anywhere; }
+.dp-table td > b { overflow-wrap: anywhere; }
+.dp-id { display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; min-width: 0; }
+.dp-id__text { min-width: 0; overflow-wrap: anywhere; }
+.dp-id__copy { flex: 0 0 auto; display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-tertiary); }
+.dp-id__copy:hover { color: var(--text-primary); background: var(--panel-header); }
+.dp-checks { list-style: none; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border-subtle); display: grid; gap: 6px; font-size: 12px; }
+.dp-checks li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; overflow-wrap: anywhere; }
+.dp-checks__mark { font-weight: 700; text-align: center; color: var(--text-tertiary); }
+.dp-checks li[data-result="ok"] .dp-checks__mark { color: var(--success); }
+.dp-checks li[data-result="fail"] .dp-checks__mark { color: var(--error); }
+.dp-warnline { color: var(--warning-fg); }
+.dp-fact__value { overflow-wrap: anywhere; }
+
+/* a recorded image: the repository wraps, a long tag is shortened in the middle, the id has its own line; the whole value stays in the tooltip and behind the copy button */
+.dp-image { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.dp-image__tag, .dp-image__id { overflow-wrap: anywhere; }
+.dp-image__id { font-size: 11px; }

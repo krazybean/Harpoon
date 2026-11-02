@@ -7,7 +7,7 @@ import { SIMULATION_NOTE } from "../../lib/deployPresentation.ts";
 import { summarizePoll } from "../../lib/deployEngine.ts";
 import { SCENARIOS, type DeployPreview } from "../../lib/deployPreview.ts";
 import { Banner } from "./parts.tsx";
-import { dialogAllowed, type Ctx, type DialogState, type Route } from "./context.ts";
+import { dialogAllowedFor, type Ctx, type DialogState, type Route } from "./context.ts";
 import { AppScreen, DeploymentScreen, HomeScreen } from "./Screens.tsx";
 import { DeployDialogs } from "./Dialogs.tsx";
 import { GitBranch, Play } from "@phosphor-icons/react";
@@ -87,7 +87,8 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
   }, [runtimeOverride, onStartHarpoon, setRuntimeOverride]);
 
   // Production-changing dialogs are refused outside the Production route, even if a button is missed.
-  const guardedOpen = useCallback((d: DialogState | null) => { if (d && !dialogAllowed(d, route.env)) return; setDialog(d); }, [route.env]);
+  // Production-changing dialogs are refused outside the Production route, and for an attached read-only runtime, even if a button is missed.
+  const guardedOpen = useCallback((d: DialogState | null) => { if (d && !dialogAllowedFor(d, route.env, state.apps[route.appId])) return; setDialog(d); }, [route.env, route.appId, state.apps]);
   const ctx: Ctx = useMemo(() => ({ state, runtime, runtimeSource: runtimeOverride ? "simulated" : "harpoon", engine: engine?.api, openContainers: onOpenContainers, route, setRoute, dispatch, open: guardedOpen, startRuntime }),
     [state, runtime, runtimeOverride, engine?.api, onOpenContainers, route, setRoute, dispatch, startRuntime, guardedOpen]);
   const meta = state.engine;
@@ -131,7 +132,7 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
         </Banner>
       )}
       {route.screen === "home" ? <HomeScreen c={ctx} /> : route.screen === "dep" ? <DeploymentScreen c={ctx} /> : <AppScreen c={ctx} />}
-      {dialog && dialogAllowed(dialog, route.env) ? <DeployDialogs c={ctx} dialog={dialog} /> : null}
+      {dialog && dialogAllowedFor(dialog, route.env, state.apps[route.appId]) ? <DeployDialogs c={ctx} dialog={dialog} /> : null}
     </div>
   );
 }

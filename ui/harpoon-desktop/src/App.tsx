@@ -26,6 +26,7 @@ import { useDeploySimulation } from "./hooks/useDeploySimulation";
 import { useDeployEngine } from "./hooks/useDeployEngine";
 import { navBadge } from "./lib/deployStore";
 import { parseDeployHash } from "./lib/deployPreview";
+import type { HostListeners } from "./lib/portExposure.ts";
 import type { RuntimeState } from "./lib/deployTypes";
 
 type HarpoonStatus = {
@@ -220,6 +221,8 @@ export default function App() {
   const logPathShelf = useShelf<string>(useCallback(()=>invoke<string>("get_log_path"), []), { ttlMs: 60000 });
   const doctorShelf = useShelf<DoctorResult>(useCallback(()=>invoke<DoctorResult>("get_doctor"), []), { ttlMs: 60000 });
   const logsShelf = useShelf<string>(useCallback(()=>invoke<string>("get_recent_logs", { lines: 120 }), []), { ttlMs: 15000 });
+  // what is actually listening on this Mac, refreshed with the containers (Docker's port mappings are not the same thing)
+  const hostListenersShelf = useShelf<HostListeners>(useCallback(()=>invoke<HostListeners>("host_tcp_listeners"), []), { ttlMs: 30000 });
   const containersShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_containers", { all: true }), []), { ttlMs: 30000 });
   const imagesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_images"), []), { ttlMs: 30000 });
   const volumesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_volumes"), []), { ttlMs: 30000 });
@@ -257,6 +260,8 @@ export default function App() {
   const refreshDoctor = doctorShelf.refresh;
   const refreshLogs = logsShelf.refresh;
   const refreshContainers = containersShelf.refresh;
+  const refreshHostListeners = hostListenersShelf.refresh;
+  useEffect(() => { if (active === "containers") void refreshHostListeners(); }, [active, containersShelf.updatedAt, refreshHostListeners]);
   const refreshImages = imagesShelf.refresh;
   const refreshVolumes = volumesShelf.refresh;
   const refreshNetworks = networksShelf.refresh;
@@ -715,8 +720,8 @@ export default function App() {
             {active==="resources" && <ResourcesView config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
             {active==="diagnostics" && <DiagnosticsView binaryPath={binaryPath} logs={logs} logsAt={logsAt} logsRefreshing={logsShelf.refreshing} logsError={logsShelf.error} logPath={logPath} doctor={doctor} doctorAt={doctorAt} doctorRefreshing={doctorShelf.refreshing} doctorError={doctorShelf.error} status={status} configRaw={config?.raw ?? null} bootstrapPhase={bootstrapPhase} onCopy={handleCopyDiagnostics} copied={copied} onRefreshDoctor={()=>doctorShelf.refresh()} onRefreshLogs={()=>logsShelf.refresh()} />}
             {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
-            {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
-            {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
+            {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} hostListeners={hostListenersShelf.data ?? undefined} />}
+            {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} hostListeners={hostListenersShelf.data ?? undefined} />}
             {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments…</div>}><DeployView {...(deployPreviewActive ? { sim: deploySim, preview: deployPreview } : { engine: deployEngine })} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} onOpenContainers={()=>handleNav("containers")} homeSignal={deployHome} /></Suspense>}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}
             {active==="volumes" && <VolumesView volumes={volumesShelf.data ?? []} refreshing={volumesShelf.refreshing} error={volumesShelf.error} updatedAt={volumesShelf.updatedAt} hasCache={volumesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>volumesShelf.refresh()} />}

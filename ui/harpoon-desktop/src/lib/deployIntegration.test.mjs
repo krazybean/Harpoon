@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { dialogAllowed } from "../views/deploy/context.ts";
+import { dialogAllowed, dialogAllowedFor } from "../views/deploy/context.ts";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { parseDeployHash, SCENARIOS } from "./deployPreview.ts";
@@ -98,7 +98,8 @@ test("non-Production routes can never open a Production-changing dialog", () => 
   for (const d of mutating) assert.equal(dialogAllowed(d, "production"), true);
   for (const env of ["development", "preview", "production"]) for (const d of [{ kind: "variable" }, { kind: "unlock-help" }, { kind: "create", step: 1, src: "git" }]) assert.equal(dialogAllowed(d, env), true);
   const view = read("../views/deploy/DeployView.tsx");
-  assert.match(view, /dialogAllowed\(dialog, route\.env\)/);
+  assert.match(view, /dialogAllowedFor\(dialog, route\.env, state\.apps\[route\.appId\]\)/, "the dialog is only rendered when it is allowed for this route and application");
+  for (const env of ["development", "preview"]) for (const d of mutating) assert.equal(dialogAllowedFor(d, env, undefined), false, `dialogAllowedFor keeps the same rule: ${env}:${d.kind}`);
   assert.match(view, /open: guardedOpen/);
 });
 

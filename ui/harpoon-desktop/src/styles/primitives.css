@@ -744,3 +744,17 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
   .resource-search { flex: 1 1 100%; min-width: 0; }
   .resource-note { width: 100%; margin-left: 0; }
 }
+
+/* ---- Containers: long names, image hashes and port lists stay inside their card; badges keep their size ---------------- */
+.container-tile > .text-meta, .stack-card__heading .text-meta { display: block; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.container-tile > .port-exposure { min-width: 0; }
+.container-tile__state, .stack-card__summary .badge { flex: 0 0 auto; white-space: nowrap; }
+.container-tile__top { min-width: 0; gap: 8px; }
+.stack-card__heading { min-width: 0; }
+.stack-card__heading strong { display: block; max-width: 100%; }
+.stack-services .stack-services__ports { grid-column: 1 / -1; align-items: flex-start; white-space: normal; }
+.port-exposure { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.port-exposure > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.port-exposure__host[data-tone="warn"], .port-exposure__line[data-tone="warn"] { color: var(--warning-fg); }
+.port-exposure__host[data-tone="ok"], .port-exposure__line[data-tone="ok"] { color: var(--text-secondary); }
+.container-detail__list-row { min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }

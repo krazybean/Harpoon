@@ -160,6 +160,14 @@ Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime
 and automatic Docker-state reconciliation (cleanup stays explicit and ownership-verified, as in
 `reconcile`, `teardown` and `cleanup-image`; see ADR 0004).
 
+**Backlog (recorded, unscheduled, not started).**
+* **`*.harpoon.localhost` DNS and reverse proxy:** friendly per-deployment names (for example `app.harpoon.localhost`) need a local
+  reverse proxy, name resolution of `*.localhost` on macOS, and a routing and TLS design. It is routing work beyond Milestone E and
+  is deliberately not part of any current change.
+* **Effective port exposure beyond what Milestone E shows:** the desktop now shows Docker's reported mapping beside the verified
+  Mac-side listener; a fuller reachability view (other interfaces, firewall, the VM boundary) is not built.
+* **Container-card layout in the Containers view** beyond the overflow fixes in section 13 of the Milestone E report.
+
 ## Current Position
 
 ### Harpoon 2.0 Step 1 — release hardening IN PROGRESS (2026-10-29)

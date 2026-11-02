@@ -1226,6 +1226,7 @@ version = "2.0.0-rc.2"
 dependencies = [
  "harpoon-deploy",
  "harpoon-deploy-cli",
+ "harpoon-deploy-docker",
  "harpoon-deploy-journal",
  "harpoon-deploy-keychain",
  "libc",
