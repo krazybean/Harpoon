@@ -7,14 +7,9 @@
 //! covered by command-construction tests in `deploy-git` (no SSH server is available offline); real
 //! GitHub or GitLab deliveries are not exercised.
 
-// formatted by deploy-git (its rustfmt.toml); this crate must not reformat the shared file
-#[rustfmt::skip]
-#[path = "../../../deploy-git/tests/support/mod.rs"]
-mod gitsupport;
-
 use super::milestone_c::running_app_ports;
 use super::*;
-use gitsupport::{fixture, git, HttpGit, Tmp};
+use crate::gitsupport::{fixture, git, HttpGit, Tmp};
 use harpoon_deploy::secrets::MemorySecretStore;
 use harpoon_deploy_cli::{run_with, Services};
 use harpoon_deploy_git::sha256::{hmac_sha256, to_hex};
