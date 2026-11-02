@@ -886,6 +886,21 @@ exit 5
         "base64 of the 8-character value passes through unmasked (documented): {}",
         o.stdout
     );
+    // the failed build's log was recorded for the desktop: redacted before it was stored, tail kept
+    let r = state(&t);
+    let logs = r.logs.of(&r.deployments[0].id);
+    let build = logs
+        .iter()
+        .find(|l| l.step == harpoon_deploy::state::Step::Build)
+        .expect("the build log is recorded");
+    assert!(
+        build.text.contains("[REDACTED:") && !build.withheld,
+        "{}",
+        build.text
+    );
+    for v in [v3, v8, v40, "AAAA-line-one", vlong, vinner] {
+        assert!(!build.text.contains(v), "{v} in the recorded log");
+    }
     // sinks: SQLite and WAL byte scans, scratch files, process argv and environment
     let leaks = files_with(
         &t,

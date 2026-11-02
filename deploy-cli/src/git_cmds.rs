@@ -891,7 +891,12 @@ fn accept_webhook(
 }
 
 pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
-    check_gate(p, gate)?;
+    // `--queue-only` polls and queues events and never deploys, so it needs no live gate: it is how the
+    // desktop shows what is waiting without running anything.
+    let queue_only = p.switch("queue-only");
+    if !queue_only {
+        check_gate(p, gate)?;
+    }
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let once = p.switch("once");
     let interval = match p.value("interval-secs") {
@@ -996,7 +1001,7 @@ pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R
             while let Ok(inb) = rx.try_recv() {
                 accept_webhook(&rt, p, &inb, out)?;
             }
-            if drain_all(p, gate, svc, &rt, p.value("repo"), out)? > 0 {
+            if !queue_only && drain_all(p, gate, svc, &rt, p.value("repo"), out)? > 0 {
                 flush(out);
                 continue;
             }

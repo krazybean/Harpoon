@@ -1177,9 +1177,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "harpoon-deploy"
+version = "0.0.0"
+
+[[package]]
+name = "harpoon-deploy-cli"
+version = "0.0.0"
+dependencies = [
+ "harpoon-deploy",
+ "harpoon-deploy-docker",
+ "harpoon-deploy-git",
+ "harpoon-deploy-journal",
+ "harpoon-deploy-keychain",
+]
+
+[[package]]
+name = "harpoon-deploy-docker"
+version = "0.0.0"
+dependencies = [
+ "harpoon-deploy",
+]
+
+[[package]]
+name = "harpoon-deploy-git"
+version = "0.0.0"
+dependencies = [
+ "harpoon-deploy",
+ "harpoon-deploy-docker",
+]
+
+[[package]]
+name = "harpoon-deploy-journal"
+version = "0.0.0"
+dependencies = [
+ "harpoon-deploy",
+]
+
+[[package]]
+name = "harpoon-deploy-keychain"
+version = "0.0.0"
+dependencies = [
+ "harpoon-deploy",
+]
+
+[[package]]
 name = "harpoon-desktop"
 version = "2.0.0-rc.2"
 dependencies = [
+ "harpoon-deploy",
+ "harpoon-deploy-cli",
+ "harpoon-deploy-journal",
+ "harpoon-deploy-keychain",
  "libc",
  "serde",
  "serde_json",

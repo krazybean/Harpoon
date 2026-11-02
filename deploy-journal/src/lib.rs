@@ -135,6 +135,8 @@ pub struct Restored {
     pub config: harpoon_deploy::config::ConfigState,
     /// Registered repositories, observed remote commits and each deployment's source commit.
     pub git: harpoon_deploy::git::GitState,
+    /// The recorded, redacted log of each deployment step that has one.
+    pub logs: harpoon_deploy::steplog::LogState,
     /// A torn final write that was (or, read-only, would be) discarded.
     pub discarded_tail_bytes: usize,
     /// Deployments newly marked interrupted by this open. Empty on every later open.
@@ -306,6 +308,7 @@ impl<W: Wal> FileJournal<W> {
                 control: state.control,
                 config: state.config,
                 git: state.git,
+                logs: state.logs,
                 discarded_tail_bytes: discarded,
                 startup: StartupReport::default(),
             },
@@ -414,6 +417,7 @@ pub fn read_only(dir: &Path) -> Result<Restored, OpenError> {
         control: state.control,
         config: state.config,
         git: state.git,
+        logs: state.logs,
         discarded_tail_bytes: match rec.tail {
             Tail::Clean => 0,
             Tail::PartialDiscarded(n) => n,

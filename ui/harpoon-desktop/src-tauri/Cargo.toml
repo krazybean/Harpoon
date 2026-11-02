@@ -15,6 +15,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
 tauri = { version = "=2.12.1", features = [] }
+harpoon-deploy = { path = "../../../deploy" }
+harpoon-deploy-journal = { path = "../../../deploy-journal" }
+harpoon-deploy-cli = { path = "../../../deploy-cli" }
+harpoon-deploy-keychain = { path = "../../../deploy-keychain" }
 
 [features]
 default = ["custom-protocol"]

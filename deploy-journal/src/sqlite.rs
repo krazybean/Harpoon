@@ -258,6 +258,7 @@ fn restore(db: &Db) -> Result<Restored, SqliteOpenError> {
         control: state.control,
         config: state.config,
         git: state.git,
+        logs: state.logs,
         discarded_tail_bytes: 0,
         startup: StartupReport::default(),
     })
@@ -374,6 +375,7 @@ impl SqliteJournal {
             Line::Control(c) => self.insert_row("control", &harpoon_deploy::control::encode(c)),
             Line::Config(c) => self.insert_row("config", &harpoon_deploy::config::encode(c)),
             Line::Git(g) => self.insert_row("git", &harpoon_deploy::git::encode(g)),
+            Line::StepLog(l) => self.insert_row("steplog", &harpoon_deploy::steplog::encode(l)),
         });
         match imported.and_then(|()| self.db.exec("COMMIT").map_err(|e| e.to_string())) {
             Ok(()) => Ok(()),
@@ -441,5 +443,8 @@ impl Journal for SqliteJournal {
     }
     fn git(&mut self, r: &harpoon_deploy::git::GitRecord) -> Result<(), JournalError> {
         self.insert("git", &harpoon_deploy::git::encode(r))
+    }
+    fn step_log(&mut self, r: &harpoon_deploy::steplog::StepLogRec) -> Result<(), JournalError> {
+        self.insert("steplog", &harpoon_deploy::steplog::encode(r))
     }
 }

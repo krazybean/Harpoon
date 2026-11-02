@@ -43,6 +43,8 @@ pub enum Line {
     Config(crate::config::ConfigRecord),
     /// A registered repository, an observed remote commit or a deployment's source (see [`crate::git`]).
     Git(crate::git::GitRecord),
+    /// The recorded, redacted log of one deployment step (see [`crate::steplog`]).
+    StepLog(crate::steplog::StepLogRec),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -517,6 +519,14 @@ pub fn decode_line(line: &str) -> Result<Line, DecodeError> {
             let f: Vec<&str> = body.split('\t').collect();
             crate::control::decode(&f).map(Line::Control).map_err(DecodeError)
         }
+        "deplog" => {
+            let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
+            if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
+                return err("checksum mismatch");
+            }
+            let f: Vec<&str> = body.split('\t').collect();
+            crate::steplog::decode(&f).map(Line::StepLog).map_err(DecodeError)
+        }
         "gitrepo" | "gitseen" | "gitsrc" => {
             let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
             if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
@@ -658,6 +668,8 @@ pub struct State {
     pub config: crate::config::ConfigState,
     /// Registered repositories, observed remote commits and deployment sources.
     pub git: crate::git::GitState,
+    /// Recorded step logs, one per (deployment, step).
+    pub logs: crate::steplog::LogState,
 }
 
 fn bad_ledger(i: usize, e: LedgerError) -> FormatError {
@@ -729,6 +741,10 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
                 .control
                 .apply(c)
                 .map_err(|e| FormatError::Inconsistent(format!("control record does not apply: {e}")))?,
+            Line::StepLog(l) => st
+                .logs
+                .apply(l)
+                .map_err(|e| FormatError::Inconsistent(format!("step log does not apply: {e}")))?,
             Line::Git(g) => st
                 .git
                 .apply(g)
@@ -738,6 +754,17 @@ pub fn replay(lines: &[Line]) -> Result<State, FormatError> {
                 .apply(c)
                 .map_err(|e| FormatError::Inconsistent(format!("configuration record does not apply: {e}")))?,
         }
+    }
+    if let Some(l) = st
+        .logs
+        .logs
+        .iter()
+        .find(|l| !st.deployments.iter().any(|d| d.id == l.deployment))
+    {
+        return Err(FormatError::Inconsistent(format!(
+            "a step log names deployment {}, which is not recorded",
+            l.deployment
+        )));
     }
     st.config
         .check_pins(&st.deployments)

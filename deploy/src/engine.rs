@@ -41,6 +41,10 @@ pub trait Journal {
             "this journal cannot store pause and event records".into(),
         ))
     }
+    /// Append the recorded, redacted log of one deployment step (see [`crate::steplog`]).
+    fn step_log(&mut self, _r: &crate::steplog::StepLogRec) -> Result<(), JournalError> {
+        Err(JournalError::Io("this journal cannot store step logs".into()))
+    }
     /// Append one Git record (a registered repository, an observed remote commit, or a deployment's
     /// source; see [`crate::git`]). Never contains a credential.
     fn git(&mut self, _r: &crate::git::GitRecord) -> Result<(), JournalError> {
@@ -72,6 +76,7 @@ pub struct MemoryJournal {
     pub control_records: Vec<crate::control::ControlRecord>,
     pub config_records: Vec<crate::config::ConfigRecord>,
     pub git_records: Vec<crate::git::GitRecord>,
+    pub step_logs: Vec<crate::steplog::StepLogRec>,
     writes: usize,
     crash_at: Option<usize>,
     trace: Option<Trace>,
@@ -165,6 +170,12 @@ impl Journal for MemoryJournal {
     fn git(&mut self, r: &crate::git::GitRecord) -> Result<(), JournalError> {
         self.gate()?;
         self.git_records.push(r.clone());
+        Ok(())
+    }
+
+    fn step_log(&mut self, r: &crate::steplog::StepLogRec) -> Result<(), JournalError> {
+        self.gate()?;
+        self.step_logs.push(r.clone());
         Ok(())
     }
 }

@@ -31,4 +31,5 @@ pub mod rollback;
 pub mod secrets;
 pub mod serving;
 pub mod state;
+pub mod steplog;
 pub mod time;

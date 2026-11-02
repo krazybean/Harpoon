@@ -209,5 +209,7 @@ No live validation of any of this; real 409 behaviour (including child images an
   `deploy`/`replace`; the immutable commit is recorded before it starts. Credentials are Keychain secrets handed to Git through
   files, never argv or URLs; SSH requires a pinned host key. `watch` is foreground and attended: **automatic while Harpoon is
   running**, polling at least every 60 s and optionally listening for signed webhooks on loopback. Live runs need the same gates
-  as `deploy`/`replace`; the shipping binary refuses them (`--simulate` is the offline path). See
-  `DEPLOY_MILESTONE_D_GIT_INTEGRATION.md`; Gate U is NOT PASSED (`SPIKE_UNATTENDED_EXECUTION.md`).
+  as `deploy`/`replace`; the shipping binary refuses them (`--simulate` is the offline path).
+  `watch --once --queue-only` only polls and queues events (no gate check, no deployment): the desktop uses it to show what is
+  waiting. Deployment steps now also record their bounded, redacted output as `deplog` journal records (read by the desktop; see
+  `DEPLOY_MILESTONE_E_DESKTOP.md`). See `DEPLOY_MILESTONE_D_GIT_INTEGRATION.md`; Gate U is NOT PASSED (`SPIKE_UNATTENDED_EXECUTION.md`).

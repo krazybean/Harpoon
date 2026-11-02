@@ -1776,6 +1776,7 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         ))
     })?;
     print_report(out, &d, &report);
+    record_logs(out, &mut journal, &d, &report);
     print_prepare_failure(out, "deploy", &d, &report, &rt, simulate, None);
     record_pauses(out, &rt, &mut journal);
     Ok(
@@ -2076,6 +2077,7 @@ pub(crate) fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Str
         ))
     })?;
     print_report(out, &d, &report);
+    record_logs(out, &mut journal, &d, &report);
     print_prepare_failure(out, "replace", &d, &report, &rt, simulate, Some(&serving));
     record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
@@ -2405,6 +2407,7 @@ fn rollback(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R 
         ))
     })?;
     print_report(out, &d, &report);
+    record_logs(out, &mut journal, &d, &report);
     print_prepare_failure(out, "rollback", &d, &report, &rt, simulate, Some(&serving));
     record_pauses(out, &rt, &mut journal);
     if let Some(i) = &d.interruption {
@@ -2636,6 +2639,33 @@ fn restore(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
         Some(RecoveryOutcome::Restored | RecoveryOutcome::RestoredUnverified) => exit::OK,
         _ => exit::FAILED,
     })
+}
+
+/// Keep what the run's steps logged (already redacted, or withheld) so it can be shown after this process is
+/// gone. A failure to write it is a note: the deployment record itself is what matters.
+fn record_logs(
+    out: &mut String,
+    journal: &mut harpoon_deploy_journal::SqliteJournal,
+    d: &Deployment,
+    r: &Report,
+) {
+    for (step, cap) in &r.logs {
+        let rec = harpoon_deploy::steplog::StepLogRec::from_capture(
+            d.id.clone(),
+            *step,
+            &cap.text,
+            cap.summary.withheld,
+            cap.summary.truncated(),
+            now_ms(),
+        );
+        if let Err(e) = journal.step_log(&rec) {
+            let _ = writeln!(
+                out,
+                "warning: could not record the {} log ({e:?})",
+                step.as_str()
+            );
+        }
+    }
 }
 
 /// After a command that can end a cutover or a rollback: write the pause record of every

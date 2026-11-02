@@ -16,6 +16,7 @@ mod context_discovery;
 mod cli_path;
 mod bootstrap;
 mod compose_import;
+mod deploy_api;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -1313,6 +1314,7 @@ fn main() {
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
             context_discovery::discover_contexts,
+            deploy_api::deploy_snapshot, deploy_api::deploy_step_logs, deploy_api::deploy_op,
             get_counts,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,
