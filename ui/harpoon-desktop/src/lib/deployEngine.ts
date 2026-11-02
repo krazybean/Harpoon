@@ -187,7 +187,7 @@ export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observ
     const projectId = repo?.project ?? repo?.name ?? "ungrouped";
     apps[a.id] = {
       id: a.id, projectId, name: repo?.name ?? a.id,
-      source: repo ? { kind: "git", label: repo.url, detail: repo.branch } : { kind: "folder", label: a.id, detail: "no repository registered" },
+      source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: "no repository registered" },
       url: running && port ? `http://127.0.0.1:${port}` : "", containerName: sv?.container ?? "",
       currentReleaseId: running ? sv!.release : null, lastKnownReleaseId: sv?.release ?? null,
       deployments, releases, automation: automationOf(a, now, (id) => byId.get(id)),
@@ -223,6 +223,33 @@ export function observedFrom(rows: unknown): Observed {
     for (const n of names.split(",")) if (n) out[n.replace(/^\//, "")] = String(r.State ?? "").toLowerCase();
   }
   return out;
+}
+
+/**
+ * The `file://` URL for an absolute local folder: every UTF-8 byte outside `A-Za-z0-9/._-~` is percent-encoded
+ * (so spaces, `%`, `#`, `?` and non-ASCII are safe), and the engine decodes it exactly once. `null` when the path
+ * is not an absolute path the engine would accept (relative, a `.`/`..` component, a control character).
+ */
+export function fileUrlFor(path: string): string | null {
+  const p = path.startsWith("file://") ? path.slice(7) : path;
+  // eslint-disable-next-line no-control-regex
+  if (!p.startsWith("/") || /[\u0000-\u001f\u007f]/.test(p) || p.split("/").some((c) => c === ".." || c === ".")) return null;
+  let out = "file://";
+  for (const b of new TextEncoder().encode(p)) {
+    const c = String.fromCharCode(b);
+    out += /[A-Za-z0-9/._~-]/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/** A recorded repository URL as a person reads it: a file URL is shown as its folder path. Anything that does not decode cleanly is shown as recorded. */
+export function displayUrl(url: string): string {
+  if (!url.startsWith("file://")) return url;
+  try {
+    const d = decodeURIComponent(url.slice(7));
+    // eslint-disable-next-line no-control-regex
+    return d.startsWith("/") && !/[\u0000-\u001f\u007f]/.test(d) ? d : url;
+  } catch { return url; }
 }
 
 /** Why a mutation is disabled in this build, or null when the engine would accept it. */

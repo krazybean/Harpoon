@@ -145,3 +145,34 @@ test("production shows the engine; the simulation is only reachable through the 
   const view = readFileSync(new URL("../views/deploy/DeployView.tsx", import.meta.url), "utf8");
   assert.match(view, /\{sim \? <>/, "simulation controls render only in simulation mode");
 });
+
+import { displayUrl, fileUrlFor } from "./deployEngine.ts";
+
+test("a local folder becomes one safely encoded file URL, and bad paths become none", () => {
+  assert.equal(fileUrlFor("/Users/juan/Harpoon UI Test"), "file:///Users/juan/Harpoon%20UI%20Test");
+  assert.equal(fileUrlFor("/Users/x/café #1 100%"), "file:///Users/x/caf%C3%A9%20%231%20100%25");
+  assert.equal(fileUrlFor("/plain/path-1.2_3~"), "file:///plain/path-1.2_3~");
+  assert.equal(fileUrlFor("file:///Users/x/a b"), "file:///Users/x/a%20b", "an existing file URL is encoded once from its path");
+  for (const bad of ["relative/path", "", "/a/../b", "/a/./b", "/a/\nb", "/a/\u0000", "/a/\u007f"]) assert.equal(fileUrlFor(bad), null, JSON.stringify(bad));
+});
+
+test("an encoded URL never carries a raw space, control character or extra separator", () => {
+  for (const p of ["/a b/c d", "/x/\u{1F600}", "/q?x=1#frag", "/p%2e%2e/q"]) {
+    const u = fileUrlFor(p);
+    assert.match(u, /^file:\/\/\/[A-Za-z0-9/._~%-]*$/, u);
+    assert.equal(decodeURIComponent(u.slice(7)), p, "it decodes back exactly once");
+  }
+  assert.equal(fileUrlFor("/p%2e%2e/q"), "file:///p%252e%252e/q", "a literal percent is encoded, so it is never read as a dot");
+});
+
+test("recorded file URLs are shown as folder paths; anything odd is shown as recorded", () => {
+  assert.equal(displayUrl("file:///Users/x/Harpoon%20UI%20Test"), "/Users/x/Harpoon UI Test");
+  assert.equal(displayUrl("https://github.com/acme/shop.git"), "https://github.com/acme/shop.git");
+  assert.equal(displayUrl("file:///a/%zz"), "file:///a/%zz");
+  assert.equal(displayUrl("file:///a/%0a"), "file:///a/%0a");
+});
+
+test("an existing journal directory with no store is the empty state, not 'cannot read'", () => {
+  const s = toDeployState({ schema: 1, generatedMs: 1, runtimeDir: "/x", store: "missing", storeError: null, writerHeld: false, gate: GATE, repos: [], apps: [], definitions: [] }, { observed: {}, keychain: "unlocked" });
+  assert.deepEqual([s.scenario, s.engine.store, s.engine.storeError], ["empty", "missing", null]);
+});

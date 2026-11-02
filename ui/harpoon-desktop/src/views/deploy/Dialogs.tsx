@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { liveBlock } from "../../lib/deployEngine.ts";
+import { fileUrlFor, liveBlock } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -238,8 +238,9 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   const [project, setProject] = useState("");
   const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
-  const url = kind === "folder" ? (location.startsWith("file://") ? location : `file://${location}`) : location;
-  const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || location.startsWith("/") || location.startsWith("file:///"));
+  const folderUrl = kind === "folder" ? fileUrlFor(location.trim()) : null;
+  const url = kind === "folder" ? folderUrl ?? "" : location;
+  const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || folderUrl !== null);
   const submit = async () => {
     const r = await c.engine!.run({ op: "add-repo", name, url, project: project || null, branch: branch || null, filters: [], containerPort: Number(port), dockerfile: dockerfile || null, context: null, target: null, healthPath: health || null, username: username || null, knownHost: null, webhook: null, app: null, environment: null });
     // a token is handed to the Keychain through standard input, never kept here
@@ -252,7 +253,7 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
       <div className="dp-field"><label>Source</label><div className="dp-seg"><button aria-pressed={kind === "git"} onClick={() => setKind("git")}>Git repository</button><button aria-pressed={kind === "folder"} onClick={() => setKind("folder")}>Local folder (a Git repository on this Mac)</button></div></div>
       <div className="dp-grid dp-grid--2">
         <div className="dp-field"><label htmlFor="rname">Name</label><input id="rname" className="dp-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="storefront" /></div>
-        <div className="dp-field"><label htmlFor="rloc">{kind === "git" ? "Repository URL" : "Absolute path"}</label><input id="rloc" className="dp-input" value={location} onChange={(e) => setLocation(e.target.value)} placeholder={kind === "git" ? "https://github.com/acme/storefront.git" : "/Users/you/code/storefront"} /></div>
+        <div className="dp-field"><label htmlFor="rloc">{kind === "git" ? "Repository URL" : "Absolute path"}</label><input id="rloc" className="dp-input" value={location} onChange={(e) => setLocation(e.target.value)} placeholder={kind === "git" ? "https://github.com/acme/storefront.git" : "/Users/you/code/My Project"} /></div>
         <div className="dp-field"><label>Branch</label><input className="dp-input" value={branch} onChange={(e) => setBranch(e.target.value)} /></div>
         <div className="dp-field"><label>Container port</label><input className="dp-input" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} /></div>
         <div className="dp-field"><label>Dockerfile</label><input className="dp-input" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} /></div>
