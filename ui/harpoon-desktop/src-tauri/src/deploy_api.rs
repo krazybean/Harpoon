@@ -839,9 +839,202 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
     }
 }
 
-/// Run one operation through the engine's CLI library with `Gate::shipping()`. The store is created
-/// (private) on first use. `keychain` is the real Keychain in the app and a fake in tests.
+// ------------------------------------------------------------------ runtime configuration (E.1)
+
+/// What a live engine command needs to reach the Harpoon runtime. Nothing here is inferred from the
+/// environment, a Docker context or a default: every value comes from the runtime's own state file and
+/// is checked to still be true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInfo {
+    pub docker_socket: PathBuf,
+    pub mgmt_socket: PathBuf,
+    /// The directory in which `harpoon/bin/docker-buildx` is looked up (the engine probes exactly that path).
+    pub resources_dir: PathBuf,
+    /// The Harpoon runtime process that owns the published-port listeners.
+    pub forwarder_pid: u32,
+    pub forwarder_command: String,
+}
+
+/// The management socket is a fixed path of the Harpoon runtime (`HarpoonPaths.mgmtSocketPath`); it is
+/// not recorded in `runtime.json`, so it is a constant here and must still be a live socket.
+pub const MGMT_SOCKET: &str = "/tmp/harpoon-mgmt.sock";
+/// The program name the engine's listener check expects for the runtime process.
+const RUNTIME_COMMAND: &str = "harpoon";
+
+fn is_socket(p: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+/// Read and verify the runtime's state. `support` is Harpoon's Application Support directory;
+/// `command_of(pid)` is the running program name of a process, or `None` when it is not running.
+pub fn discover_runtime(
+    support: &Path,
+    mgmt_socket: &Path,
+    resources: &Path,
+    command_of: &dyn Fn(u32) -> Option<String>,
+) -> Result<RuntimeInfo, String> {
+    let file = support.join("runtime.json");
+    let text = std::fs::read_to_string(&file).map_err(|_| {
+        format!("Harpoon's runtime state ({}) is missing, so the runtime is not running or not known. Start Harpoon and try again.", file.display())
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Harpoon's runtime state is unreadable ({e}); nothing was assumed."))?;
+    let socket = v
+        .get("socketPath")
+        .and_then(|x| x.as_str())
+        .filter(|s| s.starts_with('/'))
+        .ok_or("Harpoon's runtime state has no absolute Docker socket path.")?;
+    let pid = v
+        .get("pid")
+        .and_then(|x| x.as_u64())
+        .filter(|p| *p > 1 && *p <= u32::MAX as u64)
+        .ok_or("Harpoon's runtime state has no valid process id.")? as u32;
+    // the pid file is written by the same process; a disagreement means one of them is stale
+    let pidfile = std::fs::read_to_string(support.join("runtime.pid"))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok());
+    if pidfile != Some(pid) {
+        return Err("Harpoon's runtime state is stale: its two process records disagree.".into());
+    }
+    match command_of(pid) {
+        Some(c) if c == RUNTIME_COMMAND => {}
+        Some(c) => {
+            return Err(format!(
+                "Harpoon's runtime state is stale: process {pid} is `{c}`, not the Harpoon runtime."
+            ))
+        }
+        None => {
+            return Err(format!(
+                "Harpoon's runtime state is stale: process {pid} is not running."
+            ))
+        }
+    }
+    let docker_socket = PathBuf::from(socket);
+    if !is_socket(&docker_socket) {
+        return Err(format!("Harpoon's Docker socket {socket} is not available."));
+    }
+    let mgmt_socket = mgmt_socket.to_path_buf();
+    if !is_socket(&mgmt_socket) {
+        return Err(format!(
+            "Harpoon's management socket {} is not available, so guest free space cannot be measured.",
+            mgmt_socket.display()
+        ));
+    }
+    let buildx = resources.join(harpoon_deploy::buildx::BUNDLED_RELATIVE);
+    let meta = std::fs::symlink_metadata(&buildx)
+        .map_err(|_| format!("the bundled Buildx is missing at {}.", buildx.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "the bundled Buildx at {} is not a regular file.",
+            buildx.display()
+        ));
+    }
+    Ok(RuntimeInfo {
+        docker_socket,
+        mgmt_socket,
+        resources_dir: resources.to_path_buf(),
+        forwarder_pid: pid,
+        forwarder_command: RUNTIME_COMMAND.into(),
+    })
+}
+
+/// The running program name of a process (`ps`), for the stale-state check.
+pub fn process_command(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    let t = String::from_utf8_lossy(&out.stdout);
+    let name = t.trim().rsplit('/').next().unwrap_or("").to_string();
+    (out.status.success() && !name.is_empty()).then_some(name)
+}
+
+/// Which operations reach Docker (and so need the runtime's coordinates). Polling only queues; the other
+/// operations touch the journal and the Keychain only.
+fn needs_runtime(op: &DeployOp) -> bool {
+    matches!(
+        op,
+        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. }
+    )
+}
+
+/// Whether the gate lets this operation through to Docker at all.
+fn gate_open_for(op: &DeployOp, gate: &Gate) -> bool {
+    match op {
+        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } => gate.live_deploy_enabled,
+        DeployOp::Rollback { .. } | DeployOp::Restore { .. } => gate.live_replacement_enabled,
+        _ => true,
+    }
+}
+
+/// Arguments that hand the runtime's coordinates to a Docker-touching command. The live-change
+/// authorization is deliberately NOT among them: that opt-in is the user's explicit act and is never
+/// supplied implicitly.
+pub fn runtime_args(r: &RuntimeInfo) -> Vec<String> {
+    vec![
+        "--docker-socket".into(),
+        r.docker_socket.display().to_string(),
+        "--mgmt-socket".into(),
+        r.mgmt_socket.display().to_string(),
+        "--resources-dir".into(),
+        r.resources_dir.display().to_string(),
+        "--forwarder-pid".into(),
+        r.forwarder_pid.to_string(),
+        "--forwarder-command".into(),
+        r.forwarder_command.clone(),
+    ]
+}
+
+/// The engine arguments and standard input for an operation, or the refusal that stops it here.
+pub fn build_args(
+    op: &DeployOp,
+    gate: &Gate,
+    runtime: &dyn Fn() -> Result<RuntimeInfo, String>,
+) -> Result<(Vec<String>, Vec<u8>), OpResult> {
+    let (mut args, stdin) = plan(op);
+    if needs_runtime(op) {
+        match runtime() {
+            Ok(info) => args.extend(runtime_args(&info)),
+            Err(e) if gate_open_for(op, gate) => {
+                let msg = format!("Refused before contacting Docker: {e}");
+                return Err(OpResult {
+                    ok: false,
+                    exit_code: harpoon_deploy_cli::exit::REFUSED,
+                    summary: msg.clone(),
+                    detail: msg,
+                    refused_by_gate: false,
+                });
+            }
+            Err(_) => {}
+        }
+    }
+    Ok((args, stdin))
+}
+
+/// Test seam with no runtime: the shipping gate and a runtime that cannot be found.
+#[cfg(test)]
 pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult {
+    run_op_with(rt, op, keychain, &Gate::shipping(), &|| {
+        Err("no runtime in this test".into())
+    })
+}
+
+/// Run one operation through the engine's CLI library. The app passes `Gate::shipping()`. The store is
+/// created (private) on first use. `keychain` is the real Keychain in the app and a fake in tests.
+/// `runtime` reads and verifies the runtime's coordinates; it is consulted only for Docker-touching
+/// operations. While the gate is closed for an operation, a runtime that cannot be found is not a
+/// refusal of its own: the engine refuses at the gate first, with the gate's reason. Once the gate would
+/// let the operation through, a missing or stale runtime refuses it here, before the engine is reached.
+pub fn run_op_with(
+    rt: &Path,
+    op: &DeployOp,
+    keychain: &dyn SecretStore,
+    gate: &Gate,
+    runtime: &dyn Fn() -> Result<RuntimeInfo, String>,
+) -> OpResult {
     if let Err(e) = prepare(rt) {
         return OpResult {
             ok: false,
@@ -851,7 +1044,10 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
             refused_by_gate: false,
         };
     }
-    let (mut args, stdin) = plan(op);
+    let (mut args, stdin) = match build_args(op, gate, runtime) {
+        Ok(v) => v,
+        Err(refusal) => return refusal,
+    };
     args.push("--runtime-dir".into());
     args.push(rt.display().to_string());
     let mut input: &[u8] = &stdin;
@@ -861,7 +1057,7 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
         stdin_is_terminal: false,
         next: None,
     };
-    let out = run_with(&args, &Gate::shipping(), &mut svc);
+    let out = run_with(&args, gate, &mut svc);
     let text = if out.stderr.trim().is_empty() {
         out.stdout.clone()
     } else {
@@ -906,6 +1102,18 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The directory that contains `harpoon/bin/docker-buildx`: the app's Resources (the bundle maps
+/// `bundle-resources/harpoon` to `harpoon`), or the source tree's `bundle-resources` in a debug build.
+fn bundled_resources(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    if cfg!(debug_assertions) {
+        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bundle-resources"));
+    }
+    app.path()
+        .resource_dir()
+        .map_err(|e| format!("no resource directory: {e}"))
+}
+
 static OPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tauri::command]
@@ -927,11 +1135,20 @@ pub async fn deploy_step_logs(app: tauri::AppHandle, deployment: String) -> Resu
 #[tauri::command]
 pub async fn deploy_op(app: tauri::AppHandle, op: DeployOp) -> Result<OpResult, String> {
     let dir = app_dir(&app)?;
+    use tauri::Manager;
+    let support = app
+        .path()
+        .home_dir()
+        .map(|h| h.join("Library/Application Support/Harpoon"))
+        .map_err(|e| format!("no home directory: {e}"))?;
+    let resources = bundled_resources(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         // one engine command at a time from the desktop; the journal's own lock covers other processes
         let _one = OPS.lock().unwrap_or_else(|e| e.into_inner());
         let kc = harpoon_deploy_keychain::Keychain::new();
-        run_op(&dir, &op, &kc)
+        run_op_with(&dir, &op, &kc, &Gate::shipping(), &|| {
+            discover_runtime(&support, Path::new(MGMT_SOCKET), &resources, &process_command)
+        })
     })
     .await
     .map_err(|e| format!("background task failed: {e}"))

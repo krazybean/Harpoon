@@ -53,3 +53,12 @@ A safe preview needs (a) one registered application per branch with its own iden
 ## 8. Remaining acceptance limitations
 
 Gate U NOT PASSED (attended only); a live deployment, rollback and restore from the desktop are unproven because the gate is closed; the Keychain "locked" state is learned from a failed engine call, not probed ahead; Docker state is polled (3 s while Deployments is open); previews, development deploys, application removal and settings editing are not available; Milestone D's residual risks stand (see the roadmap).
+
+## 9. E.1 — runtime coordinates for Docker-touching operations
+
+`deploy_op` used to pass no `--docker-socket`, `--mgmt-socket`, `--resources-dir`, `--forwarder-pid` or `--forwarder-command`, which the CLI requires (and never defaults) for `git-deploy`, `git-run`, `rollback` and `restore`. Now, for exactly those operations, `deploy_api` reads `~/Library/Application Support/Harpoon/runtime.json` (Docker socket, pid), checks it is still true (`runtime.pid` agrees; the pid is a running program named `harpoon`; the Docker and management sockets are sockets; the bundled `harpoon/bin/docker-buildx` is a regular file) and passes the values explicitly. The management socket is the runtime's fixed `/tmp/harpoon-mgmt.sock` (not recorded in `runtime.json`). Nothing comes from the environment, a Docker context or a default.
+
+* **Authorization is not supplied.** `--authorize-live-docker-changes=…` remains the user's explicit act; the app never adds it.
+* **Order of refusals:** while the gate is closed for an operation, the engine's gate refusal stays first and only (a missing runtime is not reported instead of it). Once a gate would let it through, a missing or stale runtime refuses it in the app before the engine is reached, with the reason.
+* Polling, config, secrets, resume and recover get no Docker coordinates.
+* The gate, the acceptance binary and the engine are unchanged; with `Gate::shipping()` no live operation can run, so this is verified offline (argument construction, discovery against temporary sockets and files, refusal ordering). Not proven: a live run with the gate open, and that `ps` reports `harpoon` for the installed app's runtime (it does for the current dev runtime).
