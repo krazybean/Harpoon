@@ -129,7 +129,26 @@ func handleDoctor() -> Int32 {
             var st = stat()
             let permsOk = stat(HarpoonPaths.mgmtSocketPath, &st)==0 && (st.st_mode & 0o777)==0o600
             check(permsOk, "mgmt socket 0600")
-            check(isMgmtServiceReachable(), "mgmt service reachable (vsock 2377)")
+            let mgmtReachable = isMgmtServiceReachable()
+            check(mgmtReachable, "mgmt service reachable (vsock 2377)")
+            if mgmtReachable {
+                // Guest DNS: ask each configured resolver about "localhost" (a reply of any kind proves it is alive; no public name is
+                // involved). Read-only: `cat /etc/resolv.conf` and `nslookup localhost <resolver>` in the guest.
+                let resolv = mgmtExecCapture(argv: ["cat", "/etc/resolv.conf"])
+                if resolv.code == 0 {
+                    let servers = Array(guestNameservers(resolv.stdout).prefix(3))
+                    var probes: [String: ResolverProbe] = [:]
+                    for ns in servers {
+                        let r = mgmtExecCapture(argv: ["nslookup", "localhost", ns])
+                        probes[ns] = classifyResolverProbe(exit: r.code, stdout: r.stdout, stderr: r.stderr)
+                    }
+                    let verdict = assessGuestDNS(nameservers: servers, probes: probes, hostServers: hostDNSServers())
+                    check(verdict.ok, "Guest DNS ................. \(verdict.message)", warn: true)
+                    for note in verdict.notes { cliPrint("INFO  Guest DNS ................. \(note)") }
+                } else {
+                    check(false, "Guest DNS ................. FAIL — cannot read the guest's /etc/resolv.conf: \(resolv.stderr)", warn: true)
+                }
+            }
         }
         if let log = try? String(contentsOfFile: HarpoonPaths.logFile.path, encoding: .utf8) {
             check(log.contains("HARPOON_MGMT_READY"), "HARPOON_MGMT_READY in log")

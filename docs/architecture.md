@@ -369,6 +369,41 @@ outbound Internet access and `localhost:<port>` reachability for published ports
 container → docker bridge → Linux VM → Harpoon host networking → macOS
 ```
 
+#### Guest DNS
+
+Three different resolvers are involved, and only one of them is Harpoon's responsibility to keep alive:
+
+| Who | Resolver | Set by |
+|---|---|---|
+| Containers | `1.1.1.1`, `8.8.8.8` | `dockerd --dns=…` in the guest `init`; independent of everything below |
+| The guest itself and the Docker daemon (image pull, registry login) | `/etc/resolv.conf` | DHCP, or the Mac's resolvers (below) |
+| The Mac's resolvers | `scutil --dns`, read when the VM starts | passed to the guest as `harpoon.dns=IP,IP` on the kernel command line |
+
+DHCP (VZNAT) advertises the gateway, `192.168.64.1`, as DNS. On some hosts nothing answers there ("connection refused"): Harpoon
+runs no DNS service on it and macOS does not always provide one. The guest `init` therefore decides at every boot:
+
+1. **DHCP DNS answers** → keep it. Nothing is overridden, and every DHCP renewal keeps following the server.
+2. **DHCP DNS does not answer** → write the Mac's resolvers (`harpoon.dns`; `1.1.1.1`/`8.8.8.8` only if none were passed) to
+   `/etc/resolv.conf` **and tell `udhcpc` to leave `/etc/resolv.conf` alone for that interface**. Without this second part the busybox
+   renewal script (`/usr/share/udhcpc/default.script`, `renew()` → `resolvconf()`) puts the dead gateway DNS back at the first renewal,
+   30 minutes after boot, and `docker pull` and guest lookups fail from then on (containers keep working). The mechanism is the stock
+   `NO_DNS` list in `/etc/udhcpc/udhcpc.conf`, which `default.script` sources; address, route and lease handling are untouched.
+
+The hold is a marked block (`# BEGIN harpoon-dns-hold` … `# END harpoon-dns-hold`) in `/etc/udhcpc/udhcpc.conf`, which lives on the
+persistent disk. `init` removes it before `udhcpc` starts, so each boot begins with "DHCP DNS preferred" and only a boot that again
+finds DHCP DNS unusable holds the override. The Mac's resolvers are those at VM start; after a network change they can be stale
+(restart Harpoon to re-read them).
+
+`harpoon doctor` reports **Guest DNS**: it reads the guest's `/etc/resolv.conf` and asks each listed resolver (at most three) for
+`localhost`. Any DNS reply, including NXDOMAIN, proves the resolver is alive; no public name is looked up, so the verdict does not
+depend on public DNS or on the Internet being reachable. A guest whose resolvers all fail to answer is a warning that names them.
+
+Tests: `tools/guest-builder/regression-guest-dns.sh` runs the guest's real `default.script` (pinned copy in
+`tools/guest-builder/fixtures/`) and the real `init` DNS functions in a sandbox for both cases (working DHCP DNS; fallback DNS held
+across repeated renewals), including a control that reproduces the original defect; `harpoon/regression-guest-dns-doctor.sh` covers
+the doctor's classification. A fix to `init` reaches a machine through the rebuilt guest initramfs (it refreshes the root's `init` at
+boot) and a Harpoon restart.
+
 ## Repository Direction
 
 Illustrative layout — to be validated before freezing crate boundaries:
