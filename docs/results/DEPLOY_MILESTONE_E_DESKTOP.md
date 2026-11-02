@@ -62,3 +62,15 @@ Gate U NOT PASSED (attended only); a live deployment, rollback and restore from 
 * **Order of refusals:** while the gate is closed for an operation, the engine's gate refusal stays first and only (a missing runtime is not reported instead of it). Once a gate would let it through, a missing or stale runtime refuses it in the app before the engine is reached, with the reason.
 * Polling, config, secrets, resume and recover get no Docker coordinates.
 * The gate, the acceptance binary and the engine are unchanged; with `Gate::shipping()` no live operation can run, so this is verified offline (argument construction, discovery against temporary sockets and files, refusal ordering). Not proven: a live run with the gate open, and that `ps` reports `harpoon` for the installed app's runtime (it does for the current dev runtime).
+
+## 10. E.2 — Git workspace paths with spaces
+
+Closed-gate validation of E/E.1 found that polling from the desktop's real data directory (`~/Library/Application Support/com.harpoon.desktop/deploy`) failed: `Workspace::create` accepted only `[A-Za-z0-9/_.-]` in the whole workspace path. The restriction protected one real shell-parsed string, `GIT_SSH_COMMAND` (Git runs it through `sh`, and ssh parses `-o` values itself); every other use is a structured argument or an environment value (checked: Git runs `GIT_ASKPASS` directly, so a space is fine there). It was therefore an over-narrow guard, not a policy about spaces.
+
+* The directory above the workspace may now contain ordinary characters (spaces, non-ASCII, apostrophes). `ssh_command` quotes the two paths it embeds (shell single quotes; the `UserKnownHostsFile` value also in ssh double quotes) and leaves ordinary paths byte-identical to before.
+* Still refused: control characters, `"`, `\\`, `$` and `%` (ssh option parsing and expansion), non-UTF-8 paths. The nonce is now checked on its own: non-empty, `[A-Za-z0-9_.-]`, not `..` (it was previously covered only by the whole-path whitelist, which let `/` through). Validation now happens before any directory is created.
+* Unchanged: the 0700 workspace created with `mkdir` semantics (an existing name or symlink fails), owner-pid scoping and sweeping, cleared Git environment, hooks/helpers disabled.
+* Tests: real Git poll and checkout (branch and exact commit) under a spaced path with an apostrophe; the real `ssh -G` parsing the generated command through `sh -c`; `GIT_ASKPASS` run directly from a spaced workspace; unsafe names and paths refused and nothing created; a CLI test polling (`watch --once --queue-only`, shipping gate) from a spaced runtime directory with no Docker request. The four runner tests and the CLI test fail on the previous code.
+* Not covered: the docker build path from a spaced checkout (live, gate closed); SSH to a real server.
+
+**UI acceptance is still not done.** The F1–F8 run had no screen-control or accessibility interface; only backend behavior (the shipping CLI, same library and gate) was observed. No result in this report or in the validation notes is a desktop-UI validation.

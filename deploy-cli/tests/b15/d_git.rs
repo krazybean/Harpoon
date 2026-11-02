@@ -1427,3 +1427,88 @@ fn two_pushes_during_a_running_build_do_not_interrupt_it_and_only_the_newest_bui
     );
     assert!(scratch_clean(&t));
 }
+
+/// Milestone E.2: the desktop's data directory is `~/Library/Application Support/...`, which has a space.
+/// Polling (queue only, as the desktop does under the shipping gate) must work from such a path.
+#[test]
+fn polling_works_from_a_runtime_directory_whose_path_contains_spaces() {
+    use std::os::unix::fs::DirBuilderExt;
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    let rt =
+        gt.0.join("Library/Application Support/com.example app/deploy");
+    for d in [rt.clone(), rt.join("deploy-journal")] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&d)
+            .unwrap();
+        std::fs::set_permissions(&d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let rts = rt.display().to_string();
+    let go = |args: &[&str]| {
+        let mut a = args.to_vec();
+        a.extend(["--runtime-dir", &rts]);
+        crun(&t, &SHIPPING, &kc, b"", &a)
+    };
+    assert_exit(
+        &go(&[
+            "repo-add",
+            "--name",
+            "shop",
+            "--url",
+            &url(&repo),
+            "--app",
+            APP,
+            "--container-port",
+            "8080",
+        ]),
+        0,
+    );
+    let before = t.docker_requests();
+    let first = go(&["watch", "--once", "--queue-only"]);
+    assert_exit(&first, 0);
+    assert!(
+        first.stdout.contains("first seen at") && first.stdout.contains("baseline"),
+        "{}{}",
+        first.stdout,
+        first.stderr
+    );
+    let third = commit(&repo, "VERSION", "three\n");
+    let second = go(&["watch", "--once", "--queue-only"]);
+    assert_exit(&second, 0);
+    assert!(
+        second.stdout.contains("queued as") && second.stdout.contains(&third),
+        "{}{}",
+        second.stdout,
+        second.stderr
+    );
+    let ev = go(&["events", "--app", APP]);
+    assert!(
+        ev.stdout.contains(&third) && ev.stdout.contains("held"),
+        "{}",
+        ev.stdout
+    );
+    // reading and queueing only: no deployment, no Docker request
+    assert!(go(&["status"]).stdout.contains("deployments: 0"));
+    assert_eq!(t.docker_requests(), before);
+    // and the workspace it used under the spaced path is gone
+    let scratch = std::fs::read_dir(&rt)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .flat_map(|d| {
+            std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|n| n.starts_with("git-ws-"))
+        .count();
+    assert_eq!(scratch, 0);
+}
