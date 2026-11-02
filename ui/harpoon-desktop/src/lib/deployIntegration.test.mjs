@@ -7,7 +7,7 @@ import { parseDeployHash, SCENARIOS } from "./deployPreview.ts";
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const deployFiles = () => [
   ...readdirSync(new URL("../views/deploy/", import.meta.url)).filter((f) => /\.(tsx?|css)$/.test(f)).map((f) => `../views/deploy/${f}`),
-  "./deployTypes.ts", "./deployMock.ts", "./deployStore.ts", "./deployPresentation.ts", "./deployPreview.ts", "../hooks/useDeploySimulation.ts",
+  "./deployTypes.ts", "./deployMock.ts", "./deployStore.ts", "./deployPresentation.ts", "./deployPreview.ts", "./deployEngine.ts", "../hooks/useDeploySimulation.ts",
 ];
 
 test("the Deployments layer is mock-only: no Tauri, no Docker, no network, no storage, no processes", () => {
@@ -31,9 +31,10 @@ test("the view says it is simulated and offers an explicit simulation boundary",
   assert.match(screens, /does not exist in your real Containers view/);
 });
 
-test("simulated containers are never links into the real Containers view", () => {
+test("simulated containers are never links into the real Containers view; only real-engine containers are", () => {
   const screens = read("../views/deploy/Screens.tsx");
-  assert.doesNotMatch(screens, /openContainer|containerDestination|handleNav\(["']containers/);
+  assert.doesNotMatch(screens, /containerDestination|handleNav\(["']containers/);
+  for (const line of screens.split("\n").filter((l) => /openContainers/.test(l))) assert.match(line, /c\.engine/, `a Containers link must be engine-only: ${line.trim().slice(0, 100)}`);
 });
 
 test("secret inputs are masked, never autocompleted, and cleared after saving", () => {

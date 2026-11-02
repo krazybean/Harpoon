@@ -23,6 +23,7 @@ import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
+import { useDeployEngine } from "./hooks/useDeployEngine";
 import { navBadge } from "./lib/deployStore";
 import { parseDeployHash } from "./lib/deployPreview";
 import type { RuntimeState } from "./lib/deployTypes";
@@ -50,7 +51,7 @@ type DiscoveredContext = { id: string; name: string; engine: string; endpoint?: 
 type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting" | "vm_booting" | "docker_starting" | "ready" | "failed";
 type RuntimeRefreshEvent = { key: string; ok: boolean; generation?: number; value?: unknown; error?: string; values?: RuntimeRefreshEvent[] };
 type BootstrapEvent = { status?: HarpoonStatus; observedAtMs?: number; ok?: boolean; error?: string | null };
-// Deployments is a SIMULATED, mock-backed view (no deployment engine exists yet); it is code-split so the
+// Deployments shows the real deployment engine (a simulation only in an explicit development preview); it is code-split so the
 // existing screens do not pay for it.
 const DeployView = lazy(() => import("./views/deploy/DeployView").then((module) => ({ default: module.DeployView })));
 const DevTopologyPrototype = import.meta.env.DEV ? lazy(() => import("./components/TopologyPrototype").then((module) => ({ default: module.TopologyPrototype }))) : null;
@@ -139,7 +140,7 @@ const NavItems = memo(function NavItems({ active, onNav, deployBadge }: { active
         <button key={n} aria-current={active===n ? "page" : undefined} aria-label={label} title={label} onClick={() => onNav(n as Nav)} className={active===n ? "shell-nav__item shell-nav__item--active" : "shell-nav__item"}>
           <Icon size={20} weight={active===n ? "fill" : "regular"} className="shell-nav__icon" aria-hidden="true" />
           <span className="shell-nav__label">{label}</span>
-          {n === "deployments" && deployBadge !== "none" ? <span role="img" aria-label={deployBadge === "error" ? "simulated deployment needs attention (error)" : "simulated deployment needs attention"} title="Simulated: a mock deployment needs attention" style={{ marginLeft: "auto", flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: active === "deployments" ? "var(--nav-selected-text)" : deployBadge === "error" ? "var(--error)" : "var(--warning)" }} /> : null}
+          {n === "deployments" && deployBadge !== "none" ? <span role="img" aria-label={deployBadge === "error" ? "a deployment needs attention (error)" : "a deployment needs attention"} title="A deployment needs attention" style={{ marginLeft: "auto", flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: active === "deployments" ? "var(--nav-selected-text)" : deployBadge === "error" ? "var(--error)" : "var(--warning)" }} /> : null}
         </button>
       ))}
     </>
@@ -228,7 +229,9 @@ export default function App() {
   const status = statusShelf.data;
   // What Harpoon REALLY reports; the Deployments views believe this unless a simulation override is set.
   const realRuntime: RuntimeState = status?.state === "running" ? (status.dockerReady ? "connected" : "docker-not-ready") : status?.state === "starting" || status?.state === "booting" ? "docker-not-ready" : "stopped";
-  const deployBadge = navBadge(deploySim.state, deploySim.runtimeOverride ?? realRuntime);
+  // Production always shows the REAL engine's state; the seeded simulation is reachable only through an explicit development preview link.
+  const deployEngine = useDeployEngine(realRuntime, active === "deployments");
+  const deployBadge = navBadge(deployPreviewActive ? deploySim.state : deployEngine.state, deployPreviewActive ? deploySim.runtimeOverride ?? realRuntime : deployEngine.runtime);
   const statusAt = statusShelf.updatedAt;
   const statusError = statusShelf.error;
   const dockerVersion = dockerShelf.data;
@@ -711,7 +714,7 @@ export default function App() {
             {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
             {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
             {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
-            {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments (simulated)…</div>}><DeployView sim={deploySim} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} preview={deployPreviewActive ? deployPreview : undefined} /></Suspense>}
+            {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments…</div>}><DeployView {...(deployPreviewActive ? { sim: deploySim, preview: deployPreview } : { engine: deployEngine })} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} onOpenContainers={()=>handleNav("containers")} /></Suspense>}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}
             {active==="volumes" && <VolumesView volumes={volumesShelf.data ?? []} refreshing={volumesShelf.refreshing} error={volumesShelf.error} updatedAt={volumesShelf.updatedAt} hasCache={volumesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>volumesShelf.refresh()} />}
             {active==="networks" && <NetworksView networks={networksShelf.data ?? []} containers={containersShelf.data ?? []} refreshing={networksShelf.refreshing} error={networksShelf.error} updatedAt={networksShelf.updatedAt} hasCache={networksShelf.hasCache} containersError={containersShelf.error} containersUpdatedAt={containersShelf.updatedAt} containersHasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>networksShelf.refresh()} refreshContainers={()=>containersShelf.refresh()} />}

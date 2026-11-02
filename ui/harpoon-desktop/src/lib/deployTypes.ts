@@ -69,9 +69,10 @@ export type Release = {
   secrets: { name: string; version: number }[];
 };
 
-export type HeldEvent = { id: string; revision: Revision; ageMin: number };
+export type HeldEvent = { id: string; revision: Revision; ageMin: number; /** Engine mode: the full revision, which a resume decision needs. */ revisionFull?: string; /** Engine mode: `held`, or `selected` (chosen by a resume; nothing has run yet). */ status?: string };
 export type PauseReason =
   | { kind: "failed_cutover"; deploymentId: string; outcome: RecoveryOutcome }
+  | { kind: "interrupted_cutover"; deploymentId: string }
   | { kind: "rollback"; releaseId: string };
 export type Automation = { state: "active" | "paused"; reason?: PauseReason; sinceMin?: number; held: HeldEvent[] };
 
@@ -128,8 +129,24 @@ export type Project = { id: string; name: string; sourceLabel: string; appIds: s
 /** A simulated deployment in flight; advanced one phase at a time. */
 export type SimJob = { appId: string; deploymentId: string; outcome: NextOutcome; hadPrevious: boolean; phase: number };
 
+/** Present only when the data comes from the real engine. Absent in the explicit simulation/preview mode. */
+export type EngineMeta = {
+  generatedMs: number;
+  store: "missing" | "ok" | "error";
+  storeError: string | null;
+  writerHeld: boolean;
+  gate: { liveDeploy: boolean; liveReplacement: boolean; reason: string };
+  repos: EngineRepo[];
+  /** The last refresh failed; what is shown is the last good snapshot (or nothing). */
+  loadError: string | null;
+  stale: boolean;
+};
+export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; seen: { refName: string; commit: string; atMs: number }[] };
+
 export type DeployState = {
+  /** Engine mode only ever uses `loading` (nothing loaded yet) and `empty`/`healthy` (a loaded snapshot with/without apps). */
   scenario: ScenarioId;
+  engine?: EngineMeta;
   projects: Project[];
   apps: Record<string, AppModel>;
   keychain: KeychainState;
