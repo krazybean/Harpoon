@@ -51,23 +51,30 @@ test("'Open runtime…' picks a folder, attaches it, and says why when it cannot
   await cancelled.unmount();
 });
 
-test("an attached runtime is labelled 'External · read-only' and can be closed", async () => {
+test("an attached runtime is labelled 'External · read-only' and can be detached", async () => {
   const m = await mountView(engine);
   await m.render(stateOf(matching));
   assert.match(find(m.host, ".dp-h2", "External").textContent, /External · runtime/);
   assert.ok(find(m.host, ".dp-pill", "External · read-only"));
   assert.ok(find(m.host, "button.dp-card", "External · read-only"), "the application card carries the badge too");
   assert.match(m.host.textContent, /legacy journal\.wal, not migrated/);
-  await click(find(m.host, "button", "Close"));
+  const detach = find(m.host, "button", "Detach runtime");
+  assert.match(detach.title, /only this reference.*untouched/);
+  assert.equal(find(m.host, "button", /^Close$/), undefined, "nothing here offers to 'close' the folder");
+  await click(detach);
   assert.deepEqual(m.calls.at(-1), { detach: PATH });
   await m.unmount();
 });
 
-test("an attached runtime that cannot be read is reported with a way to close it", async () => {
+test("an attached runtime that cannot be read is shown as unavailable, kept, and can be retried or detached", async () => {
   const m = await mountView(engine);
   await m.render(stateOf({}, [{ path: "/gone", snapshot: null, error: "Cannot read /gone: No such file or directory (os error 2)" }]));
-  assert.match(find(m.host, ".dp-banner", "cannot be read").textContent, /Cannot read \/gone/);
-  await click(find(m.host, ".dp-banner button", "Close"));
+  const banner = find(m.host, ".dp-banner", "is unavailable");
+  assert.match(banner.textContent, /\/gone/);
+  assert.match(banner.textContent, /Cannot read \/gone/);
+  assert.match(banner.textContent, /keeps the reference and reads the folder again when it is back/);
+  await click(find(m.host, ".dp-banner button", "Retry"));
+  await click(find(m.host, ".dp-banner button", "Detach runtime"));
   assert.deepEqual(m.calls.at(-1), { detach: "/gone" });
   await m.unmount();
 });
@@ -163,7 +170,7 @@ test("the Configuration panel shows only what was recorded, each value with its 
   assert.equal(row("Container port"), "8080 · observed in Docker, not in the journal (Docker maps 38000→8080; the journal does not record it)");
   assert.equal(row("Host port"), "38000 · from the journal (recorded port lease)");
   assert.equal(row("Replacement"), "Nothing was replaced (first deployment) · from the journal (cutover not required)");
-  assert.match(row("Image"), /^harpoon\/app_01m6dpq543aswbhw7pw17zaj3b:dep_01M6DPQ543ASWBHW7PW17ZAJ3C-0d6a62d13d28a966f67b330bb5b659e3 \(02693c38b1e5\) · from the journal/);
+  assert.match(row("Image"), /^harpoon\/app_01m6dpq543aswbhw7pw17zaj3b:dep_01M6DPQ543….*image 02693c38b1e5 · from the journal/);
   // the values the old panel invented
   for (const invented of [/folder · app_/, /HTTP GET \//, /stop old → start new/, /Dockerfile\s/]) assert.doesNotMatch(panel.textContent, invented, String(invented));
   await m.unmount();
@@ -323,4 +330,33 @@ test("Resources & health do not call a running container 'no running container' 
   await openExternalApp(gone);
   assert.match(find(gone.host, "section.dp-panel", "Resources & health").textContent, /No running container/, "and when there really is none, it still says so");
   await gone.unmount();
+});
+
+test("a restored attachment is shown without opening it again, and an unreadable list is reported", async () => {
+  const m = await mountView(engine);
+  // the state comes straight from the remembered references: no pickFolder / attachRuntime call is involved
+  await m.render(stateOf(matching));
+  assert.ok(find(m.host, ".dp-pill", "External · read-only"));
+  assert.deepEqual(m.calls, []);
+  await m.render(stateOf({}, []), { engine: { ...engine(stateOf({}, []), m.calls), api: { ...engine(stateOf({}, []), m.calls).api, externalsError: "The list of attached runtimes is damaged. It was left as it is." } } });
+  assert.match(find(m.host, ".dp-banner", "list of attached runtimes cannot be read").textContent, /left as it is/);
+  await m.unmount();
+});
+
+test("a long image name is readable in the Configuration panel and its full reference stays reachable", async () => {
+  const copied = [];
+  Object.defineProperty(win.navigator, "clipboard", { value: { writeText: async (t) => copied.push(t) }, configurable: true });
+  const m = await mountView(engine);
+  await m.render(stateOf(matching));
+  await openExternalApp(m);
+  const row = [...m.host.querySelectorAll("dt")].find((d) => d.textContent === "Image").nextElementSibling;
+  const image = row.querySelector(".dp-image");
+  const full = image.querySelector(".dp-id__text").title;
+  assert.match(full, /^harpoon\/.+:dep_01M6DPQ543ASWBHW7PW17ZAJ3C-[0-9a-f]+ \(02693c38b1e5\)$/, "the tooltip carries the whole recorded reference");
+  assert.match(image.querySelector(".dp-image__tag").textContent, /…/, "the long tag is shortened in the middle");
+  assert.ok(image.querySelector(".dp-image__tag").title.startsWith(DEP) && full.includes(image.querySelector(".dp-image__tag").title), "the complete tag is in its tooltip");
+  assert.match(image.querySelector(".dp-image__id").textContent, /^image [0-9a-f]{12}$/, "the id is on its own line");
+  await click(image.querySelector(".dp-id__copy"));
+  assert.deepEqual(copied, [full]);
+  await m.unmount();
 });

@@ -1085,6 +1085,303 @@ mod external {
             assert!(e.contains("unknown field"), "{smuggled}: {e}");
         }
     }
+
+    // ---- remembering attachments across restarts: references only, restored read-only ------------------------------------
+
+    /// The desktop's own configuration directory for a test: a sibling of the runtime, never inside it.
+    fn app_data(runtime: &Path) -> PathBuf {
+        runtime.parent().unwrap().join("appdata")
+    }
+
+    fn list_file(data: &Path) -> PathBuf {
+        data.join("external-runtimes.json")
+    }
+
+    #[test]
+    fn an_attachment_is_remembered_as_a_path_and_nothing_from_inside_the_runtime() {
+        let dir = b7_copy("ext-persist-write");
+        let (data, o) = (app_data(&dir), own("ext-persist-write"));
+        let before = tree(&dir);
+        let entry = ExternalStore::new(&data).add(dir.to_str().unwrap(), &o, 5).unwrap();
+        assert!(entry.error.is_none() && entry.snapshot.is_some());
+        assert_eq!(entry.path, canonical(&dir).display().to_string());
+        let file = list_file(&data);
+        let text = std::fs::read_to_string(&file).unwrap();
+        // exactly a version and the folder; no deployment, container, image or journal content
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!({ "version": 1, "runtimes": [{ "path": entry.path }] })
+        );
+        for secret in [DEP, APP, "journal.wal", "2f70855fd334", "hp-dep"] {
+            assert!(!text.contains(secret), "{secret} must not be stored");
+        }
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "private to the user"
+        );
+        // kept in the desktop's configuration directory: not inside the runtime, not in the deployment store
+        assert!(!canonical(&file).starts_with(canonical(&dir)));
+        assert!(!file.starts_with(own("ext-persist-write")));
+        assert_eq!(
+            std::fs::read_dir(&data).unwrap().count(),
+            1,
+            "no temporary file is left behind"
+        );
+        assert_eq!(tree(&dir), before, "adding it wrote nothing to the runtime");
+    }
+
+    #[test]
+    fn after_a_restart_the_attachment_is_back_read_only_without_being_opened_again() {
+        let dir = b7_copy("ext-persist-restart");
+        let (data, o) = (app_data(&dir), own("ext-persist-restart"));
+        ExternalStore::new(&data).add(dir.to_str().unwrap(), &o, 5).unwrap();
+        let before = tree(&dir);
+        // a restart keeps nothing in memory: a new store reads the list from disk
+        let restored = ExternalStore::new(&data).restore(&o, 9).unwrap();
+        assert_eq!(restored.len(), 1);
+        let s = restored[0].snapshot.as_ref().expect("read again");
+        assert_eq!(
+            (
+                s.source.kind,
+                s.source.journal_format,
+                s.source.read_only,
+                s.store.as_str()
+            ),
+            ("external", "legacy", true, "ok")
+        );
+        assert_eq!(s.apps[0].deployments[0].id, DEP);
+        assert!(restored[0].error.is_none());
+        // restoring, however often, writes nothing and migrates nothing
+        for i in 0..3 {
+            ExternalStore::new(&data).restore(&o, 10 + i).unwrap();
+        }
+        assert_eq!(tree(&dir), before, "no file, lock or timestamp in the runtime changed");
+        assert!(
+            !dir.join("deploy-journal")
+                .join(harpoon_deploy_journal::SQLITE_FILE)
+                .exists(),
+            "the legacy journal was not converted"
+        );
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_runtime_stays_listed_as_unavailable_and_returns_when_it_does() {
+        let dir = b7_copy("ext-persist-missing");
+        let (data, o) = (app_data(&dir), own("ext-persist-missing"));
+        let store = ExternalStore::new(&data);
+        store.add(dir.to_str().unwrap(), &o, 5).unwrap();
+        let list = std::fs::read(list_file(&data)).unwrap();
+        let away = dir.with_file_name("runtime-away");
+        std::fs::rename(&dir, &away).unwrap();
+        let gone = store.restore(&o, 6).unwrap();
+        assert_eq!(gone.len(), 1, "the reference is kept");
+        assert!(
+            gone[0].snapshot.is_none() && gone[0].error.as_deref().unwrap().contains("Cannot read"),
+            "{:?}",
+            gone[0].error
+        );
+        assert_eq!(
+            std::fs::read(list_file(&data)).unwrap(),
+            list,
+            "an unavailable runtime does not change the list"
+        );
+        // the folder comes back: it is read again with no further action
+        std::fs::rename(&away, &dir).unwrap();
+        assert!(store.restore(&o, 7).unwrap()[0].snapshot.is_some());
+        // a folder with no journal in it is unavailable with the reason, and still listed
+        std::fs::remove_file(dir.join("deploy-journal/journal.wal")).unwrap();
+        let bare = store.restore(&o, 8).unwrap();
+        assert!(bare[0].snapshot.is_none() && bare[0].error.as_deref().unwrap().contains("No deployment journal"));
+        // a journal that cannot be decoded is an attached runtime whose store is shown as unreadable, not dropped
+        std::fs::write(dir.join("deploy-journal/journal.wal"), b"this is not a journal").unwrap();
+        let bad = store.restore(&o, 9).unwrap();
+        let snap = bad[0].snapshot.as_ref().expect("still attached");
+        assert_eq!(snap.store, "error");
+        assert!(snap.store_error.is_some() && snap.apps.is_empty());
+        assert_eq!(
+            std::fs::read(list_file(&data)).unwrap(),
+            list,
+            "the reference survives all of it"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("deploy-journal/journal.wal")).unwrap(),
+            b"this is not a journal",
+            "an unreadable journal is not repaired"
+        );
+    }
+
+    #[test]
+    fn detaching_forgets_only_the_reference() {
+        let a = b7_copy("ext-persist-detach");
+        let (data, o) = (app_data(&a), own("ext-persist-detach"));
+        let b = a.with_file_name("runtime-b");
+        std::fs::create_dir_all(b.join("deploy-journal")).unwrap();
+        std::fs::copy(
+            a.join("deploy-journal/journal.wal"),
+            b.join("deploy-journal/journal.wal"),
+        )
+        .unwrap();
+        let store = ExternalStore::new(&data);
+        let (ea, eb) = (
+            store.add(a.to_str().unwrap(), &o, 5).unwrap(),
+            store.add(b.to_str().unwrap(), &o, 5).unwrap(),
+        );
+        let (tree_a, tree_b) = (tree(&a), tree(&b));
+        assert!(store.remove(&ea.path).unwrap());
+        let left: Vec<String> = ExternalStore::new(&data)
+            .restore(&o, 6)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(
+            left,
+            std::slice::from_ref(&eb.path),
+            "only the other reference is left, after a restart too"
+        );
+        assert_eq!(
+            (tree(&a), tree(&b)),
+            (tree_a, tree_b),
+            "no file in either runtime was touched"
+        );
+        assert!(
+            a.join("deploy-journal/journal.wal").exists(),
+            "the detached runtime's files are all still there"
+        );
+        // detaching something that is not attached changes nothing
+        let list = std::fs::read(list_file(&data)).unwrap();
+        assert!(!store.remove(&ea.path).unwrap());
+        assert!(!store.remove("/nonexistent/runtime").unwrap());
+        assert_eq!(std::fs::read(list_file(&data)).unwrap(), list);
+        // a runtime that is gone can still be detached
+        let away = b.with_file_name("runtime-b-away");
+        std::fs::rename(&b, &away).unwrap();
+        assert!(store.remove(&eb.path).unwrap());
+        assert!(ExternalStore::new(&data).restore(&o, 7).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_damaged_list_is_reported_and_never_overwritten() {
+        let dir = b7_copy("ext-persist-damaged");
+        let (data, o) = (app_data(&dir), own("ext-persist-damaged"));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ExternalStore::new(&data);
+        for bad in [
+            "{ not json".to_string(),
+            r#"{"version":2,"runtimes":[]}"#.to_string(),
+            r#"{"version":1,"runtimes":[{"path":"relative/runtime"}]}"#.to_string(),
+            r#"{"version":1,"runtimes":[{"path":"/x","extra":1}]}"#.to_string(),
+            format!(
+                r#"{{"version":1,"runtimes":[{}]}}"#,
+                vec![r#"{"path":"/x"}"#; 33].join(",")
+            ),
+        ] {
+            std::fs::write(list_file(&data), &bad).unwrap();
+            assert!(store.restore(&o, 5).unwrap_err().contains("left as it is"), "{bad}");
+            assert!(store.add(dir.to_str().unwrap(), &o, 5).is_err());
+            assert!(store.remove("/x").is_err());
+            assert_eq!(
+                std::fs::read_to_string(list_file(&data)).unwrap(),
+                bad,
+                "the damaged list is exactly as it was"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicates_collapse_and_the_list_is_bounded() {
+        let dir = b7_copy("ext-persist-bounds");
+        let (data, o) = (app_data(&dir), own("ext-persist-bounds"));
+        let store = ExternalStore::new(&data);
+        let link = dir.with_file_name("alias");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let first = store.add(dir.to_str().unwrap(), &o, 5).unwrap();
+        let again = store.add(link.to_str().unwrap(), &o, 5).unwrap();
+        assert_eq!(
+            first.path, again.path,
+            "an alias of the same folder is the same reference"
+        );
+        assert_eq!(store.restore(&o, 6).unwrap().len(), 1);
+        // a full list refuses one more, and writes nothing
+        let full: Vec<_> = (0..32)
+            .map(|i| format!(r#"{{"path":"/nonexistent/runtime-{i}"}}"#))
+            .collect();
+        std::fs::write(
+            list_file(&data),
+            format!(r#"{{"version":1,"runtimes":[{}]}}"#, full.join(",")),
+        )
+        .unwrap();
+        let list = std::fs::read(list_file(&data)).unwrap();
+        assert!(store
+            .add(dir.to_str().unwrap(), &o, 5)
+            .unwrap_err()
+            .contains("At most 32"));
+        assert_eq!(std::fs::read(list_file(&data)).unwrap(), list);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_runtime_is_refused_and_not_remembered() {
+        let dir = b7_copy("ext-persist-refuse");
+        let (data, o) = (app_data(&dir), own("ext-persist-refuse"));
+        let store = ExternalStore::new(&data);
+        for bad in ["relative/path", "/nonexistent/runtime"] {
+            assert!(store.add(bad, &o, 5).is_err(), "{bad}");
+        }
+        assert!(store.add(dir.join("deploy-journal").to_str().unwrap(), &o, 5).is_err());
+        assert!(!list_file(&data).exists(), "nothing was written for a refused path");
+        assert!(!data.exists(), "not even the configuration directory");
+    }
+
+    #[test]
+    fn a_remembered_runtime_is_guarded_against_mutation_even_while_it_is_unavailable() {
+        let dir = b7_copy("ext-persist-guard");
+        let (data, o) = (app_data(&dir), own("ext-persist-guard"));
+        let later = dir.with_file_name("not-yet-there");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            list_file(&data),
+            format!(
+                r#"{{"version":1,"runtimes":[{{"path":{:?}}}]}}"#,
+                later.display().to_string()
+            ),
+        )
+        .unwrap();
+        // restored after a "restart": unavailable, but already guarded
+        let e = ExternalStore::new(&data).restore(&o, 5).unwrap();
+        assert!(e[0].snapshot.is_none());
+        assert!(is_attached(&later), "guarded before the folder exists");
+        // the folder appears (a runtime that was not mounted yet): an operation aimed at it is refused before anything is created
+        std::fs::create_dir_all(later.join("deploy-journal")).unwrap();
+        std::fs::copy(
+            dir.join("deploy-journal/journal.wal"),
+            later.join("deploy-journal/journal.wal"),
+        )
+        .unwrap();
+        let before = tree(&later);
+        let kc = MemorySecretStore::new();
+        for target in [later.clone(), later.join("deploy-journal")] {
+            let r = run_op(
+                &target,
+                &DeployOp::Resume {
+                    app: APP.into(),
+                    mode: "dismiss".into(),
+                    revision: None,
+                },
+                &kc,
+            );
+            assert!(
+                !r.ok && r.exit_code == harpoon_deploy_cli::exit::REFUSED && r.summary.contains("attached read-only"),
+                "{target:?}: {}",
+                r.detail
+            );
+        }
+        assert_eq!(tree(&later), before);
+        // after detaching, the guard no longer claims it
+        assert!(ExternalStore::new(&data).remove(later.to_str().unwrap()).unwrap());
+        assert!(!is_attached(&later));
+    }
 }
 
 // ---- host listeners: what is actually bound on this Mac, kept apart from what Docker reports

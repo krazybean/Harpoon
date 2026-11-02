@@ -212,3 +212,8 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-checks li[data-result="fail"] .dp-checks__mark { color: var(--error); }
 .dp-warnline { color: var(--warning-fg); }
 .dp-fact__value { overflow-wrap: anywhere; }
+
+/* a recorded image: the repository wraps, a long tag is shortened in the middle, the id has its own line; the whole value stays in the tooltip and behind the copy button */
+.dp-image { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.dp-image__tag, .dp-image__id { overflow-wrap: anywhere; }
+.dp-image__id { font-size: 11px; }

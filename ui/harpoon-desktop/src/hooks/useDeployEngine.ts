@@ -20,9 +20,9 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const [notice, setNotice] = useState<NewHeld[]>([]);
   // delivery keys already known; null until the first snapshot, which seeds it so old events are not announced
   const seen = useRef<Set<string> | null>(null);
-  // runtimes attached read-only by path, for this session; each is re-read on every refresh, never written
+  // runtimes attached read-only; the backend remembers the folder references (not their content) across restarts and reads each again on every refresh, never writing it
   const [externals, setExternals] = useState<ExternalInput[]>([]);
-  const externalPaths = useRef<string[]>([]);
+  const [externalsError, setExternalsError] = useState<string | null>(null);
   const [keychain, setKeychain] = useState<KeychainState>("unlocked");
   const inflight = useRef(false);
   // what is actually listening on this Mac (lsof), kept apart from what Docker reports; refreshed only while Deployments is showing
@@ -43,15 +43,11 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
     } catch (e) {
       setLoadError(String(e));
     }
-    // external runtimes: a failed read keeps the last good snapshot and says why; it never invents or drops one
-    const paths = [...externalPaths.current];
-    if (paths.length) {
-      const got = await Promise.all(paths.map(async (path) => {
-        try { return { path, snapshot: await invoke<EngineSnapshot>("deploy_snapshot_at", { path }), error: null as string | null }; }
-        catch (e) { return { path, snapshot: null as EngineSnapshot | null, error: String(e) }; }
-      }));
-      setExternals((prev) => got.map((g) => (g.snapshot ? g : { ...g, snapshot: prev.find((p) => p.path === g.path)?.snapshot ?? null })));
-    }
+    // attached runtimes: an unreadable one stays listed with the reason (its reference is kept); an unreadable list is reported, never replaced
+    try {
+      setExternals(await invoke<ExternalInput[]>("external_runtimes"));
+      setExternalsError(null);
+    } catch (e) { setExternalsError(String(e)); }
     if (activeRef.current) {
       try { setHostListeners(await invoke<NonNullable<HostListeners>>("host_tcp_listeners")); } catch (e) { setHostListeners({ verified: false, error: String(e), checkedMs: Date.now(), listeners: [] }); }
     }
@@ -88,15 +84,17 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
 
   const attachRuntime = useCallback(async (path: string) => {
     try {
-      const snapshot = await invoke<EngineSnapshot>("deploy_snapshot_at", { path });
-      if (!externalPaths.current.includes(path)) externalPaths.current = [...externalPaths.current, path];
-      setExternals((prev) => [...prev.filter((p) => p.path !== path), { path, snapshot, error: null }]);
+      const entry = await invoke<ExternalInput>("external_runtime_add", { path });
+      setExternals((prev) => [...prev.filter((p) => p.path !== entry.path), entry]);
       return { ok: true } as const;
     } catch (e) { return { ok: false, error: String(e) } as const; }
   }, []);
-  const detachRuntime = useCallback((path: string) => {
-    externalPaths.current = externalPaths.current.filter((p) => p !== path);
-    setExternals((prev) => prev.filter((p) => p.path !== path));
+  // forgets the reference only; the folder and its files are never touched
+  const detachRuntime = useCallback(async (path: string) => {
+    try {
+      await invoke<boolean>("external_runtime_remove", { path });
+      setExternals((prev) => prev.filter((p) => p.path !== path));
+    } catch (e) { setExternalsError(String(e)); }
   }, []);
   const pickFolder = useCallback(async () => invoke<string | null>("deploy_pick_folder"), []);
   const clearNotice = useCallback(() => setNotice([]), []);
@@ -110,7 +108,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals, hostListeners }), [snap, observed, keychain, loadError, stale, externals, hostListeners]);
   // Docker could not be asked although the VM says it is up: do not claim to know the current state.
   const runtime: RuntimeState = realRuntime === "connected" && observed === null && snap != null ? "docker-not-ready" : realRuntime;
-  const api: EngineApi = useMemo(() => ({ run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, stepLogs, runtimeLogs }), [run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, stepLogs, runtimeLogs]);
+  const api: EngineApi = useMemo(() => ({ run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs }), [run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs]);
   return { state, runtime, api };
 }
 

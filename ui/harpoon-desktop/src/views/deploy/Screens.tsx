@@ -9,6 +9,7 @@ import {
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
 import { liveBlock } from "../../lib/deployEngine.ts";
 import type { Ctx, Tab } from "./context.ts";
+import { imageParts } from "../../lib/imageName.ts";
 import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
 import { describeExposure } from "../../lib/portExposure.ts";
 import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
@@ -25,6 +26,8 @@ const NO_PREVIEWS = "Branch previews are not part of this build: Harpoon can't y
 
 // ------------------------------------------------------------------ home
 
+const DETACH_TITLE = "Removes only this reference; the folder and its files are untouched";
+
 export function HomeScreen({ c }: { c: Ctx }) {
   const { state } = c;
   const [attachMsg, setAttachMsg] = useState<string | null>(null);
@@ -40,9 +43,12 @@ export function HomeScreen({ c }: { c: Ctx }) {
   const attachNotices = (
     <>
       {attachMsg && <Banner tone="err" title="That runtime cannot be opened" actions={<button className="btn btn--ghost" onClick={() => setAttachMsg(null)}>Dismiss</button>}>{attachMsg}</Banner>}
+      {c.engine?.externalsError && <Banner tone="err" title="The list of attached runtimes cannot be read" actions={<button className="btn btn--secondary" onClick={() => c.engine!.refresh()}>Retry</button>}>{c.engine.externalsError}</Banner>}
       {(state.engine?.externals ?? []).filter((e) => e.error || !state.projects.some((p) => p.id === e.id)).map((e) => (
-        <Banner key={e.id} tone={e.error ? "warn" : "info"} title={e.error ? "An attached runtime cannot be read" : "An attached runtime has no deployments"}
-          actions={<button className="btn btn--secondary" onClick={() => c.engine!.detachRuntime(e.path)}>Close</button>}><span className="mono">{e.path}</span>{e.error ? ` — ${e.error}` : " — its journal records none."}</Banner>
+        <Banner key={e.id} tone={e.error ? "warn" : "info"} title={e.error ? "An attached runtime is unavailable" : "An attached runtime has no deployments"}
+          actions={<>{e.error && <button className="btn btn--secondary" onClick={() => c.engine!.refresh()}>Retry</button>}<button className="btn btn--secondary" onClick={() => void c.engine!.detachRuntime(e.path)} title={DETACH_TITLE}>Detach runtime</button></>}>
+          <span className="mono">{e.path}</span>{e.error ? ` — ${e.error} Harpoon keeps the reference and reads the folder again when it is back; nothing was changed there.` : " — its journal records none."}
+        </Banner>
       ))}
     </>
   );
@@ -111,7 +117,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
       ))}
       {state.projects.map((p) => (
         <section key={p.id}>
-          <div className="dp-h2" style={{ margin: "14px 0 10px" }}>{p.name} {state.engine?.externals.some((e) => e.id === p.id) ? <><Pill tone="info" icon={<Lock size={11} />}>External · read-only</Pill> <button className="btn btn--ghost btn--sm" onClick={() => c.engine!.detachRuntime(state.engine!.externals.find((e) => e.id === p.id)!.path)}>Close</button> </> : null}<span className="dp-faint" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {p.appIds.length} application{p.appIds.length === 1 ? "" : "s"} · {p.sourceLabel}</span></div>
+          <div className="dp-h2" style={{ margin: "14px 0 10px" }}>{p.name} {state.engine?.externals.some((e) => e.id === p.id) ? <><Pill tone="info" icon={<Lock size={11} />}>External · read-only</Pill> <button className="btn btn--ghost btn--sm" onClick={() => void c.engine!.detachRuntime(state.engine!.externals.find((e) => e.id === p.id)!.path)} title={DETACH_TITLE}>Detach runtime</button> </> : null}<span className="dp-faint" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {p.appIds.length} application{p.appIds.length === 1 ? "" : "s"} · {p.sourceLabel}</span></div>
           <div className="dp-grid dp-grid--3">{p.appIds.map((id) => state.apps[id] && card(state.apps[id]))}</div>
         </section>
       ))}
@@ -281,9 +287,19 @@ const FACT_FROM: Record<ConfigFact["from"], string> = {
   registration: "from the repository registration", journal: "from the journal", docker: "observed in Docker, not in the journal", none: "",
 };
 /** A recorded value with its origin, or "Not recorded". Never a default. */
-function Fact({ fact }: { fact: ConfigFact }) {
+function ImageFact({ value }: { value: string }) {
+  const p = imageParts(value);
+  return (
+    <span className="dp-image">
+      <Ident value={value} shown={p.repo} copy />
+      {p.tag !== null ? <span className="mono dp-image__tag" title={p.tag}>:{p.tagShown}</span> : null}
+      {p.id ? <span className="mono dp-faint dp-image__id" title={p.id}>image {p.id}</span> : null}
+    </span>
+  );
+}
+function Fact({ fact, image = false }: { fact: ConfigFact; image?: boolean }) {
   if (fact.value === null) return <span className="dp-muted">Not recorded</span>;
-  return <><span className="dp-fact__value">{fact.value}</span> <span className="dp-faint">· {FACT_FROM[fact.from]}{fact.detail ? ` (${fact.detail})` : ""}</span></>;
+  return <>{image ? <ImageFact value={fact.value} /> : <span className="dp-fact__value">{fact.value}</span>} <span className="dp-faint">· {FACT_FROM[fact.from]}{fact.detail ? ` (${fact.detail})` : ""}</span></>;
 }
 const FACT_ROWS: [string, ConfigFactKey][] = [["Source", "source"], ["Branch", "branch"], ["Build file", "dockerfile"], ["Container port", "containerPort"], ["Host port", "hostPort"], ["Health check", "healthCheck"], ["Replacement", "replacement"], ["Image", "image"]];
 
@@ -379,7 +395,7 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Configuration</h2><span className="dp-spacer" />{app.external ? null : btn("btn--secondary", () => c.setRoute({ tab: "settings" }), c.engine ? "View settings" : "Edit", { sm: true })}</div>
           {c.engine && app.facts ? <div className="dp-panel__body"><dl className="dp-kv">
-            {FACT_ROWS.filter(([, k]) => k !== "branch" || app.facts![k].value).map(([label, k]) => <Fragment key={k}><dt>{label}</dt><dd><Fact fact={app.facts![k]} /></dd></Fragment>)}
+            {FACT_ROWS.filter(([, k]) => k !== "branch" || app.facts![k].value).map(([label, k]) => <Fragment key={k}><dt>{label}</dt><dd><Fact fact={app.facts![k]} image={k === "image"} /></dd></Fragment>)}
           </dl><p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Each value shows where it was recorded. A value nothing recorded says so; it is never filled in with a default.</p></div> : <div className="dp-panel__body"><dl className="dp-kv">
             <dt>Source</dt><dd>{app.source.kind} · {app.source.label}</dd><dt>Build</dt><dd>Dockerfile <code>{app.settings.dockerfile}</code></dd>
             <dt>Port</dt><dd>{app.settings.port ?? "—"} → {app.url.replace("http://", "")}</dd><dt>Health check</dt><dd>{app.settings.healthCheck}</dd>
@@ -547,7 +563,7 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
 }
 
 function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
-  const f = (label: string, value: string, hint?: string) => <div className="dp-field" key={label}><label>{label}</label><input className="dp-input" defaultValue={value} readOnly aria-readonly="true" />{hint ? <small>{hint}</small> : null}</div>;
+  const f = (label: string, value: string, hint?: string) => <div className="dp-field" key={label}><label>{label}</label><input className="dp-input" title={value} defaultValue={value} readOnly aria-readonly="true" />{hint ? <small>{hint}</small> : null}</div>;
   const fact = (label: string, k: ConfigFactKey) => { const x = app.facts![k]; return f(label, x.value ?? "Not recorded", x.value === null ? undefined : `${FACT_FROM[x.from]}${x.detail ? ` (${x.detail})` : ""}`); };
   if (c.engine && app.facts) {
     return (

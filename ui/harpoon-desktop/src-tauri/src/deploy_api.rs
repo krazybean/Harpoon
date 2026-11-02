@@ -707,11 +707,21 @@ fn canonical(p: &Path) -> PathBuf {
 /// Is `rt` an attached external runtime, or inside or above one?
 fn is_attached(rt: &Path) -> bool {
     let c = canonical(rt);
-    ATTACHED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .any(|a| c.starts_with(a) || a.starts_with(&c))
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|a| {
+        let a = canonical(a); // a remembered reference may not have existed when it was recorded
+        c.starts_with(&a) || a.starts_with(&c)
+    })
+}
+
+fn register_attached(p: &Path) {
+    let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
+    if !attached.iter().any(|a| a == p) {
+        attached.push(p.to_path_buf());
+    }
+}
+
+fn unregister_attached(p: &Path) {
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).retain(|a| a != p);
 }
 
 /// A deployment runtime somewhere else on this Mac (another build's, a preserved acceptance session), shown
@@ -769,10 +779,7 @@ impl ExternalRuntime {
                 jd.display()
             ));
         }
-        let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
-        if !attached.contains(&root) {
-            attached.push(root.clone());
-        }
+        register_attached(&root);
         Ok(ExternalRuntime { root })
     }
 
@@ -780,6 +787,182 @@ impl ExternalRuntime {
     /// `writer_lock_status` only. A legacy journal is decoded where it is, never converted.
     pub fn snapshot(&self, now_ms: u64) -> EngineSnapshot {
         build_snapshot(&self.root, now_ms, "external")
+    }
+}
+
+// ---- remembering which external runtimes are attached (a reference list, nothing else)
+
+const EXTERNAL_FILE: &str = "external-runtimes.json";
+const MAX_ATTACHED: usize = 32;
+static EXTERNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// What is written: the validated folder of each attached runtime, and nothing from inside it (no journal content, no ids).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRefs {
+    version: u32,
+    runtimes: Vec<StoredRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRef {
+    path: String,
+}
+
+/// An attached runtime as the desktop shows it: read just now, or unavailable with the reason (its reference is kept either way).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalEntry {
+    pub path: String,
+    pub snapshot: Option<EngineSnapshot>,
+    pub error: Option<String>,
+}
+
+/// The list of attached runtimes, kept in the desktop's own configuration directory (`<app data>/external-runtimes.json`),
+/// beside and never inside the deployment store or any external runtime. Restoring reads each runtime read-only through
+/// [`ExternalRuntime`]; nothing here can write to, lock, repair or migrate an external journal.
+pub struct ExternalStore {
+    file: PathBuf,
+}
+
+impl ExternalStore {
+    pub fn new(app_data: &Path) -> ExternalStore {
+        ExternalStore {
+            file: app_data.join(EXTERNAL_FILE),
+        }
+    }
+
+    /// The remembered folders. A missing file is an empty list; a file that cannot be read is an error and is left exactly as it
+    /// is (it is never replaced, so a damaged list cannot silently lose the references in it).
+    fn read(&self) -> Result<Vec<String>, String> {
+        let bytes = match std::fs::read(&self.file) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => {
+                return Err(format!(
+                    "The list of attached runtimes ({}) cannot be read: {e}. It was left as it is.",
+                    self.file.display()
+                ))
+            }
+        };
+        let parsed: StoredRefs = serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "The list of attached runtimes ({}) is not valid: {e}. It was left as it is.",
+                self.file.display()
+            )
+        })?;
+        let bad = parsed.version != 1
+            || parsed.runtimes.len() > MAX_ATTACHED
+            || parsed.runtimes.iter().any(|r| {
+                !Path::new(&r.path).is_absolute() || r.path.len() > 4096 || r.path.chars().any(|c| c.is_control())
+            });
+        if bad {
+            return Err(format!(
+                "The list of attached runtimes ({}) has an unsupported or invalid entry. It was left as it is.",
+                self.file.display()
+            ));
+        }
+        Ok(parsed.runtimes.into_iter().map(|r| r.path).collect())
+    }
+
+    /// Atomically: a private temporary file in the same directory, flushed, then renamed over the list.
+    fn write(&self, paths: &[String]) -> Result<(), String> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let dir = self.file.parent().ok_or("no configuration directory")?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        let body = serde_json::to_vec_pretty(&StoredRefs {
+            version: 1,
+            runtimes: paths.iter().map(|p| StoredRef { path: p.clone() }).collect(),
+        })
+        .map_err(|e| e.to_string())?;
+        let tmp = dir.join(format!("{EXTERNAL_FILE}.tmp-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+        f.write_all(&body)
+            .and_then(|_| f.write_all(b"\n"))
+            .and_then(|_| f.sync_all())
+            .map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.file).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("Cannot update {}: {e}", self.file.display())
+        })
+    }
+
+    fn entry(&self, path: &str, own: &Path, now_ms: u64) -> ExternalEntry {
+        match ExternalRuntime::attach(path, own) {
+            Ok(rt) => ExternalEntry {
+                path: path.to_string(),
+                snapshot: Some(rt.snapshot(now_ms)),
+                error: None,
+            },
+            Err(e) => ExternalEntry {
+                path: path.to_string(),
+                snapshot: None,
+                error: Some(e),
+            },
+        }
+    }
+
+    /// Every remembered runtime, revalidated and read read-only now. One that is missing, invalid or unreadable is returned
+    /// as unavailable with the reason; its reference is kept, and it is read again whenever the folder is back. Every
+    /// remembered path is also registered as attached, so the mutation guard covers it even while it is unavailable.
+    pub fn restore(&self, own: &Path, now_ms: u64) -> Result<Vec<ExternalEntry>, String> {
+        let _one = EXTERNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let paths = self.read()?;
+        for p in &paths {
+            register_attached(Path::new(p));
+        }
+        Ok(paths.iter().map(|p| self.entry(p, own, now_ms)).collect())
+    }
+
+    /// Validate `path` (read-only) and remember it. Refused, with nothing written, when it is not a runtime folder or the list is full.
+    pub fn add(&self, path: &str, own: &Path, now_ms: u64) -> Result<ExternalEntry, String> {
+        let _one = EXTERNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut paths = self.read()?;
+        let rt = ExternalRuntime::attach(path, own)?;
+        let stored = rt.root.display().to_string();
+        if !paths.contains(&stored) {
+            if paths.len() >= MAX_ATTACHED {
+                return Err(format!(
+                    "At most {MAX_ATTACHED} runtimes can be attached; detach one first."
+                ));
+            }
+            paths.push(stored.clone());
+            self.write(&paths)?;
+        }
+        Ok(ExternalEntry {
+            path: stored,
+            snapshot: Some(rt.snapshot(now_ms)),
+            error: None,
+        })
+    }
+
+    /// Detach: forget the reference. Only the entry in the list is removed; the folder and everything in it are not touched,
+    /// and the folder does not need to exist. Returns whether there was such a reference.
+    pub fn remove(&self, path: &str) -> Result<bool, String> {
+        let _one = EXTERNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut paths = self.read()?;
+        let canon = canonical(Path::new(path)).display().to_string();
+        let before = paths.len();
+        paths.retain(|p| p != path && *p != canon);
+        let removed = before - paths.len();
+        if removed > 0 {
+            self.write(&paths)?;
+            unregister_attached(Path::new(path));
+            unregister_attached(Path::new(&canon));
+        }
+        Ok(removed > 0)
     }
 }
 
@@ -1323,11 +1506,36 @@ pub async fn deploy_snapshot(app: tauri::AppHandle) -> Result<EngineSnapshot, St
         .map_err(|e| format!("background task failed: {e}"))
 }
 
-/// A read-only snapshot of an external runtime at an explicit path. Takes no operation, writes nothing.
+fn app_data(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data directory: {e}"))
+}
+
+/// Every attached runtime (remembered across restarts), read read-only now. Takes nothing from the caller.
 #[tauri::command]
-pub async fn deploy_snapshot_at(app: tauri::AppHandle, path: String) -> Result<EngineSnapshot, String> {
-    let own = app_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || ExternalRuntime::attach(&path, &own).map(|e| e.snapshot(now_ms())))
+pub async fn external_runtimes(app: tauri::AppHandle) -> Result<Vec<ExternalEntry>, String> {
+    let (data, own) = (app_data(&app)?, app_dir(&app)?);
+    tauri::async_runtime::spawn_blocking(move || ExternalStore::new(&data).restore(&own, now_ms()))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
+}
+
+/// Validate a folder, read it read-only, and remember the reference.
+#[tauri::command]
+pub async fn external_runtime_add(app: tauri::AppHandle, path: String) -> Result<ExternalEntry, String> {
+    let (data, own) = (app_data(&app)?, app_dir(&app)?);
+    tauri::async_runtime::spawn_blocking(move || ExternalStore::new(&data).add(&path, &own, now_ms()))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
+}
+
+/// Detach: forget the reference. The folder and its files are not touched.
+#[tauri::command]
+pub async fn external_runtime_remove(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    let data = app_data(&app)?;
+    tauri::async_runtime::spawn_blocking(move || ExternalStore::new(&data).remove(&path))
         .await
         .map_err(|e| format!("background task failed: {e}"))?
 }

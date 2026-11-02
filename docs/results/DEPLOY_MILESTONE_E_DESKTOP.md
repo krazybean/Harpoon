@@ -112,7 +112,7 @@ B7 build (`236ccec`, one local-only commit on a pre-B9 main) in the legacy `jour
 **What it does.** "Open runtime…" (Projects) picks a runtime folder; `deploy_snapshot_at(path)` validates it and returns the same
 snapshot the adapter always produced, tagged `source.kind = "external"`, `readOnly = true`, with its journal format. The
 applications appear in their own group, labelled **External · read-only**. Harpoon's own store, its alerts and the sidebar badge
-are unaffected. Attachments last for the session; nothing about them is saved.
+are unaffected. Attachments are remembered across restarts as folder references only (see "Remembered attachments" below).
 
 **Read-only, enforced in the backend.**
 * `ExternalRuntime::attach` is the only way to get one. The path must be absolute, free of `..` and control characters, a real
@@ -144,7 +144,7 @@ screen). The golden file is regenerated with `UPDATE_GOLDEN=1 cargo test`.
 **Preserved evidence.** The B7 session was copied byte for byte (1032 files, hashes, `diff -r` and permissions identical) to
 `~/harpoon-b7-evidence-PRESERVED-20261102` (read-only, with a manifest) before any work; the original in `/tmp` is untouched.
 
-**Not done / limits.** Attachments are per session. Pre-C journals have no pinned configuration, repository, secrets or recorded
+**Not done / limits.** Pre-C journals have no pinned configuration, repository, secrets or recorded
 step logs; the page says "Not recorded" rather than filling values in. Observation is polled, not pushed. A different Docker than
 Harpoon's own is not consulted.
 
@@ -193,6 +193,29 @@ their own (they fail about 1 run in 10 on a busy machine, as seen at `broadcast.
 **Still needs eyes (not verifiable here).** The app renders in macOS WKWebView, not Chrome: check the Containers card and the
 B7 application page at a narrow window; that the "Mac listener" line shows `127.0.0.1:38000 · loopback only` for the B7
 container; and that the Configuration panel shows "Not recorded" for source, build file and health check.
+
+### Remembered attachments (same PR)
+The attached B7 runtime used to disappear on every restart because the attachment lived in the page only.
+
+- **What is stored:** `external-runtimes.json` in the desktop's own data directory (next to, not inside, the deployment journals):
+  `{"version":1,"runtimes":[{"path":"<canonical folder>"}]}`, mode 0600, written atomically (temp file, `fsync`, rename). Nothing from
+  a journal is stored: no deployment, container, image or id. At most 32 references; an alias of the same folder is the same reference.
+- **Restore:** on start and on every refresh the list is read and each folder is validated and read again through the same
+  read-only path as "Open runtime…" (no lock, no migration, no creation; the legacy `journal.wal` stays legacy). Every remembered folder
+  is guarded against mutation from the moment the list is read, also while it is unavailable, so the backend still refuses any operation aimed
+  at it, at or above it.
+- **Unavailable is not forgotten:** a missing, unreadable or invalid folder keeps its reference and is listed as "An attached runtime
+  is unavailable" with the path and the reason, plus **Retry** and **Detach runtime**. It returns by itself when the folder is back.
+- **Detach runtime** removes only the reference (also for a folder that is gone). The folder and its files are never touched.
+- **A damaged list** (bad JSON, other version, relative path, unknown field, more than 32) is reported, left byte-for-byte as it was, and
+  refuses further adds/removes until fixed; attachments are never silently dropped or overwritten.
+- **Tests (Rust, `deploy_api::tests::external`):** file content is only the version and paths, mode 0600, outside the runtime; restart
+  restore from a new store instance with the runtime tree byte- and mtime-identical and no SQLite file created; missing folder kept and
+  back when restored; no-journal and undecodable-journal folders shown unavailable and unrepaired; detach leaves both trees identical;
+  damaged list untouched; dedupe and limit; refused paths not remembered; a remembered-but-missing folder is guarded. Frontend: restored
+  state shown without attaching, unavailable banner with Retry/Detach runtime, Detach runtime calls `detachRuntime(path)`.
+- **Configuration panel image names:** the repository wraps, a long tag is shortened in the middle (`dep_01M6DPQ543…b330bb5b659e3`), the
+  image id sits on its own line; the complete reference is the tooltip and behind a copy button, and the Settings tab field carries it as its tooltip.
 
 ### Noted, not implemented (reported during the B7 manual validation)
 

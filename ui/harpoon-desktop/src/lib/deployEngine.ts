@@ -73,7 +73,10 @@ export type EngineApi = {
   pickFolder: () => Promise<string | null>;
   /** Attach a runtime read-only by path (validated by the backend). Never changes it. */
   attachRuntime: (path: string) => Promise<{ ok: true } | { ok: false; error: string }>;
-  detachRuntime: (path: string) => void;
+  /** Forgets only the remembered reference; the folder and its files are never touched. */
+  detachRuntime: (path: string) => void | Promise<void>;
+  /** Set when the remembered list itself could not be read; it is left as it is. */
+  externalsError?: string | null;
   clearLast: () => void;
   stepLogs: (deploymentId: string) => Promise<LogLine[]>;
   runtimeLogs: (container: string) => Promise<LogLine[]>;
