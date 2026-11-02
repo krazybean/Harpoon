@@ -30,21 +30,112 @@ impl Drop for Tmp {
     }
 }
 
+// ------------------------------------------------------------------ fork gate (test isolation)
+//
+// `flock` belongs to the open file description. A child that any thread of the test process forks while a
+// journal is open holds a copy of its lock until it execs (see deploy-journal's test
+// `a_child_forked_while_the_journal_is_open_keeps_the_lock_until_it_execs`), so dropping the journal does
+// not free it that instant and the next open reports "another Harpoon process holds the journal". That is
+// the operating system's behaviour, not a journal defect, and the journal stays fail-fast. How long the
+// copy lives depends on how soon the child is scheduled, which on a loaded CI runner is long enough to
+// matter. What the tests control is the overlap: a thread may only spawn a process (fake Buildx, fake
+// lsof, the real binary, and the `git` this module's own fixtures run) while no thread has a journal
+// open, and no journal is opened while a spawn is under way. Holders never wait for each other; a
+// spawner waits for them and then runs alone. The one spawn left outside the gate is the smart-HTTP
+// fixture's `git http-backend`: it only runs while a client thread is inside `spawning`, which already
+// excludes every other thread's journal.
+
+struct ForkGate {
+    holders: usize,
+    spawning: bool,
+}
+
+static FORK_GATE: (Mutex<ForkGate>, std::sync::Condvar) = (
+    Mutex::new(ForkGate {
+        holders: 0,
+        spawning: false,
+    }),
+    std::sync::Condvar::new(),
+);
+
+thread_local! {
+    static HELD_BY_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SPAWNING_ON_THIS_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A journal may be open for as long as this lives.
+pub struct Holding;
+
+pub fn holding() -> Holding {
+    let (m, cv) = &FORK_GATE;
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    while g.spawning {
+        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+    g.holders += 1;
+    HELD_BY_THIS_THREAD.with(|h| h.set(h.get() + 1));
+    Holding
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        HELD_BY_THIS_THREAD.with(|h| h.set(h.get().saturating_sub(1)));
+        let (m, cv) = &FORK_GATE;
+        m.lock().unwrap_or_else(|e| e.into_inner()).holders -= 1;
+        cv.notify_all();
+    }
+}
+
+/// Run `f`, which may spawn a process, with no journal open in any test thread. A thread that is itself
+/// holding a journal would wait for itself forever, so that is a panic instead; a spawn inside a spawn
+/// (the same thread) is already alone.
+pub fn spawning<T>(f: impl FnOnce() -> T) -> T {
+    if SPAWNING_ON_THIS_THREAD.with(|s| s.get()) {
+        return f();
+    }
+    assert!(
+        HELD_BY_THIS_THREAD.with(|h| h.get()) == 0,
+        "a thread that holds a journal must not spawn a process (see the fork gate)"
+    );
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            SPAWNING_ON_THIS_THREAD.with(|s| s.set(false));
+            let (m, cv) = &FORK_GATE;
+            m.lock().unwrap_or_else(|e| e.into_inner()).spawning = false;
+            cv.notify_all();
+        }
+    }
+    {
+        let (m, cv) = &FORK_GATE;
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        while g.spawning || g.holders > 0 {
+            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.spawning = true;
+    }
+    SPAWNING_ON_THIS_THREAD.with(|s| s.set(true));
+    let _done = Done;
+    f()
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let o = Command::new("/usr/bin/git")
-        .current_dir(dir)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@example.com")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@example.com")
-        .args(["-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always"])
-        .args(args)
-        .output()
-        .unwrap();
+    let o = spawning(|| {
+        Command::new("/usr/bin/git")
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .args(["-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always"])
+            .args(args)
+            .output()
+            .unwrap()
+    });
     assert!(
         o.status.success(),
         "git {args:?}: {}",

@@ -4,6 +4,11 @@
 #[path = "../../deploy-docker/tests/support/mod.rs"]
 mod support;
 
+// formatted by deploy-git (its rustfmt.toml); this crate must not reformat the shared file
+#[rustfmt::skip]
+#[path = "../../deploy-git/tests/support/mod.rs"]
+mod gitsupport;
+
 use harpoon_deploy::engine::Journal;
 use harpoon_deploy::ids::{ApplicationId, DeploymentId, IdGenerator};
 use harpoon_deploy::ledger::{Disposition, LedgerRecord, ResourceKey, ResourceKind};
@@ -27,62 +32,8 @@ use support::Harness;
 // real binary) while no thread has a journal open, and no journal is opened while a spawn is under way.
 // Holders never wait for each other; a spawner waits for them and then runs alone.
 
-struct ForkGate {
-    holders: usize,
-    spawning: bool,
-}
-
-static FORK_GATE: (std::sync::Mutex<ForkGate>, std::sync::Condvar) = (
-    std::sync::Mutex::new(ForkGate {
-        holders: 0,
-        spawning: false,
-    }),
-    std::sync::Condvar::new(),
-);
-
-/// A journal may be open for as long as this lives.
-struct Holding;
-
-fn holding() -> Holding {
-    let (m, cv) = &FORK_GATE;
-    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
-    while g.spawning {
-        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-    }
-    g.holders += 1;
-    Holding
-}
-
-impl Drop for Holding {
-    fn drop(&mut self) {
-        let (m, cv) = &FORK_GATE;
-        m.lock().unwrap_or_else(|e| e.into_inner()).holders -= 1;
-        cv.notify_all();
-    }
-}
-
-/// Run `f`, which may spawn a process, with no journal open in any test thread. Must not be called
-/// by a thread that is itself holding a journal.
-fn spawning<T>(f: impl FnOnce() -> T) -> T {
-    struct Done;
-    impl Drop for Done {
-        fn drop(&mut self) {
-            let (m, cv) = &FORK_GATE;
-            m.lock().unwrap_or_else(|e| e.into_inner()).spawning = false;
-            cv.notify_all();
-        }
-    }
-    {
-        let (m, cv) = &FORK_GATE;
-        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
-        while g.spawning || g.holders > 0 {
-            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-        }
-        g.spawning = true;
-    }
-    let _done = Done;
-    f()
-}
+// The gate itself lives in the shared Git test support, so the fixture's own `git` spawns pass through it too.
+use gitsupport::{holding, spawning, Holding};
 
 /// A journal handle that keeps the gate's "holding" state for exactly as long as it is open.
 struct Held {

@@ -188,20 +188,22 @@ mod built {
     #[test]
     fn the_acceptance_binary_identifies_itself_and_still_demands_authorization() {
         let bin = env!("CARGO_BIN_EXE_harpoon-deploy-acceptance");
-        let o = Command::new(bin).arg("--acceptance-info").output().unwrap();
+        let o = crate::spawning(|| Command::new(bin).arg("--acceptance-info").output().unwrap());
         let s = String::from_utf8_lossy(&o.stdout);
         assert!(s.contains("ACCEPTANCE BUILD") && s.contains("OPEN"), "{s}");
         // open gate, but no authorization phrase: refused before anything is read
-        let o = Command::new(bin)
-            .args([
-                "restore",
-                "--deployment",
-                super::super::DEAD,
-                "--runtime-dir",
-                "/nonexistent-b15",
-            ])
-            .output()
-            .unwrap();
+        let o = crate::spawning(|| {
+            Command::new(bin)
+                .args([
+                    "restore",
+                    "--deployment",
+                    super::super::DEAD,
+                    "--runtime-dir",
+                    "/nonexistent-b15",
+                ])
+                .output()
+                .unwrap()
+        });
         assert_eq!(o.status.code(), Some(6));
         assert!(
             String::from_utf8_lossy(&o.stderr).contains("opt-in"),
@@ -209,15 +211,17 @@ mod built {
             String::from_utf8_lossy(&o.stderr)
         );
         // and it has no fault flags
-        let o = Command::new(bin)
-            .args([
-                "replace",
-                "--app",
-                super::super::APP,
-                "--experimental-crash-after-stop",
-            ])
-            .output()
-            .unwrap();
+        let o = crate::spawning(|| {
+            Command::new(bin)
+                .args([
+                    "replace",
+                    "--app",
+                    super::super::APP,
+                    "--experimental-crash-after-stop",
+                ])
+                .output()
+                .unwrap()
+        });
         assert_eq!(o.status.code(), Some(2));
     }
 }
