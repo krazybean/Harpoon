@@ -474,3 +474,67 @@ mod runtime {
         assert!(snapshot(&dir, 1).apps.is_empty(), "nothing was recorded");
     }
 }
+
+// ---- E.3: an empty journal directory is an uninitialised store; real damage still fails closed
+
+#[test]
+fn an_empty_journal_directory_is_uninitialised_not_damaged() {
+    let dir = rt("empty-journal");
+    prepare(&dir).unwrap();
+    assert!(std::fs::read_dir(journal_dir(&dir)).unwrap().next().is_none());
+    let s = snapshot(&dir, 1);
+    assert_eq!(
+        (s.store.as_str(), s.store_error.as_deref(), s.apps.len()),
+        ("missing", None, 0)
+    );
+}
+
+#[test]
+fn a_failed_first_registration_leaves_a_store_that_still_reads_as_missing() {
+    let dir = rt("failed-first");
+    let kc = MemorySecretStore::new();
+    let add = |url: &str| DeployOp::AddRepo {
+        name: "shop".into(),
+        url: url.into(),
+        app: None,
+        project: None,
+        environment: None,
+        branch: Some("main".into()),
+        filters: vec![],
+        container_port: 3000,
+        dockerfile: None,
+        context: None,
+        target: None,
+        health_path: None,
+        username: None,
+        known_host: None,
+        webhook: None,
+    };
+    let r = run_op(&dir, &add("file:///Users/x/Harpoon UI Test"), &kc);
+    assert!(!r.ok && r.summary.contains("whitespace"), "{}", r.detail);
+    let s = snapshot(&dir, 1);
+    assert_eq!(
+        (s.store.as_str(), s.store_error.as_deref()),
+        ("missing", None),
+        "the refusal must not blank the screen"
+    );
+    // the encoded form registers, and the store then reads as ok
+    let r = run_op(&dir, &add("file:///Users/x/Harpoon%20UI%20Test"), &kc);
+    assert!(r.ok, "{}", r.detail);
+    assert_eq!(snapshot(&dir, 2).store, "ok");
+}
+
+#[test]
+fn an_unreadable_journal_file_is_still_an_error_whichever_format_it_is() {
+    for (name, file) in [
+        ("sqlite", harpoon_deploy_journal::SQLITE_FILE),
+        ("legacy", harpoon_deploy_journal::JOURNAL_FILE),
+    ] {
+        let dir = rt(&format!("damaged-{name}"));
+        prepare(&dir).unwrap();
+        std::fs::write(journal_dir(&dir).join(file), b"not a journal at all").unwrap();
+        let s = snapshot(&dir, 1);
+        assert_eq!(s.store, "error", "{name}");
+        assert!(s.store_error.is_some() && s.apps.is_empty());
+    }
+}

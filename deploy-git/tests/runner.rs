@@ -653,3 +653,76 @@ fn unsafe_workspace_names_and_paths_are_still_refused_and_create_nothing() {
     // a refused request never leaves a workspace behind
     assert_eq!(leftovers(&base), 0);
 }
+
+// ---------------------------------------------------------------- local folders as file URLs (Milestone E.3)
+
+/// `file://` + the path with everything outside `A-Za-z0-9/._-~` percent-encoded: what the desktop builds.
+fn encoded(p: &Path) -> String {
+    let mut out = String::from("file://");
+    for b in p.to_str().unwrap().bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_repository_in_a_folder_with_spaces_is_polled_and_checked_out_through_its_encoded_url() {
+    let t = Tmp::new();
+    let home = t.0.join("Harpoon UI Test & café");
+    std::fs::create_dir_all(&home).unwrap();
+    let (repo, first, second) = fixture(&home);
+    assert!(repo.to_str().unwrap().contains("Harpoon UI Test"));
+    let (u, s) = (encoded(&repo), Settings::default());
+    assert!(u.contains("Harpoon%20UI%20Test") && !u.contains(' '), "{u}");
+    let w = ws(&t.0, "enc");
+    let refs = ls_remote(&w, &u, &Credential::None, &s, &none()).unwrap();
+    assert!(
+        branch_heads(&refs).iter().any(|(b, c)| b == "main" && *c == second),
+        "{refs:?}"
+    );
+    let c = checkout(&w, &u, &Credential::None, &Selector::Branch("main".into()), &s, &none()).unwrap();
+    assert_eq!(c.commit, second);
+    let w2 = ws(&t.0, "enc2");
+    let c = checkout(
+        &w2,
+        &u,
+        &Credential::None,
+        &Selector::Commit(first.clone()),
+        &s,
+        &none(),
+    )
+    .unwrap();
+    assert_eq!(c.commit, first);
+    drop((w, w2));
+    assert_eq!(leftovers(&t.0.join("scratch")), 0);
+}
+
+#[test]
+fn encoded_traversal_and_malformed_file_urls_are_refused_before_git_runs() {
+    let t = Tmp::new();
+    let (repo, _, _) = fixture(&t.0);
+    let s = Settings::default();
+    let good = encoded(&repo);
+    let w = ws(&t.0, "bad");
+    for bad in [
+        format!("{good}/%2e%2e/origin"),
+        format!("{good}%2f..%2forigin"),
+        format!("{good}%00"),
+        format!("{good}%0a"),
+        format!("{good}%"),
+        format!("{good}%zz"),
+        format!("{} x", good),
+    ] {
+        assert!(
+            matches!(
+                ls_remote(&w, &bad, &Credential::None, &s, &none()),
+                Err(GitError::Invalid(_))
+            ),
+            "{bad}"
+        );
+    }
+}

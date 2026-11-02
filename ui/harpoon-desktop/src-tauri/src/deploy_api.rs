@@ -443,7 +443,11 @@ pub fn snapshot(rt: &Path, now_ms: u64) -> EngineSnapshot {
         apps: vec![],
         definitions: vec![],
     };
-    if !jd.exists() {
+    // An empty journal directory (a first operation that failed before writing anything) is an
+    // uninitialised store, not a damaged one. A directory with either journal file in it is read, and
+    // fails closed below if that file is unreadable.
+    if !jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() && !jd.join(harpoon_deploy_journal::JOURNAL_FILE).exists()
+    {
         return snap;
     }
     snap.writer_held = matches!(writer_lock_status(&jd), Ok(LockStatus::Held));

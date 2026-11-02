@@ -1512,3 +1512,53 @@ fn polling_works_from_a_runtime_directory_whose_path_contains_spaces() {
         .count();
     assert_eq!(scratch, 0);
 }
+
+/// Milestone E.3: a local folder with spaces is registered as an encoded file URL, a raw one is refused
+/// without leaving a store behind, and polling then works.
+#[test]
+fn a_local_folder_with_spaces_registers_as_an_encoded_file_url_and_a_raw_one_leaves_nothing() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let home = gt.0.join("Harpoon UI Test");
+    std::fs::create_dir_all(&home).unwrap();
+    let (repo, _, _) = fixture(&home);
+    let raw = url(&repo);
+    let enc = raw.replace(' ', "%20");
+    assert!(raw.contains(' ') && !enc.contains(' '));
+    // the raw URL is refused by URL validation before any store is opened
+    let o = add_repo(&t, &kc, "shop", &raw, APP, &[]);
+    assert_exit(&o, 2);
+    assert!(o.stderr.contains("whitespace"), "{}", o.stderr);
+    assert!(
+        !t.rt
+            .join("deploy-journal")
+            .join("deployments.sqlite3")
+            .exists(),
+        "no store was created by the refusal"
+    );
+    // malformed / traversing encodings are refused too
+    for bad in [
+        format!("{enc}/%2e%2e/x"),
+        format!("{enc}%00"),
+        format!("{enc}%zz"),
+    ] {
+        assert_exit(&add_repo(&t, &kc, "shop", &bad, APP, &[]), 2);
+    }
+    // the encoded URL registers and polls
+    assert_exit(&add_repo(&t, &kc, "shop", &enc, APP, &[]), 0);
+    let list = sim(&t, &kc, &["repo-list"]);
+    assert!(
+        list.stdout.contains("Harpoon%20UI%20Test"),
+        "{}",
+        list.stdout
+    );
+    let o = sim(&t, &kc, &["watch", "--once", "--queue-only"]);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("first seen at"),
+        "{}{}",
+        o.stdout,
+        o.stderr
+    );
+}

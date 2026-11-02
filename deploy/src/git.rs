@@ -90,6 +90,7 @@ pub fn validate_url(url: &str) -> Result<UrlKind, String> {
         if !path.starts_with('/') || path.contains("..") {
             return Err("a file:// URL needs an absolute path without '..'".into());
         }
+        file_url_path(path)?;
         return Ok(UrlKind::File);
     }
     // scp-like: user@host:path
@@ -99,6 +100,46 @@ pub fn validate_url(url: &str) -> Result<UrlKind, String> {
         }
     }
     Err("unsupported repository URL: use https://, ssh://, user@host:path or file:///absolute/path".into())
+}
+
+/// The filesystem path a `file://` URL names, decoded exactly once. Git decodes `%XX` in a file URL once,
+/// so this is the path Git will open; validating this value (and passing the URL on unchanged) keeps the
+/// check and the execution on the same bytes. Refused: a malformed or truncated escape, bytes that are not
+/// UTF-8, a decoded control character (NUL and newline included), an encoded `/` (it would hide a
+/// separator from the component checks), and a `.` or `..` component. A literal `%` in a name must arrive
+/// as `%25`; decoding it once yields a plain file name that is not decoded again.
+pub fn file_url_path(path: &str) -> Result<String, String> {
+    let bad = |why: &str| Err(format!("a file:// URL path is not acceptable: {why}"));
+    let raw = path.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != b'%' {
+            out.push(raw[i]);
+            i += 1;
+            continue;
+        }
+        let hex = |b: Option<&u8>| b.and_then(|c| (*c as char).to_digit(16));
+        let (Some(h), Some(l)) = (hex(raw.get(i + 1)), hex(raw.get(i + 2))) else {
+            return bad("a malformed %-escape");
+        };
+        let byte = (h * 16 + l) as u8;
+        if byte == b'/' {
+            return bad("an encoded '/'");
+        }
+        out.push(byte);
+        i += 3;
+    }
+    let Ok(decoded) = String::from_utf8(out) else {
+        return bad("it is not valid UTF-8");
+    };
+    if decoded.chars().any(|c| c.is_control()) {
+        return bad("it decodes to a control character");
+    }
+    if !decoded.starts_with('/') || decoded.split('/').any(|c| c == ".." || c == ".") {
+        return bad("it must be absolute, without '.' or '..' components");
+    }
+    Ok(decoded)
 }
 
 /// The host part of an SSH URL (for the pinned host key line).
@@ -604,6 +645,49 @@ mod tests {
             target: Some("release".into()),
             health_path: Some("/health".into()),
             at_ms: 5,
+        }
+    }
+
+    #[test]
+    fn file_urls_are_decoded_once_and_checked_on_the_decoded_path() {
+        // ordinary macOS names, encoded: spaces, non-ASCII, a literal percent
+        for (url, path) in [
+            ("file:///Users/x/Harpoon%20UI%20Test", "/Users/x/Harpoon UI Test"),
+            ("file:///Users/x/caf%C3%A9", "/Users/x/caf\u{e9}"),
+            ("file:///Users/x/100%25", "/Users/x/100%"),
+            // decoded once only: %252e is the literal name "%2e", not a dot
+            ("file:///a/%252e%252e/b", "/a/%2e%2e/b"),
+            ("file:///var/repos/shop.git", "/var/repos/shop.git"),
+        ] {
+            assert_eq!(validate_url(url), Ok(UrlKind::File), "{url}");
+            assert_eq!(
+                file_url_path(url.strip_prefix("file://").unwrap()).unwrap(),
+                path,
+                "{url}"
+            );
+        }
+        for bad in [
+            "file:///a/%2e%2e/b",
+            "file:///a/%2E%2E/b",
+            "file:///a/.%2e/b",
+            "file:///a/%2e/b",
+            "file:///a/%2fetc",
+            "file:///a%2F..%2Fb",
+            "file:///a/%00",
+            "file:///a/%0a",
+            "file:///a/%09b",
+            "file:///a/%7f",
+            "file:///a/%",
+            "file:///a/%4",
+            "file:///a/%zz",
+            "file:///a/%ff",
+            "file:///a/%c3",
+            "file:///a/b c",
+            "file:///a/b\nc",
+            "file://host/a",
+            "file://relative",
+        ] {
+            assert!(validate_url(bad).is_err(), "{bad}");
         }
     }
 
