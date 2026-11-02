@@ -538,3 +538,181 @@ fn an_unreadable_journal_file_is_still_an_error_whichever_format_it_is() {
         assert!(s.store_error.is_some() && s.apps.is_empty());
     }
 }
+
+// ---- held Git events: recorded, decided, and still there after a restart
+
+mod held {
+    use super::*;
+    use harpoon_deploy_cli::{run_with, Gate, Services};
+
+    const COMMIT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const COMMIT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Queue an event the way a poll or a webhook does, without Git or a network: `git-trigger`.
+    fn queue(dir: &Path, commit: &str, delivery: &str) {
+        let args: Vec<String> = [
+            "git-trigger",
+            "--repo",
+            "shop",
+            "--revision",
+            commit,
+            "--delivery",
+            delivery,
+            "--source",
+            "poll",
+            "--runtime-dir",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .chain([dir.display().to_string()])
+        .collect();
+        let kc = MemorySecretStore::new();
+        let mut input: &[u8] = b"";
+        let mut svc = Services {
+            secrets: &kc,
+            stdin: &mut input,
+            stdin_is_terminal: false,
+            next: None,
+        };
+        let o = run_with(&args, &Gate::shipping(), &mut svc);
+        assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    }
+
+    fn registered(name: &str) -> (PathBuf, MemorySecretStore) {
+        let dir = rt(name);
+        let kc = MemorySecretStore::new();
+        let add = DeployOp::AddRepo {
+            name: "shop".into(),
+            url: "https://example.com/acme/shop.git".into(),
+            app: None,
+            project: None,
+            environment: None,
+            branch: Some("main".into()),
+            filters: vec![],
+            container_port: 3000,
+            dockerfile: None,
+            context: None,
+            target: None,
+            health_path: None,
+            username: None,
+            known_host: None,
+            webhook: None,
+        };
+        assert!(run_op(&dir, &add, &kc).ok);
+        (dir, kc)
+    }
+
+    fn events(dir: &Path) -> Vec<(String, String, String)> {
+        // a fresh read of the journal is exactly what a restarted desktop does
+        snapshot(dir, 9).apps[0]
+            .events
+            .iter()
+            .map(|e| (e.revision.clone(), e.status.clone(), e.source.clone()))
+            .collect()
+    }
+
+    fn app_id(dir: &Path) -> String {
+        snapshot(dir, 1).apps[0].id.clone()
+    }
+
+    #[test]
+    fn a_queued_commit_is_a_held_event_with_everything_the_review_dialog_shows() {
+        let (dir, _) = registered("held-shows");
+        queue(&dir, COMMIT_A, "poll:shop:a");
+        let s = snapshot(&dir, 5);
+        let e = &s.apps[0].events[0];
+        assert_eq!(
+            (e.revision.as_str(), e.status.as_str(), e.source.as_str()),
+            (COMMIT_A, "held", "poll")
+        );
+        assert!(e.received_ms > 0 && e.decided_ms.is_none());
+        assert!(s.apps[0].deployments.is_empty(), "queuing a commit deploys nothing");
+    }
+
+    #[test]
+    fn dismissing_is_recorded_and_survives_a_restart() {
+        let (dir, kc) = registered("held-dismiss");
+        queue(&dir, COMMIT_A, "poll:shop:a");
+        queue(&dir, COMMIT_B, "poll:shop:b");
+        let app = app_id(&dir);
+        let r = run_op(
+            &dir,
+            &DeployOp::Resume {
+                app,
+                mode: "dismiss".into(),
+                revision: None,
+            },
+            &kc,
+        );
+        assert!(r.ok, "{}", r.detail);
+        let after = events(&dir);
+        assert_eq!(
+            after.iter().map(|e| e.1.as_str()).collect::<Vec<_>>(),
+            ["dismissed", "dismissed"]
+        );
+        // "restart": nothing is kept in memory, so a second independent read is the restarted desktop's view
+        assert_eq!(events(&dir), after);
+        let s = snapshot(&dir, 10);
+        assert!(s.apps[0].deployments.is_empty() && s.apps[0].pauses.is_empty());
+        // a dismissed commit is not queued again
+        queue(&dir, COMMIT_A, "poll:shop:a");
+        assert_eq!(events(&dir).len(), 2, "the same delivery is a duplicate");
+    }
+
+    #[test]
+    fn selecting_a_revision_is_recorded_deploys_nothing_and_survives_a_restart() {
+        let (dir, kc) = registered("held-select");
+        queue(&dir, COMMIT_A, "poll:shop:a");
+        queue(&dir, COMMIT_B, "poll:shop:b");
+        let app = app_id(&dir);
+        let r = run_op(
+            &dir,
+            &DeployOp::Resume {
+                app,
+                mode: "revision".into(),
+                revision: Some(COMMIT_A.into()),
+            },
+            &kc,
+        );
+        assert!(r.ok, "{}", r.detail);
+        let after = events(&dir);
+        let status = |c: &str| after.iter().find(|e| e.0 == c).unwrap().1.clone();
+        assert_eq!(status(COMMIT_A), "selected");
+        assert_ne!(status(COMMIT_B), "selected");
+        assert_eq!(events(&dir), after, "unchanged on a second, independent read");
+        assert!(
+            snapshot(&dir, 11).apps[0].deployments.is_empty(),
+            "choosing a revision deploys nothing"
+        );
+    }
+
+    #[test]
+    fn a_decision_for_a_revision_that_was_never_held_is_refused_and_changes_nothing() {
+        let (dir, kc) = registered("held-unknown");
+        queue(&dir, COMMIT_A, "poll:shop:a");
+        let before = events(&dir);
+        let r = run_op(
+            &dir,
+            &DeployOp::Resume {
+                app: app_id(&dir),
+                mode: "revision".into(),
+                revision: Some(COMMIT_B.into()),
+            },
+            &kc,
+        );
+        assert!(!r.ok, "{}", r.detail);
+        assert_eq!(events(&dir), before);
+    }
+}
+
+#[test]
+fn the_folder_pickers_answer_is_one_clean_absolute_path_or_nothing() {
+    assert_eq!(
+        parse_picked_folder("/Users/juan/Harpoon UI Test/\n").as_deref(),
+        Some("/Users/juan/Harpoon UI Test")
+    );
+    assert_eq!(parse_picked_folder("/\n").as_deref(), Some("/"));
+    for bad in ["", "\n", "relative/path\n", "/a/b\nc\n", "/a/\u{7}b\n"] {
+        assert_eq!(parse_picked_folder(bad), None, "{bad:?}");
+    }
+}

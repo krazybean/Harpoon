@@ -106,7 +106,9 @@ button { font-family: var(--font-sans); -webkit-appearance: none; appearance: no
 .shell-main--containers .table-wrap { flex: 1; min-height: 0; overflow: auto; }
 .shell-header {
   min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  background: rgba(19,23,27,0.92); border: 1px solid var(--border); border-radius: var(--radius-card);
+  /* opaque: content (banners, tables) scrolls beneath this sticky header and must not show through it */
+  background: rgb(19,23,27); border: 1px solid var(--border); border-radius: var(--radius-card);
+  box-shadow: 0 6px 10px -6px rgba(0,0,0,.6);
   padding: 10px 14px 10px 18px; margin-bottom: 18px; position: sticky; top: 0; z-index: 5;
 }
 .shell-header__left { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }

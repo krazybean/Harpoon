@@ -69,7 +69,7 @@ export type Release = {
   secrets: { name: string; version: number }[];
 };
 
-export type HeldEvent = { id: string; revision: Revision; ageMin: number; /** Engine mode: the full revision, which a resume decision needs. */ revisionFull?: string; /** Engine mode: `held`, or `selected` (chosen by a resume; nothing has run yet). */ status?: string };
+export type HeldEvent = { id: string; revision: Revision; ageMin: number; /** Engine mode: the full revision, which a resume decision needs. */ revisionFull?: string; /** Engine mode: `held`, or `selected` (chosen by a resume; nothing has run yet). */ status?: string; /** Engine mode: where it came from (`poll`, `poll-late`, `github`, `gitlab`, `ci`). */ source?: string; /** Engine mode: when it was recorded, in epoch milliseconds. */ receivedMs?: number };
 export type PauseReason =
   | { kind: "failed_cutover"; deploymentId: string; outcome: RecoveryOutcome }
   | { kind: "interrupted_cutover"; deploymentId: string }

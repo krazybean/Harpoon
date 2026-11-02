@@ -1158,5 +1158,41 @@ pub async fn deploy_op(app: tauri::AppHandle, op: DeployOp) -> Result<OpResult, 
     .map_err(|e| format!("background task failed: {e}"))
 }
 
+/// The path in the macOS folder picker's answer (`POSIX path of (choose folder …)`): one absolute path,
+/// a trailing slash dropped. Anything else (empty, relative, control characters) is no answer.
+pub fn parse_picked_folder(out: &str) -> Option<String> {
+    let p = out.trim_end_matches(['\n', '\r']);
+    let p = if p.len() > 1 { p.trim_end_matches('/') } else { p };
+    (p.starts_with('/') && !p.chars().any(|c| c.is_control())).then(|| p.to_string())
+}
+
+/// The standard macOS folder picker with a fixed AppleScript (nothing from the app is interpolated into
+/// it), the same mechanism the Compose import uses. `None` when the person cancels. The path is only
+/// filled into the form; the engine validates it when the repository is registered.
+#[tauri::command]
+pub async fn deploy_pick_folder() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Select the Git repository folder\")",
+            ])
+            .output()
+            .map_err(|_| "Could not open the macOS folder picker".to_string())?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("-128") || err.contains("User canceled") {
+                return Ok(None);
+            }
+            return Err("The folder picker did not complete".into());
+        }
+        parse_picked_folder(&String::from_utf8_lossy(&out.stdout))
+            .map(Some)
+            .ok_or_else(|| "The folder picker returned a path Harpoon cannot use".into())
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests;

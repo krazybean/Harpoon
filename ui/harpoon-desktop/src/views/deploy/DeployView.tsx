@@ -4,12 +4,13 @@ import type { DeploySimulation } from "../../hooks/useDeploySimulation.ts";
 import type { DeployEngine } from "../../hooks/useDeployEngine.ts";
 import type { KeychainState, NextOutcome, RuntimeState, ScenarioId } from "../../lib/deployTypes.ts";
 import { SIMULATION_NOTE } from "../../lib/deployPresentation.ts";
+import { summarizePoll } from "../../lib/deployEngine.ts";
 import { SCENARIOS, type DeployPreview } from "../../lib/deployPreview.ts";
 import { Banner } from "./parts.tsx";
 import { dialogAllowed, type Ctx, type DialogState, type Route } from "./context.ts";
 import { AppScreen, DeploymentScreen, HomeScreen } from "./Screens.tsx";
 import { DeployDialogs } from "./Dialogs.tsx";
-import { Play } from "@phosphor-icons/react";
+import { GitBranch, Play } from "@phosphor-icons/react";
 
 const SCENARIO_LABELS: Record<ScenarioId, string> = {
   healthy: "Healthy", building: "Building (live)", "build-failed": "Build failed", "cutover-restored": "Cutover failed · restored · paused",
@@ -80,6 +81,7 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
     [state, runtime, runtimeOverride, engine?.api, onOpenContainers, route, setRoute, dispatch, startRuntime, guardedOpen]);
   const meta = state.engine;
   const last = engine?.api.last ?? null;
+  const notice = engine?.api.notice ?? [];
 
   const showBanner = runtime !== "connected";
   return (
@@ -103,8 +105,12 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
         actions={<button className="btn btn--secondary" onClick={() => engine?.api.refresh()}>Retry</button>}>{meta.loadError}{meta.stale ? ` Last read ${new Date(meta.generatedMs).toLocaleTimeString()}; what follows may be out of date.` : ""}</Banner>}
       {meta && meta.store !== "error" && (!meta.gate.liveDeploy || !meta.gate.liveReplacement) && <Banner tone="info" title="Live deployment is closed in this build">{meta.gate.reason} History, releases, configuration and logs are real and readable; configuration and repository changes are recorded.</Banner>}
       {meta?.writerHeld && <Banner tone="info" title="Harpoon is working on deployment records right now">A deployment or another command holds the records. Items shown as running may be genuinely in progress.</Banner>}
-      {last && <Banner tone={last.ok ? "ok" : "err"} title={last.ok ? "Done" : last.refusedByGate ? "Refused by the shipping gate" : "That did not work"}
-        actions={<button className="btn btn--ghost" onClick={() => engine?.api.clearLast()}>Dismiss</button>}>{last.summary || (last.ok ? "The engine finished." : "The engine reported an error.")}</Banner>}
+      {last && <Banner tone={last.ok ? "ok" : "err"} title={last.op === "poll" ? (last.ok ? "Checked for new commits" : "Could not check for new commits") : last.ok ? "Done" : last.refusedByGate ? "Refused by the shipping gate" : "That did not work"}
+        actions={<button className="btn btn--ghost" onClick={() => engine?.api.clearLast()}>Dismiss</button>}>{last.op === "poll" ? (last.ok ? summarizePoll(true, last.detail) : last.summary || summarizePoll(false, last.detail)) : last.summary || (last.ok ? "The engine finished." : "The engine reported an error.")}</Banner>}
+      {notice.length > 0 && <Banner tone="info" icon={<GitBranch size={18} />} title={notice.length === 1 ? "A new commit was recorded as a held event" : `${notice.length} new commits were recorded as held events`}
+        actions={<><button className="btn btn--primary" onClick={() => { setRoute({ screen: "app", appId: notice[0].appId, env: "production", tab: "overview" }); setDialog({ kind: "resume" }); engine?.api.clearNotice(); }}>Review</button><button className="btn btn--ghost" onClick={() => engine?.api.clearNotice()}>Dismiss</button></>}>
+        {notice.slice(0, 3).map((n) => `${n.sha} on ${n.app}`).join(", ")}{notice.length > 3 ? ", …" : ""}. Recorded only — nothing was deployed.
+      </Banner>}
       {showBanner && (
         <Banner tone="warn" title={runtime === "stopped" ? "Harpoon is stopped" : "Docker is not ready"}
           actions={<button className="btn btn--primary" onClick={startRuntime}><Play size={14} /> {runtimeOverride ? "End simulated outage" : "Start Harpoon"}</button>}>

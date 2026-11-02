@@ -44,6 +44,8 @@ export type EngineSnapshot = {
   repos: SnapRepo[]; apps: SnapApp[]; definitions: SnapDefinition[];
 };
 export type OpResult = { ok: boolean; exitCode: number; summary: string; detail: string; refusedByGate: boolean };
+/** What the views show after an operation: the engine's answer, tagged with the operation that produced it. */
+export type LastResult = OpResult & { op: string };
 export type StepLog = { step: string; text: string; withheld: boolean; truncated: boolean; atMs: number };
 
 /** Container name -> Docker state, as observed now. `null` = Docker could not be asked. */
@@ -55,7 +57,12 @@ export type EngineApi = {
   refresh: () => void;
   busy: boolean;
   /** The engine's own answer to the last operation, shown as-is (refusal reasons included). */
-  last: OpResult | null;
+  last: LastResult | null;
+  /** Held events that appeared since the person last looked (announced once). */
+  notice: NewHeld[];
+  clearNotice: () => void;
+  /** The macOS folder picker; null when cancelled. */
+  pickFolder: () => Promise<string | null>;
   clearLast: () => void;
   stepLogs: (deploymentId: string) => Promise<LogLine[]>;
   runtimeLogs: (container: string) => Promise<LogLine[]>;
@@ -137,7 +144,7 @@ function variablesOf(snap: EngineSnapshot, app: SnapApp, now: number): Variable[
 
 function automationOf(app: SnapApp, now: number, dep: (id: string) => SnapDeployment | undefined): Automation {
   const held: HeldEvent[] = app.events.filter((e) => e.status === "held" || e.status === "selected").map((e) => ({
-    id: e.delivery, status: e.status, revisionFull: e.revision, ageMin: min(e.receivedMs, now),
+    id: e.delivery, status: e.status, source: e.source, receivedMs: e.receivedMs, revisionFull: e.revision, ageMin: min(e.receivedMs, now),
     revision: { sha: e.revision.slice(0, 7), message: `${e.source} delivery ${e.delivery.slice(0, 12)}`, branch: "", author: "" },
   }));
   const p = app.pauses[0];
@@ -250,6 +257,77 @@ export function displayUrl(url: string): string {
     // eslint-disable-next-line no-control-regex
     return d.startsWith("/") && !/[\u0000-\u001f\u007f]/.test(d) ? d : url;
   } catch { return url; }
+}
+
+/** A repository name from a folder's last component: the characters the engine accepts, nothing else. */
+export function suggestRepoName(path: string): string {
+  const last = path.replace(/\/+$/, "").split("/").pop() ?? "";
+  return last.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 64);
+}
+
+/** Reserved by Harpoon: the engine refuses these names (`deploy/src/envvars.rs`). */
+export const RESERVED_ENV_PREFIX = "HARPOON_";
+const MAX_NAME_BYTES = 128;
+const MAX_VALUE_BYTES = 4096;
+
+/** The same rules the engine applies to a variable name, so the form can say what is wrong before anything is sent. `null` = acceptable. */
+export function variableNameProblem(name: string): string | null {
+  if (name === "") return null; // empty is "not filled in yet", not an error to shout about
+  if (new TextEncoder().encode(name).length > MAX_NAME_BYTES) return `Names can be at most ${MAX_NAME_BYTES} bytes.`;
+  if (!/^[A-Za-z_]/.test(name)) return "A name must start with a letter or an underscore.";
+  if (!/^[A-Za-z0-9_]+$/.test(name)) return "Use only letters, digits and underscores.";
+  if (name.startsWith(RESERVED_ENV_PREFIX)) return `Names starting with ${RESERVED_ENV_PREFIX} are reserved for Harpoon (for example the per-container response marker) and cannot be set.`;
+  return null;
+}
+
+/** The engine's limits on a Config value (a Secret has its own rules and is never inspected here). */
+export function configValueProblem(value: string): string | null {
+  if (new TextEncoder().encode(value).length > MAX_VALUE_BYTES) return `A value can be at most ${MAX_VALUE_BYTES} bytes.`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return "A value cannot contain control characters (newlines included).";
+  return null;
+}
+
+export type NewHeld = { appId: string; app: string; eventId: string; sha: string };
+
+/** Held events present in `next` that were not in `seen`. The caller owns `seen` (and seeds it from the first snapshot, so launching the app does not announce old events). */
+export function newHeldEvents(next: DeployState, seen: Set<string>): NewHeld[] {
+  const out: NewHeld[] = [];
+  for (const a of Object.values(next.apps)) {
+    for (const h of a.automation.held) {
+      const key = `${a.id}/${h.id}`;
+      if (h.status === "held" && !seen.has(key)) out.push({ appId: a.id, app: a.name, eventId: h.id, sha: h.revision.sha });
+    }
+  }
+  return out;
+}
+
+/** Every event of the snapshot as `seen` keys, whatever its status: a decided event is never "new" again. */
+export function allEventKeys(snap: EngineSnapshot): string[] {
+  return snap.apps.flatMap((a) => a.events.map((e) => `${a.id}/${e.delivery}`));
+}
+
+/**
+ * One poll's worth of announcement logic. `seen` is `null` until the first snapshot, which only seeds it: opening
+ * the app does not announce events that were already there. Afterwards a held event is announced exactly once.
+ * Returns the new `seen` and the events to announce.
+ */
+export function announceHeld(snap: EngineSnapshot, seen: Set<string> | null): { seen: Set<string>; fresh: NewHeld[] } {
+  if (seen === null) return { seen: new Set(snap.store === "ok" ? allEventKeys(snap) : []), fresh: [] };
+  if (snap.store !== "ok") return { seen, fresh: [] };
+  const fresh = newHeldEvents(toDeployState(snap, { observed: null, keychain: "unlocked" }), seen);
+  return { seen: new Set([...seen, ...allEventKeys(snap)]), fresh };
+}
+
+/** What a "Check for new commits" pass found, in a sentence, from the engine's own output lines. */
+export function summarizePoll(ok: boolean, detail: string): string {
+  const lines = detail.split("\n");
+  const queued = lines.filter((l) => /queued as /.test(l)).length;
+  const baseline = lines.filter((l) => /\(baseline;/.test(l)).length;
+  if (!ok) return "Checking for new commits did not complete.";
+  if (queued > 0) return `${queued} new commit${queued === 1 ? "" : "s"} recorded as held event${queued === 1 ? "" : "s"}. Nothing was deployed.`;
+  if (baseline > 0) return `Starting point recorded for ${baseline} repositor${baseline === 1 ? "y" : "ies"}; existing history is not deployed.`;
+  return "No new commits since the last check.";
 }
 
 /** Why a mutation is disabled in this build, or null when the engine would accept it. */

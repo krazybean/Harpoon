@@ -2,7 +2,7 @@
 // The wording rules here encode the product philosophy: a recovery is only "restored" when it
 // was, a failed deployment is not a failed recovery, and a green local check is evidence about
 // the local container — never a promise about any other environment.
-import type { DeploymentStatus, RecoveryOutcome, RestoreReason, StepStatus } from "./deployTypes.ts";
+import type { AppStatusKind, DeploymentStatus, RecoveryOutcome, RestoreReason, StepStatus } from "./deployTypes.ts";
 
 export type Tone = "ok" | "info" | "warn" | "err" | "neutral";
 
@@ -42,6 +42,11 @@ export function recoveryHeadline(o: RecoveryOutcome): string {
     in_progress: "The new release failed — restoring the previous release",
   } as const)[o];
 }
+/** The style of the big status badge on an application: green only for something that is actually running. */
+export function heroClassFor(kind: AppStatusKind): "" | "err" | "info" | "idle" {
+  return kind === "down" ? "err" : kind === "recovering" ? "info" : kind === "unknown" || kind === "idle" ? "idle" : "";
+}
+
 export function reasonLabel(r: RestoreReason): string {
   return ({ secret_unavailable: "a pinned secret is unavailable", image_missing: "the retained image is missing", timeout: "the 60 s budget ran out", start_failed: "the release did not start", docker_unreachable: "Docker was unreachable" } as const)[r];
 }
