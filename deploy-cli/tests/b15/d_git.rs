@@ -686,6 +686,72 @@ fn post(port: u16, path: &str, headers: &[(&str, String)], body: &str) -> String
     out.lines().next().unwrap_or("").to_string()
 }
 
+/// The fixture's retry after a journal-lock refusal must give the command its whole standard input again.
+#[test]
+fn crun_retries_a_lock_refusal_with_the_whole_standard_input() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(
+        &add_repo(&t, &kc, "shop", &url(&repo), APP, &["--webhook", "github"]),
+        0,
+    );
+    // another writer holds the journal for a moment: the first attempts are refused with exit 4
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let dir = t.journal_dir();
+    let holder = std::thread::spawn(move || {
+        let (j, _) = open_j(&dir).unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(j);
+    });
+    locked_rx.recv().unwrap();
+    let o = crun(
+        &t,
+        &SHIPPING,
+        &kc,
+        b"gh-secret\n",
+        &[
+            "repo-secret",
+            "--simulate",
+            "--name",
+            "shop",
+            "--kind",
+            "webhook",
+        ],
+    );
+    holder.join().unwrap();
+    assert_exit(&o, 0);
+}
+
+/// `post` waits for the listener to come up instead of giving up after a fixed few seconds.
+#[test]
+fn post_waits_for_a_listener_that_starts_late() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(3500)); // later than the old fixed window
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let (mut c, _) = l.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = std::io::Read::read(&mut c, &mut buf);
+        std::io::Write::write_all(
+            &mut c,
+            b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+    });
+    assert_eq!(
+        post(port, "/webhook/github/shop", &[], "{}"),
+        "HTTP/1.1 202 Accepted"
+    );
+    server.join().unwrap();
+}
+
 #[test]
 fn signed_github_and_token_verified_gitlab_deliveries_deploy_once_and_unverifiable_ones_never_reach_the_queue(
 ) {
@@ -1517,70 +1583,4 @@ fn polling_works_from_a_runtime_directory_whose_path_contains_spaces() {
         .filter(|n| n.starts_with("git-ws-"))
         .count();
     assert_eq!(scratch, 0);
-}
-
-/// The fixture's retry after a journal-lock refusal must give the command its whole standard input again.
-#[test]
-fn crun_retries_a_lock_refusal_with_the_whole_standard_input() {
-    let t = T::new();
-    let kc = MemorySecretStore::new();
-    let gt = Tmp::new();
-    let (repo, _, _) = fixture(&gt.0);
-    assert_exit(
-        &add_repo(&t, &kc, "shop", &url(&repo), APP, &["--webhook", "github"]),
-        0,
-    );
-    // another writer holds the journal for a moment: the first attempts are refused with exit 4
-    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-    let dir = t.journal_dir();
-    let holder = std::thread::spawn(move || {
-        let (j, _) = open_j(&dir).unwrap();
-        locked_tx.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        drop(j);
-    });
-    locked_rx.recv().unwrap();
-    let o = crun(
-        &t,
-        &SHIPPING,
-        &kc,
-        b"gh-secret\n",
-        &[
-            "repo-secret",
-            "--simulate",
-            "--name",
-            "shop",
-            "--kind",
-            "webhook",
-        ],
-    );
-    holder.join().unwrap();
-    assert_exit(&o, 0);
-}
-
-/// `post` waits for the listener to come up instead of giving up after a fixed few seconds.
-#[test]
-fn post_waits_for_a_listener_that_starts_late() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let server = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(3500)); // later than the old fixed window
-        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-        let (mut c, _) = l.accept().unwrap();
-        let mut buf = [0u8; 1024];
-        let _ = std::io::Read::read(&mut c, &mut buf);
-        std::io::Write::write_all(
-            &mut c,
-            b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",
-        )
-        .unwrap();
-    });
-    assert_eq!(
-        post(port, "/webhook/github/shop", &[], "{}"),
-        "HTTP/1.1 202 Accepted"
-    );
-    server.join().unwrap();
 }
