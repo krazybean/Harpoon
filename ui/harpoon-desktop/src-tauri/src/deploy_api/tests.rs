@@ -421,7 +421,7 @@ mod runtime {
     fn operations_that_do_not_reach_docker_get_no_coordinates() {
         for op in [
             DeployOp::Poll { repo: None },
-            DeployOp::Recover,
+            DeployOp::Recover {},
             DeployOp::Resume {
                 app: "app_x".into(),
                 mode: "dismiss".into(),
@@ -714,5 +714,332 @@ fn the_folder_pickers_answer_is_one_clean_absolute_path_or_nothing() {
     assert_eq!(parse_picked_folder("/\n").as_deref(), Some("/"));
     for bad in ["", "\n", "relative/path\n", "/a/b\nc\n", "/a/\u{7}b\n"] {
         assert_eq!(parse_picked_folder(bad), None, "{bad:?}");
+    }
+}
+
+// ---- external runtimes: read-only, no migration, no way into an operation
+
+mod external {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const DEP: &str = "dep_01M6DPQ543ASWBHW7PW17ZAJ3C";
+    const APP: &str = "app_01M6DPQ543ASWBHW7PW17ZAJ3B";
+
+    fn fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/b7-legacy-runtime")
+    }
+
+    /// A private copy of the B7 fixture to attach (the committed fixture itself is never attached).
+    fn b7_copy(name: &str) -> PathBuf {
+        let dir = rt(name).join("runtime"); // `rt` clears and creates the test's own directory
+        std::fs::create_dir_all(dir.join("deploy-journal")).unwrap();
+        std::fs::copy(
+            fixture().join("deploy-journal/journal.wal"),
+            dir.join("deploy-journal/journal.wal"),
+        )
+        .unwrap();
+        std::fs::copy(fixture().join("runtime-kind"), dir.join("runtime-kind")).unwrap();
+        dir
+    }
+
+    /// Every path under `dir` with its kind, size, modification time and bytes: equal before and after means nothing was written.
+    fn tree(dir: &Path) -> Vec<(String, bool, u64, std::time::SystemTime, Vec<u8>)> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, bool, u64, std::time::SystemTime, Vec<u8>)>) {
+            let mut es: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+            es.sort_by_key(|e| e.file_name());
+            for e in es {
+                let m = std::fs::symlink_metadata(e.path()).unwrap();
+                let rel = e.path().strip_prefix(base).unwrap().display().to_string();
+                if m.is_dir() {
+                    out.push((rel, true, 0, m.modified().unwrap(), vec![]));
+                    walk(base, &e.path(), out);
+                } else {
+                    out.push((
+                        rel,
+                        false,
+                        m.len(),
+                        m.modified().unwrap(),
+                        std::fs::read(e.path()).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// Harpoon's own (stand-in) store for a test: a sibling of the attached runtime, never created by the helper.
+    fn own(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("harpoon-deploy-api-{}-{name}", std::process::id()))
+            .join("own")
+    }
+
+    fn attach(dir: &Path, own: &Path) -> Result<ExternalRuntime, String> {
+        ExternalRuntime::attach(dir.to_str().unwrap(), own)
+    }
+
+    #[test]
+    fn the_b7_legacy_journal_is_shown_as_it_was_recorded() {
+        let dir = b7_copy("ext-shows");
+        let s = attach(&dir, &own("ext-shows")).unwrap().snapshot(5);
+        assert_eq!(
+            (s.source.kind, s.source.journal_format, s.source.read_only),
+            ("external", "legacy", true)
+        );
+        assert_eq!(
+            (s.store.as_str(), s.store_error.as_deref(), s.apps.len()),
+            ("ok", None, 1)
+        );
+        let a = &s.apps[0];
+        assert_eq!(a.id, APP);
+        assert_eq!(a.deployments.len(), 1);
+        let d = &a.deployments[0];
+        assert_eq!(
+            (d.id.as_str(), d.status.as_str(), d.cutover.as_str()),
+            (DEP, "succeeded", "not_required") // the first deployment: nothing to cut over from
+        );
+        let steps: Vec<_> = d.steps.iter().map(|x| (x.name.as_str(), x.status.as_str())).collect();
+        assert_eq!(
+            steps,
+            [
+                ("source", "succeeded"),
+                ("build", "succeeded"),
+                ("preliminary_check", "succeeded"),
+                ("cutover", "succeeded"),
+                ("final_check", "succeeded"),
+                ("recovery", "skipped")
+            ]
+        );
+        // what the ledger recorded: the lease for the serving container's port is the only place the port survives
+        let lease = |state: &str| {
+            d.resources
+                .iter()
+                .filter(|r| r.kind == "port" && r.state == state)
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lease("created"), ["38000"], "{:?}", d.resources);
+        assert_eq!(lease("released"), ["39000"], "the preliminary-check port was released");
+        let c = d
+            .resources
+            .iter()
+            .find(|r| r.kind == "container" && r.state == "created")
+            .expect("serving container");
+        assert_eq!(c.name, format!("hp-{DEP}"));
+        assert_eq!(
+            c.id.as_deref(),
+            Some("2f70855fd334312f11ae3b2c5cb2ef42af49203820869637c71c02ead50ed936")
+        );
+        let sv = a.serving.as_ref().expect("serving release derived from the ledger");
+        assert_eq!(
+            (sv.deployment.as_str(), sv.container.as_str(), sv.via.as_str()),
+            (DEP, format!("hp-{DEP}").as_str(), "original")
+        );
+        // a pre-configuration journal pins nothing: no port, no health path, no secrets - and says so
+        assert!(sv.host_port.is_none() && d.pin.is_none());
+        assert!(s.repos.is_empty() && s.definitions.is_empty());
+    }
+
+    /// The exact JSON the desktop receives for the B7 journal. The frontend tests load this same file, so what they
+    /// assume about the contract is what the backend produces. `UPDATE_GOLDEN=1 cargo test` rewrites it.
+    #[test]
+    fn the_snapshot_json_for_b7_is_the_checked_in_contract() {
+        let dir = b7_copy("ext-golden");
+        let mut v =
+            serde_json::to_value(attach(&dir, &own("ext-golden")).unwrap().snapshot(1_793_609_000_000)).unwrap();
+        v["runtimeDir"] = "<runtime>".into();
+        v["source"]["path"] = "<runtime>".into();
+        let text = serde_json::to_string_pretty(&v).unwrap() + "\n";
+        let golden = fixture().parent().unwrap().join("b7-legacy-snapshot.json");
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&golden, &text).unwrap();
+        }
+        assert_eq!(
+            text,
+            std::fs::read_to_string(&golden).expect("golden file"),
+            "the snapshot contract changed; rerun with UPDATE_GOLDEN=1 if intended"
+        );
+    }
+
+    #[test]
+    fn reading_it_writes_nothing_and_migrates_nothing() {
+        let dir = b7_copy("ext-nowrite");
+        let before = tree(&dir);
+        let ext = attach(&dir, &own("ext-nowrite")).unwrap();
+        for i in 0..3 {
+            let s = ext.snapshot(10 + i);
+            assert_eq!(s.store, "ok");
+        }
+        assert_eq!(tree(&dir), before, "no file, directory, lock or timestamp changed");
+        assert!(
+            !dir.join("deploy-journal")
+                .join(harpoon_deploy_journal::SQLITE_FILE)
+                .exists(),
+            "a legacy journal is read where it is, not converted"
+        );
+    }
+
+    #[test]
+    fn it_can_be_read_from_a_folder_nobody_can_write_to() {
+        let dir = b7_copy("ext-readonly-fs");
+        let jd = dir.join("deploy-journal");
+        std::fs::set_permissions(jd.join("journal.wal"), std::fs::Permissions::from_mode(0o400)).unwrap();
+        for d in [&jd, &dir] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let before = tree(&dir);
+        let s = attach(&dir, &own("ext-readonly-fs")).unwrap().snapshot(5);
+        assert_eq!((s.store.as_str(), s.apps.len()), ("ok", 1), "{:?}", s.store_error);
+        assert_eq!(tree(&dir), before);
+        for d in [&dir, &jd] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_sqlite_runtime_is_read_without_creating_anything_either() {
+        let dir = rt("ext-sqlite").join("runtime");
+        prepare(&dir).unwrap();
+        {
+            let (mut j, _) = SqliteJournal::open(&journal_dir(&dir)).unwrap();
+            j.persist(&dep(D1, Some(DeploymentStatus::Succeeded))).unwrap();
+        }
+        let before = tree(&dir);
+        let s = attach(&dir, &own("ext-sqlite")).unwrap().snapshot(5);
+        assert_eq!(
+            (s.source.journal_format, s.store.as_str(), s.apps[0].deployments.len()),
+            ("sqlite", "ok", 1)
+        );
+        assert_eq!(tree(&dir), before, "no -journal, -wal, -shm or lock file appeared");
+    }
+
+    #[test]
+    fn only_a_real_runtime_folder_can_be_attached() {
+        let o = own("ext-validate");
+        let good = b7_copy("ext-validate");
+        assert!(attach(&good, &o).is_ok());
+        let err = |p: &str| {
+            ExternalRuntime::attach(p, &o)
+                .err()
+                .unwrap_or_else(|| format!("ACCEPTED {p:?}"))
+        };
+        assert!(err("relative/runtime").contains("absolute"));
+        assert!(err(&format!("{}/../runtime", good.display())).contains("absolute path without"));
+        assert!(err("/nonexistent-harpoon-runtime").contains("Cannot read"));
+        assert!(err("/tmp/hv\u{7}x").contains("control character"));
+        assert!(err(good.join("deploy-journal/journal.wal").to_str().unwrap()).contains("not a folder"));
+        assert!(err(good.join("deploy-journal").to_str().unwrap()).contains("not deploy-journal itself"));
+        let empty = rt("ext-validate-empty");
+        assert!(err(empty.to_str().unwrap()).contains("No deploy-journal"));
+        std::fs::create_dir_all(empty.join("deploy-journal")).unwrap();
+        assert!(err(empty.to_str().unwrap()).contains("No deployment journal"));
+        // symbolic links are refused, not followed into
+        let linked = rt("ext-validate-link");
+        std::os::unix::fs::symlink(good.join("deploy-journal"), linked.join("deploy-journal")).unwrap();
+        assert!(err(linked.to_str().unwrap()).contains("symbolic link"));
+        let linked2 = rt("ext-validate-link2");
+        std::fs::create_dir_all(linked2.join("deploy-journal")).unwrap();
+        std::os::unix::fs::symlink(
+            good.join("deploy-journal/journal.wal"),
+            linked2.join("deploy-journal/journal.wal"),
+        )
+        .unwrap();
+        assert!(err(linked2.to_str().unwrap()).contains("not a regular file"));
+        // Harpoon's own store is not an "external" one
+        prepare(&o).unwrap();
+        assert!(err(o.to_str().unwrap()).contains("own deployment store"));
+    }
+
+    #[test]
+    fn nothing_can_aim_an_operation_at_an_attached_runtime() {
+        let o = own("ext-guard");
+        let dir = b7_copy("ext-guard");
+        let _attached = attach(&dir, &o).unwrap();
+        let before = tree(&dir);
+        let kc = MemorySecretStore::new();
+        let ops = [
+            DeployOp::AddRepo {
+                name: "shop".into(),
+                url: "https://example.com/acme/shop.git".into(),
+                app: None,
+                project: None,
+                environment: None,
+                branch: None,
+                filters: vec![],
+                container_port: 3000,
+                dockerfile: None,
+                context: None,
+                target: None,
+                health_path: None,
+                username: None,
+                known_host: None,
+                webhook: None,
+            },
+            DeployOp::Resume {
+                app: APP.into(),
+                mode: "dismiss".into(),
+                revision: None,
+            },
+            DeployOp::SetConfig {
+                scope: "global".into(),
+                name: "A".into(),
+                value: "1".into(),
+                build: false,
+                runtime: true,
+            },
+            DeployOp::Recover {},
+        ];
+        // the runtime itself, the journal folder inside it, and a path that merely climbs back into it
+        for target in [
+            dir.clone(),
+            dir.join("deploy-journal"),
+            dir.join("deploy-journal").join(".."),
+        ] {
+            for op in &ops {
+                let r = run_op(&target, op, &kc);
+                assert!(
+                    !r.ok
+                        && r.exit_code == harpoon_deploy_cli::exit::REFUSED
+                        && r.summary.contains("attached read-only"),
+                    "{target:?}: {}",
+                    r.detail
+                );
+            }
+        }
+        assert_eq!(tree(&dir), before, "refused before anything was created or opened");
+        // Harpoon's own store is unaffected by the guard
+        let own_ok = run_op(
+            &o,
+            &DeployOp::SetConfig {
+                scope: "global".into(),
+                name: "A".into(),
+                value: "1".into(),
+                build: false,
+                runtime: true,
+            },
+            &kc,
+        );
+        assert!(own_ok.ok, "{}", own_ok.detail);
+    }
+
+    #[test]
+    fn an_operation_cannot_carry_a_runtime_path_at_all() {
+        let ok: Result<DeployOp, _> = serde_json::from_str(r#"{"op":"recover"}"#);
+        assert!(ok.is_ok());
+        for smuggled in [
+            r#"{"op":"recover","runtimeDir":"/tmp/x"}"#,
+            r#"{"op":"recover","runtime":"/tmp/x"}"#,
+            r#"{"op":"resume","app":"a","mode":"dismiss","revision":null,"runtimeDir":"/tmp/x"}"#,
+            r#"{"op":"set-config","scope":"global","name":"A","value":"1","build":false,"runtime":true,"path":"/tmp/x"}"#,
+        ] {
+            let e = serde_json::from_str::<DeployOp>(smuggled)
+                .err()
+                .expect(smuggled)
+                .to_string();
+            assert!(e.contains("unknown field"), "{smuggled}: {e}");
+        }
     }
 }

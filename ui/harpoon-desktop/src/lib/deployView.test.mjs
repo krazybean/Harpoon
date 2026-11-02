@@ -11,7 +11,7 @@ const SHA = "3da0fcb5b2c8a5992c2ed0c5522c89b5836497af";
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "Live deployment is closed in this build." };
 const ev = (status, delivery = "poll:shop:1", revision = SHA) => ({ delivery, source: "poll-late", revision, receivedMs: NOW - 120000, status, decidedMs: null, related: null });
 const snapshot = (events, extra = {}) => ({
-  schema: 1, generatedMs: NOW, runtimeDir: "/x", store: "ok", storeError: null, writerHeld: false, gate: GATE, definitions: [],
+  schema: 1, generatedMs: NOW, runtimeDir: "/x", source: { kind: "own", path: "/x", journalFormat: "sqlite", readOnly: false }, store: "ok", storeError: null, writerHeld: false, gate: GATE, definitions: [],
   repos: [{ name: "shop", url: "https://example.com/shop.git", app: "app_1", project: "demo", environment: null, branch: "main", filters: [], credential: "none", webhook: null, containerPort: 3000, dockerfile: "Dockerfile", context: null, target: null, healthPath: "/", seen: [] }],
   apps: [{ id: "app_1", repo: "shop", deployments: [], serving: null, pauses: [], events }], ...extra,
 });

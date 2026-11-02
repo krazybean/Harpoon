@@ -310,6 +310,7 @@ export function appsNeedingAttention(s: DeployState, runtime: RuntimeState): { a
   if (runtime !== "connected") return [];
   const out: { app: AppModel; attention: Attention }[] = [];
   for (const app of Object.values(s.apps)) {
+    if (app.external) continue; // an attached runtime is looked at, not operated: it does not raise Harpoon's own alerts
     const a = attention(app, runtime);
     if (a && a.tone !== "info") out.push({ app, attention: a });
   }
@@ -323,6 +324,6 @@ export function releaseById(app: AppModel, id: string | null): Release | null {
 export type NavBadge = "none" | "attention" | "error";
 export function navBadge(s: DeployState, runtime: RuntimeState): NavBadge {
   const items = appsNeedingAttention(s, runtime);
-  if (items.some((i) => i.attention.tone === "err") || Object.values(s.apps).some((a) => recoveryInProgress(a))) return runtime === "connected" ? "error" : "none";
+  if (items.some((i) => i.attention.tone === "err") || Object.values(s.apps).some((a) => !a.external && recoveryInProgress(a))) return runtime === "connected" ? "error" : "none";
   return items.length ? "attention" : "none";
 }

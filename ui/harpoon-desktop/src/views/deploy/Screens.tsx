@@ -18,12 +18,33 @@ const connected = (c: Ctx) => c.runtime === "connected";
 /** Why a live action is disabled in the real-engine mode (the shipping gate), or undefined. */
 const gated = (c: Ctx) => (c.engine ? liveBlock(c.state) ?? undefined : undefined);
 const SIM_ONLY = "Simulated Deployments only models Production release state. Switch to Production to use this action.";
+const EXT_REASON = "This runtime is attached read-only. Harpoon shows it and does not change it.";
 const NO_PREVIEWS = "Branch previews are not part of this build: Harpoon can't yet create or expire preview instances, so none are shown.";
 
 // ------------------------------------------------------------------ home
 
 export function HomeScreen({ c }: { c: Ctx }) {
   const { state } = c;
+  const [attachMsg, setAttachMsg] = useState<string | null>(null);
+  const openRuntime = async () => {
+    setAttachMsg(null);
+    try {
+      const path = await c.engine!.pickFolder();
+      if (!path) return;
+      const r = await c.engine!.attachRuntime(path);
+      if (!r.ok) setAttachMsg(r.error);
+    } catch (e) { setAttachMsg(String(e)); }
+  };
+  const attachNotices = (
+    <>
+      {attachMsg && <Banner tone="err" title="That runtime cannot be opened" actions={<button className="btn btn--ghost" onClick={() => setAttachMsg(null)}>Dismiss</button>}>{attachMsg}</Banner>}
+      {(state.engine?.externals ?? []).filter((e) => e.error || !state.projects.some((p) => p.id === e.id)).map((e) => (
+        <Banner key={e.id} tone={e.error ? "warn" : "info"} title={e.error ? "An attached runtime cannot be read" : "An attached runtime has no deployments"}
+          actions={<button className="btn btn--secondary" onClick={() => c.engine!.detachRuntime(e.path)}>Close</button>}><span className="mono">{e.path}</span>{e.error ? ` — ${e.error}` : " — its journal records none."}</Banner>
+      ))}
+    </>
+  );
+  const openRuntimeButton = c.engine ? <button className="btn btn--secondary" onClick={() => void openRuntime()} title="Show a deployment runtime from another folder, read-only"><FolderSimple size={14} /> Open runtime…</button> : null;
   if (state.scenario === "loading") {
     return (
       <div className="dp-col" aria-busy="true" aria-label="Loading deployments">
@@ -37,6 +58,8 @@ export function HomeScreen({ c }: { c: Ctx }) {
   }
   if (state.projects.length === 0) {
     return (
+      <>
+      {attachNotices}
       <div className="dp-panel dp-empty">
         <div className="art"><RocketLaunch size={34} /></div>
         <h2>Deploy something to your local Harpoon</h2>
@@ -44,9 +67,11 @@ export function HomeScreen({ c }: { c: Ctx }) {
         <div className="dp-row dp-row--wrap" style={{ justifyContent: "center" }}>
           <button className="btn btn--primary" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
           <button className="btn btn--secondary" onClick={() => c.open({ kind: "create", step: 1, src: "folder" })}><FolderSimple size={14} /> Import a local folder</button>
+          {openRuntimeButton}
         </div>
         <Evidence>Everything runs on this Mac, under Harpoon. Local runs are evidence, not a production guarantee.</Evidence>
       </div>
+      </>
     );
   }
   const needs = appsNeedingAttention(state, c.runtime);
@@ -55,7 +80,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
     const att = needs.find((n) => n.app.id === app.id);
     return (
       <button key={app.id} className={`dp-card ${att ? (att.attention.tone === "err" ? "dp-card--err" : "dp-card--warn") : ""}`} onClick={() => c.setRoute({ screen: "app", appId: app.id, tab: "overview", env: "production" })}>
-        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill></div>
+        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>{app.external ? <Tag>External · read-only</Tag> : null}</div>
         <div className="dp-muted" style={{ fontSize: 12 }}>
           {app.source.kind === "git" ? <GitBranch size={12} style={{ verticalAlign: -2 }} /> : <Cube size={12} style={{ verticalAlign: -2 }} />} {app.source.label} · {app.source.detail}{st.live && st.releaseId ? ` · release ${st.releaseId}` : ""}
         </div>
@@ -72,8 +97,10 @@ export function HomeScreen({ c }: { c: Ctx }) {
       <div className="dp-row dp-row--wrap" style={{ marginBottom: 14 }}>
         <div><div className="dp-kicker">Local-first deployments</div><h1 className="dp-h1">Projects</h1></div>
         <span className="dp-spacer" />
+        {openRuntimeButton}
         <button className="btn btn--primary" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
       </div>
+      {attachNotices}
       {needs.map((n) => (
         <Banner key={n.app.id} tone={n.attention.tone === "err" ? "err" : "warn"} title={`${n.app.projectId} / ${n.app.name} needs attention`}
           actions={btn("btn--primary", () => c.setRoute({ screen: "app", appId: n.app.id, tab: "overview", env: "production" }), `Open ${n.app.name}`)}>
@@ -82,7 +109,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
       ))}
       {state.projects.map((p) => (
         <section key={p.id}>
-          <div className="dp-h2" style={{ margin: "14px 0 10px" }}>{p.name} <span className="dp-faint" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {p.appIds.length} application{p.appIds.length === 1 ? "" : "s"} · {p.sourceLabel}</span></div>
+          <div className="dp-h2" style={{ margin: "14px 0 10px" }}>{p.name} {state.engine?.externals.some((e) => e.id === p.id) ? <><Pill tone="info" icon={<Lock size={11} />}>External · read-only</Pill> <button className="btn btn--ghost btn--sm" onClick={() => c.engine!.detachRuntime(state.engine!.externals.find((e) => e.id === p.id)!.path)}>Close</button> </> : null}<span className="dp-faint" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {p.appIds.length} application{p.appIds.length === 1 ? "" : "s"} · {p.sourceLabel}</span></div>
           <div className="dp-grid dp-grid--3">{p.appIds.map((id) => state.apps[id] && card(state.apps[id]))}</div>
         </section>
       ))}
@@ -108,7 +135,9 @@ export function AppScreen({ c }: { c: Ctx }) {
   const paused = app.automation.state === "paused";
   const down = st.kind === "down";
   const prod = env === "production";
-  const gate = gated(c);
+  const ext = !!app.external;
+  const gate = ext ? EXT_REASON : gated(c);
+  const canAct = ok && !ext; // an attached runtime is looked at, never acted on
   const prodOnly = gate ?? (prod ? undefined : SIM_ONLY);
 
   const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : st.kind === "idle" ? <Cube size={20} /> : <Check size={20} />;
@@ -128,25 +157,26 @@ export function AppScreen({ c }: { c: Ctx }) {
         </div>
         <span className="dp-faint hide-compact" style={{ fontSize: 11 }}>{env === "production" ? `tracks ${app.settings.productionBranch || "its configured branch"}` : c.engine ? "not available in this build" : env === "preview" ? "one instance per branch · TTL 7 d" : "manual · local folder"} · all environments run locally on this Mac</span>
       </div>
-      {att && <Banner tone={att.tone} title={att.title}
+      {ext && <Banner tone="info" icon={<Lock size={18} />} title="External · read-only">Recorded in <span className="mono">{app.external!.path}</span> ({app.external!.format === "legacy" ? "legacy journal.wal, read where it is and not migrated" : "SQLite journal"}). This page shows what that journal recorded and what Docker shows now. Harpoon did not create this deployment here and cannot change it.</Banner>}
+      {!ext && att && <Banner tone={att.tone} title={att.title}
         actions={<>
-          {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !ok || !prod, title: prodOnly })}
-          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !ok || !prod, title: prodOnly })}
+          {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !canAct || !prod, title: prodOnly })}
+          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !canAct || !prod, title: prodOnly })}
           {latest && btn("btn--secondary", () => c.setRoute({ screen: "dep", depId: latest.id }), `Inspect ${latest.id}`)}
         </>}>{att.text}</Banner>}
-      {paused && (ok || c.engine) && (
+      {!ext && paused && (ok || c.engine) && (
         <Banner tone="warn" icon={<PausedIcon />} title={c.engine ? "Git triggers are paused" : "Automatic deployments are paused"}
           actions={btn("btn--primary", () => c.open({ kind: "resume" }), c.engine ? <><Play size={14} /> Review held events…</> : <><Play size={14} /> Review &amp; resume…</>, { disabled: !prod, title: prodOnly })}>
           {pauseText(app)} <b>{app.automation.held.length} {c.engine ? "commit" : "push"}{app.automation.held.length === 1 ? "" : "es"} held</b> — nothing was discarded. {c.engine ? "Nothing is deployed by itself." : "Manual deployments still work."}
         </Banner>
       )}
-      {c.engine && !paused && (app.automation.selected?.length ?? 0) > 0 && (
+      {!ext && c.engine && !paused && (app.automation.selected?.length ?? 0) > 0 && (
         <Banner tone="info" icon={<GitBranch size={18} />} title={`Commit ${app.automation.selected![0].revision.sha} is selected, not yet run`}
           actions={btn("btn--secondary", () => c.open({ kind: "resume" }), <>Review…</>, { disabled: !prod, title: prodOnly })}>
           You chose it in the review dialog and the decision is recorded. It is waiting for an attended deployment; nothing has run. Dismiss it there to clear the selection.
         </Banner>
       )}
-      {c.engine && !paused && app.automation.held.length > 0 && (
+      {!ext && c.engine && !paused && app.automation.held.length > 0 && (
         <Banner tone="info" icon={<GitBranch size={18} />} title={`${app.automation.held.length} held Git event${app.automation.held.length === 1 ? "" : "s"}`}
           actions={btn("btn--primary", () => c.open({ kind: "resume" }), <>Review held events…</>, { disabled: !prod, title: prodOnly })}>
           {app.automation.held.map((h) => h.revision.sha).slice(0, 3).join(", ")}{app.automation.held.length > 3 ? ", …" : ""} — recorded, not deployed. Review them to dismiss or select one.
@@ -160,7 +190,7 @@ export function AppScreen({ c }: { c: Ctx }) {
               <Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>
               {st.kind === "unknown" ? <Tag>not live</Tag> : null}
               {ok && (st.kind === "running" || st.kind === "building") && rel ? <><b>release {rel.id}</b><span className="mono dp-muted">{rel.revision.sha}</span></> : null}
-              {c.engine ? null : <Tag>simulated</Tag>}
+              {c.engine ? (ext ? <Tag>External · read-only</Tag> : null) : <Tag>simulated</Tag>}
             </div>
             <div className="dp-muted" style={{ fontSize: 12, marginTop: 4 }}>
               {subline ?? <>{app.url ? <span className="mono">{app.url}</span> : "no loopback URL"} · {env} · container {app.containerName ? <span className="mono" title={c.engine ? "Observed in Docker" : "Simulated container name — it does not exist in your real Containers view"}>{app.containerName}</span> : "none"}{c.engine && app.containerName && c.openContainers ? <> · <button className="btn btn--ghost btn--sm" onClick={() => c.openContainers!()}>Open in Containers</button></> : null}</>}
@@ -168,10 +198,10 @@ export function AppScreen({ c }: { c: Ctx }) {
           </div>
         </div>
         <div className="dp-actions">
-          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !ok || !prod, title: prodOnly })}
-          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !ok || !prod || !app.releases.length, title: prodOnly })}
-          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !ok || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
-          {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !ok || !prod || !app.previews.length, title: c.engine ? NO_PREVIEWS : prodOnly })}
+          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canAct || !prod, title: prodOnly })}
+          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canAct || !prod || !app.releases.length, title: prodOnly })}
+          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
+          {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !canAct || !prod || !app.previews.length, title: ext ? EXT_REASON : c.engine ? NO_PREVIEWS : prodOnly })}
         </div>
       </div></div>
       <div className="dp-tabs" role="tablist">
@@ -234,6 +264,30 @@ function ResourceBlock({ c, app }: { c: Ctx; app: AppModel }) {
   );
 }
 
+const OBS_LABEL: Record<NonNullable<AppModel["observation"]>["kind"], [string, "ok" | "warn" | "err" | "neutral"]> = {
+  match: ["Matches Docker", "ok"], unverified: ["Running, ownership unchecked", "warn"], stopped: ["Recorded, not running", "warn"],
+  absent: ["Recorded, not in Docker", "err"], mismatch: ["Does not match Docker", "err"], unknown: ["Cannot compare", "neutral"],
+};
+
+/** The journal's record next to what Docker shows now. They are two statements; a difference is reported, not resolved. */
+function ObservationPanel({ app }: { app: AppModel }) {
+  const o = app.observation!;
+  const [label, tone] = OBS_LABEL[o.kind];
+  return (
+    <section className="dp-panel">
+      <div className="dp-panel__head"><h2 className="dp-h2">Recorded vs observed</h2><span className="dp-spacer" /><Pill tone={tone}>{label}</Pill></div>
+      <div className="dp-panel__body">
+        <dl className="dp-kv">
+          <dt>Recorded</dt><dd>{o.recorded}<div className="dp-faint">from the journal; says what was done, not what is true now</div></dd>
+          <dt>Observed</dt><dd>{o.observed}<div className="dp-faint">from Docker, just now</div></dd>
+          {app.url ? <><dt>Loopback URL</dt><dd><span className="mono">{app.url}</span> <span className="dp-faint">{app.urlSource === "lease" ? "from the recorded port lease (no configuration was pinned)" : "from the pinned release configuration"}</span></dd></> : null}
+        </dl>
+        {o.notes.length ? <ul className="dp-muted" style={{ margin: "10px 0 0", paddingLeft: 18 }}>{o.notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
+      </div>
+    </section>
+  );
+}
+
 function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
   const L = latestDeployment(app);
   const st = appStatus(app, c.runtime);
@@ -266,8 +320,10 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             </div>
           </div>
         </section>
+        {app.observation ? <ObservationPanel app={app} /> : null}
       </div>
       <div className="dp-col">
+        {app.external ? null : (
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Automation</h2><span className="dp-spacer" />
             {c.engine ? <Pill tone={a.state === "paused" ? "warn" : "neutral"} icon={a.state === "paused" ? <Pause size={11} /> : undefined}>{a.state === "paused" ? "Paused" : "Manual"}</Pill> : !ok ? <Pill icon={<Pause size={11} />}>Not running</Pill> : <Pill tone={a.state === "paused" ? "warn" : "ok"} icon={a.state === "paused" ? <Pause size={11} /> : <Check size={11} />}>{a.state === "paused" ? "Paused" : "Active"}</Pill>}
@@ -286,6 +342,7 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>{c.engine ? "Nothing is polled or deployed in the background, and unattended deployment is not offered. Commits you find are recorded as held events; deploying one is a separate, attended step." : "Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered."}</p>
           </div>
         </section>
+        )}
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Configuration</h2><span className="dp-spacer" />{btn("btn--secondary", () => c.setRoute({ tab: "settings" }), "Edit", { sm: true })}</div>
           <div className="dp-panel__body"><dl className="dp-kv">
@@ -357,7 +414,7 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const live = app.deployments.find((d) => d.status === "running");
   const target = live ?? app.deployments.find((d) => d.buildLog.length) ?? null;
   const runtimeOk = connected(c) && !!app.currentReleaseId;
-  const rec = useStepLog(c, c.engine && which === "build" ? target?.id ?? null : null);
+  const rec = useStepLog(c, c.engine && which === "build" && !app.external ? target?.id ?? null : null);
   const [rt, setRt] = useState<{ lines: LogLine[]; error: string | null }>({ lines: [], error: null });
   useEffect(() => {
     if (!c.engine || which !== "runtime" || !runtimeOk || !app.containerName) return;
@@ -382,7 +439,8 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
   return (
     <>
       {which === "runtime" && !runtimeOk && <Banner tone="info" title="Application logs need a running container">{connected(c) ? "No release is running, so there is nothing to stream." : "Harpoon is not connected, so live application logs are unavailable. Build logs stay readable."}</Banner>}
-      {c.engine && which === "build" && !rec.loading && !rec.error && lines.length === 0 && <Banner tone="info" title="No log was recorded">{target ? "Nothing was captured for this deployment: it may predate log recording, or it ended before a step produced output." : "There are no deployments yet."}</Banner>}
+      {app.external && which === "build" && <Banner tone="info" title="No recorded build log here">Step logs are recorded by Harpoon's own store; this runtime was written by something else, or before logs were recorded. Application logs come from Docker.</Banner>}
+      {c.engine && !app.external && which === "build" && !rec.loading && !rec.error && lines.length === 0 && <Banner tone="info" title="No log was recorded">{target ? "Nothing was captured for this deployment: it may predate log recording, or it ended before a step produced output." : "There are no deployments yet."}</Banner>}
       {rec.error && <Banner tone="warn" title="Could not read the recorded log">{rec.error}</Banner>}
       {which === "runtime" && c.engine && rt.error && <Banner tone="warn" title="Docker did not return logs">{rt.error}</Banner>}
       {!c.engine && live && which === "build" && <div className="dp-bar dp-bar--live" style={{ marginBottom: 10 }} role="progressbar" aria-label="build in progress"><i style={{ width: `${Math.min(95, 15 + live.buildLog.length * 7)}%` }} /></div>}
@@ -425,7 +483,7 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
       <div className="dp-row dp-row--wrap" style={{ marginBottom: 10 }}>
         <div className="dp-seg"><button aria-pressed="true">{c.route.env[0].toUpperCase() + c.route.env.slice(1)}</button><button aria-pressed="false" disabled title={c.engine ? NO_PREVIEWS : "Not part of this mock"}>Compare with Preview</button></div>
         <span className="dp-spacer" /><span className="dp-faint hide-compact">Values resolve at deploy time; releases keep a snapshot. Changing a value affects <b>new</b> deployments only.</span>
-        <button className="btn btn--primary" onClick={() => c.open({ kind: "variable" })}><Plus size={14} /> Add variable</button>
+        <button className="btn btn--primary" disabled={!!app.external} title={app.external ? EXT_REASON : undefined} onClick={() => c.open({ kind: "variable" })}><Plus size={14} /> Add variable</button>
       </div>
       <div className="dp-tablewrap"><table className="dp-table"><thead><tr><th>Name</th><th>Type</th><th>Value</th><th className="hide-compact">Used in</th><th className="hide-compact">Scope</th><th className="hide-compact">Version</th><th /></tr></thead><tbody>
         {app.variables.map((v) => (
@@ -435,7 +493,7 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
             <td>{v.type === "secret" ? <><span className="dp-secret">{locked ? "locked" : "••••••••"}</span> <span className="dp-faint">write-only</span></> : <code>{v.value}</code>}</td>
             <td className="hide-compact"><span className="dp-flag">{v.used}</span></td><td className="hide-compact dp-muted">{v.scope}</td>
             <td className="hide-compact dp-faint">{v.type === "secret" ? `v${v.version}${v.changedAgoMin != null ? ` · ${formatAge(v.changedAgoMin)}` : ""}` : "—"}</td>
-            <td style={{ textAlign: "right" }}>{btn("btn--secondary", () => c.open({ kind: "variable", name: v.name }), v.type === "secret" ? "Replace" : "Edit", { sm: true })}</td>
+            <td style={{ textAlign: "right" }}>{btn("btn--secondary", () => c.open({ kind: "variable", name: v.name }), v.type === "secret" ? "Replace" : "Edit", { sm: true, disabled: !!app.external, title: app.external ? EXT_REASON : undefined })}</td>
           </tr>
         ))}
       </tbody></table></div>
@@ -480,9 +538,9 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
 export function DeploymentScreen({ c }: { c: Ctx }) {
   const app = c.state.apps[c.route.appId];
   const d = app?.deployments.find((x) => x.id === c.route.depId) ?? app?.deployments[0];
-  const rec = useStepLog(c, c.engine ? d?.id ?? null : null);
+  const rec = useStepLog(c, c.engine && !app?.external ? d?.id ?? null : null);
   if (!app || !d) return <Banner tone="warn" title="Deployment not found">{c.engine ? "This deployment is not in Harpoon's records." : "This simulated deployment no longer exists in the current scenario."}</Banner>;
-  const gate = gated(c);
+  const gate = app.external ? EXT_REASON : gated(c);
   const ok = connected(c) && c.route.env === "production" && !gate; // the mock only models Production release state
   const why = gate;
   const r = d.recovery;
@@ -541,6 +599,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
             <dt>Port</dt><dd>{app.settings.port ?? "—"}</dd>{c.engine && d.note ? <><dt>Changes</dt><dd>{d.note.replace("Configuration changes since the previous snapshot: ", "")}</dd></> : null}</dl>
             <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Rollback uses this snapshot. If a pinned secret version has been deleted, this release can't be restored — you'll be told before you confirm.</p></div></section>
           <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Docker objects</h2></div><div className="dp-panel__body"><div className="dp-muted" style={{ fontSize: 12 }}>{c.engine ? "Labelled" : "Would be labelled"} <code>io.harpoon.deployment={d.id}</code></div>
+            {c.engine && d.recorded?.length ? <table className="dp-table" style={{ marginTop: 8 }}><thead><tr><th>Recorded</th><th>Id</th><th>State</th></tr></thead><tbody>{d.recorded.map((r) => <tr key={`${r.kind}:${r.name}`}><td><b>{r.kind}</b><div className="sub mono" style={{ wordBreak: "break-all" }}>{r.name}</div></td><td className="mono" title={r.id ?? undefined}>{r.id ? r.id.replace(/^sha256:/, "").slice(0, 12) : "—"}</td><td>{r.state.replace("_", " ")}</td></tr>)}</tbody></table> : null}
             <div style={{ marginTop: 8 }}>{c.engine ? (d.releaseId && d.releaseId === app.currentReleaseId ? <><span className="mono">{app.containerName}</span> <span className="dp-faint">running now</span></> : <span className="dp-faint">{d.releaseId ? "not observed running now" : "none"}</span>) : d.releaseId ? <span className="mono" title="Simulated — this container does not exist in your Containers view">{app.projectId}-{app.name}-{d.releaseId}</span> : <span className="dp-faint">none</span>}{c.engine ? null : <> <Tag>simulated</Tag></>}</div></div></section>
         </div>
       </div>

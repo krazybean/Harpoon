@@ -71,6 +71,7 @@ export const fakeEngine = (state, calls, over = {}) => ({
   api: {
     run: async (op) => { calls.push(op); return { ok: true, exitCode: 0, summary: "", detail: "", refusedByGate: false, op: String(op.op) }; },
     refresh() {}, busy: false, last: null, clearLast() {}, notice: [], clearNotice() {}, pickFolder: async () => null,
+    attachRuntime: async (path) => { calls.push({ attach: path }); return { ok: true }; }, detachRuntime(path) { calls.push({ detach: path }); },
     stepLogs: async () => [], runtimeLogs: async () => [], ...over,
   },
 });

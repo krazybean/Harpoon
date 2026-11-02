@@ -40,6 +40,8 @@ export type StepRecord = { name: StepName; status: StepStatus; durationLabel: st
 
 export type Deployment = {
   id: string;
+  /** Engine mode: what the ledger recorded creating for this deployment. */
+  recorded?: { kind: string; name: string; id: string | null; state: string }[];
   env: Env;
   status: DeploymentStatus;
   trigger: Trigger;
@@ -105,7 +107,16 @@ export type AppSettings = {
   pollSeconds: number;
 };
 
+/** Recorded (journal) vs observed (Docker) for an application's serving container. Never merged into one claim. */
+export type ObservationKind = "match" | "unverified" | "stopped" | "absent" | "mismatch" | "unknown";
+export type Observation = { kind: ObservationKind; recorded: string; observed: string; notes: string[] };
+
 export type AppModel = {
+  /** Set when this application comes from a runtime attached read-only by path: Harpoon did not create it here and cannot change it. */
+  external?: { path: string; format: string };
+  observation?: Observation;
+  /** Where the loopback URL comes from: the pinned release configuration, or a recorded port lease when nothing was pinned. */
+  urlSource?: "pin" | "lease";
   id: string;
   projectId: string;
   name: string;
@@ -141,6 +152,8 @@ export type EngineMeta = {
   /** The last refresh failed; what is shown is the last good snapshot (or nothing). */
   loadError: string | null;
   stale: boolean;
+  /** Runtimes attached read-only by path (engine mode). */
+  externals: { id: string; path: string; format: string; store: string; error: string | null }[];
 };
 export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; seen: { refName: string; commit: string; atMs: number }[] };
 

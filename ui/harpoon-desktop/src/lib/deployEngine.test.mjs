@@ -8,7 +8,7 @@ const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
 const step = (name, status, extra = {}) => ({ name, status, startedMs: NOW - 60000, finishedMs: NOW - 50000, note: "", log: false, ...extra });
 const dep = (id, extra = {}) => ({
-  id, status: "succeeded", trigger: "cli", createdMs: NOW - 120000, startedMs: NOW - 119000, finishedMs: NOW - 100000, steps: [step("source", "succeeded"), step("build", "succeeded")],
+  id, resources: [], status: "succeeded", trigger: "cli", createdMs: NOW - 120000, startedMs: NOW - 119000, finishedMs: NOW - 100000, steps: [step("source", "succeeded"), step("build", "succeeded")],
   cutover: "confirmed", cutoverAtMs: NOW - 101000, failure: null, recovery: null, interruption: null, release: `rel_${id}`, replaces: null, rollbackTo: null, mayBeDown: false, unfinished: false,
   source: { repo: "shop", url: "https://example.com/shop.git", selector: "branch", requested: "main", commit: "0123456789abcdef", trigger: "manual", delivery: null },
   pin: { imageTag: `harpoon/${id}:1`, imageId: "sha256:x", hostPort: 41000, containerPort: 3000, healthPath: "/healthz", envNames: ["MODE"], secrets: [{ name: "DB", id: "app:a/DB", version: 2 }], snapshot: id, build: null },
@@ -16,7 +16,7 @@ const dep = (id, extra = {}) => ({
 });
 const app = (deployments, extra = {}) => ({ id: "app_1", repo: "shop", deployments, serving: null, pauses: [], events: [], ...extra });
 const snap = (apps, extra = {}) => ({
-  schema: 1, generatedMs: NOW, runtimeDir: "/x", store: "ok", storeError: null, writerHeld: false, gate: GATE, apps, definitions: [],
+  schema: 1, generatedMs: NOW, runtimeDir: "/x", source: { kind: "own", path: "/x", journalFormat: "sqlite", readOnly: false }, store: "ok", storeError: null, writerHeld: false, gate: GATE, apps, definitions: [],
   repos: [{ name: "shop", url: "https://example.com/shop.git", app: "app_1", project: null, environment: null, branch: "main", filters: [], credential: "none", webhook: null, containerPort: 3000, dockerfile: "Dockerfile", context: null, target: null, healthPath: "/healthz", seen: [] }], ...extra,
 });
 const st = (s, o = {}) => toDeployState(s, { observed: {}, keychain: "unlocked", ...o });
@@ -45,7 +45,7 @@ test("no seeded or fabricated content: every app, id and release comes from the 
 test("recorded serving release is only 'running' when Docker was observed running it", () => {
   const serving = { release: "rel_dep_1", deployment: "dep_1", container: "hp-dep_1", via: "original", sinceMs: NOW - 90000, hostPort: 41000, healthPath: "/healthz" };
   const a = app([dep("dep_1")], { serving });
-  const up = st(snap([a]), { observed: { "hp-dep_1": "running" } }).apps.app_1;
+  const up = st(snap([a]), { observed: { "hp-dep_1": { id: "c1", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1", "io.harpoon.deployment": "dep_1" }, ports: [41000] } } }).apps.app_1;
   assert.deepEqual([up.currentReleaseId, up.url], ["rel_dep_1", "http://127.0.0.1:41000"]);
   assert.equal(appStatus(up, "connected").kind, "running");
   const gone = st(snap([a]), { observed: {} }).apps.app_1;
@@ -128,7 +128,9 @@ test("recorded step logs: withheld output is stated, truncation is stated, text 
 });
 
 test("observed Docker state parses names and treats a non-answer as unknown", () => {
-  assert.deepEqual(observedFrom([{ Names: "/a,b", State: "Running" }]), { a: "running", b: "running" });
+  const row = { id: "abc", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1" }, ports: [38000] };
+  assert.deepEqual(observedFrom([{ Names: "/a,b", ID: "abc", State: "Running", Labels: "io.harpoon.managed=true,io.harpoon.app=app_1", Ports: "127.0.0.1:38000->8080/tcp" }]), { a: row, b: row });
+  assert.equal(observedFrom([{ Names: "x", ID: "1", State: "exited" }]).x.labels, null, "no Labels in Docker's answer means nothing to check, not 'no labels'");
   assert.equal(observedFrom(null), null);
 });
 
@@ -174,7 +176,7 @@ test("recorded file URLs are shown as folder paths; anything odd is shown as rec
 });
 
 test("an existing journal directory with no store is the empty state, not 'cannot read'", () => {
-  const s = toDeployState({ schema: 1, generatedMs: 1, runtimeDir: "/x", store: "missing", storeError: null, writerHeld: false, gate: GATE, repos: [], apps: [], definitions: [] }, { observed: {}, keychain: "unlocked" });
+  const s = toDeployState({ schema: 1, generatedMs: 1, runtimeDir: "/x", source: { kind: "own", path: "/x", journalFormat: "none", readOnly: false }, store: "missing", storeError: null, writerHeld: false, gate: GATE, repos: [], apps: [], definitions: [] }, { observed: {}, keychain: "unlocked" });
   assert.deepEqual([s.scenario, s.engine.store, s.engine.storeError], ["empty", "missing", null]);
 });
 

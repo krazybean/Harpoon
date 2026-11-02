@@ -1,4 +1,4 @@
-import type { DeployAction, DeployState, Env, RuntimeState } from "../../lib/deployTypes.ts";
+import type { AppModel, DeployAction, DeployState, Env, RuntimeState } from "../../lib/deployTypes.ts";
 import type { EngineApi } from "../../lib/deployEngine.ts";
 
 export type Tab = "overview" | "deployments" | "logs" | "metrics" | "variables" | "settings";
@@ -34,4 +34,7 @@ export type Ctx = {
 
 /** Dialogs that start or change Production state; the simulation models Production only. */
 const PRODUCTION_ONLY: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume"];
+/** Dialogs that change something. None may open for an application from a runtime attached read-only. */
+export const MUTATING_DIALOGS: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume", "variable"];
+export const dialogAllowedFor = (d: DialogState, env: Env, app?: AppModel): boolean => dialogAllowed(d, env) && !(app?.external && MUTATING_DIALOGS.includes(d.kind));
 export const dialogAllowed = (d: DialogState, env: Env): boolean => env === "production" || !PRODUCTION_ONLY.includes(d.kind);

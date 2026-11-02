@@ -10,14 +10,15 @@
 //  * Secrets are names, ids and versions. Values are never in the snapshot.
 // Strip-types friendly: no enums, no parameter properties.
 import type {
-  AppModel, Automation, Deployment, DeployState, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
+  AppModel, Automation, Deployment, DeployState, Observation, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
   Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
 } from "./deployTypes.ts";
 
 export type SnapStep = { name: string; status: string; startedMs: number | null; finishedMs: number | null; note: string; log: boolean };
 export type SnapEntry = { name: string; kind: "config" | "secret"; build: boolean; runtime: boolean; scope: string; value: string | null; secretId: string | null; version: number | null };
+export type SnapResource = { kind: string; name: string; id: string | null; state: string; keep: string };
 export type SnapDeployment = {
-  id: string; status: string; trigger: string; createdMs: number; startedMs: number | null; finishedMs: number | null; steps: SnapStep[];
+  id: string; resources: SnapResource[]; status: string; trigger: string; createdMs: number; startedMs: number | null; finishedMs: number | null; steps: SnapStep[];
   cutover: string; cutoverAtMs: number | null;
   failure: { step: string; kind: string; message: string; timedOut: boolean } | null;
   recovery: { outcome: string; reason: string | null; reasonText: string | null; startedMs: number; finishedMs: number | null; budgetMs: number } | null;
@@ -38,8 +39,9 @@ export type SnapRepo = {
   containerPort: number; dockerfile: string | null; context: string | null; target: string | null; healthPath: string | null; seen: { refName: string; commit: string; atMs: number }[];
 };
 export type SnapDefinition = { scope: string; name: string; kind: string; build: boolean; runtime: boolean; value: string | null; secretId: string | null; version: number | null; atMs: number };
+export type SnapSource = { kind: "own" | "external"; path: string; journalFormat: "sqlite" | "legacy" | "none"; readOnly: boolean };
 export type EngineSnapshot = {
-  schema: number; generatedMs: number; runtimeDir: string; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
+  schema: number; generatedMs: number; runtimeDir: string; source: SnapSource; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
   gate: { liveDeploy: boolean; liveReplacement: boolean; reason: string };
   repos: SnapRepo[]; apps: SnapApp[]; definitions: SnapDefinition[];
 };
@@ -48,8 +50,13 @@ export type OpResult = { ok: boolean; exitCode: number; summary: string; detail:
 export type LastResult = OpResult & { op: string };
 export type StepLog = { step: string; text: string; withheld: boolean; truncated: boolean; atMs: number };
 
-/** Container name -> Docker state, as observed now. `null` = Docker could not be asked. */
-export type Observed = Record<string, string> | null;
+/** What Docker shows for one container right now. `labels` is `null` when Docker's answer carried none to check. */
+export type ObservedContainer = { id: string; state: string; labels: Record<string, string> | null; ports: number[] };
+/** Container name -> what Docker shows, as observed now. `null` = Docker could not be asked. */
+export type Observed = Record<string, ObservedContainer> | null;
+
+/** A runtime attached read-only by path, as the hook holds it. */
+export type ExternalInput = { path: string; snapshot: EngineSnapshot | null; error: string | null };
 
 /** What the views may do with the real engine. They never see `invoke`. */
 export type EngineApi = {
@@ -63,6 +70,9 @@ export type EngineApi = {
   clearNotice: () => void;
   /** The macOS folder picker; null when cancelled. */
   pickFolder: () => Promise<string | null>;
+  /** Attach a runtime read-only by path (validated by the backend). Never changes it. */
+  attachRuntime: (path: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  detachRuntime: (path: string) => void;
   clearLast: () => void;
   stepLogs: (deploymentId: string) => Promise<LogLine[]>;
   runtimeLogs: (container: string) => Promise<LogLine[]>;
@@ -158,45 +168,48 @@ function automationOf(app: SnapApp, now: number, dep: (id: string) => SnapDeploy
   return { state: "paused", reason, sinceMin: min(p.sinceMs, now), held, selected };
 }
 
-export function engineMeta(snap: EngineSnapshot | null, loadError: string | null, stale: boolean): EngineMeta {
+const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+
+export function engineMeta(snap: EngineSnapshot | null, loadError: string | null, stale: boolean, externals: ExternalInput[] = []): EngineMeta {
   return {
     generatedMs: snap?.generatedMs ?? 0, store: snap?.store ?? "missing", storeError: snap?.storeError ?? null, writerHeld: snap?.writerHeld ?? false,
     gate: snap?.gate ?? { liveDeploy: false, liveReplacement: false, reason: "The deployment engine has not answered yet." },
     repos: (snap?.repos ?? []).map((r) => ({ name: r.name, url: r.url, app: r.app, project: r.project, branch: r.branch, containerPort: r.containerPort, dockerfile: r.dockerfile, healthPath: r.healthPath, seen: r.seen })),
     loadError, stale,
+    externals: externals.map((x, i) => ({ id: `ext${i}`, path: x.path, format: x.snapshot?.source.journalFormat ?? "none", store: x.snapshot?.store ?? "missing", error: x.error ?? x.snapshot?.storeError ?? null })),
   };
 }
 
-/**
- * `observed` is the current Docker state of containers by name. An application is current only when the
- * container its recorded serving release lives in was seen running; otherwise that release is "last known".
- */
-export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observed; keychain: KeychainState; loadError?: string | null; stale?: boolean }): DeployState {
-  const engine = engineMeta(snap, o.loadError ?? null, o.stale ?? false);
-  const base = { keychain: o.keychain, nextOutcome: "success" as const, job: null, nextDeploymentNumber: 1, engine };
-  if (!snap) return { ...base, scenario: o.loadError ? "empty" : "loading", projects: [], apps: {} };
-  if (snap.store === "error") return { ...base, scenario: "empty", projects: [], apps: {} };
+/** The applications of one snapshot. `ext` marks a runtime attached read-only: ids are prefixed so they can never collide with, or be mistaken for, Harpoon's own. */
+function appsFrom(snap: EngineSnapshot, observed: Observed, ext?: { id: string; path: string }): { apps: Record<string, AppModel>; projects: Project[] } {
   const now = snap.generatedMs;
   const apps: Record<string, AppModel> = {};
   const projects: Record<string, Project> = {};
+  const idOf = (id: string) => (ext ? `${ext.id}/${id}` : id);
   for (const a of snap.apps) {
     const repo = snap.repos.find((r) => r.app === a.id) ?? null;
     const byId = new Map(a.deployments.map((d) => [d.id, d] as const));
-    const deployments = a.deployments.map((d) => deploymentOf(d, now, snap.writerHeld)).sort((x, y) => x.ageMin - y.ageMin);
+    const deployments = a.deployments.map((d) => ({ ...deploymentOf(d, now, snap.writerHeld), recorded: d.resources.map((r) => ({ kind: r.kind, name: r.name, id: r.id, state: r.state })) })).sort((x, y) => x.ageMin - y.ageMin);
     const releases: Release[] = a.deployments.filter((d) => d.release).map((d) => ({
-      id: d.release!, deploymentId: d.id, image: d.pin?.imageTag ?? "", revision: revisionOf(d), ageMin: min(d.finishedMs ?? d.createdMs, now),
+      id: d.release!, deploymentId: d.id, image: d.pin?.imageTag ?? d.resources.find((r) => r.kind === "image")?.name ?? "", revision: revisionOf(d), ageMin: min(d.finishedMs ?? d.createdMs, now),
       secrets: (d.pin?.secrets ?? []).map((s) => ({ name: s.name, version: s.version })),
     })).sort((x, y) => x.ageMin - y.ageMin);
     const sv = a.serving;
-    const seen = sv ? o.observed?.[sv.container] : undefined;
-    const running = !!sv && seen === "running";
-    const port = sv?.hostPort ?? null;
+    const observation = correlate(a, observed) ?? undefined;
+    // current = recorded as serving AND observed running as that deployment's container (labels checked when Docker gave them)
+    const running = !!sv && (observation?.kind === "match" || observation?.kind === "unverified");
+    const servDep = sv ? a.deployments.find((d) => d.id === sv.deployment) : undefined;
+    const lease = servDep?.resources.find((r) => r.kind === "port" && r.state === "created");
+    const leasePort = lease ? Number(lease.name) : null;
+    const port = sv?.hostPort ?? leasePort;
     const healthPath = sv?.healthPath ?? repo?.healthPath ?? "/";
     const pin = [...a.deployments].reverse().find((d) => d.pin)?.pin ?? null;
-    const projectId = repo?.project ?? repo?.name ?? "ungrouped";
-    apps[a.id] = {
-      id: a.id, projectId, name: repo?.name ?? a.id,
-      source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: "no repository registered" },
+    const projectId = ext ? ext.id : repo?.project ?? repo?.name ?? "ungrouped";
+    apps[idOf(a.id)] = {
+      id: idOf(a.id), projectId, name: repo?.name ?? a.id,
+      ...(ext ? { external: { path: ext.path, format: snap.source.journalFormat } } : {}),
+      observation, urlSource: sv?.hostPort != null ? "pin" : leasePort ? "lease" : undefined,
+      source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: ext ? "recorded in an external runtime" : "no repository registered" },
       url: running && port ? `http://127.0.0.1:${port}` : "", containerName: sv?.container ?? "",
       currentReleaseId: running ? sv!.release : null, lastKnownReleaseId: sv?.release ?? null,
       deployments, releases, automation: automationOf(a, now, (id) => byId.get(id)),
@@ -207,9 +220,43 @@ export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observ
       },
       previews: [], resources: null,
     };
-    (projects[projectId] ??= { id: projectId, name: projectId, sourceLabel: repo ? "Git repository" : "recorded deployments", appIds: [] }).appIds.push(a.id);
+    const pid = projectId;
+    (projects[pid] ??= ext
+      ? { id: pid, name: `External · ${baseName(ext.path)}`, sourceLabel: `read-only · ${snap.source.journalFormat === "legacy" ? "legacy journal.wal, not migrated" : "SQLite journal"}`, appIds: [] }
+      : { id: pid, name: pid, sourceLabel: repo ? "Git repository" : "recorded deployments", appIds: [] }).appIds.push(idOf(a.id));
   }
-  return { ...base, scenario: snap.apps.length ? "healthy" : "empty", projects: Object.values(projects), apps };
+  return { apps, projects: Object.values(projects) };
+}
+
+/**
+ * `observed` is what Docker shows now. An application is current only when the container its record names was
+ * seen running and carries its ownership labels; otherwise that release is only "last known", and the mismatch is
+ * reported on the application (`observation`). `externals` are runtimes attached read-only.
+ */
+export function toDeployState(snap: EngineSnapshot | null, o: { observed: Observed; keychain: KeychainState; loadError?: string | null; stale?: boolean; externals?: ExternalInput[] }): DeployState {
+  const externals = o.externals ?? [];
+  const engine = engineMeta(snap, o.loadError ?? null, o.stale ?? false, externals);
+  const base = { keychain: o.keychain, nextOutcome: "success" as const, job: null, nextDeploymentNumber: 1, engine };
+  if (!snap) return { ...base, scenario: o.loadError ? "empty" : "loading", projects: [], apps: {} };
+  const own = snap.store === "error" ? { apps: {}, projects: [] as Project[] } : appsFrom(snap, o.observed);
+  const apps: Record<string, AppModel> = { ...own.apps };
+  const projects: Project[] = [...own.projects];
+  externals.forEach((x, i) => {
+    if (!x.snapshot || x.snapshot.store === "error") return;
+    const e = appsFrom(x.snapshot, o.observed, { id: `ext${i}`, path: x.path });
+    Object.assign(apps, e.apps);
+    projects.push(...e.projects);
+  });
+  if (snap.store === "error") return { ...base, scenario: "empty", projects, apps };
+  return { ...base, scenario: Object.keys(apps).length ? "healthy" : "empty", projects, apps };
+}
+
+/** Is this application one attached read-only? (Its ids are prefixed `ext<n>/`; Harpoon's own never are.) */
+export const isExternalAppId = (id: unknown): boolean => typeof id === "string" && /^ext\d+\//.test(id);
+
+/** Operations act on Harpoon's own store only. The backend refuses anything else; this keeps the request from being sent. */
+export function externalOpProblem(op: Record<string, unknown>): string | null {
+  return isExternalAppId(op.app) ? "That application belongs to a runtime attached read-only; Harpoon does not change it." : null;
 }
 
 /** A recorded step log as the views' log lines. The text was redacted by the engine before it was stored. */
@@ -223,15 +270,56 @@ export function logLines(logs: StepLog[]): LogLine[] {
   return out;
 }
 
-/** The observed Docker state by container name, from `docker ps` rows. */
+/** The Docker label keys the engine stamps on every object it creates (`deploy/src/ids.rs`). */
+export const LABEL_MANAGED = "io.harpoon.managed";
+export const LABEL_APP = "io.harpoon.app";
+export const LABEL_DEPLOYMENT = "io.harpoon.deployment";
+
+/** What Docker shows, by container name, from `docker ps` rows (names, id, state, labels, published ports). */
 export function observedFrom(rows: unknown): Observed {
   if (!Array.isArray(rows)) return null;
-  const out: Record<string, string> = {};
+  const out: Record<string, ObservedContainer> = {};
   for (const r of rows as Record<string, unknown>[]) {
-    const names = String(r.Names ?? r.Name ?? "");
-    for (const n of names.split(",")) if (n) out[n.replace(/^\//, "")] = String(r.State ?? "").toLowerCase();
+    const labelText = typeof r.Labels === "string" ? r.Labels : null;
+    const labels = labelText === null ? null : Object.fromEntries(labelText.split(",").filter(Boolean).map((kv) => { const i = kv.indexOf("="); return i < 0 ? [kv, ""] : [kv.slice(0, i), kv.slice(i + 1)]; }));
+    const ports = [...String(r.Ports ?? "").matchAll(/:(\d+)->/g)].map((m) => Number(m[1]));
+    const row: ObservedContainer = { id: String(r.ID ?? r.Id ?? ""), state: String(r.State ?? "").toLowerCase(), labels, ports };
+    for (const n of String(r.Names ?? r.Name ?? "").split(",")) if (n) out[n.replace(/^\//, "")] = row;
   }
   return out;
+}
+
+const shortId = (id: string) => id.replace(/^sha256:/, "").slice(0, 12);
+
+/**
+ * Recorded vs observed for an application's serving container. The journal says what Harpoon (or the tool that
+ * wrote it) did; Docker says what exists now. They are compared, never merged: a record is "current" only when the
+ * container it names is there, running, and carries this application's and this deployment's ownership labels.
+ */
+export function correlate(app: SnapApp, observed: Observed): Observation | null {
+  const sv = app.serving;
+  if (!sv) return null;
+  const dep = app.deployments.find((d) => d.id === sv.deployment);
+  const rec = dep?.resources.find((r) => r.kind === "container" && r.name === sv.container);
+  const lease = dep?.resources.find((r) => r.kind === "port" && r.state === "created");
+  const leasePort = lease ? Number(lease.name) : null;
+  const recorded = `release ${sv.release} serving in container ${sv.container}${rec?.id ? ` (${shortId(rec.id)})` : ""}${leasePort ? `, port lease ${leasePort}` : ""}`;
+  if (observed === null) return { kind: "unknown", recorded, observed: "Docker could not be asked", notes: ["The record cannot be compared with Docker right now."] };
+  const row = observed[sv.container];
+  if (!row) return { kind: "absent", recorded, observed: "no container with that name", notes: ["Recorded as serving, but Docker has no such container."] };
+  const notes: string[] = [];
+  if (rec?.id && row.id && !(row.id === rec.id || row.id.startsWith(rec.id) || rec.id.startsWith(row.id))) notes.push(`The container id differs: recorded ${shortId(rec.id)}, observed ${shortId(row.id)}.`);
+  if (row.labels) {
+    if (row.labels[LABEL_MANAGED] !== "true") notes.push(`The container is not labelled ${LABEL_MANAGED}=true.`);
+    if (row.labels[LABEL_APP] !== app.id) notes.push(`Its ${LABEL_APP} label is ${JSON.stringify(row.labels[LABEL_APP] ?? "")}, not ${app.id}.`);
+    if (row.labels[LABEL_DEPLOYMENT] !== sv.deployment) notes.push(`Its ${LABEL_DEPLOYMENT} label is ${JSON.stringify(row.labels[LABEL_DEPLOYMENT] ?? "")}, not ${sv.deployment}.`);
+  }
+  if (leasePort && row.ports.length && !row.ports.includes(leasePort)) notes.push(`The recorded port lease ${leasePort} is not among the published ports (${row.ports.join(", ")}).`);
+  const observedText = `container ${shortId(row.id)} ${row.state}${row.labels ? ", ownership labels checked" : ", no labels to check"}${row.ports.length ? `, published ${row.ports.join(", ")}` : ""}`;
+  if (notes.length) return { kind: "mismatch", recorded, observed: observedText, notes };
+  if (row.state !== "running") return { kind: "stopped", recorded, observed: observedText, notes: [`Recorded as serving, but the container is ${row.state || "not running"}.`] };
+  if (!row.labels) return { kind: "unverified", recorded, observed: observedText, notes: ["Docker's answer carried no labels, so ownership could not be checked."] };
+  return { kind: "match", recorded, observed: observedText, notes: [] };
 }
 
 /**

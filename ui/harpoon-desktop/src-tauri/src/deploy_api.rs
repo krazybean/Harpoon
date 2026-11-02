@@ -79,6 +79,8 @@ pub struct EngineSnapshot {
     pub schema: u32,
     pub generated_ms: u64,
     pub runtime_dir: String,
+    /// Whose store this is: Harpoon's own, or an external runtime attached read-only.
+    pub source: RuntimeSourceDto,
     /// `missing` (nothing was ever recorded), `ok`, or `error` (the store is damaged or unreadable).
     pub store: String,
     pub store_error: Option<String>,
@@ -88,6 +90,31 @@ pub struct EngineSnapshot {
     pub repos: Vec<RepoDto>,
     pub apps: Vec<AppDto>,
     pub definitions: Vec<DefinitionDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSourceDto {
+    /// `own` (the desktop's deployment engine store) or `external` (attached read-only by path).
+    pub kind: &'static str,
+    pub path: String,
+    /// `sqlite`, `legacy` (the pre-SQLite `journal.wal`, read without migrating it) or `none`.
+    pub journal_format: &'static str,
+    /// An external source is never written: not by this module, and not by any operation.
+    pub read_only: bool,
+}
+
+/// One ledger entry: an image, container or port lease the engine recorded for a deployment.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceDto {
+    pub kind: String,
+    /// Image tag, container name, or the decimal port number.
+    pub name: String,
+    /// The id the runtime returned (absent until a receipt was recorded).
+    pub id: Option<String>,
+    pub state: String,
+    pub keep: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,6 +264,8 @@ pub struct EntryDto {
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentDto {
     pub id: String,
+    /// What the engine recorded creating for this deployment (images, containers, port leases), with ids.
+    pub resources: Vec<ResourceDto>,
     pub status: String,
     pub trigger: String,
     pub created_ms: u64,
@@ -334,6 +363,19 @@ fn reason_of(o: harpoon_deploy::state::RecoveryOutcome) -> Option<harpoon_deploy
     }
 }
 
+fn entry_state(s: &harpoon_deploy::ledger::EntryState) -> &'static str {
+    use harpoon_deploy::ledger::{EntryState::*, Released};
+    match s {
+        Intended => "intended",
+        Created => "created",
+        Released(Released::Removed) => "released",
+        Released(Released::AlreadyAbsent) => "released_absent",
+        CleanupFailed(_) => "cleanup_failed",
+        CleanupConflict(..) => "cleanup_conflict",
+        Refused(_) => "refused",
+    }
+}
+
 fn deployment_dto(d: &Deployment, r: &Restored, prev_snapshot: Option<&config::Snapshot>) -> DeploymentDto {
     let logged: BTreeSet<&str> = r.logs.of(&d.id).iter().map(|l| l.step.as_str()).collect();
     let snap = r.config.snapshot_of(&d.id);
@@ -346,6 +388,24 @@ fn deployment_dto(d: &Deployment, r: &Restored, prev_snapshot: Option<&config::S
     };
     DeploymentDto {
         id: d.id.to_string(),
+        resources: r
+            .ledger
+            .entries()
+            .iter()
+            .filter(|e| e.deployment == d.id)
+            .map(|e| ResourceDto {
+                kind: e.key.kind.as_str().to_string(),
+                name: e.key.name.clone(),
+                id: e.id.clone(),
+                state: entry_state(&e.state).to_string(),
+                keep: match e.disposition {
+                    harpoon_deploy::ledger::Disposition::Retain => "retain",
+                    harpoon_deploy::ledger::Disposition::RemoveOnFailure => "remove_on_failure",
+                    harpoon_deploy::ledger::Disposition::RemoveAlways => "remove_always",
+                }
+                .to_string(),
+            })
+            .collect(),
         status: d.status.to_string(),
         trigger: name_of(&d.trigger),
         created_ms: d.created_ms,
@@ -426,11 +486,34 @@ fn deployment_dto(d: &Deployment, r: &Restored, prev_snapshot: Option<&config::S
 
 /// Everything the Deployments views need, from the engine's own records. Read-only.
 pub fn snapshot(rt: &Path, now_ms: u64) -> EngineSnapshot {
+    build_snapshot(rt, now_ms, "own")
+}
+
+fn journal_format(jd: &Path) -> &'static str {
+    if jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() {
+        "sqlite"
+    } else if jd.join(harpoon_deploy_journal::JOURNAL_FILE).exists() {
+        "legacy"
+    } else {
+        "none"
+    }
+}
+
+/// The one reader behind both the desktop's own store and an attached external runtime. It only ever calls
+/// `SqliteJournal::read_only` and `writer_lock_status`: no writer is opened, nothing is locked, created,
+/// repaired or migrated.
+fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot {
     let jd = journal_dir(rt);
     let mut snap = EngineSnapshot {
         schema: SCHEMA,
         generated_ms: now_ms,
         runtime_dir: rt.display().to_string(),
+        source: RuntimeSourceDto {
+            kind,
+            path: rt.display().to_string(),
+            journal_format: journal_format(&jd),
+            read_only: kind == "external",
+        },
         store: "missing".into(),
         store_error: None,
         writer_held: false,
@@ -611,10 +694,101 @@ pub fn step_logs(rt: &Path, deployment: &str) -> Result<Vec<StepLogDto>, String>
         .collect())
 }
 
+// ------------------------------------------------------------------ external runtimes (read-only)
+
+/// Canonical roots of the external runtimes attached in this process. Anything that would write to one of
+/// them is refused in [`run_op_with`], whatever the caller says; the frontend is not what keeps them safe.
+static ATTACHED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Is `rt` an attached external runtime, or inside or above one?
+fn is_attached(rt: &Path) -> bool {
+    let c = canonical(rt);
+    ATTACHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|a| c.starts_with(a) || a.starts_with(&c))
+}
+
+/// A deployment runtime somewhere else on this Mac (another build's, a preserved acceptance session), shown
+/// read-only. The only way to get one is [`ExternalRuntime::attach`], which validates the path, and the only
+/// thing it can do is [`ExternalRuntime::snapshot`], which only reads.
+pub struct ExternalRuntime {
+    root: PathBuf,
+}
+
+impl ExternalRuntime {
+    /// `path` must be the runtime folder (the one that contains `deploy-journal/`), absolute, free of `..`,
+    /// not Harpoon's own store, with a real `deploy-journal` directory holding a `deployments.sqlite3` or a
+    /// legacy `journal.wal` that is a regular file (symbolic links are refused, not followed into).
+    pub fn attach(path: &str, own: &Path) -> Result<ExternalRuntime, String> {
+        use std::path::Component;
+        let p = Path::new(path);
+        if !p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err("An external runtime is given as an absolute path without '..'.".into());
+        }
+        if path.chars().any(|c| c.is_control()) {
+            return Err("The path contains a control character.".into());
+        }
+        let root = std::fs::canonicalize(p).map_err(|e| format!("Cannot read {path}: {e}"))?;
+        if !root.is_dir() {
+            return Err(format!("{} is not a folder.", root.display()));
+        }
+        if root == canonical(own) {
+            return Err("That is Harpoon's own deployment store; it is already shown.".into());
+        }
+        let jd = journal_dir(&root);
+        match std::fs::symlink_metadata(&jd) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err("deploy-journal is a symbolic link; it is not followed.".into())
+            }
+            _ if root.file_name().is_some_and(|n| n == "deploy-journal") => {
+                return Err("Choose the runtime folder that contains deploy-journal, not deploy-journal itself.".into())
+            }
+            _ => return Err(format!("No deploy-journal folder in {}.", root.display())),
+        }
+        let mut any = false;
+        for f in [
+            harpoon_deploy_journal::SQLITE_FILE,
+            harpoon_deploy_journal::JOURNAL_FILE,
+        ] {
+            match std::fs::symlink_metadata(jd.join(f)) {
+                Ok(m) if m.file_type().is_file() => any = true,
+                Ok(_) => return Err(format!("{f} is not a regular file; it is not read.")),
+                Err(_) => {}
+            }
+        }
+        if !any {
+            return Err(format!(
+                "No deployment journal (deployments.sqlite3 or journal.wal) in {}.",
+                jd.display()
+            ));
+        }
+        let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
+        if !attached.contains(&root) {
+            attached.push(root.clone());
+        }
+        Ok(ExternalRuntime { root })
+    }
+
+    /// Read-only by construction: this and [`build_snapshot`] use `SqliteJournal::read_only` and
+    /// `writer_lock_status` only. A legacy journal is decoded where it is, never converted.
+    pub fn snapshot(&self, now_ms: u64) -> EngineSnapshot {
+        build_snapshot(&self.root, now_ms, "external")
+    }
+}
+
 // ------------------------------------------------------------------ operations
 
+// An operation names no runtime: it always acts on the desktop's own store. A field that tries to name one
+// (or anything else unknown) is an error, not something quietly ignored.
 #[derive(Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+#[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 #[allow(clippy::large_enum_variant)] // short-lived command argument; boxing would only obscure the JSON contract
 pub enum DeployOp {
     #[serde(rename_all = "camelCase")]
@@ -686,7 +860,8 @@ pub enum DeployOp {
     Restore {
         deployment: String,
     },
-    Recover,
+    // a struct variant (not a unit variant) so that deny_unknown_fields applies to it too
+    Recover {},
     #[serde(rename_all = "camelCase")]
     Resume {
         app: String,
@@ -827,7 +1002,7 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             vec![],
         ),
         DeployOp::Restore { deployment } => (s(&["restore", "--deployment", deployment, "--apply"]), vec![]),
-        DeployOp::Recover => (s(&["recover"]), vec![]),
+        DeployOp::Recover {} => (s(&["recover"]), vec![]),
         DeployOp::Resume { app, mode, revision } => {
             let mut a = s(&["resume", "--app", app]);
             match mode.as_str() {
@@ -1039,6 +1214,17 @@ pub fn run_op_with(
     gate: &Gate,
     runtime: &dyn Fn() -> Result<RuntimeInfo, String>,
 ) -> OpResult {
+    if is_attached(rt) {
+        let msg = "Refused: that runtime is attached read-only. Operations act only on Harpoon's own deployment store."
+            .to_string();
+        return OpResult {
+            ok: false,
+            exit_code: harpoon_deploy_cli::exit::REFUSED,
+            summary: msg.clone(),
+            detail: msg,
+            refused_by_gate: false,
+        };
+    }
     if let Err(e) = prepare(rt) {
         return OpResult {
             ok: false,
@@ -1126,6 +1312,15 @@ pub async fn deploy_snapshot(app: tauri::AppHandle) -> Result<EngineSnapshot, St
     tauri::async_runtime::spawn_blocking(move || snapshot(&dir, now_ms()))
         .await
         .map_err(|e| format!("background task failed: {e}"))
+}
+
+/// A read-only snapshot of an external runtime at an explicit path. Takes no operation, writes nothing.
+#[tauri::command]
+pub async fn deploy_snapshot_at(app: tauri::AppHandle, path: String) -> Result<EngineSnapshot, String> {
+    let own = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || ExternalRuntime::attach(&path, &own).map(|e| e.snapshot(now_ms())))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 #[tauri::command]
