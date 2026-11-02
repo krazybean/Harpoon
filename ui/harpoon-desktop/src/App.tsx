@@ -206,6 +206,8 @@ export default function App() {
   const [bootstrapPhase, setBootstrapPhase] = useState<BootstrapPhase>("launching");
   const [bootstrapStatus, setBootstrapStatus] = useState("Resolving Harpoon binary…");
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  // Set when the status command itself could not be read; the engine may be running. Kept apart from bootstrapError (a startup failure).
+  const [statusReadFailure, setStatusReadFailure] = useState<string | null>(null);
   const [rustRefreshFallback, setRustRefreshFallback] = useState(false);
   const bootstrapAttempted = useRef(false);
   const bootstrapActiveRef = useRef(false);
@@ -311,6 +313,7 @@ export default function App() {
     if (bootstrapActiveRef.current) return;
     bootstrapActiveRef.current = true;
     setBootstrapError(null);
+    setStatusReadFailure(null);
     setActionError(null);
     try {
       setBootstrapPhase("launching");
@@ -319,7 +322,7 @@ export default function App() {
       await new Promise(r => setTimeout(r, 120));
       setBootstrapPhase("discovering");
       setBootstrapStatus("Checking runtime status…");
-      const s0 = await refreshStatus();
+      const read0 = await statusShelf.refreshResult();
       setBootstrapStatus("Reading runtime configuration and Docker state…");
       await Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]);
       // Stage 3B: ensure Harpoon docker context exists (idempotent, no default switch, Finder-safe resolver)
@@ -334,7 +337,11 @@ export default function App() {
       }
       // Doctor is independent; keep the verbose log tail out of clean performance runs.
       refreshDoctor();
-      if (!s0) { setBootstrapError("Could not read Harpoon status."); setBootstrapPhase("failed"); return; }
+      if (!read0.ok) {
+        // The status command failed; that says nothing about whether the engine started. Report it as what it is.
+        setStatusReadFailure(read0.error); setBootstrapError(`Could not read Harpoon status: ${read0.error}`); setBootstrapPhase("failed"); return;
+      }
+      const s0 = read0.value;
       if (s0.state === "running" && s0.dockerReady) {
         setBootstrapStatus("Harpoon is ready.");
         setBootstrapPhase("ready");
@@ -407,7 +414,7 @@ export default function App() {
       setBootstrapStatus("Harpoon is ready.");
       setBootstrapPhase("ready");
     } finally { if (!bootstrapEventPush) bootstrapActiveRef.current = false; }
-  }, [bootstrapEventPush, refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
+  }, [bootstrapEventPush, refreshBinary, statusShelf.refreshResult, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
 
   useEffect(()=>{
     if (!tauriAvailable) {
@@ -420,6 +427,11 @@ export default function App() {
   // Reconcile bootstrap with live authoritative shelf data — header and overlay must share truth
   useEffect(()=>{
     if (bootstrapActiveRef.current) return;
+    if (statusReadFailure !== null && bootstrapPhase==="failed" && status?.state==="running" && status?.dockerReady && !statusError) {
+      // a later status read succeeded: the earlier read failure is over (a real startup failure never takes this path)
+      setStatusReadFailure(null); setBootstrapError(null); setBootstrapPhase("ready");
+      return;
+    }
     if (status?.state==="running" && status?.dockerReady && binaryPath) {
       if (bootstrapPhase==="discovering" || bootstrapPhase==="launching" || bootstrapPhase==="starting" || bootstrapPhase==="vm_booting" || bootstrapPhase==="docker_starting") {
         setBootstrapPhase("ready");
@@ -431,7 +443,7 @@ export default function App() {
     } else if (status?.state==="failed") {
       if (bootstrapPhase!=="failed") setBootstrapPhase("failed");
     }
-  }, [status, binaryPath, bootstrapPhase]);
+  }, [status, statusError, statusReadFailure, binaryPath, bootstrapPhase]);
 
   // Rust owns normal refresh scheduling; the JS path is an emergency startup fallback only.
   useEffect(()=>{
@@ -688,7 +700,7 @@ export default function App() {
 
         {showFailed && (
           <div className="panel" style={{ borderColor:"var(--error)", padding:24, minHeight:320 }}>
-            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>{status?.failure?.category === "vm_terminated" ? "Harpoon VM unexpectedly terminated" : status?.failure?.message || "Harpoon could not start"}</div>
+            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>{statusReadFailure !== null ? "Could not read Harpoon status" : status?.failure?.category === "vm_terminated" ? "Harpoon VM unexpectedly terminated" : status?.failure?.message || "Harpoon could not start"}</div>
             <div style={{ fontSize:13, color:"#374151", marginBottom:4 }}>Phase: <code style={{ background:"#f3f4f6", padding:"2px 6px", borderRadius:6 }}>{bootstrapPhase}</code> {status && <span style={{ fontSize:12, color:"#6b7280" }}>• state {status.state}</span>}</div>
             <div role="alert" aria-live="assertive" style={{ fontSize:13, color:"var(--error-fg)", background:"var(--error-bg)", border:"1px solid var(--error)", borderRadius:8, padding:10, marginBottom:12, whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
               <div>{bootstrapError || actionError || "Unknown error"}</div>
@@ -700,7 +712,7 @@ export default function App() {
               <button onClick={()=>handleNav("diagnostics")} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Diagnostics</button>
               <button onClick={()=>{ refreshStatus(); setBootstrapPhase("discovering"); runBootstrap(true); }} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Check again</button>
             </div>
-            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again.</div>
+            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>{statusReadFailure !== null ? "Reading the status failed; that does not mean Harpoon failed to start. Nothing was started, stopped or restarted. Check again, or review Diagnostics." : "The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again."}</div>
           </div>
         )}
 
