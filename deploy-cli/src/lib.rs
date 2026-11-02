@@ -12,6 +12,7 @@
 mod args;
 mod commands;
 mod config_cmds;
+mod git_cmds;
 mod next_steps;
 mod store;
 
@@ -109,6 +110,12 @@ pub struct Services<'a> {
     pub stdin: &'a mut dyn std::io::Read,
     /// An interactive terminal would echo a secret; `secret-set` refuses one.
     pub stdin_is_terminal: bool,
+    /// Set by the Git executor just before it runs `deploy` or `replace`: the deployment id (so its
+    /// source record can be written first) and what triggered it. Taken once by the lifecycle command.
+    pub next: Option<(
+        harpoon_deploy::ids::DeploymentId,
+        harpoon_deploy::state::Trigger,
+    )>,
 }
 
 /// Run one command against the real Keychain and standard input. `args` excludes the program name.
@@ -124,6 +131,7 @@ pub fn run(args: &[String], gate: &Gate) -> Outcome {
             secrets: &keychain,
             stdin: &mut stdin,
             stdin_is_terminal: terminal,
+            next: None,
         },
     )
 }

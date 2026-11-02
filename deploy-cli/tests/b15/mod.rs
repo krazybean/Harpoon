@@ -13,6 +13,7 @@ use harpoon_deploy::state::Step;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+mod d_git;
 mod milestone_c;
 mod packaging;
 

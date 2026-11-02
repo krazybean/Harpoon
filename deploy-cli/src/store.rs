@@ -202,6 +202,8 @@ pub fn open_error(rt: &Runtime, e: SqliteOpenError) -> Fail {
 /// directory from a hard kill until the next writing command; `status` reports it. Not a guarantee.
 fn sweep_secret_residue(rt: &Runtime) {
     harpoon_deploy_docker::buildx_run::SecretFiles::sweep(&rt.scratch_dir());
+    // a checkout workspace holds a Git credential while it exists
+    harpoon_deploy_git::sweep(&rt.scratch_dir());
 }
 
 pub fn open_writer(rt: &Runtime, kind: Kind) -> Result<(SqliteJournal, Restored), Fail> {
