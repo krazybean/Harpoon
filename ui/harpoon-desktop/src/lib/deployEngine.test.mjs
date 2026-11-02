@@ -98,7 +98,8 @@ test("pauses, held events and selected revisions are reported; resume needs the 
   });
   const a = st(snap([pausedApp])).apps.app_1.automation;
   assert.equal(a.state, "paused");
-  assert.deepEqual(a.held.map((h) => [h.status, h.revisionFull]), [["held", "feedfacefeedface"], ["selected", "abcdabcdabcd"]]);
+  assert.deepEqual(a.held.map((h) => [h.status, h.revisionFull]), [["held", "feedfacefeedface"]], "held means undecided");
+  assert.deepEqual(a.selected.map((h) => [h.status, h.revisionFull]), [["selected", "abcdabcdabcd"]], "a selection is a different state, kept apart");
   assert.equal(a.reason.kind, "failed_cutover");
 });
 
@@ -209,10 +210,11 @@ test("config values follow the engine's limits", () => {
 
 test("held events carry the full commit, status, source and time for the review dialog", () => {
   const s = st(withEvents([ev("d1", A), ev("d2", B, "selected", "github")]));
-  const held = s.apps.app_1.automation.held;
-  assert.deepEqual(held.map((h) => [h.revisionFull, h.status, h.source, h.receivedMs]), [[A, "held", "poll", NOW - 5000], [B, "selected", "github", NOW - 5000]]);
-  const decided = st(withEvents([ev("d1", A, "dismissed"), ev("d2", B, "executed")]));
-  assert.deepEqual(decided.apps.app_1.automation.held, [], "decided events are history, not held");
+  const { held, selected } = s.apps.app_1.automation;
+  assert.deepEqual(held.map((h) => [h.revisionFull, h.status, h.source, h.receivedMs]), [[A, "held", "poll", NOW - 5000]]);
+  assert.deepEqual(selected.map((h) => [h.revisionFull, h.status, h.source, h.receivedMs]), [[B, "selected", "github", NOW - 5000]]);
+  const decided = st(withEvents([ev("d1", A, "dismissed"), ev("d2", B, "executed")])).apps.app_1.automation;
+  assert.deepEqual([decided.held, decided.selected], [[], []], "decided events are history, neither held nor selected");
 });
 
 test("a new held commit is announced once; opening the app and decided events are not", () => {

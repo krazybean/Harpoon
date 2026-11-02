@@ -122,6 +122,7 @@ export function AppScreen({ c }: { c: Ctx }) {
   return (
     <>
       <div className="dp-row dp-row--wrap" style={{ marginBottom: 12 }}>
+        <button className="btn btn--ghost btn--sm" onClick={() => c.setRoute({ screen: "home", depId: null, tab: "overview" })} aria-label="Back to all projects">← Projects</button>
         <div className="dp-seg" role="group" aria-label="Environment">
           {(["development", "preview", "production"] as Env[]).map((e) => <button key={e} aria-pressed={env === e} onClick={() => c.setRoute({ env: e, tab: "overview" })}>{e[0].toUpperCase() + e.slice(1)}</button>)}
         </div>
@@ -137,6 +138,12 @@ export function AppScreen({ c }: { c: Ctx }) {
         <Banner tone="warn" icon={<PausedIcon />} title={c.engine ? "Git triggers are paused" : "Automatic deployments are paused"}
           actions={btn("btn--primary", () => c.open({ kind: "resume" }), c.engine ? <><Play size={14} /> Review held events…</> : <><Play size={14} /> Review &amp; resume…</>, { disabled: !prod, title: prodOnly })}>
           {pauseText(app)} <b>{app.automation.held.length} {c.engine ? "commit" : "push"}{app.automation.held.length === 1 ? "" : "es"} held</b> — nothing was discarded. {c.engine ? "Nothing is deployed by itself." : "Manual deployments still work."}
+        </Banner>
+      )}
+      {c.engine && !paused && (app.automation.selected?.length ?? 0) > 0 && (
+        <Banner tone="info" icon={<GitBranch size={18} />} title={`Commit ${app.automation.selected![0].revision.sha} is selected, not yet run`}
+          actions={btn("btn--secondary", () => c.open({ kind: "resume" }), <>Review…</>, { disabled: !prod, title: prodOnly })}>
+          You chose it in the review dialog and the decision is recorded. It is waiting for an attended deployment; nothing has run. Dismiss it there to clear the selection.
         </Banner>
       )}
       {c.engine && !paused && app.automation.held.length > 0 && (
@@ -270,10 +277,11 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
               <dt>Trigger</dt><dd>{c.engine ? <>Attended: Harpoon checks <code>origin/{app.settings.productionBranch}</code> when you ask it to</> : <>Poll <code>origin/{app.settings.productionBranch}</code> every {app.settings.pollSeconds} s</>}</dd>
               <dt>Mode</dt><dd>{c.engine ? "Manual check. Harpoon looks for new commits only when you press Check for new commits; it does not poll in the background." : "Attended — runs while Harpoon is open"}</dd>
               <dt>State</dt><dd>{c.engine ? (a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Nothing is paused. Nothing is checked or deployed by itself.") : !ok ? "Not watching — automatic deployment only runs while Harpoon is running" : a.state === "paused" ? <>{pauseText(app)}<div className="dp-faint">since {formatAge(a.sinceMin ?? 0)}</div></> : "Watching for pushes"}</dd>
+              {c.engine && (a.selected?.length ?? 0) > 0 ? <><dt>Selected</dt><dd>{a.selected!.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> <span className="dp-faint">chosen, not yet run · {formatAge(h.ageMin)}</span></div>)}</dd></> : null}
               <dt>Held events</dt><dd>{a.held.length ? a.held.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> {h.revision.message} <span className="dp-faint">{formatAge(h.ageMin)}{h.status ? ` · ${h.status === "selected" ? "selected, not yet run" : h.status}` : ""}</span></div>) : "None"}</dd>
             </dl>
             {c.engine && app.settings.productionBranch ? <div style={{ marginTop: 12 }}>{btn("btn--secondary", () => void c.engine!.run({ op: "poll" }), <><ArrowsClockwise size={14} /> Check for new commits</>, { disabled: c.engine.busy, title: "Looks for new commits and queues them. It does not deploy.", sm: true })}</div> : null}
-            {c.engine && (a.held.length > 0 || a.state === "paused") ? <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <>Review held events{a.held.length ? ` (${a.held.length})` : ""}…</>, { disabled: c.route.env !== "production" })}</div> : null}
+            {c.engine && (a.held.length > 0 || (a.selected?.length ?? 0) > 0 || a.state === "paused") ? <div style={{ marginTop: 12 }}>{btn(a.held.length || a.state === "paused" ? "btn--primary" : "btn--secondary", () => c.open({ kind: "resume" }), <>{a.held.length ? `Review held events (${a.held.length})` : (a.selected?.length ?? 0) > 0 ? "Review selected commit" : "Review pause"}…</>, { disabled: c.route.env !== "production" })}</div> : null}
             {!c.engine && a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: c.route.env !== "production", title: c.route.env !== "production" ? SIM_ONLY : undefined })}</div>}
             <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>{c.engine ? "Nothing is polled or deployed in the background, and unattended deployment is not offered. Commits you find are recorded as held events; deploying one is a separate, attended step." : "Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered."}</p>
           </div>
@@ -484,6 +492,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
   return (
     <>
       <div className="dp-row dp-row--wrap" style={{ marginBottom: 12 }}>
+        <button className="btn btn--ghost btn--sm" onClick={() => c.setRoute({ screen: "home", depId: null, tab: "overview" })} aria-label="Back to all projects">← Projects</button>
         <button className="btn btn--ghost btn--sm" onClick={() => c.setRoute({ screen: "app", tab: "deployments" })}>← {app.name}</button>
         <DeploymentPills d={d} /><span className="mono">{d.revision.sha}</span><span>{d.revision.message}</span>{c.engine ? null : <Tag>simulated</Tag>}<span className="dp-spacer" />
         <div className="dp-actions">

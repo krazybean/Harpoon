@@ -143,17 +143,19 @@ function variablesOf(snap: EngineSnapshot, app: SnapApp, now: number): Variable[
 }
 
 function automationOf(app: SnapApp, now: number, dep: (id: string) => SnapDeployment | undefined): Automation {
-  const held: HeldEvent[] = app.events.filter((e) => e.status === "held" || e.status === "selected").map((e) => ({
+  const toHeld = (e: SnapApp["events"][number]): HeldEvent => ({
     id: e.delivery, status: e.status, source: e.source, receivedMs: e.receivedMs, revisionFull: e.revision, ageMin: min(e.receivedMs, now),
     revision: { sha: e.revision.slice(0, 7), message: `${e.source} delivery ${e.delivery.slice(0, 12)}`, branch: "", author: "" },
-  }));
+  });
+  const held = app.events.filter((e) => e.status === "held").map(toHeld);
+  const selected = app.events.filter((e) => e.status === "selected").map(toHeld);
   const p = app.pauses[0];
-  if (!p) return { state: "active", held };
+  if (!p) return { state: "active", held, selected };
   let reason: PauseReason;
   if (p.kind === "rollback") reason = { kind: "rollback", releaseId: dep(p.origin)?.release ?? p.context };
   else if (p.kind === "interrupted_cutover") reason = { kind: "interrupted_cutover", deploymentId: p.origin };
   else reason = { kind: "failed_cutover", deploymentId: p.origin, outcome: (dep(p.origin)?.recovery?.outcome as RecoveryOutcome | undefined) ?? "not_attempted" };
-  return { state: "paused", reason, sinceMin: min(p.sinceMs, now), held };
+  return { state: "paused", reason, sinceMin: min(p.sinceMs, now), held, selected };
 }
 
 export function engineMeta(snap: EngineSnapshot | null, loadError: string | null, stale: boolean): EngineMeta {

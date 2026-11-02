@@ -548,9 +548,12 @@ export default function App() {
   }, [active, refreshDoctor, refreshLogs, tauriAvailable]);
 
   // Navigation stays synchronous; view refreshes are deferred to their effects.
+  // Clicking Deployments while Deployments is showing goes back to its project list (it keeps its own route).
+  const [deployHome, setDeployHome] = useState(0);
   const handleNav = useCallback((n: Nav)=>{
+    if (n === "deployments" && active === "deployments") setDeployHome((x) => x + 1);
     setDestination({ kind: "nav", nav: n });
-  }, []);
+  }, [active]);
 
   const openContainer = useCallback((containerId: string) => {
     if (!containerId) return;
@@ -714,7 +717,7 @@ export default function App() {
             {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
             {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
             {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
-            {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments…</div>}><DeployView {...(deployPreviewActive ? { sim: deploySim, preview: deployPreview } : { engine: deployEngine })} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} onOpenContainers={()=>handleNav("containers")} /></Suspense>}
+            {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments…</div>}><DeployView {...(deployPreviewActive ? { sim: deploySim, preview: deployPreview } : { engine: deployEngine })} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} onOpenContainers={()=>handleNav("containers")} homeSignal={deployHome} /></Suspense>}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}
             {active==="volumes" && <VolumesView volumes={volumesShelf.data ?? []} refreshing={volumesShelf.refreshing} error={volumesShelf.error} updatedAt={volumesShelf.updatedAt} hasCache={volumesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>volumesShelf.refresh()} />}
             {active==="networks" && <NetworksView networks={networksShelf.data ?? []} containers={containersShelf.data ?? []} refreshing={networksShelf.refreshing} error={networksShelf.error} updatedAt={networksShelf.updatedAt} hasCache={networksShelf.hasCache} containersError={containersShelf.error} containersUpdatedAt={containersShelf.updatedAt} containersHasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>networksShelf.refresh()} refreshContainers={()=>containersShelf.refresh()} />}

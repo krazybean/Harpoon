@@ -152,22 +152,24 @@ const SOURCE_LABEL: Record<string, string> = { poll: "found by Check for new com
  * recorded in the journal and deploys nothing; running a selected revision is a separate, attended, gated step.
  */
 function HeldEventsDialog({ c, app, close }: { c: Ctx; app: AppModel; close: () => void }) {
-  const events = app.automation.held;
-  const waiting = events.filter((e) => e.status === "held");
+  const waiting = app.automation.held;
+  const pending = app.automation.selected ?? [];
+  const events = [...waiting, ...pending].sort((x, y) => (x.receivedMs ?? 0) - (y.receivedMs ?? 0));
   const [pick, setPick] = useState("");
   const chosen = waiting.find((e) => e.id === pick) ?? waiting[waiting.length - 1];
   const paused = app.automation.state === "paused";
   const gate = liveBlock(c.state);
   const busy = !!c.engine?.busy;
   return (
-    <Dialog wide title={`Held Git events · ${app.name}`} sub="Recorded in Harpoon's journal. Choosing here records a decision and deploys nothing." onClose={close}
+    <Dialog wide title={`Git events · ${app.name}`} sub="Recorded in Harpoon's journal. Choosing here records a decision and deploys nothing." onClose={close}
       footer={<>
         <button className="btn btn--secondary" disabled={busy || (!events.length && !paused)} title={!events.length && !paused ? "Nothing is held and nothing is paused" : undefined}
           onClick={() => { void c.engine!.run({ op: "resume", app: app.id, mode: "dismiss" }); close(); }}>{events.length ? "Dismiss all" : "Lift the pause"}</button>
-        <button className="btn btn--primary" disabled={busy || !chosen} title={!chosen ? "No held revision to select" : undefined}
+        <button className="btn btn--primary" disabled={busy || !chosen || pending.length > 0} title={pending.length > 0 ? "A revision is already selected. Dismiss it first to choose another." : !chosen ? "No held revision to select" : undefined}
           onClick={() => { void c.engine!.run({ op: "resume", app: app.id, mode: "revision", revision: chosen!.revisionFull }); close(); }}><Play size={14} /> Select this revision</button>
       </>}>
       {paused && <Banner tone="warn" icon={<Pause size={18} />} title="Git triggers are paused for this application">Dismissing the held events also lifts the pause. Selecting a revision records it and keeps the application blocked until you dismiss.</Banner>}
+      {pending.length > 0 && <Banner tone="info" icon={<Info size={18} />} title={`${pending[0].revision.sha} is selected, not yet run`}>The decision is recorded and the commit is waiting for an attended deployment. Dismiss it to clear the selection; a different revision can be chosen after that.</Banner>}
       <div className="dp-h2">Events ({events.length})</div>
       <div className="dp-tablewrap"><table className="dp-table"><thead><tr><th /><th>Commit</th><th>Status</th><th>Recorded</th></tr></thead><tbody>
         {events.length ? events.map((e) => (
