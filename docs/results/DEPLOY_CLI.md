@@ -201,3 +201,13 @@ No live validation of any of this; real 409 behaviour (including child images an
   `io.harpoon.deploy`, account `<id>@<version>`); the journal stores references only. A secret that cannot be read stops the
   command before anything is built, stopped or written (exit 6, the key named). Restore and rollback use the pinned versions of the
   release they recreate. Full design, exposure notes and gaps: `DEPLOY_MILESTONE_C_CONFIGURATION_SECRETS.md`.
+
+## Milestone D — Git sources and attended automation
+
+- `repo-add`, `repo-secret` (value on standard input only), `repo-list`, `git-deploy`, `git-trigger`, `git-run`, `watch`. A
+  deployment from Git checks out a branch, tag or exact commit into a bounded private workspace and runs the ordinary
+  `deploy`/`replace`; the immutable commit is recorded before it starts. Credentials are Keychain secrets handed to Git through
+  files, never argv or URLs; SSH requires a pinned host key. `watch` is foreground and attended: **automatic while Harpoon is
+  running**, polling at least every 60 s and optionally listening for signed webhooks on loopback. Live runs need the same gates
+  as `deploy`/`replace`; the shipping binary refuses them (`--simulate` is the offline path). See
+  `DEPLOY_MILESTONE_D_GIT_INTEGRATION.md`; Gate U is NOT PASSED (`SPIKE_UNATTENDED_EXECUTION.md`).

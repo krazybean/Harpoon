@@ -1,6 +1,6 @@
 # Milestone C: configuration, builds and secrets (implementation and evidence)
 
-Status: **implemented offline as one vertical slice; not live-accepted.** Everything below was verified against a fake
+Status: **implementation-complete by owner decision (recorded with Milestone D); the slice below was implemented offline and is not live-accepted.** Everything below was verified against a fake
 Docker, a fake Buildx and an in-memory secret store, plus one opt-in round trip on the real macOS Keychain using a
 disposable item. No live Docker, VM, Buildx or `docker history` evidence exists; that is listed as a gap, not claimed.
 `Gate::shipping()` is unchanged (the live lifecycle stays closed in the shipping binary). Milestone B was not reopened.
