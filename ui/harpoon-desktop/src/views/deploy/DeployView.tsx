@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./deploy.css";
 import type { DeploySimulation } from "../../hooks/useDeploySimulation.ts";
 import type { DeployEngine } from "../../hooks/useDeployEngine.ts";
@@ -32,10 +32,12 @@ type Props = {
   realRuntime: RuntimeState;
   onStartHarpoon: () => void;
   onOpenContainers?: () => void;
+  /** Changes each time the Deployments item in the sidebar is clicked while Deployments is already showing: go back to the project list. */
+  homeSignal?: number;
   preview?: DeployPreview;
 };
 
-export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, preview: previewProp }: Props) {
+export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, homeSignal, preview: previewProp }: Props) {
   const preview = previewApplied ? undefined : previewProp;
   const state = engine ? engine.state : sim!.state;
   const dispatch = sim ? sim.dispatch : NOOP;
@@ -46,6 +48,15 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
   const [route, setRouteState] = useState<Route>({ screen: preview?.screen ?? "home", appId: preview?.app ?? (engine ? firstApp ?? "" : "api"), env: preview?.env ?? "production", tab: preview?.tab ?? "overview", depId: preview?.dep ?? null });
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const setRoute = useCallback((p: Partial<Route>) => setRouteState((r) => ({ ...r, ...p })), []);
+
+  // Clicking Deployments in the sidebar while already in Deployments returns to the project list.
+  const lastHome = useRef(homeSignal);
+  useEffect(() => {
+    if (homeSignal === lastHome.current) return;
+    lastHome.current = homeSignal;
+    setDialog(null);
+    setRouteState((r) => ({ ...r, screen: "home", depId: null, tab: "overview" }));
+  }, [homeSignal]);
 
   // A scenario change must never strand the user on a screen for something that no longer exists.
   useEffect(() => {

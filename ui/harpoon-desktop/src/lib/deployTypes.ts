@@ -74,7 +74,8 @@ export type PauseReason =
   | { kind: "failed_cutover"; deploymentId: string; outcome: RecoveryOutcome }
   | { kind: "interrupted_cutover"; deploymentId: string }
   | { kind: "rollback"; releaseId: string };
-export type Automation = { state: "active" | "paused"; reason?: PauseReason; sinceMin?: number; held: HeldEvent[] };
+/** `held` = recorded and undecided. `selected` (engine mode) = chosen in a resume decision and waiting for an attended deployment; the engine keeps that state apart from `held`, and so must any count shown to a person. */
+export type Automation = { state: "active" | "paused"; reason?: PauseReason; sinceMin?: number; held: HeldEvent[]; selected?: HeldEvent[] };
 
 export type VariableType = "config" | "secret";
 export type VariableUse = "runtime" | "build" | "build+runtime" | "build secret";
