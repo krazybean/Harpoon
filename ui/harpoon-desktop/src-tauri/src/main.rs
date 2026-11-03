@@ -17,6 +17,7 @@ mod cli_path;
 mod bootstrap;
 mod compose_import;
 mod deploy_api;
+mod app_router;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -1294,6 +1295,15 @@ mod tests {
 
 }
 
+/// Open an application's address in the default browser. Only Harpoon's own addresses are accepted.
+#[tauri::command]
+fn open_app_url(url: String) -> Result<(), String> {
+    if !app_router::openable(&url) {
+        return Err("not a Harpoon application address".into());
+    }
+    Command::new("/usr/bin/open").arg(&url).status().map_err(|e| e.to_string()).and_then(|s| if s.success() { Ok(()) } else { Err(format!("open exited with {s}")) })
+}
+
 fn main() {
     let shell_manager = std::sync::Arc::new(shell::ShellManager::new());
     let builder = tauri::Builder::default()
@@ -1301,7 +1311,9 @@ fn main() {
         .setup(|app| {
             use tauri::Manager;
             if let Ok(dir) = app.path().app_data_dir() {
-                cli_path::ensure_on_launch(dir);
+                cli_path::ensure_on_launch(dir.clone());
+                let rt = deploy_api::runtime_dir(&dir);
+                app_router::start_default(Box::new(move || deploy_api::route_table(&rt)));
             }
             Ok(())
         })
@@ -1315,7 +1327,7 @@ fn main() {
             list_networks, inspect_network, remove_network,
             context_discovery::discover_contexts,
             deploy_api::deploy_snapshot, deploy_api::external_runtimes, deploy_api::external_runtime_add, deploy_api::external_runtime_remove, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder, deploy_api::host_tcp_listeners,
-            get_counts,
+            get_counts, open_app_url,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,
             start_bootstrap_worker, stop_bootstrap_worker,

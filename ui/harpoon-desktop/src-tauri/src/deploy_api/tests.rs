@@ -1454,3 +1454,36 @@ mod listeners {
         }
     }
 }
+
+#[test]
+fn the_hostname_and_route_come_from_the_records_and_survive_a_restart_without_writing() {
+    let dir = rt("hostname");
+    seed(&dir, &[dep(D1, Some(DeploymentStatus::Succeeded)), dep(D2, Some(DeploymentStatus::Failed))]);
+    let jd = journal_dir(&dir);
+    let sizes = || {
+        let mut v: Vec<_> = std::fs::read_dir(&jd).unwrap().flatten().map(|e| (e.file_name(), e.metadata().unwrap().len())).collect();
+        v.sort();
+        v
+    };
+    let before = sizes();
+    let app: ApplicationId = APP.parse().unwrap();
+    let host = harpoon_deploy::route::hostname(&app);
+    // "Restart": a fresh read of the same journal, twice. Same name, same table, nothing written.
+    for _ in 0..2 {
+        let s = snapshot_when_released(&dir, 5);
+        assert_eq!(s.apps[0].hostname, host);
+        assert!(host.ends_with(".harpoon.localhost") && host.len() < 40);
+        // Succeeded but no container in the ledger: the application is registered, not serving.
+        assert_eq!(s.apps[0].route, "idle");
+        let t = route_table(&dir).unwrap();
+        assert_eq!(t.resolve(&host), Some(&harpoon_deploy::route::Route::Idle { app: app.clone() }));
+    }
+    assert_eq!(sizes(), before, "reading the route table wrote nothing");
+    // No store yet: an empty table, not an error; a damaged store is an error so the router keeps its table.
+    assert!(route_table(&rt("hostname-none")).unwrap().resolve(&host).is_none());
+    let bad = rt("hostname-bad");
+    let bj = journal_dir(&bad);
+    std::fs::create_dir_all(&bj).unwrap();
+    std::fs::write(bj.join(harpoon_deploy_journal::SQLITE_FILE), b"not a database").unwrap();
+    assert!(route_table(&bad).is_err());
+}

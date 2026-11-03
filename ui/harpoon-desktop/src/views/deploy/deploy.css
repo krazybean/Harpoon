@@ -217,3 +217,11 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-image { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
 .dp-image__tag, .dp-image__id { overflow-wrap: anywhere; }
 .dp-image__id { font-size: 11px; }
+
+.dp-address { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-header); }
+.dp-address__label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+.dp-address__url { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.dp-address__url--none { font-weight: 400; color: var(--text-secondary); }
+.dp-address__note { flex-basis: 100%; font-size: 11px; }
+.dp-address[data-status="stopped"] .dp-address__url, .dp-address[data-status="unavailable"] .dp-address__url { color: var(--text-secondary); }
+.dp-address[data-status="conflict"] { border-color: var(--warning); }

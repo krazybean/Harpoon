@@ -121,7 +121,12 @@ export type ConfigFacts = Record<ConfigFactKey, ConfigFact>;
 /** Filled in by the port-exposure logic: what Docker reports for the container beside what is actually listening on this Mac. */
 export type PortExposureView = import("./portExposure.ts").Exposure;
 
+/** The stable address Harpoon's loopback router gives an application. `url` is empty when there is none to open. */
+export type AppAddress = { url: string; status: "running" | "stopped" | "conflict" | "unavailable" | "unresolvable"; note: string };
+
 export type AppModel = {
+  /** Engine mode: the friendly `<name>.harpoon.localhost` address (same for every release), when there is something true to show. */
+  address?: AppAddress;
   /** Set when this application comes from a runtime attached read-only by path: Harpoon did not create it here and cannot change it. */
   external?: { path: string; format: string };
   observation?: Observation;

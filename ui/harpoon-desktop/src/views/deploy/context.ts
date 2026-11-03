@@ -30,6 +30,8 @@ export type Ctx = {
   startRuntime: () => void;
   /** Leave Deployments for the existing Containers view (real engine mode). */
   openContainers?: () => void;
+  /** Open an application address in the default browser (the shell validates it is one of Harpoon's). */
+  openUrl?: (url: string) => void;
 };
 
 /** Dialogs that start or change Production state; the simulation models Production only. */

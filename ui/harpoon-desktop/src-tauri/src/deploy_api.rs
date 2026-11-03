@@ -87,9 +87,25 @@ pub struct EngineSnapshot {
     /// A writer holds the journal right now (a deployment or another command is running).
     pub writer_held: bool,
     pub gate: GateDto,
+    /// The loopback router behind the friendly application URLs.
+    pub router: RouterDto,
     pub repos: Vec<RepoDto>,
     pub apps: Vec<AppDto>,
     pub definitions: Vec<DefinitionDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterDto {
+    pub domain: &'static str,
+    /// The loopback port the router listens on, when it is running.
+    pub port: Option<u16>,
+    /// Why it is not running (for example the port is taken); the direct-port URLs keep working.
+    pub error: Option<String>,
+    /// Whether this Mac resolves `*.harpoon.localhost` to loopback: `null` until checked, `false` with the reason in
+    /// `resolveError`. When it does not, the friendly address would not open and the UI says so.
+    pub resolves: Option<bool>,
+    pub resolve_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +173,11 @@ pub struct SeenDto {
 #[serde(rename_all = "camelCase")]
 pub struct AppDto {
     pub id: String,
+    /// The stable `<label>.harpoon.localhost` name of this application (its identity, not a release's).
+    pub hostname: String,
+    /// `serving`, `idle` (nothing recorded as serving), `conflict` (another application derives the same name) or
+    /// `external` (read-only attached runtime: not routed).
+    pub route: &'static str,
     pub repo: Option<String>,
     pub deployments: Vec<DeploymentDto>,
     pub serving: Option<ServingDto>,
@@ -489,6 +510,25 @@ pub fn snapshot(rt: &Path, now_ms: u64) -> EngineSnapshot {
     build_snapshot(rt, now_ms, "own")
 }
 
+fn app_ids_of(r: &harpoon_deploy_journal::Restored) -> Vec<ApplicationId> {
+    let mut ids: Vec<ApplicationId> = r.deployments.iter().map(|d| d.application_id.clone()).collect();
+    ids.extend(r.git.repos.values().map(|x| x.app.clone()));
+    ids.sort_by_key(|a| a.to_string());
+    ids.dedup();
+    ids
+}
+
+/// The application router's table, from the durable records alone (read-only: no writer is opened).
+/// A store that is not there yet is an empty table; an unreadable one is an error, so the router keeps its last table.
+pub fn route_table(rt: &Path) -> Result<harpoon_deploy::route::RouteTable, String> {
+    let jd = journal_dir(rt);
+    if !jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() {
+        return Ok(Default::default());
+    }
+    let r = SqliteJournal::read_only(&jd).map_err(|e| e.0)?;
+    Ok(harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids_of(&r)))
+}
+
 fn journal_format(jd: &Path) -> &'static str {
     if jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() {
         "sqlite"
@@ -521,6 +561,17 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
             live_deploy: Gate::shipping().live_deploy_enabled,
             live_replacement: Gate::shipping().live_replacement_enabled,
             reason: GATE_REASON,
+        },
+        router: {
+            let (port, error) = crate::app_router::status();
+            let res = crate::app_router::resolution();
+            RouterDto {
+                domain: harpoon_deploy::route::DOMAIN,
+                port,
+                error,
+                resolves: res.as_ref().map(|r| r.is_ok()),
+                resolve_error: res.and_then(|r| r.err()),
+            }
         },
         repos: vec![],
         apps: vec![],
@@ -572,10 +623,8 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
                 .collect(),
         });
     }
-    let mut app_ids: Vec<ApplicationId> = r.deployments.iter().map(|d| d.application_id.clone()).collect();
-    app_ids.extend(r.git.repos.values().map(|x| x.app.clone()));
-    app_ids.sort_by_key(|a| a.to_string());
-    app_ids.dedup();
+    let app_ids = app_ids_of(&r);
+    let routes = harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids);
     let pauses = control::active_pauses(&r.deployments, &r.control);
     for app in app_ids {
         let mut deps: Vec<&Deployment> = r.deployments.iter().filter(|d| d.application_id == app).collect();
@@ -604,6 +653,14 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
         });
         snap.apps.push(AppDto {
             id: app.to_string(),
+            hostname: harpoon_deploy::route::hostname(&app),
+            // The router reads Harpoon's own journal only: an attached external runtime is never routed.
+            route: match routes.route_of(&app) {
+                _ if kind == "external" => "external",
+                Some(harpoon_deploy::route::Route::Serving { .. }) => "serving",
+                Some(harpoon_deploy::route::Route::Conflict { .. }) => "conflict",
+                _ => "idle",
+            },
             repo: r.git.repo_of_app(&app).map(|x| x.name.clone()),
             deployments: dtos,
             serving,
