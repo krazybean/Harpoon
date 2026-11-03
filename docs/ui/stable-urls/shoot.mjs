@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
+import { STUB_SOURCE, fixtureUrl } from "./stub.mjs";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const OUT = new URL("./shots/", import.meta.url).pathname;
@@ -35,22 +36,6 @@ const SCENES = {
   "04-router-unavailable": { containers: [{ ID: "c1", Names: `hp-${DEP(2)}`, State: "running", Ports: "", Labels: null }], snap: snapshot({ snap: { router: { domain: "harpoon.localhost", port: null, error: "cannot listen on 127.0.0.1:7480: Address already in use" } } }) },
 };
 
-const stub = (scene) => `(() => {
-  const S = ${JSON.stringify(scene)};
-  const answers = {
-    get_status: { state: "running", pid: 1, cpus: 2, memoryMiB: 4096, dockerReady: true, sockExists: true, lockHeld: true },
-    deploy_snapshot: S.snap, external_runtimes: [], host_tcp_listeners: { verified: true, error: null, checkedMs: ${NOW}, listeners: [] },
-    list_containers: S.containers, get_counts: { containers: 1, running: 1, images: 1, volumes: 0, networks: 1 }, get_config: { cpus: 2, memory: 4096, raw: "", path: "/dev/null" },
-    list_images: [], list_volumes: [], list_networks: [], get_docker_info: "27.0.1", discover_contexts: [], get_doctor: { raw: "", passed: 5, warnings: 0, failures: 0 }, get_recent_logs: "", get_log_path: "/dev/null", get_harpoon_binary_path: "/dev/null",
-  };
-  let cb = 0;
-  window.__TAURI_INTERNALS__ = {
-    metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
-    transformCallback: () => ++cb, unregisterCallback() {}, convertFileSrc: (p) => p,
-    invoke: async (cmd) => { if (cmd in answers) return answers[cmd]; if (cmd.startsWith("plugin:")) return 0; throw new Error("fixture: no answer for " + cmd); },
-  };
-})();`;
-
 const proc = spawn(CHROME, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--remote-debugging-port=9444", "--window-size=1440,1000", "--user-data-dir=/tmp/harpoon-stable-url-shots", "about:blank"], { stdio: "ignore" });
 let id = 0; const pending = new Map(); let ws;
 const send = (method, params = {}) => new Promise((res, rej) => { const i = ++id; pending.set(i, { res, rej }); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -66,8 +51,8 @@ try {
   let script;
   for (const [name, scene] of Object.entries(SCENES)) {
     if (script) await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: script });
-    script = (await send("Page.addScriptToEvaluateOnNewDocument", { source: stub(scene) })).identifier;
-    await send("Page.navigate", { url: "http://localhost:1420/" });
+    script = (await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB_SOURCE })).identifier;
+    await send("Page.navigate", { url: fixtureUrl("http://localhost:1420/", { ...scene, now: NOW }) });
     await sleep(1500);
     await waitFor(`!!document.querySelector('nav, aside, [role=navigation]')`);
     await clickText("button, a, [role=button], li", "Deployments");
