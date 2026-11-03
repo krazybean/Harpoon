@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./deploy.css";
+import "../../styles/tour.css";
 import type { DeploySimulation } from "../../hooks/useDeploySimulation.ts";
 import type { DeployEngine } from "../../hooks/useDeployEngine.ts";
 import type { KeychainState, NextOutcome, RuntimeState, ScenarioId } from "../../lib/deployTypes.ts";
@@ -10,7 +11,8 @@ import { Banner } from "./parts.tsx";
 import { dialogAllowedFor, type Ctx, type DialogState, type Route } from "./context.ts";
 import { AppScreen, DeploymentScreen, HomeScreen } from "./Screens.tsx";
 import { DeployDialogs } from "./Dialogs.tsx";
-import { GitBranch, Play } from "@phosphor-icons/react";
+import { GitBranch, Play, Question } from "@phosphor-icons/react";
+import { useDeploymentsTour, type Onboarding } from "../../hooks/useDeploymentsTour.ts";
 
 const SCENARIO_LABELS: Record<ScenarioId, string> = {
   healthy: "Healthy", building: "Building (live)", "build-failed": "Build failed", "cutover-restored": "Cutover failed · restored · paused",
@@ -35,9 +37,11 @@ type Props = {
   /** Changes each time the Deployments item in the sidebar is clicked while Deployments is already showing: go back to the project list. */
   homeSignal?: number;
   preview?: DeployPreview;
+  /** The first-run walkthrough's storage and Driver.js loader. Production passes nothing; tests inject both. */
+  onboarding?: Onboarding;
 };
 
-export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, homeSignal, preview: previewProp }: Props) {
+export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, homeSignal, preview: previewProp, onboarding }: Props) {
   const preview = previewApplied ? undefined : previewProp;
   const state = engine ? engine.state : sim!.state;
   const dispatch = sim ? sim.dispatch : NOOP;
@@ -95,6 +99,14 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
   const last = engine?.api.last ?? null;
   const notice = engine?.api.notice ?? [];
 
+  // The walkthrough starts by itself only on the real engine's first quiet visit: not in simulation or preview, not while
+  // loading, not over an error, a dialog or a running job. "Replay walkthrough" starts it any time.
+  const replayTour = useDeploymentsTour({
+    auto: !!engine && !preview && state.scenario !== "loading" && meta?.store !== "error" && !dialog && !state.job,
+    routeKey: `${route.screen}|${route.appId}|${route.env}|${route.tab}|${route.depId ?? ""}`,
+    onboarding,
+  });
+
   const showBanner = runtime !== "connected";
   return (
     <div className="dp-root" data-testid="deployments-view" style={preview?.width ? { width: preview.width } : undefined}>
@@ -112,6 +124,7 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
       </div>
       <div className="dp-sim-note">{SIMULATION_NOTE}</div>
       </> : null}
+      <div className="dp-tourbar"><button type="button" className="btn btn--ghost btn--sm" data-tour="replay-tour" onClick={replayTour} title="Take the short tour of this page again. It changes nothing."><Question size={14} /> Replay walkthrough</button></div>
       {meta?.store === "error" && <Banner tone="err" title="Harpoon cannot read its deployment records">{meta.storeError} Nothing is shown rather than guessing. The records were not modified.</Banner>}
       {meta?.loadError && <Banner tone="warn" title={meta.stale ? "Showing the last data Harpoon could read" : "Harpoon could not read deployment state"}
         actions={<button className="btn btn--secondary" onClick={() => engine?.api.refresh()}>Retry</button>}>{meta.loadError}{meta.stale ? ` Last read ${new Date(meta.generatedMs).toLocaleTimeString()}; what follows may be out of date.` : ""}</Banner>}
