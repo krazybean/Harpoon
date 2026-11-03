@@ -201,7 +201,7 @@ test_resize() {
   cp assets/guest/harpoon-root.img "$dest" 2>/dev/null || cp -c assets/guest/harpoon-root.img "$dest" 2>/dev/null || ditto assets/guest/harpoon-root.img "$dest" 2>/dev/null
   truncate -s "$cur" "$dest" 2>/dev/null || python3 -c "import os; os.truncate('$dest',$cur)" 2>/dev/null
   # Ensure VM stopped (isolation guarantees no lock)
-  rm -f /tmp/harpoon.lock 2>/dev/null || true
+  rm -f "$RESIZE_TMP/harpoon.lock" 2>/dev/null || true
   if "$BIN" disk resize "$want" 2>&1 | grep -qi "$expect"; then
     pass "$label" "$cur -> $want ($expect)"
   else
@@ -277,10 +277,8 @@ fi
 # === Live tests (VM-dependent) ===
 if [ "$LIVE" -eq 1 ]; then
   say "--- LIVE tests (VM required) ---"
-  # Ensure clean and start
-  "$BIN" stop 2>&1 | tail -n2 || true
-  sleep 2
-  # Use isolated tmpdir for live tests to not clobber user disk
+  # Use a private namespace for live tests: it moves the locks and sockets too, so nothing here can
+  # stop or start the Harpoon that is serving on this machine. (It used to run a bare `stop` first.)
   LIVE_TMPDIR=$(mktemp -d)
   export HARPOON_TEST_TMPDIR="$LIVE_TMPDIR"
   export HARPOON_ALLOW_TMP_FALLBACK=1

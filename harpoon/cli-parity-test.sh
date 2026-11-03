@@ -11,6 +11,27 @@ fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# This suite issues real lifecycle verbs (start/stop/restart). They must only ever see a private
+# namespace: HARPOON_TEST_TMPDIR moves the locks, sockets, stop file, state and disk under $TMP, so a
+# Harpoon that is serving on this machine is never named. If the binary cannot prove that (an older
+# build, a root that aliases /tmp), refuse before running a single lifecycle command.
+export HARPOON_TEST_TMPDIR="$TMP/ns"
+unset HARPOON_DOCKER_SOCK HARPOON_DISK HARPOON_TEST_MODE HARPOON_ALLOW_TMP_FALLBACK || true
+ISOLATION="$("$BIN" status --json 2>&1)" || true
+printf '%s' "$ISOLATION" | python3 -I -c '
+import json, os, sys
+root = os.environ["HARPOON_TEST_TMPDIR"] + "/"
+doc = json.load(sys.stdin)
+keys = ["socketPath", "lockPath", "lifecycleLockPath", "controlSocketPath", "mgmtSocketPath", "stopFilePath", "logPath"]
+assert doc.get("isolated") is True and all(str(doc.get(k, "")).startswith(root) for k in keys)
+' 2>/dev/null || {
+  echo "FAIL: cannot establish an isolated Harpoon namespace with $BIN; refusing to run lifecycle commands" >&2
+  echo "      (rebuild with harpoon/build.sh; do not point HARPOON_BIN at an installed or running build)" >&2
+  exit 1
+}
+ENDPOINT="unix://$HARPOON_TEST_TMPDIR/harpoon-docker.sock"
+
 FAKE_DOCKER="$TMP/docker"
 FAKE_LOG="$TMP/docker-args.log"
 
@@ -47,25 +68,25 @@ expect_forward() {
 pass "help and machine namespace"
 
 # Common Docker/Podman verbs are pinned directly to Harpoon's engine socket.
-expect_forward "--host unix:///tmp/harpoon-docker.sock ps -a" ps -a
-expect_forward "--host unix:///tmp/harpoon-docker.sock images" images
-expect_forward "--host unix:///tmp/harpoon-docker.sock pull alpine:3.22" pull alpine:3.22
-expect_forward "--host unix:///tmp/harpoon-docker.sock build -t parity-test ." build -t parity-test .
-expect_forward "--host unix:///tmp/harpoon-docker.sock login -u alice registry.example.com" login -u alice registry.example.com
-expect_forward "--host unix:///tmp/harpoon-docker.sock logout registry.example.com" logout registry.example.com
-expect_forward "--host unix:///tmp/harpoon-docker.sock volume ls" volume ls
-expect_forward "--host unix:///tmp/harpoon-docker.sock network ls" network ls
-expect_forward "--host unix:///tmp/harpoon-docker.sock system df" system df
-expect_forward "--host unix:///tmp/harpoon-docker.sock compose version" compose version
+expect_forward "--host $ENDPOINT ps -a" ps -a
+expect_forward "--host $ENDPOINT images" images
+expect_forward "--host $ENDPOINT pull alpine:3.22" pull alpine:3.22
+expect_forward "--host $ENDPOINT build -t parity-test ." build -t parity-test .
+expect_forward "--host $ENDPOINT login -u alice registry.example.com" login -u alice registry.example.com
+expect_forward "--host $ENDPOINT logout registry.example.com" logout registry.example.com
+expect_forward "--host $ENDPOINT volume ls" volume ls
+expect_forward "--host $ENDPOINT network ls" network ls
+expect_forward "--host $ENDPOINT system df" system df
+expect_forward "--host $ENDPOINT compose version" compose version
 pass "non-colliding container commands"
 
 # Colliding verbs switch to container semantics when a target/image is supplied.
-expect_forward "--host unix:///tmp/harpoon-docker.sock run --rm alpine:3.22 echo ok" run --rm alpine:3.22 echo ok
-expect_forward "--host unix:///tmp/harpoon-docker.sock start web" start web
-expect_forward "--host unix:///tmp/harpoon-docker.sock stop web" stop web
-expect_forward "--host unix:///tmp/harpoon-docker.sock restart web" restart web
-expect_forward "--host unix:///tmp/harpoon-docker.sock logs web" logs web
-expect_forward "--host unix:///tmp/harpoon-docker.sock exec web sh -lc true" exec web sh -lc true
+expect_forward "--host $ENDPOINT run --rm alpine:3.22 echo ok" run --rm alpine:3.22 echo ok
+expect_forward "--host $ENDPOINT start web" start web
+expect_forward "--host $ENDPOINT stop web" stop web
+expect_forward "--host $ENDPOINT restart web" restart web
+expect_forward "--host $ENDPOINT logs web" logs web
+expect_forward "--host $ENDPOINT exec web sh -lc true" exec web sh -lc true
 pass "collision-aware container commands"
 
 # Historical lifecycle spellings remain machine aliases and must not hit Docker.
