@@ -27,11 +27,16 @@ for SLICE in $SLICES; do
   SLICE_OUTS="$SLICE_OUTS $SLICE_OUT"
 done
 # shellcheck disable=SC2086
-lipo -create $SLICE_OUTS -output "$OUT"
+# Build beside the target and rename into place: a running Harpoon keeps executing the old inode,
+# whereas re-signing or overwriting build/harpoon in place would modify a live engine's own file.
+NEW="$OUT.new.$$"
+trap 'rm -f "$NEW"' EXIT
+lipo -create $SLICE_OUTS -output "$NEW"
 rm -f $SLICE_OUTS
-echo "[harpoon] architectures: $(lipo -archs "$OUT")" >&2
+echo "[harpoon] architectures: $(lipo -archs "$NEW")" >&2
 echo "[harpoon] signing with entitlement..." >&2
-codesign --entitlements "$SCRIPT_DIR/entitlements.plist" --force -s - "$OUT" 2>&1
-codesign -d --entitlements - "$OUT" 2>&1 | grep -q "com.apple.security.virtualization" && echo "[harpoon] entitlement OK" >&2 || { echo "[harpoon] entitlement missing!" >&2; exit 1; }
+codesign --entitlements "$SCRIPT_DIR/entitlements.plist" --force -s - "$NEW" 2>&1
+codesign -d --entitlements - "$NEW" 2>&1 | grep -q "com.apple.security.virtualization" && echo "[harpoon] entitlement OK" >&2 || { echo "[harpoon] entitlement missing!" >&2; exit 1; }
+mv -f "$NEW" "$OUT"
 ls -lh "$OUT" >&2
 echo "[harpoon] build complete: $OUT" >&2

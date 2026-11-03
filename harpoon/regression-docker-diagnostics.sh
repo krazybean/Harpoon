@@ -19,7 +19,7 @@ cat > "$SELECTED" <<'EOF'
 case " $* " in
   *" --version "*) echo 'Docker version 28.3.3'; exit 0 ;;
   *" compose version "*) echo 'Docker Compose version v5.1.0'; exit 0 ;;
-  *" context inspect harpoon "*) printf '%s\n' '[{"Endpoints":{"docker":{"Host":"unix:///tmp/harpoon-docker.sock"}}}]'; exit 0 ;;
+  *" context inspect harpoon "*) printf '[{"Endpoints":{"docker":{"Host":"%s"}}}]\n' "$FIXTURE_ENDPOINT"; exit 0 ;;
   *" version "*) echo 'Server: Docker Engine - 28.3.3'; exit 0 ;;
 esac
 exit 1
@@ -31,12 +31,13 @@ exit 1
 EOF
 chmod +x "$STALE" "$SELECTED" "$DECOY"
 
-HARPOON_TEST_TMPDIR="$TMP/state" HOME="$TMP" DOCKER_CONFIG="$TMP/fixture-docker" \
+# An isolated run addresses its own socket, not /tmp/harpoon-docker.sock.
+FIXTURE_ENDPOINT="unix://$TMP/state/harpoon-docker.sock" HARPOON_TEST_TMPDIR="$TMP/state" HOME="$TMP" DOCKER_CONFIG="$TMP/fixture-docker" \
   PATH="$TMP/stale:$TMP/selected:$TMP/decoy:/usr/bin:/bin" \
   "$ROOT/harpoon/build/harpoon" doctor > "$TMP/doctor.out" 2>&1 || true
 
 grep -q "Docker CLI .* $SELECTED" "$TMP/doctor.out"
 grep -q "Docker Compose plugin .* PASS Docker Compose version v5.1.0" "$TMP/doctor.out"
-grep -q "Harpoon context .* PASS unix:///tmp/harpoon-docker.sock" "$TMP/doctor.out"
+grep -q "Harpoon context .* PASS unix://$TMP/state/harpoon-docker.sock" "$TMP/doctor.out"
 ! grep -q "decoy Docker CLI" "$TMP/doctor.out"
 echo "docker diagnostics fixture PASS"
