@@ -41,7 +41,13 @@ let id = 0; const pending = new Map(); let ws;
 const send = (method, params = {}) => new Promise((res, rej) => { const i = ++id; pending.set(i, { res, rej }); ws.send(JSON.stringify({ id: i, method, params })); });
 const js = async (expression) => { const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails)); return r.result.value; };
 const waitFor = async (expr, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await js(expr).catch(() => false)) return true; await sleep(250); } return false; };
-const clickText = (sel, text) => js(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(sel)})].find((x) => x.innerText.replace(/\\s+/g, " ").trim().includes(${JSON.stringify(text)})); if (!b) return false; b.click(); return true; })()`);
+// sel/text are passed as call arguments (data), never spliced into the evaluated source.
+const CLICK_TEXT = `function (sel, text) { const b = [...document.querySelectorAll(sel)].find((x) => x.innerText.replace(/\\s+/g, " ").trim().includes(text)); if (!b) return false; b.click(); return true; }`;
+const clickText = async (sel, text) => {
+  const fn = await send("Runtime.evaluate", { expression: `(${CLICK_TEXT})` });
+  const r = await send("Runtime.callFunctionOn", { objectId: fn.result.objectId, functionDeclaration: "function (...a) { return this(...a); }", arguments: [{ value: sel }, { value: text }], returnByValue: true });
+  return r.result.value;
+};
 try {
   let tabs; for (let i = 0; i < 40 && !tabs; i++) { try { tabs = await (await fetch("http://localhost:9444/json")).json(); } catch { await sleep(250); } }
   ws = new WebSocket(tabs.find((t) => t.type === "page").webSocketDebuggerUrl);

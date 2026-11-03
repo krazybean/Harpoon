@@ -30,3 +30,10 @@ test("the stub source is a constant and shoot.mjs builds no code from data", () 
   const shoot = readFileSync(new URL("./shoot.mjs", import.meta.url), "utf8");
   assert.ok(!/addScriptToEvaluateOnNewDocument", \{ source: (?!STUB_SOURCE)/.test(shoot));
 });
+
+test("shoot.mjs never interpolates a value into evaluated JavaScript", () => {
+  const shoot = readFileSync(new URL("./shoot.mjs", import.meta.url), "utf8");
+  // every template literal handed to js()/Runtime.evaluate must be free of ${...}
+  for (const m of shoot.matchAll(/\bjs\(`([^`]*)`\)/g)) assert.ok(!m[1].includes("${"), m[1]);
+  assert.ok(!/\$\{\s*JSON\.stringify/.test(shoot), "JSON.stringify spliced into a template");
+});
