@@ -39,8 +39,19 @@ func diskSizeRequestError(_ ds: String) -> (code: Int32, lines: [String])? {
 /// engine, its files or its sockets. `restart` calls this BEFORE it stops anything.
 func startArgsError(_ args: [String]) -> (code: Int32, lines: [String])? {
     let valued: Set<String> = ["--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--disk-size"]
-    for (i, a) in args.enumerated() where valued.contains(a) && i + 1 >= args.count {
-        return (2, ["\(a) needs a value"])
+    // Every token must be a known option, its value, or --disk-size=SIZE. A typo such as --memroy
+    // used to be skipped silently, so a restart would stop the engine and start it without the change.
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        if valued.contains(a) {
+            if i + 1 >= args.count { return (2, ["\(a) needs a value"]) }
+            i += 2
+        } else if a.hasPrefix("--disk-size=") {
+            i += 1
+        } else {
+            return (2, ["unknown option or stray argument: \(a)"])
+        }
     }
     let parsed = parseResourceArgs(args)
     if let ds = parsed.diskSize, let rejected = diskSizeRequestError(ds) { return rejected }

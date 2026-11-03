@@ -28,9 +28,18 @@ BEFORE="$(fingerprint)"
 
 TMP="$(mktemp -d)"
 FAKE_PID=""; HOLD_PID=""
+# Signal a process only if its command line still names a file inside this test's own namespace:
+# a recycled pid, or a pid variable that ended up empty or wrong, must never reach another process.
+kill_if_ours() { # pid, needle
+  [ -n "$1" ] || return 0
+  case "$(ps -o command= -p "$1" 2>/dev/null)" in
+    *"$2"*) kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true ;;
+  esac
+  return 0
+}
 cleanup() {
-  [ -z "$FAKE_PID" ] || kill "$FAKE_PID" 2>/dev/null || true
-  [ -z "$HOLD_PID" ] || { kill "$HOLD_PID" 2>/dev/null; wait "$HOLD_PID" 2>/dev/null; } || true
+  kill_if_ours "$FAKE_PID" "$TMP/ns/harpoon-fake-engine"
+  kill_if_ours "$HOLD_PID" "$TMP/ns/harpoon.lock"
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -83,9 +92,19 @@ pass "locks, sockets, stop file and state resolve inside the test root"
 # --- 3. A fake engine lives in the namespace; invalid restarts must not touch it. -------------
 mkdir -p "$ROOT"
 FAKE="$ROOT/harpoon-fake-engine"
-cp /bin/sleep "$FAKE" && codesign --force -s - "$FAKE" >/dev/null 2>&1 || fail "cannot build fake engine"
+# Compiled here (not a re-signed copy of /bin/sleep, which a runner may refuse to execute). The path
+# contains "harpoon", so Harpoon's own process check accepts it as an engine it is allowed to signal.
+printf 'import Darwin\nsetvbuf(stdout, nil, _IOLBF, 0)\nsleep(600)\n' > "$TMP/fake.swift"
+xcrun swiftc -module-cache-path "$TMP/mcache" "$TMP/fake.swift" -o "$FAKE" >"$TMP/fake-build.log" 2>&1 \
+  || { cat "$TMP/fake-build.log" >&2; fail "cannot build fake engine"; }
 # Started from a subshell so it is not our child: a stopped child stays a zombie until reaped and still looks alive.
-FAKE_PID="$( ("$FAKE" 600 >/dev/null 2>&1 & echo $!) )"
+FAKE_PID="$( ("$FAKE" >"$TMP/fake.out" 2>&1 & echo $!) )"
+sleep 0.5
+if ! kill -0 "$FAKE_PID" 2>/dev/null; then
+  echo "--- diagnostics: fake engine pid=$FAKE_PID is gone ---" >&2
+  ls -l "$FAKE" >&2; codesign -dv "$FAKE" >&2 2>&1 || true; cat "$TMP/fake.out" >&2 || true
+  fail "fake engine did not start"
+fi
 printf '%s\n' "$FAKE_PID" > "$ROOT/runtime.pid"
 python3 -I -c '
 import fcntl, sys, time
@@ -117,6 +136,16 @@ invalid_restart "memory below minimum" --memory 1
 invalid_restart "cpus not a number" --cpus many
 invalid_restart "cpus too many" --cpus 99
 invalid_restart "dangling --memory" --memory
+# A misspelled FIRST option is not a machine option, so it is a container verb (docker restart ...),
+# addressed to the private socket only; it can fail but must never reach the engine.
+cli restart --memroy 2048
+[ "$CODE" -ne 0 ] || fail "misspelled first option unexpectedly succeeded: $OUT"
+engine_untouched "misspelled first option"
+invalid_restart "misspelled later option" --cpus 2 --memroy 2048
+invalid_restart "unknown flag after valid option" --cpus 2 --bogus
+invalid_restart "stray argument" --cpus 2 web
+invalid_restart "stray first argument" --memory 2048 extra
+invalid_restart "unknown -x flag" --cpus 2 -x
 invalid_restart "kernel missing" --kernel "$TMP/no-such-kernel"
 invalid_restart "initramfs missing" --initramfs "$TMP/no-such-initramfs"
 invalid_restart "disk-size invalid" --disk-size nope

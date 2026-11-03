@@ -101,6 +101,7 @@ def test_restart_validates_everything_before_it_stops_anything() -> None:
         "restart stops the engine before validating its arguments"
     # the pre-flight itself must be free of lifecycle side effects
     preflight = CLI.split("func startArgsError", 1)[1].split("func handleStart", 1)[0]
+    assert "unknown option or stray argument" in preflight, "unknown restart options must be rejected up front"
     for effect in ("handleStop", "kill(", "removeItem", "createFile", "Process()", "rotateLog", "ensureAppSupport"):
         assert effect not in preflight, "start pre-flight must not perform " + effect
 
