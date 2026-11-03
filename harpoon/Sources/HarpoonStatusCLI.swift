@@ -9,6 +9,10 @@ func handleStatus(args: [String]=[]) -> Int32 {
             "state": snap.state,
             "socketPath": HarpoonPaths.dockerSocketPath,
             "lockPath": HarpoonPaths.lockPath,
+            "lifecycleLockPath": HarpoonPaths.lifecycleLockPath,
+            "controlSocketPath": HarpoonPaths.controlSocketPath,
+            "stopFilePath": HarpoonPaths.stopFilePath,
+            "isolated": HarpoonRoots.testRoot != nil,
             "logPath": HarpoonPaths.logFile.path,
             "dockerReady": snap.dockerReady,
             "sockExists": snap.sockExists,
@@ -116,7 +120,7 @@ func handleStatus(args: [String]=[]) -> Int32 {
 func handleLogs(args: [String]) -> Int32 {
     if args.contains("--path") {
         // print resolved log path (check both locations)
-        let candidates = [HarpoonPaths.logFile.path, "/tmp/harpoon-runtime/harpoon.log", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/harpoon.log").path]
+        let candidates = HarpoonRoots.testRoot != nil ? [HarpoonPaths.logFile.path] : [HarpoonPaths.logFile.path, "/tmp/harpoon-runtime/harpoon.log", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/harpoon.log").path]
         for cand in candidates {
             if FileManager.default.fileExists(atPath: cand) { cliPrint(cand); return 0 }
         }
@@ -154,7 +158,7 @@ func handleLogs(args: [String]) -> Int32 {
     }
     // resolve actual log path (check both)
     var logPath = HarpoonPaths.logFile.path
-    let candidates2 = [HarpoonPaths.logFile.path, "/tmp/harpoon-runtime/harpoon.log", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/harpoon.log").path, "/tmp/harpoon.log"]
+    let candidates2 = HarpoonRoots.testRoot != nil ? [HarpoonPaths.logFile.path] : [HarpoonPaths.logFile.path, "/tmp/harpoon-runtime/harpoon.log", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/harpoon.log").path, "/tmp/harpoon.log"]
     for cand in candidates2 {
         if FileManager.default.fileExists(atPath: cand) { logPath = cand; break }
     }
@@ -162,7 +166,7 @@ func handleLogs(args: [String]) -> Int32 {
     if !fm.fileExists(atPath: logPath) {
         cliError("no log at \(logPath)")
         // also check legacy /tmp/harpoon.log
-        if fm.fileExists(atPath: "/tmp/harpoon.log") {
+        if HarpoonRoots.testRoot == nil, fm.fileExists(atPath: "/tmp/harpoon.log") {
             cliError("legacy log at /tmp/harpoon.log")
         }
         return 1

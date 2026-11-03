@@ -250,6 +250,17 @@ bash harpoon/build.sh
 
 This compiles the Swift runtime (`harpoon/Sources/*.swift` with `-framework Virtualization`) to `harpoon/build/harpoon` and ad-hoc signs it with `harpoon/entitlements.plist` (`com.apple.security.virtualization`). Output is a single `Mach-O arm64` executable; `harpoon doctor` validates it.
 
+### Validating while Harpoon is serving
+
+`sh tools/validate.sh` is safe to run on a machine where Harpoon is serving containers. It builds a new binary beside the old one and renames it into place (a running engine keeps its own inode), and every suite that issues `start`/`stop`/`restart` runs inside a private namespace:
+
+- `HARPOON_TEST_TMPDIR=<dir>` moves the **whole** lifecycle namespace under `<dir>`: `harpoon.lock`, `harpoon-lifecycle.lock`, `harpoon-docker.sock`, `harpoon-control`, `harpoon-mgmt.sock`, `harpoon-stop`, the serial log, `runtime.pid`/`runtime.json`, `config.json`, the log and `data/harpoon-root.img`. Production fallbacks (`/tmp/harpoon-runtime`, `~/Library/Application Support/Harpoon`) are not read, and `harpoon status --json` reports `"isolated": true` and every path.
+- Harpoon refuses to run any command (exit 2, `HARPOON_ISOLATION_FAILED`) if the root is relative, resolves to `/tmp` or the production state directory, is too long for a unix socket path, or if `HARPOON_DOCKER_SOCK` / `HARPOON_DISK` point back at production. `harpoon docker setup|remove|use` also refuse unless `DOCKER_CONFIG` is set, so a test cannot repoint your real `harpoon` Docker context.
+- `harpoon/cli-parity-test.sh` and `harpoon/regression-lifecycle-isolation.sh` check this through the binary they are about to drive and refuse to run a lifecycle command if it cannot prove isolation (for example an installed or older build in `HARPOON_BIN`).
+- `harpoon restart ...` validates every option (and the effective configuration, kernel/initramfs/disk) **before** it stops anything; an invalid restart changes nothing.
+
+Do not run the manual VM suites (`harpoon/m*-test.sh`, `ec-test.sh`, `ui-test.sh`, `install.sh`, `uninstall.sh`, `tools/stage-*` gates) on a machine that is serving: they use the machine's real namespace. They are listed in `harpoon/regression-lifecycle-safety.py` (`LIVE_ONLY`); a new script that runs lifecycle verbs must either export `HARPOON_TEST_TMPDIR` or be added there deliberately.
+
 ## 8. Build frontend
 
 Verified frontend build (from repository root):

@@ -83,7 +83,7 @@ func handleDoctor() -> Int32 {
         cliPrint("INFO  Docker config ............. \(dockerConfigPath())")
         cliPrint("INFO  Docker environment ......... DOCKER_HOST=\(env["DOCKER_HOST"] ?? "<unset>") DOCKER_CONTEXT=\(env["DOCKER_CONTEXT"] ?? "<unset>")")
         if snap.state=="running" && sockExists {
-            let (c, vOut, vErr) = runDocker(["--context", "harpoon", "version"])
+            let (c, vOut, vErr) = runDocker(harpoonDockerTarget() + ["version"])
             if c==0 {
                 let verLine = vOut.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
                 check(true, "Docker Engine .............. PASS \(verLine)")
