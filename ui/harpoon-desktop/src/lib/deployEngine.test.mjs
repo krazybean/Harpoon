@@ -320,6 +320,19 @@ test("a collision or an unavailable router is reported, with no URL to copy or o
   assert.match(u.note, /already in use/);
 });
 
+test("a Mac that cannot resolve *.harpoon.localhost gets no broken URL, only the reason; unknown is not a claim", () => {
+  const no = addressOf(withHost("serving"), { ...ROUTER, resolves: false, resolveError: "this Mac does not resolve probe.harpoon.localhost: nodename nor servname provided" }, true, false);
+  assert.deepEqual([no.status, no.url], ["unresolvable", ""]);
+  assert.match(no.note, /does not resolve/);
+  assert.match(no.note, /direct address/);
+  for (const resolves of [true, null, undefined]) assert.ok(addressOf(withHost("serving"), { ...ROUTER, resolves }, true, false).url);
+});
+
+test("the address note says it needs Harpoon open (the router lives in the desktop app)", () => {
+  assert.match(addressOf(withHost("serving"), ROUTER, true, false).note, /Harpoon is open/);
+  assert.match(addressOf(withHost("serving"), ROUTER, false, false).note, /needs Harpoon open/);
+});
+
 test("Copy and Open act on exactly the URL shown, and the primary view hides the internal port", () => {
   const src = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
   assert.match(src, /writeText\(a\.url\)/);

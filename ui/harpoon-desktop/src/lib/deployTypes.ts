@@ -122,7 +122,7 @@ export type ConfigFacts = Record<ConfigFactKey, ConfigFact>;
 export type PortExposureView = import("./portExposure.ts").Exposure;
 
 /** The stable address Harpoon's loopback router gives an application. `url` is empty when there is none to open. */
-export type AppAddress = { url: string; status: "running" | "stopped" | "conflict" | "unavailable"; note: string };
+export type AppAddress = { url: string; status: "running" | "stopped" | "conflict" | "unavailable" | "unresolvable"; note: string };
 
 export type AppModel = {
   /** Engine mode: the friendly `<name>.harpoon.localhost` address (same for every release), when there is something true to show. */

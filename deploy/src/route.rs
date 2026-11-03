@@ -11,6 +11,7 @@
 
 use crate::ids::ApplicationId;
 use crate::ledger::{Ledger, ResourceKind};
+use crate::ports::PortRange;
 use crate::serving::serving_release;
 use crate::state::Deployment;
 use std::collections::BTreeMap;
@@ -47,9 +48,14 @@ pub fn serving_port(ledger: &Ledger, deployments: &[Deployment], app: &Applicati
         .find_map(|e| e.key.name.parse().ok())
 }
 
-/// The table for every application in `apps`, from the durable records.
+/// The table for every application in `apps`, from the durable records. A recorded port outside the ranges Harpoon
+/// leases for applications is not a forwarding target (the router never trusts an arbitrary port).
 pub fn table_of(ledger: &Ledger, deployments: &[Deployment], apps: &[ApplicationId]) -> RouteTable {
-    RouteTable::build(apps.iter().map(|a| (a.clone(), serving_port(ledger, deployments, a))))
+    let leased = |p: u16| PortRange::APPLICATIONS.contains(p) || PortRange::TESTS.contains(p);
+    RouteTable::build(
+        apps.iter()
+            .map(|a| (a.clone(), serving_port(ledger, deployments, a).filter(|p| leased(*p)))),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

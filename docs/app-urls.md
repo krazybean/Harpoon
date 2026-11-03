@@ -9,6 +9,7 @@
 | Does `<anything>.harpoon.localhost` resolve with no `/etc/hosts` or DNS change? | Yes: `getaddrinfo` (Python, curl, Rust `std`) returns `::1` and `127.0.0.1` for it. A test (`the_system_resolver_sends_a_harpoon_localhost_name_to_the_router`) connects by name through the system resolver. |
 | Can an unprivileged process listen on port 80 of loopback? | **No.** `bind(127.0.0.1:80)` and `bind([::1]:80)` fail with EACCES; only the wildcard `0.0.0.0:80` succeeds, which would expose applications to the LAN. |
 | Result | The router listens on loopback port **7480**, so the URL carries the port. A port-less URL would need a privileged helper or a `pf` redirect (admin rights, system change); that is not done. |
+| GitHub's macOS runner | **Did not resolve it** (`nodename nor servname provided`), although the development Mac did. So resolution is a property of the machine, not something to assume. |
 | Older macOS (the app targets 12+) | **Not verified.** `.localhost` is reserved (RFC 6761) and the major browsers resolve it themselves, but this was not tested on 12–26. If a name does not resolve, the direct `http://127.0.0.1:<port>` URL still works. |
 
 ## Architecture
@@ -42,6 +43,14 @@ browser ──► 127.0.0.1:7480 (router, desktop app) ──► 127.0.0.1:<rele
   Harpoon starts nothing on its own.
 * **Existing behaviour kept.** Direct `127.0.0.1:<port>` URLs, port allocation, ownership labels, journals and leases are
   untouched; this change only reads them. An attached external runtime (the read-only B7 viewer) is never routed.
+
+* **Resolution is checked, not assumed.** At startup the app resolves a probe name through the system resolver and requires
+  loopback-only answers. If that fails, the UI shows no friendly URL for any application, says why, and points at the
+  direct address; unknown (not yet probed) claims nothing. Routing itself never depends on DNS: the router is tested with an
+  explicit `Host` header against its own address.
+* **Hardening.** One `Host` header only (duplicates or `Host :` are 400); the whole request head must arrive within 10 s and be
+  under 16 KiB; at most 256 simultaneous connections (extra ones are refused); the router never forwards to its own port; the
+  route table only holds ports from Harpoon's leased ranges (38000–38999 applications, 39000–39099 tests).
 
 ## UI
 

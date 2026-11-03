@@ -707,3 +707,20 @@ fn an_unrestored_failure_keeps_the_record_so_the_router_can_report_the_applicati
     // stopped container unreachable and says so (503) instead of routing anywhere else.
     serving_on(&w, &routes(&w, &r, &d), 38200);
 }
+
+#[test]
+fn a_recorded_port_outside_the_leased_ranges_is_never_a_forwarding_target() {
+    let mut w = world();
+    for port in [22u16, 7480, 8080, 37999, 39100] {
+        w.deps[1].pinned.as_mut().unwrap().host_port = port;
+        assert_eq!(
+            before(&w).route_of(&w.app),
+            Some(&Route::Idle { app: w.app.clone() }),
+            "{port}"
+        );
+    }
+    for port in [38000u16, 38999, 39000, 39099] {
+        w.deps[1].pinned.as_mut().unwrap().host_port = port;
+        serving_on(&w, &before(&w), port);
+    }
+}

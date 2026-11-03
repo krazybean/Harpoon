@@ -43,7 +43,7 @@ export type SnapRepo = {
 };
 export type SnapDefinition = { scope: string; name: string; kind: string; build: boolean; runtime: boolean; value: string | null; secretId: string | null; version: number | null; atMs: number };
 export type SnapSource = { kind: "own" | "external"; path: string; journalFormat: "sqlite" | "legacy" | "none"; readOnly: boolean };
-export type SnapRouter = { domain: string; port: number | null; error: string | null };
+export type SnapRouter = { domain: string; port: number | null; error: string | null; resolves?: boolean | null; resolveError?: string | null };
 export type EngineSnapshot = {
   router?: SnapRouter;
   schema: number; generatedMs: number; runtimeDir: string; source: SnapSource; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
@@ -200,10 +200,12 @@ export function addressOf(a: SnapApp, router: SnapRouter | undefined, running: b
   if (a.route === "conflict") return { url: "", status: "conflict", note: "Another application was assigned the same address, so Harpoon routes neither of them. Nothing was changed." };
   if (a.route !== "serving") return undefined;
   if (router.port == null) return { url: "", status: "unavailable", note: router.error ?? "The application router is not running." };
+  // Checked on this Mac at startup. Unknown (null/absent) is not a claim either way; a "no" means the URL would not open.
+  if (router.resolves === false) return { url: "", status: "unresolvable", note: `${router.resolveError ?? "This Mac does not resolve *.harpoon.localhost"}, so the friendly address would not open. The direct address under "Recorded vs observed" still works.` };
   const url = `http://${a.hostname}:${router.port}`;
   return running
-    ? { url, status: "running", note: "Answers while the release recorded as serving is running." }
-    : { url, status: "stopped", note: "The release recorded as serving is not observed running, so this address will not respond until it is." };
+    ? { url, status: "running", note: "Answers while Harpoon is open and the release recorded as serving is running." }
+    : { url, status: "stopped", note: "The release recorded as serving is not observed running, so this address will not respond until it is (it also needs Harpoon open)." };
 }
 
 /**

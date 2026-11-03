@@ -102,6 +102,10 @@ pub struct RouterDto {
     pub port: Option<u16>,
     /// Why it is not running (for example the port is taken); the direct-port URLs keep working.
     pub error: Option<String>,
+    /// Whether this Mac resolves `*.harpoon.localhost` to loopback: `null` until checked, `false` with the reason in
+    /// `resolveError`. When it does not, the friendly address would not open and the UI says so.
+    pub resolves: Option<bool>,
+    pub resolve_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -560,7 +564,14 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
         },
         router: {
             let (port, error) = crate::app_router::status();
-            RouterDto { domain: harpoon_deploy::route::DOMAIN, port, error }
+            let res = crate::app_router::resolution();
+            RouterDto {
+                domain: harpoon_deploy::route::DOMAIN,
+                port,
+                error,
+                resolves: res.as_ref().map(|r| r.is_ok()),
+                resolve_error: res.and_then(|r| r.err()),
+            }
         },
         repos: vec![],
         apps: vec![],

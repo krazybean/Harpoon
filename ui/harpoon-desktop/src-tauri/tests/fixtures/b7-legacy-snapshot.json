@@ -140,7 +140,9 @@
   "router": {
     "domain": "harpoon.localhost",
     "error": null,
-    "port": null
+    "port": null,
+    "resolveError": null,
+    "resolves": null
   },
   "runtimeDir": "<runtime>",
   "schema": 1,
