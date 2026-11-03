@@ -1746,6 +1746,43 @@ impl<T: HttpTransport> DockerBackend<T> {
         // container and its freshly chosen port belong to the rollback deployment, while the
         // original deployment keeps its old, stopped container's lease) and after a restoration.
         // Any other deployment holding the pinned port is still refused below.
+        // Authoritative check, when Docker can give it: the port the serving container was actually
+        // created with (its configured bindings, which a stopped container keeps). A pin naming any
+        // other port is stale or corrupted, even if some allowed owner still holds a lease on it.
+        // If Docker cannot say (error, container gone, no bindings) the lease rules below still
+        // decide, so a Docker hiccup never turns a recoverable failure into a refusal.
+        let (serving_owner, serving_name) = match &previous.container {
+            Some(c) => (&c.owner, Some(&c.name)),
+            None => (&previous.deployment, None),
+        };
+        let serving_id = io
+            .ledger()
+            .entries()
+            .iter()
+            .find(|e| {
+                e.deployment == *serving_owner
+                    && serving_name.is_none_or(|n| e.key.name == *n)
+                    && e.app == *io.app()
+                    && e.key.kind == ResourceKind::Container
+                    && !e.is_released()
+                    && e.id.is_some()
+            })
+            .and_then(|e| e.id.clone());
+        if let Some(id) = serving_id {
+            if let Ok(ports) = self
+                .api
+                .configured_host_ports(&id, b.left("reading the serving container's port")?)
+            {
+                if !ports.is_empty() && !ports.contains(&cfg.host_port) {
+                    io.log.push_line(&format!(
+                        "restoration: the pinned port {} is not a port the serving container was created with ({}); the pin cannot be trusted, so nothing was created",
+                        cfg.host_port,
+                        ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+                    ));
+                    return Ok(RestoreResult::NotAttempted(Reason::ConfigUnavailable));
+                }
+            }
+        }
         let lease_owners: Vec<&DeploymentId> = std::iter::once(&previous.deployment)
             .chain(previous.container.as_ref().map(|c| &c.owner))
             .collect();

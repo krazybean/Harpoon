@@ -1390,3 +1390,86 @@ fn restoration_is_unchanged_for_a_release_that_was_itself_restored() {
         (Some(PREV_PORT), r.prev_image.as_str())
     );
 }
+
+// ------------------------------------------- the serving container's own port is authoritative
+
+#[test]
+fn a_pin_naming_the_original_deployments_stale_port_is_refused_after_a_rollback() {
+    // A's original lease (PREV_PORT) is still held by A's building deployment, an allowed owner, but
+    // the container serving A was created on ROLLED_PORT: the pin is stale and must not be used
+    let Rolled {
+        mut r,
+        rb_container,
+        ..
+    } = rolled();
+    r.prev_container = rb_container;
+    r.cfg.previous.as_mut().unwrap().host_port = PREV_PORT;
+    let mut b = backend(&r, transport_on(PREV_PORT, Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::NotAttempted(Reason::ConfigUnavailable)
+    );
+    assert!(r
+        .h
+        .docker
+        .container(&format!("hp-{}-restored", r.h.dep.id))
+        .is_none());
+    assert!(rep.logs.iter().any(|(s, c)| *s == Step::Recovery
+        && c.text
+            .contains("not a port the serving container was created with")));
+    only_the_previous_release_was_stopped(&r);
+}
+
+#[test]
+fn when_docker_cannot_report_the_serving_containers_port_the_lease_rules_still_restore() {
+    // measure which inspect of the serving container is the restoration's own
+    let probe = {
+        let Rolled {
+            mut r,
+            rb_container,
+            ..
+        } = rolled();
+        r.prev_container = rb_container.clone();
+        let mut b = backend(&r, transport_on(ROLLED_PORT, Observation::Status(200)));
+        run(&mut r, &mut b);
+        let reqs = r.h.docker.requests();
+        let create = reqs
+            .iter()
+            .position(|q| q.method == "POST" && q.path.contains("-restored"))
+            .expect("restored");
+        reqs[..create]
+            .iter()
+            .filter(|q| q.method == "GET" && q.path.contains(&format!("{rb_container}/json")))
+            .count()
+    };
+    assert!(probe > 0);
+    let Rolled {
+        mut r,
+        rb_container,
+        ..
+    } = rolled();
+    r.prev_container = rb_container.clone();
+    r.h.docker.fault_after(
+        Some("GET"),
+        &format!("{rb_container}/json"),
+        probe - 1,
+        1,
+        Action::Disconnect,
+    );
+    let mut b = backend(&r, transport_on(ROLLED_PORT, Observation::Status(200)));
+    run(&mut r, &mut b);
+    assert!(
+        r.h.docker
+            .with(|s| s.faults.iter().all(|f| f.remaining == 0)),
+        "the fault hit the restoration's own inspect"
+    );
+    assert_eq!(r.h.dep.recovery.unwrap().outcome, RecoveryOutcome::Restored);
+    assert_eq!(
+        r.h.docker
+            .container(&format!("hp-{}-restored", r.h.dep.id))
+            .unwrap()
+            .host_port,
+        Some(ROLLED_PORT)
+    );
+}
