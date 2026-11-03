@@ -832,6 +832,110 @@ fn a_failed_final_check_gets_one_bounded_restoration_from_the_old_pin_and_a_dura
     assert!(s.contains("automatic triggers paused"), "{s}");
 }
 
+/// A → B replaced (seeded), rolled back to A through the CLI, then a replacement whose candidate
+/// never answers: the bounded restoration recreates A from its own pin on the port the rollback
+/// chose (a lease held by the rollback deployment, not by A's original deployment).
+#[test]
+fn a_failed_replacement_after_a_rollback_restores_the_rolled_back_release_from_its_own_pin() {
+    let _ports = ports();
+    let old = "dep_00000000000000000000000020";
+    let new = "dep_00000000000000000000000021";
+    let rel = format!("rel_{}", &old[4..]);
+    let t = T::new();
+    let lsof = forwarder_lsof(&t);
+    let (old_image, _) = seed(
+        &t,
+        APP,
+        old,
+        100,
+        38400,
+        false,
+        9101,
+        &[("OLD", "1"), ("EQ", "a=b")],
+    );
+    seed(&t, APP, new, 200, 38401, true, 9102, &[("NEW", "2")]);
+    let by = bystander(&t);
+    let held = occupy_all_but_first();
+    let _pre = responder(&t, TEST_PORT, true);
+    // answers for whichever container runs on the rolled-back release's port
+    let _serving = new_release_responder(&t, vec![38401, 38600]);
+    let o = live(
+        &t,
+        &lsof,
+        ["rollback", "--app", APP, "--to", &rel, "--confirm-rollback"]
+            .map(String::from)
+            .to_vec(),
+    );
+    drop(held);
+    assert_exit(&o, 0);
+    let rolled_port = containers(&t)
+        .into_iter()
+        .find(|c| c.1 && c.3 == old_image)
+        .and_then(|c| c.2)
+        .expect("the rolled-back release is running");
+    assert_ne!(rolled_port, 38400, "the rollback chose a fresh port");
+    let pauses_before = control_of(&t).pauses.len();
+
+    drop(_pre);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let held = occupy_all_but_first();
+    let _pre2 = responder(&t, TEST_PORT, true);
+    image_appears_after_build(&t);
+    let o = live(
+        &t,
+        &lsof,
+        replace_args(&t, &["--confirm-cutover", "--env", "NEW=3"]),
+    );
+    drop(held);
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("failure at final_check")
+            && o.stdout.matches("recovery: restored").count() == 1
+            && !o.stdout.contains("restored_unverified"),
+        "{}",
+        o.stdout
+    );
+    let restored: Vec<Seen> = containers(&t)
+        .into_iter()
+        .filter(|c| c.0.ends_with("-restored"))
+        .collect();
+    assert_eq!(restored.len(), 1, "exactly one restoration");
+    assert_eq!(
+        (restored[0].2, restored[0].3.as_str()),
+        (Some(rolled_port), old_image.as_str())
+    );
+    let mut e = without_marker(&restored[0].4);
+    e.sort();
+    assert_eq!(e, ["EQ=a=b", "OLD=1"], "A's own pinned environment");
+    untouched(&t, &by);
+    // the journal replays; the restored release's lease is still held by the rollback deployment
+    // alone, and a successful restoration resumes nothing: the rollback pause stays, one failed
+    // cutover pause is added
+    let (_, r) = open_j(&t.journal_dir()).expect("the journal replays");
+    let holders: Vec<_> = r
+        .ledger
+        .entries()
+        .iter()
+        .filter(|x| {
+            x.key.kind == ResourceKind::PortLease
+                && x.key.name == rolled_port.to_string()
+                && !x.is_released()
+        })
+        .collect();
+    assert_eq!(holders.len(), 1);
+    let c = control_of(&t);
+    assert_eq!(c.pauses.len(), pauses_before + 1);
+    assert!(c
+        .pauses
+        .iter()
+        .any(|p| p.kind == control::PauseKind::Rollback));
+    assert!(c
+        .pauses
+        .iter()
+        .any(|p| p.kind == control::PauseKind::FailedCutover));
+    assert!(c.resumes.is_empty());
+}
+
 /// A held event that a developer has selected: pending attended execution. Pauses the application
 /// first (a failed cutover record, as a previous failure would leave).
 fn hold_and_select(t: &T) -> ControlState {

@@ -25,6 +25,7 @@ const PREV_PORT: u16 = 38500;
 /// scripted for the restoration, everything else (the failing candidate) answers 503.
 struct ByPort {
     restored: Observation,
+    restored_port: u16,
     seen: RefCell<Vec<u16>>,
 }
 
@@ -33,7 +34,7 @@ impl HttpTransport for ByPort {
         self.seen.borrow_mut().push(port);
         if port >= 39000 {
             Observation::Status(200)
-        } else if port == PREV_PORT {
+        } else if port == self.restored_port {
             self.restored.clone()
         } else {
             Observation::Status(503)
@@ -45,8 +46,13 @@ impl HttpTransport for ByPort {
 }
 
 fn transport(restored: Observation) -> ByPort {
+    transport_on(PREV_PORT, restored)
+}
+
+fn transport_on(restored_port: u16, restored: Observation) -> ByPort {
     ByPort {
         restored,
+        restored_port,
         seen: RefCell::new(Vec::new()),
     }
 }
@@ -1077,4 +1083,310 @@ fn a_reserved_or_malformed_variable_never_reaches_docker() {
         );
         assert!(r.h.dep.failure.is_some(), "{bad:?}");
     }
+}
+
+// ---------------------------------------------------- restoring a release a rollback is serving
+
+const ROLLED_PORT: u16 = 38501;
+
+/// A deployed, replaced and rolled-back application as the ledger holds it: A's own (stopped)
+/// container still holds A's original lease on `PREV_PORT`; the rollback deployment `rb` owns the
+/// running container that serves A now, on the freshly chosen `ROLLED_PORT`, and holds that lease.
+/// The serving pin is A's own (image, environment) with the new port.
+struct Rolled {
+    r: Rig,
+    rb: DeploymentId,
+    rb_name: String,
+    rb_container: String,
+}
+
+fn rolled() -> Rolled {
+    rolled_with(false).0
+}
+
+/// `stranger`: the pinned port's lease is held by an unrelated deployment instead of `rb`.
+fn rolled_with(stranger: bool) -> (Rolled, DeploymentId) {
+    let mut r = rig();
+    let app = r.h.dep.application_id.clone();
+    let rb = r.h.ids.gen.deployment().unwrap();
+    let rb_name = format!("hp-{rb}");
+    r.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .find(|c| c.name == r.prev_name)
+            .unwrap()
+            .running = false; // replaced by B, then B rolled back
+    });
+    let rb_container = r.h.docker.with(|s| {
+        let c = s.add_container(&rb_name, labels(&app, &rb), true);
+        s.containers.last_mut().unwrap().host_port = Some(ROLLED_PORT);
+        c
+    });
+    let lease_owner = if stranger {
+        r.h.ids.gen.deployment().unwrap()
+    } else {
+        rb.clone()
+    };
+    for rec in [
+        LedgerRecord::Intent {
+            key: ResourceKey::new(ResourceKind::Container, &rb_name),
+            app: app.clone(),
+            deployment: rb.clone(),
+            disposition: Disposition::RemoveOnFailure,
+            at_ms: 10,
+        },
+        LedgerRecord::Receipt {
+            key: ResourceKey::new(ResourceKind::Container, &rb_name),
+            deployment: rb.clone(),
+            id: rb_container.clone(),
+            at_ms: 11,
+        },
+        LedgerRecord::Intent {
+            key: ResourceKey::new(ResourceKind::PortLease, ROLLED_PORT.to_string()),
+            app: app.clone(),
+            deployment: lease_owner.clone(),
+            disposition: Disposition::RemoveOnFailure,
+            at_ms: 12,
+        },
+        LedgerRecord::Receipt {
+            key: ResourceKey::new(ResourceKind::PortLease, ROLLED_PORT.to_string()),
+            deployment: lease_owner.clone(),
+            id: ROLLED_PORT.to_string(),
+            at_ms: 13,
+        },
+    ] {
+        r.cfg.prior_ledger.apply(&rec).unwrap();
+    }
+    let pin = r.cfg.previous.as_mut().unwrap();
+    pin.host_port = ROLLED_PORT;
+    pin.env = pairs(&[("OLD", "1"), ("EQ", "a=b")]);
+    r.cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: rb.clone(),
+        name: rb_name.clone(),
+    });
+    (
+        Rolled {
+            r,
+            rb,
+            rb_name,
+            rb_container,
+        },
+        lease_owner,
+    )
+}
+
+fn unreleased_lease_holders(l: &Ledger, port: u16) -> Vec<DeploymentId> {
+    l.entries()
+        .iter()
+        .filter(|e| {
+            e.key.kind == ResourceKind::PortLease
+                && e.key.name == port.to_string()
+                && !e.is_released()
+        })
+        .map(|e| e.deployment.clone())
+        .collect()
+}
+
+#[test]
+fn a_failed_replacement_after_a_rollback_restores_the_rolled_back_release_on_its_own_port() {
+    let Rolled {
+        mut r,
+        rb,
+        rb_name,
+        rb_container,
+    } = rolled();
+    let a_stale_lease_holders = unreleased_lease_holders(&r.cfg.prior_ledger, PREV_PORT);
+    assert_eq!(a_stale_lease_holders, [r.prev.clone()]);
+    r.prev_container = rb_container.clone(); // the container the cutover stops
+    let mut b = backend(&r, transport_on(ROLLED_PORT, Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    let d = &r.h.dep;
+    // the journal: failed at the final check after the cutover began, one recovery, restored
+    assert_eq!(rep.status, DeploymentStatus::Failed);
+    assert_eq!(d.failure.as_ref().unwrap().kind, FailureKind::FinalCheck);
+    let rec = d.recovery.unwrap();
+    assert_eq!(
+        rec.outcome,
+        RecoveryOutcome::Restored,
+        "{:?} {:?}",
+        rep.warnings,
+        rep.logs
+    );
+    assert!(!d.application_may_be_down());
+    assert_eq!(
+        rep.pause,
+        Some(harpoon_deploy::engine::PauseReason::FailedCutover)
+    );
+    // exactly one restoration: one `-restored` container, one restoration create
+    let restored_name = format!("hp-{}-restored", d.id);
+    let all = r.h.docker.with(|s| {
+        s.containers
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        all.iter().filter(|n| n.ends_with("-restored")).count(),
+        1,
+        "{all:?}"
+    );
+    assert_eq!(
+        creates(&r)
+            .iter()
+            .filter(|(n, _)| *n == restored_name)
+            .count(),
+        1
+    );
+    // the right release: A's pinned image id and A's own environment, on the rolled-back port
+    let c =
+        r.h.docker
+            .container(&restored_name)
+            .expect("restored container");
+    assert!(c.running);
+    assert_eq!(c.image, r.prev_image);
+    assert_eq!(c.host_port, Some(ROLLED_PORT));
+    let env = env_of(&c.create_body.to_json());
+    assert!(
+        env.contains(&"OLD=1".to_string()) && env.contains(&"EQ=a=b".to_string()),
+        "{env:?}"
+    );
+    assert!(c
+        .labels
+        .iter()
+        .any(|(k, v)| k == RESTORES_LABEL && *v == r.prev.to_string()));
+    // the serving container was stopped, never removed; A's old stopped container was not touched
+    assert!(!r.h.docker.container(&rb_name).unwrap().running);
+    for q in r.h.docker.requests() {
+        if q.method != "GET" {
+            assert!(
+                !q.path
+                    .contains(&r.h.docker.container(&r.prev_name).unwrap().id),
+                "{} {}",
+                q.method,
+                q.path
+            );
+        }
+        assert!(!(q.method == "DELETE" && q.path.contains(&rb_container)));
+    }
+    // leases: the pinned port is still held by the rollback deployment alone (no new lease was
+    // taken for it); A's old lease is as it was; the failed candidate's lease is accounted for
+    assert_eq!(unreleased_lease_holders(&rep.ledger, ROLLED_PORT), [rb]);
+    assert_eq!(
+        unreleased_lease_holders(&rep.ledger, PREV_PORT),
+        a_stale_lease_holders
+    );
+    let candidate_leases: Vec<_> = rep
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| {
+            e.key.kind == ResourceKind::PortLease && e.deployment == d.id && !e.is_released()
+        })
+        .collect();
+    assert_eq!(
+        candidate_leases.len(),
+        1,
+        "only the failed candidate's own lease remains"
+    );
+    only_the_previous_release_was_stopped(&r);
+}
+
+#[test]
+fn a_pinned_port_leased_by_an_unrelated_deployment_is_not_restored_after_a_rollback() {
+    let (
+        Rolled {
+            mut r,
+            rb_container,
+            ..
+        },
+        stranger,
+    ) = rolled_with(true);
+    r.prev_container = rb_container;
+    let mut b = backend(&r, transport_on(ROLLED_PORT, Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert!(matches!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::NotAttempted(Reason::ConfigUnavailable)
+    ));
+    assert!(r
+        .h
+        .docker
+        .container(&format!("hp-{}-restored", r.h.dep.id))
+        .is_none());
+    assert_eq!(
+        unreleased_lease_holders(&rep.ledger, ROLLED_PORT),
+        [stranger]
+    );
+    only_the_previous_release_was_stopped(&r);
+}
+
+#[test]
+fn a_serving_container_whose_owner_is_not_the_leaseholder_fails_closed() {
+    // the serving container is recorded under a deployment that holds no lease for the pin, while
+    // the pinned port is leased by yet another deployment: neither may be used
+    let Rolled {
+        mut r,
+        rb_container,
+        ..
+    } = rolled();
+    r.prev_container = rb_container;
+    let other = r.h.ids.gen.deployment().unwrap();
+    r.cfg.previous_container.as_mut().unwrap().owner = other;
+    let mut b = backend(&r, transport_on(ROLLED_PORT, Observation::Status(200)));
+    let _ = run(&mut r, &mut b);
+    // the serving container cannot be proven (no receipt under that owner): the cutover never
+    // starts, nothing is stopped, nothing is restored
+    assert!(r
+        .h
+        .docker
+        .container(&format!("hp-{}-restored", r.h.dep.id))
+        .is_none());
+    assert!(r.h.docker.container(&r.prev_name).is_some());
+    for (name, running) in &r.bystanders {
+        assert_eq!(r.h.docker.container(name).unwrap().running, *running);
+    }
+}
+
+#[test]
+fn restoration_is_unchanged_for_a_release_that_was_itself_restored() {
+    let mut r = rig();
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    assert_eq!(r.h.dep.recovery.unwrap().outcome, RecoveryOutcome::Restored);
+    let first = r.h.dep.clone();
+    let restored_name = format!("hp-{}-restored", first.id);
+    // the next replacement also fails: the restored container (owned by `first`, serving on the
+    // original lease still held by the original deployment) is the one restored in turn
+    r.h.dep = new_deployment(&mut r.h.ids);
+    r.h.docker.with(|s| s.faults.clear());
+    r.h.seed_built_image();
+    let mut cfg = r.cfg.clone();
+    cfg.prior_ledger = rep.ledger.clone();
+    cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: first.id.clone(),
+        name: restored_name.clone(),
+    });
+    let mut b2 = backend(&r, transport(Observation::Status(200)));
+    let rel = release(&r);
+    let rep2 =
+        r.h.run_replacing_with(&mut b2, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("engine");
+    assert_eq!(
+        r.h.dep.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep2.logs
+    );
+    assert_eq!(
+        unreleased_lease_holders(&rep2.ledger, PREV_PORT),
+        [r.prev.clone()]
+    );
+    let second =
+        r.h.docker
+            .container(&format!("hp-{}-restored", r.h.dep.id))
+            .unwrap();
+    assert_eq!(
+        (second.host_port, second.image.as_str()),
+        (Some(PREV_PORT), r.prev_image.as_str())
+    );
 }

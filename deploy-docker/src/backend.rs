@@ -1741,13 +1741,21 @@ impl<T: HttpTransport> DockerBackend<T> {
         // The previous release still holds its port lease in the ledger, which is what kept the port
         // reserved while it was stopped; the restored container serves on that same lease. A lease
         // held by anyone else is not ours to use; a free one is taken the usual way.
+        // Who may hold that lease: the deployment that built the release, or the deployment that
+        // owns the container actually serving it. They differ after a rollback (the rolled-back
+        // container and its freshly chosen port belong to the rollback deployment, while the
+        // original deployment keeps its old, stopped container's lease) and after a restoration.
+        // Any other deployment holding the pinned port is still refused below.
+        let lease_owners: Vec<&DeploymentId> = std::iter::once(&previous.deployment)
+            .chain(previous.container.as_ref().map(|c| &c.owner))
+            .collect();
         let leased_by_previous: Vec<String> = io
             .ledger()
             .entries()
             .iter()
             .filter(|e| {
                 e.key.kind == ResourceKind::PortLease
-                    && e.deployment == previous.deployment
+                    && lease_owners.contains(&&e.deployment)
                     && !e.is_released()
             })
             .map(|e| e.key.name.clone())
@@ -1773,7 +1781,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             })
             .map(|e| e.deployment.clone());
         match holder {
-            Some(d) if d == previous.deployment => {}
+            Some(d) if lease_owners.contains(&&d) => {}
             Some(d) => {
                 io.log.push_line(&format!(
                     "restoration: port {} is leased by deployment {d}; it was not used",
