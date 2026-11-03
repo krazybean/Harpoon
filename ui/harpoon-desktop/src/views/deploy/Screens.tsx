@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, ArrowsClockwise, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check } from "@phosphor-icons/react";
-import type { AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
+import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check } from "@phosphor-icons/react";
+import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
   EVIDENCE_NOTE, formatAge, heroClassFor, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
@@ -23,6 +23,24 @@ const gated = (c: Ctx) => (c.engine ? liveBlock(c.state) ?? undefined : undefine
 const SIM_ONLY = "Simulated Deployments only models Production release state. Switch to Production to use this action.";
 const EXT_REASON = "This runtime is attached read-only. Harpoon shows it and does not change it.";
 const NO_PREVIEWS = "Branch previews are not part of this build: Harpoon can't yet create or expire preview instances, so none are shown.";
+
+/** The application's stable address, with Copy and Open acting on exactly the URL shown. */
+function AddressBar({ a, openUrl }: { a: AppAddress; openUrl?: (url: string) => void }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => { try { await navigator.clipboard.writeText(a.url); setCopied(true); window.setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ } };
+  const open = () => { if (openUrl) openUrl(a.url); else window.open(a.url, "_blank", "noopener"); };
+  return (
+    <div className="dp-address" data-status={a.status}>
+      <span className="dp-address__label">Application URL</span>
+      {a.url ? <span className="dp-address__url mono">{a.url}</span> : <span className="dp-address__url dp-address__url--none">No address</span>}
+      {a.url ? <>
+        <button className="btn btn--secondary btn--sm" onClick={() => void copy()} aria-label={`Copy ${a.url}`}>{copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy</>}</button>
+        <button className="btn btn--secondary btn--sm" onClick={open} aria-label={`Open ${a.url}`}><ArrowSquareOut size={14} /> Open</button>
+      </> : null}
+      <span className="dp-address__note dp-faint">{a.note}</span>
+    </div>
+  );
+}
 
 // ------------------------------------------------------------------ home
 
@@ -201,8 +219,9 @@ export function AppScreen({ c }: { c: Ctx }) {
               {c.engine ? (ext ? <Tag>External · read-only</Tag> : null) : <Tag>simulated</Tag>}
             </div>
             <div className="dp-muted" style={{ fontSize: 12, marginTop: 4 }}>
-              {subline ?? <>{app.url ? <span className="mono">{app.url}</span> : "no loopback URL"} · {env} · container {app.containerName ? <span className="mono" title={c.engine ? "Observed in Docker" : "Simulated container name — it does not exist in your real Containers view"}>{app.containerName}</span> : "none"}{c.engine && app.containerName && c.openContainers ? <> · <button className="btn btn--ghost btn--sm" onClick={() => c.openContainers!()}>Open in Containers</button></> : null}</>}
+              {subline ?? <>{app.address ? null : <>{app.url ? <span className="mono">{app.url}</span> : "no loopback URL"} · </>}{env} · container {app.containerName ? <span className="mono" title={c.engine ? "Observed in Docker" : "Simulated container name — it does not exist in your real Containers view"}>{app.containerName}</span> : "none"}{c.engine && app.containerName && c.openContainers ? <> · <button className="btn btn--ghost btn--sm" onClick={() => c.openContainers!()}>Open in Containers</button></> : null}</>}
             </div>
+            {app.address ? <AddressBar a={app.address} openUrl={c.openUrl} /> : null}
           </div>
         </div>
         <div className="dp-actions">
@@ -324,7 +343,7 @@ function ObservationPanel({ app }: { app: AppModel }) {
           <dt>Recorded</dt><dd>{o.recorded}<div className="dp-faint">from {journal}: what was done, not what is true now</div></dd>
           <dt>Observed</dt><dd>{o.observed}<div className="dp-faint">from Docker, just now</div></dd>
           {exp ? <><dt>Exposure</dt><dd>{exp.docker}{exp.host.map((h) => <div key={h} className={exp.hostTone === "warn" ? "dp-warnline" : undefined}>{h}</div>)}<div className="dp-faint">Docker's mapping is inside Harpoon's VM; the listener on this Mac, checked with lsof, is what decides who can connect.</div></dd></> : null}
-          {app.url ? <><dt>Loopback URL</dt><dd><span className="mono">{app.url}</span> <span className="dp-faint">{app.urlSource === "lease" ? "from the recorded port lease (no configuration was pinned)" : "from the pinned release configuration"}</span></dd></> : null}
+          {app.url ? <><dt>Direct URL (diagnostic)</dt><dd><span className="mono">{app.url}</span> <span className="dp-faint">{app.urlSource === "lease" ? "from the recorded port lease (no configuration was pinned)" : "from the pinned release configuration"}</span></dd></> : null}
         </dl>
         {o.checks.length ? (
           <ul className="dp-checks" aria-label="What was compared">

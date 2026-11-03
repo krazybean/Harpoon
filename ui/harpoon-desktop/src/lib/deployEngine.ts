@@ -11,7 +11,7 @@
 // Strip-types friendly: no enums, no parameter properties.
 import { exposureOf, parseDockerPorts, type HostListeners, type PortMapping } from "./portExposure.ts";
 import type {
-  AppModel, Automation, ConfigFact, ConfigFacts, Deployment, DeployState, Observation, ObservationCheck, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
+  AppAddress, AppModel, Automation, ConfigFact, ConfigFacts, Deployment, DeployState, Observation, ObservationCheck, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
   Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
 } from "./deployTypes.ts";
 
@@ -30,7 +30,9 @@ export type SnapDeployment = {
   config: SnapEntry[] | null; configDiff: string[];
 };
 export type SnapApp = {
-  id: string; repo: string | null; deployments: SnapDeployment[];
+  id: string; repo: string | null;
+  /** The stable `<label>.harpoon.localhost` name of the application, and whether it routes (serving / idle / conflict / external). */
+  hostname?: string; route?: "serving" | "idle" | "conflict" | "external"; deployments: SnapDeployment[];
   serving: { release: string; deployment: string; container: string; via: string; sinceMs: number; hostPort: number | null; healthPath: string | null } | null;
   pauses: { origin: string; kind: string; sinceMs: number; context: string; recorded: boolean }[];
   events: { delivery: string; source: string; revision: string; receivedMs: number; status: string; decidedMs: number | null; related: string | null }[];
@@ -41,7 +43,9 @@ export type SnapRepo = {
 };
 export type SnapDefinition = { scope: string; name: string; kind: string; build: boolean; runtime: boolean; value: string | null; secretId: string | null; version: number | null; atMs: number };
 export type SnapSource = { kind: "own" | "external"; path: string; journalFormat: "sqlite" | "legacy" | "none"; readOnly: boolean };
+export type SnapRouter = { domain: string; port: number | null; error: string | null };
 export type EngineSnapshot = {
+  router?: SnapRouter;
   schema: number; generatedMs: number; runtimeDir: string; source: SnapSource; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
   gate: { liveDeploy: boolean; liveReplacement: boolean; reason: string };
   repos: SnapRepo[]; apps: SnapApp[]; definitions: SnapDefinition[];
@@ -187,6 +191,22 @@ export function engineMeta(snap: EngineSnapshot | null, loadError: string | null
 const NOT: ConfigFact = { value: null, from: "none" };
 
 /**
+ * The friendly address of an application, or nothing when there is nothing true to show. The name belongs to the
+ * application, so it is the same for every release; whether it answers depends on the recorded serving release
+ * being observed running. An attached external runtime is never routed, so it never gets one.
+ */
+export function addressOf(a: SnapApp, router: SnapRouter | undefined, running: boolean, external: boolean): AppAddress | undefined {
+  if (external || !a.hostname || !router) return undefined;
+  if (a.route === "conflict") return { url: "", status: "conflict", note: "Another application was assigned the same address, so Harpoon routes neither of them. Nothing was changed." };
+  if (a.route !== "serving") return undefined;
+  if (router.port == null) return { url: "", status: "unavailable", note: router.error ?? "The application router is not running." };
+  const url = `http://${a.hostname}:${router.port}`;
+  return running
+    ? { url, status: "running", note: "Answers while the release recorded as serving is running." }
+    : { url, status: "stopped", note: "The release recorded as serving is not observed running, so this address will not respond until it is." };
+}
+
+/**
  * Configuration as RECORDED, field by field, each with where it came from: the repository registration, the
  * journal (a pinned release configuration, the ledger, the deployment record) or Docker (observed, and not in the
  * journal). A value nothing recorded stays `null` and is shown as "Not recorded": no default, placeholder or guess
@@ -252,6 +272,7 @@ function appsFrom(snap: EngineSnapshot, observed: Observed, hostListeners: HostL
       ...(ext ? { external: { path: ext.path, format: snap.source.journalFormat } } : {}),
       observation, facts: factsOf(a, repo, servDep, row, leasePort), urlSource: sv?.hostPort != null ? "pin" : leasePort ? "lease" : undefined,
       source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: ext ? "recorded in an external runtime" : "no repository registered" },
+      address: addressOf(a, snap.router, running, !!ext),
       url: running && port ? `http://127.0.0.1:${port}` : "", containerName: sv?.container ?? "",
       currentReleaseId: running ? sv!.release : null, lastKnownReleaseId: sv?.release ?? null,
       deployments, releases, automation: automationOf(a, now, (id) => byId.get(id)),

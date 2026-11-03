@@ -28,6 +28,7 @@ pub mod ports;
 pub mod queue;
 pub mod release;
 pub mod rollback;
+pub mod route;
 pub mod secrets;
 pub mod serving;
 pub mod state;

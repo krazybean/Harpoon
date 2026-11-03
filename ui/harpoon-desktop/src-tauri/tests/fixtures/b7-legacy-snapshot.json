@@ -113,9 +113,11 @@
         }
       ],
       "events": [],
+      "hostname": "7pw17zaj3b.harpoon.localhost",
       "id": "app_01M6DPQ543ASWBHW7PW17ZAJ3B",
       "pauses": [],
       "repo": null,
+      "route": "external",
       "serving": {
         "container": "hp-dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
         "deployment": "dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
@@ -135,6 +137,11 @@
   },
   "generatedMs": 1793609000000,
   "repos": [],
+  "router": {
+    "domain": "harpoon.localhost",
+    "error": null,
+    "port": null
+  },
   "runtimeDir": "<runtime>",
   "schema": 1,
   "source": {

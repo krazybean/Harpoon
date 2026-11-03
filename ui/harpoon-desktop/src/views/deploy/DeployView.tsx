@@ -32,12 +32,13 @@ type Props = {
   realRuntime: RuntimeState;
   onStartHarpoon: () => void;
   onOpenContainers?: () => void;
+  onOpenUrl?: (url: string) => void;
   /** Changes each time the Deployments item in the sidebar is clicked while Deployments is already showing: go back to the project list. */
   homeSignal?: number;
   preview?: DeployPreview;
 };
 
-export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, homeSignal, preview: previewProp }: Props) {
+export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenContainers, onOpenUrl, homeSignal, preview: previewProp }: Props) {
   const preview = previewApplied ? undefined : previewProp;
   const state = engine ? engine.state : sim!.state;
   const dispatch = sim ? sim.dispatch : NOOP;
@@ -89,8 +90,8 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
   // Production-changing dialogs are refused outside the Production route, even if a button is missed.
   // Production-changing dialogs are refused outside the Production route, and for an attached read-only runtime, even if a button is missed.
   const guardedOpen = useCallback((d: DialogState | null) => { if (d && !dialogAllowedFor(d, route.env, state.apps[route.appId])) return; setDialog(d); }, [route.env, route.appId, state.apps]);
-  const ctx: Ctx = useMemo(() => ({ state, runtime, runtimeSource: runtimeOverride ? "simulated" : "harpoon", engine: engine?.api, openContainers: onOpenContainers, route, setRoute, dispatch, open: guardedOpen, startRuntime }),
-    [state, runtime, runtimeOverride, engine?.api, onOpenContainers, route, setRoute, dispatch, startRuntime, guardedOpen]);
+  const ctx: Ctx = useMemo(() => ({ state, runtime, runtimeSource: runtimeOverride ? "simulated" : "harpoon", engine: engine?.api, openContainers: onOpenContainers, openUrl: onOpenUrl, route, setRoute, dispatch, open: guardedOpen, startRuntime }),
+    [state, runtime, runtimeOverride, engine?.api, onOpenContainers, onOpenUrl, route, setRoute, dispatch, startRuntime, guardedOpen]);
   const meta = state.engine;
   const last = engine?.api.last ?? null;
   const notice = engine?.api.notice ?? [];

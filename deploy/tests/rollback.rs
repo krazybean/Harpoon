@@ -13,6 +13,7 @@ use harpoon_deploy::journal_format::{encode_snapshot, replay, Line};
 use harpoon_deploy::ledger::{Disposition, Ledger, LedgerRecord, ResourceKey, ResourceKind};
 use harpoon_deploy::release::ReleaseConfig;
 use harpoon_deploy::rollback::{retained_releases, select_target};
+use harpoon_deploy::route::{hostname, table_of, Route, RouteTable};
 use harpoon_deploy::serving::{serving_release, ServedBy};
 use harpoon_deploy::state::*;
 use harpoon_deploy::time::{Clock, ManualClock, SeqEntropy};
@@ -605,4 +606,104 @@ fn an_interrupted_rollback_pauses_nothing_new_and_a_second_rollback_is_not_start
         harpoon_deploy::engine::recover_cutover(&mut dd, prev, &mut b, &mut MemoryJournal::new(), &w.clock, &c)
             .is_err()
     );
+}
+
+// ------------------------------------------------------------------ stable application hostname
+
+/// The route table a router would build from the records after `d`.
+fn routes(w: &W, r: &Report, d: &Deployment) -> RouteTable {
+    table_of(&r.ledger, &all(&w.deps, d), std::slice::from_ref(&w.app))
+}
+
+fn serving_on(w: &W, t: &RouteTable, port: u16) {
+    assert_eq!(
+        t.route_of(&w.app),
+        Some(&Route::Serving {
+            app: w.app.clone(),
+            port
+        })
+    );
+}
+
+fn before(w: &W) -> RouteTable {
+    table_of(&w.ledger, &w.deps, std::slice::from_ref(&w.app))
+}
+
+#[test]
+fn the_hostname_is_stable_when_a_replacement_moves_the_route() {
+    let mut w = world();
+    let host = hostname(&w.app);
+    serving_on(&w, &before(&w), 38200);
+    let id = w.gen.deployment().unwrap();
+    let mut d = Deployment::new(id, w.app.clone(), Trigger::Cli, w.clock.now_ms());
+    d.transition(DeploymentStatus::Queued, w.clock.now_ms()).unwrap();
+    let mut b = FakeBackend::new(w.clock.clone()).with_runtime(FakeRuntime::world());
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", d.failure);
+    let t = routes(&w, &r, &d);
+    let port = d.pinned.as_ref().unwrap().host_port;
+    serving_on(&w, &t, port);
+    assert!(
+        t.resolve(&host).is_some(),
+        "the same hostname resolves to the new release"
+    );
+}
+
+#[test]
+fn a_candidate_rejected_before_the_cutover_leaves_the_route_untouched() {
+    for (name, mut b) in [
+        ("source", backend(&world()).fail_source("gone")),
+        ("preliminary", backend(&world()).fail_preliminary("HTTP 503")),
+        ("plan", backend(&world()).fail_plan("no port")),
+    ] {
+        let mut w = world();
+        let mut d = rollback_dep(&mut w);
+        let r = run(&w, &mut d, &mut b);
+        assert_eq!(r.status, DeploymentStatus::Failed, "{name}");
+        assert_eq!(routes(&w, &r, &d), before(&w), "{name}");
+    }
+}
+
+#[test]
+fn a_successful_rollback_routes_the_same_hostname_to_the_target_release() {
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let mut b = backend(&w);
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(r.status, DeploymentStatus::Succeeded);
+    let t = routes(&w, &r, &d);
+    let port = d.pinned.as_ref().unwrap().host_port;
+    assert_ne!(port, 38200);
+    serving_on(&w, &t, port);
+    assert_eq!(t.route_of(&w.app), t.resolve(&hostname(&w.app)));
+}
+
+#[test]
+fn a_failed_post_cutover_replacement_returns_the_same_hostname_after_restoration() {
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let mut b = backend(&w)
+        .fail_final_check("HTTP 503")
+        .restore_with(RestoreResult::Healthy, 300);
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(d.recovery.unwrap().outcome, RecoveryOutcome::Restored);
+    // restored: the release that served before, on the port it served on, under the same name
+    serving_on(&w, &routes(&w, &r, &d), 38200);
+}
+
+#[test]
+fn an_unrestored_failure_keeps_the_record_so_the_router_can_report_the_application_down() {
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let mut b = backend(&w)
+        .fail_final_check("HTTP 503")
+        .restore_with(RestoreResult::Failed(Reason::StartFailed), 300);
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::RestoreFailed(Reason::StartFailed)
+    );
+    // Nothing new serves; the recorded release keeps its name and port, and the router finds the
+    // stopped container unreachable and says so (503) instead of routing anywhere else.
+    serving_on(&w, &routes(&w, &r, &d), 38200);
 }

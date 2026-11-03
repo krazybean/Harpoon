@@ -277,3 +277,54 @@ test("only something running gets the green badge; 'No release' and 'unknown' ar
   assert.equal(appStatus(idle, "connected").kind, "idle");
   assert.equal(heroClassFor(appStatus(idle, "connected").kind), "idle");
 });
+
+// ---- stable application address -------------------------------------------------------------------------------
+import { addressOf } from "./deployEngine.ts";
+const ROUTER = { domain: "harpoon.localhost", port: 7480, error: null };
+const withHost = (route, extra = {}) => app([dep("d1")], { hostname: "abc124xyz0.harpoon.localhost", route, ...extra });
+
+test("the address is the application's name plus the router port, and never contains a release's port", () => {
+  const a = addressOf(withHost("serving"), ROUTER, true, false);
+  assert.deepEqual([a.url, a.status], ["http://abc124xyz0.harpoon.localhost:7480", "running"]);
+  assert.doesNotMatch(a.url, /41000|127\.0\.0\.1/);
+});
+
+test("the address is identical for release A and release B: only the serving release changes, not the name", () => {
+  const serving = (rel, hostPort) => ({ release: rel, deployment: "d", container: "c", via: "original", sinceMs: NOW, hostPort, healthPath: "/healthz" });
+  const urls = [["rel_a", 38001], ["rel_b", 38002]].map(([r, p]) => {
+    const s = st(snap([withHost("serving", { serving: serving(r, p) })], { router: ROUTER }));
+    return Object.values(s.apps)[0].address.url;
+  });
+  assert.equal(urls[0], urls[1]);
+});
+
+test("a stopped application keeps its address but says it is not responding", () => {
+  const a = addressOf(withHost("serving"), ROUTER, false, false);
+  assert.equal(a.status, "stopped");
+  assert.match(a.note, /not observed running/);
+  assert.ok(a.url);
+});
+
+test("nothing true to show means no address: idle, external, no router data or an old backend", () => {
+  assert.equal(addressOf(withHost("idle"), ROUTER, false, false), undefined);
+  assert.equal(addressOf(withHost("external"), ROUTER, true, true), undefined);
+  assert.equal(addressOf(withHost("serving"), undefined, true, false), undefined);
+  assert.equal(addressOf(app([dep("d1")]), ROUTER, true, false), undefined);
+});
+
+test("a collision or an unavailable router is reported, with no URL to copy or open", () => {
+  const c = addressOf(withHost("conflict"), ROUTER, true, false);
+  assert.deepEqual([c.status, c.url], ["conflict", ""]);
+  const u = addressOf(withHost("serving"), { ...ROUTER, port: null, error: "cannot listen on 127.0.0.1:7480: Address already in use" }, true, false);
+  assert.deepEqual([u.status, u.url], ["unavailable", ""]);
+  assert.match(u.note, /already in use/);
+});
+
+test("Copy and Open act on exactly the URL shown, and the primary view hides the internal port", () => {
+  const src = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(src, /writeText\(a\.url\)/);
+  assert.match(src, /openUrl\(a\.url\)/);
+  assert.match(readFileSync(new URL("../App.tsx", import.meta.url), "utf8"), /invoke\("open_app_url", \{ url \}\)/);
+  assert.match(src, /app\.address \? null : <>\{app\.url/, "the direct 127.0.0.1 URL is only the fallback when there is no address");
+  assert.match(src, /Direct URL \(diagnostic\)/);
+});
