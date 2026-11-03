@@ -7,6 +7,7 @@ extension BridgeSet {
 func startPortForwarding() {
     let mgr = PortForwardManager(log: log)
     mgr.setVsockDevice(vsockDevice)
+    mgr.mgmtVsockPort = config.mgmtVsockPort
     self.portManager = mgr
     mgr.startPolling()
     // guest IP discovery — poll serial log for HARPOON_GUEST_IP, fallback to 192.168.64.3
