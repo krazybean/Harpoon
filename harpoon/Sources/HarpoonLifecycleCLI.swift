@@ -17,6 +17,54 @@ func syncGuestFilesystem() -> GuestSyncOutcome {
     return result == 0 ? .completed : .failed(result)
 }
 
+/// Why `--disk-size ds` would be refused. Pure: reads the disk's size, changes nothing.
+func diskSizeRequestError(_ ds: String) -> (code: Int32, lines: [String])? {
+    guard let bytes = RuntimeConfig.parseDiskSize(ds) else {
+        return (2, ["invalid --disk-size: \(ds) — use e.g. 8G, 16G, 32G, 1024M (G/GiB/M/MiB)"])
+    }
+    if bytes < RuntimeConfig.minProvisionBytes {
+        return (2, ["disk-size must be at least 2G, got \(ds) (\(bytes) bytes)"])
+    }
+    if let existing = RuntimeConfig.existingUserDiskPath() {
+        let (curLogical, _) = RuntimeConfig.backingFileInfo(at: existing)
+        if bytes != curLogical {
+            return (1, ["disk already exists (\(RuntimeConfig.formatBytes(curLogical)) at \(existing)) — use harpoon disk resize \(ds) to grow (VM must be stopped)",
+                        "not resizing on start; --disk-size only provisions when no disk exists"])
+        }
+    }
+    return nil
+}
+
+/// Everything a start with these arguments would reject, decided without touching the running
+/// engine, its files or its sockets. `restart` calls this BEFORE it stops anything.
+func startArgsError(_ args: [String]) -> (code: Int32, lines: [String])? {
+    let valued: Set<String> = ["--cpus", "--cpu", "--memory", "--kernel", "--initramfs", "--disk", "--disk-size"]
+    // Every token must be a known option, its value, or --disk-size=SIZE. A typo such as --memroy
+    // used to be skipped silently, so a restart would stop the engine and start it without the change.
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        if valued.contains(a) {
+            if i + 1 >= args.count { return (2, ["\(a) needs a value"]) }
+            i += 2
+        } else if a.hasPrefix("--disk-size=") {
+            i += 1
+        } else {
+            return (2, ["unknown option or stray argument: \(a)"])
+        }
+    }
+    let parsed = parseResourceArgs(args)
+    if let ds = parsed.diskSize, let rejected = diskSizeRequestError(ds) { return rejected }
+    let cfg = resolveConfigFromArgs(args)
+    if let invalid = cfg.validate() { return (2, [invalid]) }
+    // --disk-size on a host with no disk provisions one; otherwise the disk must already be a regular file.
+    let provisions = parsed.diskSize != nil && RuntimeConfig.existingUserDiskPath() == nil
+    if !provisions && diskIdentity(at: cfg.diskURL.path) == nil {
+        return (1, ["persistent Docker root disk missing or identity invalid: \(cfg.diskURL.path)"])
+    }
+    return nil
+}
+
 func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> Int32 {
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
@@ -64,21 +112,12 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
     // Stage 3C: first-provision sizing via --disk-size (when no disk exists) — must not silently resize existing
     let parsedDiskSize = parseResourceArgs(args).diskSize
     if let ds = parsedDiskSize {
-        guard let bytes = RuntimeConfig.parseDiskSize(ds) else {
-            cliError("invalid --disk-size: \(ds) — use e.g. 8G, 16G, 32G, 1024M (G/GiB/M/MiB)")
-            return 2
+        if let rejected = diskSizeRequestError(ds) {
+            rejected.lines.forEach(cliError)
+            return rejected.code
         }
-        if bytes < RuntimeConfig.minProvisionBytes {
-            cliError("disk-size must be at least 2G, got \(ds) (\(bytes) bytes)")
-            return 2
-        }
-        if let existing = RuntimeConfig.existingUserDiskPath() {
-            let (curLogical, _) = RuntimeConfig.backingFileInfo(at: existing)
-            if bytes != curLogical {
-                cliError("disk already exists (\(RuntimeConfig.formatBytes(curLogical)) at \(existing)) — use harpoon disk resize \(ds) to grow (VM must be stopped)")
-                cliError("not resizing on start; --disk-size only provisions when no disk exists")
-                return 1
-            }
+        let bytes = RuntimeConfig.parseDiskSize(ds)!
+        if RuntimeConfig.existingUserDiskPath() != nil {
             // same size, no-op
         } else {
             // no disk — provision with requested size before VM start
@@ -87,7 +126,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
                 cliError("template not found for provisioning")
                 return 1
             }
-            let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path
+            let dest = HarpoonRoots.userDiskCandidates(testFlags: false)[0]
             try? FileManager.default.createDirectory(atPath: (dest as NSString).deletingLastPathComponent, withIntermediateDirectories: true, attributes: nil)
             if !FileManager.default.fileExists(atPath: dest) {
                 let cp = Process(); cp.executableURL = URL(fileURLWithPath: "/bin/cp"); cp.arguments = ["-c", "-p", template, dest]; try? cp.run(); cp.waitUntilExit()
@@ -107,6 +146,11 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
         }
     }
 
+    // The child `run` would reject these anyway; refuse here so no process is spawned for them.
+    if let rejected = startArgsError(args) {
+        rejected.lines.forEach(cliError)
+        return rejected.code
+    }
     let cfg = resolveConfigFromArgs(args)
     guard FileManager.default.fileExists(atPath: cfg.diskURL.path),
           diskIdentity(at: cfg.diskURL.path) != nil else {
@@ -346,7 +390,7 @@ func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
     // Try SIGTERM (production path)
     kill(pid, SIGTERM)
     // Fallback for sandbox where kill is blocked: create stop file
-    FileManager.default.createFile(atPath: "/tmp/harpoon-stop", contents: nil, attributes: nil)
+    FileManager.default.createFile(atPath: HarpoonPaths.stopFilePath, contents: nil, attributes: nil)
     let deadline = Date().addingTimeInterval(10)
     while Date() < deadline {
         if !isProcessAlive(pid: pid) { break }
@@ -367,7 +411,7 @@ func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
     // clean pid files and stop file
     try? FileManager.default.removeItem(at: HarpoonPaths.pidFile)
     try? FileManager.default.removeItem(at: HarpoonPaths.jsonFile)
-    try? FileManager.default.removeItem(atPath: "/tmp/harpoon-stop")
+    try? FileManager.default.removeItem(atPath: HarpoonPaths.stopFilePath)
     cliPrint("Harpoon stopped")
     return 0
 }
@@ -392,6 +436,12 @@ func handleRestart(args: [String]) -> Int32 {
         } else {
             startArgs = []
         }
+    }
+    // Nothing below may stop the engine unless the start that follows would be accepted.
+    if let rejected = startArgsError(startArgs) {
+        rejected.lines.forEach(cliError)
+        cliError("restart refused before stopping anything: the running Harpoon was not touched")
+        return rejected.code
     }
     let stopCode = handleStop(controlLock: controlLock)
     if stopCode != 0 {

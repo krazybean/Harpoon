@@ -74,8 +74,8 @@ func diagnosticsSnapshot() -> [String: Any] {
     let guest = guestProbe()
     var containers: [[String: Any]] = []
     if findDocker() != nil, status.dockerReady {
-        let ids = runDocker(["--context", harpoonContextName, "ps", "-aq", "--no-trunc"]).1.split(whereSeparator: { $0 == "\n" }).map(String.init).prefix(128)
-        if !ids.isEmpty, let data = runDocker(["--context", harpoonContextName, "inspect"] + ids).1.data(using: .utf8), let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+        let ids = runDocker(harpoonDockerTarget() + ["ps", "-aq", "--no-trunc"]).1.split(whereSeparator: { $0 == "\n" }).map(String.init).prefix(128)
+        if !ids.isEmpty, let data = runDocker(harpoonDockerTarget() + ["inspect"] + ids).1.data(using: .utf8), let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             for row in rows {
                 let state = row["State"] as? [String: Any] ?? [:]; let pid = state["Pid"] as? Int ?? 0; let id = row["Id"] as? String ?? ""; let name = row["Name"] as? String ?? ""
                 let cgroup = guest.pids["\(pid)"]?.split(separator: ":").last.map(String.init)?.split(separator: "/").dropFirst().map(String.init).joined(separator: "/") ?? ""
