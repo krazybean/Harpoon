@@ -6,14 +6,17 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 import { JSDOM } from "jsdom";
+import { DEPLOYMENTS_TOUR_KEY, DEPLOYMENTS_TOUR_VERSION, memoryStore } from "./tour/onboardingStore.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { pretendToBeVisual: true, url: "http://localhost/" });
-for (const k of ["window", "document", "navigator", "HTMLElement", "KeyboardEvent", "MouseEvent", "Event", "Node", "getComputedStyle"]) {
+for (const k of ["window", "document", "navigator", "HTMLElement", "Element", "SVGElement", "KeyboardEvent", "MouseEvent", "Event", "Node", "getComputedStyle"]) {
   Object.defineProperty(globalThis, k, { value: dom.window[k], configurable: true, writable: true });
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+globalThis.requestAnimationFrame ??= (f) => setTimeout(() => f(Date.now()), 0);
+globalThis.cancelAnimationFrame ??= (id) => clearTimeout(id);
 // React's `act` falls back to a new MessageChannel for every call when it is not loaded as CommonJS, and Node
 // keeps each port alive forever. A channel made of setImmediate delivers the same message and holds nothing.
 globalThis.MessageChannel = class {
@@ -56,13 +59,16 @@ export const find = (root, sel, text) => [...root.querySelectorAll(sel)].find((e
 export const click = (el) => act(async () => { el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true })); });
 
 /** Mount the view with a fake engine. `props()` returns the engine pieces for a given state, so tests can re-render with fresh state objects the way polling does. */
+/** The walkthrough's storage as it is once the person has seen it: every view test except the walkthrough's own starts with it done. */
+export const seenTour = () => memoryStore({ [DEPLOYMENTS_TOUR_KEY]: JSON.stringify({ version: DEPLOYMENTS_TOUR_VERSION, status: "completed", at: 0 }) });
+
 export async function mountView(makeEngine, extra = {}) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
   const calls = [];
   const render = (state, o = {}) => act(async () => root.render(h(DeployView, {
-    engine: makeEngine(state, calls), realRuntime: "connected", onStartHarpoon() {}, onOpenContainers() {}, ...extra, ...o,
+    engine: makeEngine(state, calls), realRuntime: "connected", onStartHarpoon() {}, onOpenContainers() {}, onboarding: { store: seenTour() }, ...extra, ...o,
   })));
   return { host, root, calls, render, unmount: () => act(async () => { root.unmount(); host.remove(); }) };
 }

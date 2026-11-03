@@ -73,7 +73,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
         <h2>Deploy something to your local Harpoon</h2>
         <p>Import a project from a Git repository, a local folder with a Dockerfile, or an existing image. Harpoon builds and runs it in your local Docker Engine — no cloud, no account. Your existing containers stay exactly where they are.</p>
         <div className="dp-row dp-row--wrap" style={{ justifyContent: "center" }}>
-          <button className="btn btn--primary" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
+          <button className="btn btn--primary" data-tour="create-project" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
           <button className="btn btn--secondary" onClick={() => c.open({ kind: "create", step: 1, src: "folder" })}><FolderSimple size={14} /> Import a local folder</button>
           {openRuntimeButton}
         </div>
@@ -106,7 +106,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
         <div><div className="dp-kicker">Local-first deployments</div><h1 className="dp-h1">Projects</h1></div>
         <span className="dp-spacer" />
         {openRuntimeButton}
-        <button className="btn btn--primary" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
+        <button className="btn btn--primary" data-tour="create-project" onClick={() => c.open({ kind: "create", step: 1, src: "git" })}><Plus size={14} /> Create project</button>
       </div>
       {attachNotices}
       {needs.map((n) => (
@@ -115,8 +115,8 @@ export function HomeScreen({ c }: { c: Ctx }) {
           {n.attention.text}{n.app.automation.state === "paused" ? (c.engine ? " Git triggers are paused." : " Automatic deployments are paused.") : ""}
         </Banner>
       ))}
-      {state.projects.map((p) => (
-        <section key={p.id}>
+      {state.projects.map((p, i) => (
+        <section key={p.id} data-tour={i === 0 ? "app-list" : undefined}>
           <div className="dp-h2" style={{ margin: "14px 0 10px" }}>{p.name} {state.engine?.externals.some((e) => e.id === p.id) ? <><Pill tone="info" icon={<Lock size={11} />}>External · read-only</Pill> <button className="btn btn--ghost btn--sm" onClick={() => void c.engine!.detachRuntime(state.engine!.externals.find((e) => e.id === p.id)!.path)} title={DETACH_TITLE}>Detach runtime</button> </> : null}<span className="dp-faint" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {p.appIds.length} application{p.appIds.length === 1 ? "" : "s"} · {p.sourceLabel}</span></div>
           <div className="dp-grid dp-grid--3">{p.appIds.map((id) => state.apps[id] && card(state.apps[id]))}</div>
         </section>
@@ -190,7 +190,7 @@ export function AppScreen({ c }: { c: Ctx }) {
           {app.automation.held.map((h) => h.revision.sha).slice(0, 3).join(", ")}{app.automation.held.length > 3 ? ", …" : ""} — recorded, not deployed. Review them to dismiss or select one.
         </Banner>
       )}
-      <div className="dp-panel"><div className="dp-panel__body dp-hero">
+      <div className="dp-panel" data-tour="app-status"><div className="dp-panel__body dp-hero">
         <div className="dp-hero__state">
           <div className={`big ${heroClass}`} style={{ width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>{heroIcon}</div>
           <div>
@@ -205,7 +205,7 @@ export function AppScreen({ c }: { c: Ctx }) {
             </div>
           </div>
         </div>
-        <div className="dp-actions">
+        <div className="dp-actions" data-tour="recovery-actions">
           {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canAct || !prod, title: prodOnly })}
           {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canAct || !prod || !app.releases.length, title: prodOnly })}
           {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
@@ -213,7 +213,7 @@ export function AppScreen({ c }: { c: Ctx }) {
         </div>
       </div></div>
       <div className="dp-tabs" role="tablist">
-        {TABS.map(([k, l]) => <button key={k} role="tab" aria-selected={c.route.tab === k} onClick={() => c.setRoute({ tab: k })}>{l}{k === "deployments" ? <span className="dp-count">{app.deployments.length}</span> : null}</button>)}
+        {TABS.map(([k, l]) => <button key={k} role="tab" data-tour={k === "deployments" || k === "variables" ? `tab-${k}` : undefined} aria-selected={c.route.tab === k} onClick={() => c.setRoute({ tab: k })}>{l}{k === "deployments" ? <span className="dp-count">{app.deployments.length}</span> : null}</button>)}
       </div>
       {c.engine && env !== "production" ? <div className="dp-panel dp-empty"><h2>{env === "preview" ? "Branch previews are not available yet" : "Development deployments are not available yet"}</h2><p>{NO_PREVIEWS}</p></div> :
         env === "preview" && c.route.tab === "overview" ? <PreviewTab app={app} /> : env === "development" && c.route.tab === "overview" ? <DevTab c={c} /> :
