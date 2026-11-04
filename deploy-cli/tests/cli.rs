@@ -95,12 +95,22 @@ fn spawn_binary(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
 const OPEN: Gate = Gate {
     live_deploy_enabled: true,
     live_replacement_enabled: false,
+    live_triggered_enabled: true,
 };
-/// What the acceptance build opens: live deploy and the replacement family.
+/// What the acceptance build opens: every live gate, including trigger-driven execution.
 const ACCEPTANCE: Gate = Gate {
     live_deploy_enabled: true,
     live_replacement_enabled: true,
+    live_triggered_enabled: true,
 };
+/// Every live gate closed: what the shipping binary was before attended deployment was enabled. Tests that
+/// prove a refusal "at the gate" use this; they do not depend on what `Gate::shipping()` currently opens.
+const CLOSED: Gate = Gate {
+    live_deploy_enabled: false,
+    live_replacement_enabled: false,
+    live_triggered_enabled: false,
+};
+/// What the shipping binary and the desktop use: attended deployment and replacement open, triggered closed.
 const SHIPPING: Gate = Gate::shipping();
 
 struct T {
@@ -130,8 +140,10 @@ impl T {
         }
         run(&a, gate)
     }
+    /// The default gate for the offline and closed-gate tests: everything closed. What the shipping build
+    /// opens is tested explicitly through `SHIPPING` (see `attended`).
     fn cli(&self, args: &[&str]) -> Outcome {
-        self.go(&SHIPPING, args)
+        self.go(&CLOSED, args)
     }
     fn src(&self) -> Vec<String> {
         vec![
@@ -1210,8 +1222,8 @@ fn live_deploy_is_refused_before_anything_is_read_written_or_contacted() {
         &auth,
     ];
     full.extend(src.iter().map(String::as_str));
-    // shipping build: refused even with every flag and a reachable socket
-    let o = t.go(&SHIPPING, &full);
+    // a build whose gate is closed: refused even with every flag and a reachable socket
+    let o = t.go(&CLOSED, &full);
     assert_exit(&o, 6);
     assert!(
         o.stderr.contains("disabled in this build") && o.stderr.contains("B7"),
@@ -1239,12 +1251,14 @@ fn live_deploy_is_refused_before_anything_is_read_written_or_contacted() {
 }
 
 #[test]
-fn a_real_binary_invocation_cannot_deploy_live() {
+fn a_real_binary_invocation_still_demands_the_explicit_authorization_and_never_adopts_the_environment(
+) {
     let t = T::new();
     let (sock, res) = (t.socket(), t.resources());
-    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
     let rt = t.rt.display().to_string();
     let ctx = t.h.ws.context().display().to_string();
+    // the shipping binary has its attended gate open, but with no authorization flag it refuses before reading
+    // or contacting anything, whatever the environment says
     let out = spawn_binary(
         &[
             "deploy",
@@ -1254,16 +1268,23 @@ fn a_real_binary_invocation_cannot_deploy_live() {
             &sock,
             "--resources-dir",
             &res,
-            &auth,
             "--project-dir",
             &ctx,
             "--container-port",
             "8080",
         ],
-        &[("DOCKER_HOST", "unix:///nonexistent")],
+        &[
+            ("DOCKER_HOST", "unix:///nonexistent"),
+            ("HARPOON_ACCEPTANCE", "1"),
+            ("HARPOON_LIVE", "1"),
+        ],
     );
     assert_eq!(out.status.code(), Some(6));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("disabled in this build"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("explicit opt-in") && err.contains(AUTH_PHRASE),
+        "{err}"
+    );
     assert!(!t.rt.exists());
     assert_eq!(t.docker_requests(), 0);
     assert_eq!(spawn_binary(&["help"], &[]).status.code(), Some(0));
@@ -2988,3 +3009,7 @@ mod b14;
 // the packaging boundary (offline; fake Docker only).
 #[path = "b15/mod.rs"]
 mod b15;
+
+// Attended deployment and replacement in the shipping gate; trigger-driven execution (Gate U) stays closed.
+#[path = "attended/mod.rs"]
+mod attended;

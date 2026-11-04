@@ -8,7 +8,9 @@ Commands: `status`, `doctor`, `plan`, `recover`, `reconcile`, `deploy`, `export-
   (`DIR/deploy-journal`, mode 0700; files 0600). There is no default and no environment fallback.
 * Docker is contacted only through an explicit `--docker-socket PATH`; `DOCKER_HOST`, contexts and `~/.docker` are never read.
 * Read-only commands never write, create, lock-for-write or mark anything.
-* Live `deploy` is disabled in the shipping build (`Gate::shipping()`) until B7; `deploy --simulate` runs the engine's
+* Live `deploy`, `replace`, `rollback` and `restore` are open in the shipping build (`Gate::shipping()`) but each still needs the
+  exact `--authorize-live-docker-changes=…` opt-in and every explicit path. Executing queued Git events (`git-run`, `watch`
+  without `--queue-only`) is closed in the shipping build (Gate U). `deploy --simulate` runs the engine's
   `FakeBackend` through the real journal in a separate *simulated* runtime directory.
 
 Details, exit codes and the B7 hand-off: `docs/results/DEPLOY_CLI.md`.

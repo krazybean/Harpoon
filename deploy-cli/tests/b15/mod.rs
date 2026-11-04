@@ -478,12 +478,12 @@ const LIVE_COMMANDS: [(&str, &[&str]); 3] = [
 ];
 
 #[test]
-fn the_shipping_gate_refuses_every_live_operation_even_with_every_authorization_in_process() {
+fn a_closed_gate_refuses_every_live_operation_even_with_every_authorization_in_process() {
     let t = T::new();
     for (cmd, extra) in LIVE_COMMANDS {
         let mut a = vec![cmd.to_string()];
         a.extend(extra.iter().map(|s| s.to_string()));
-        for gate in [&SHIPPING, &OPEN] {
+        for gate in [&CLOSED, &OPEN] {
             let o = go(&t, gate, a.clone());
             assert_exit(&o, 6);
             assert!(
@@ -503,12 +503,18 @@ fn the_shipping_gate_refuses_every_live_operation_even_with_every_authorization_
 }
 
 #[test]
-fn the_real_shipping_binary_refuses_them_too_and_no_flag_or_environment_variable_opens_it() {
+fn the_real_shipping_binary_still_refuses_every_live_operation_without_the_authorization_and_no_environment_variable_changes_that(
+) {
     let t = T::new();
     for (cmd, extra) in LIVE_COMMANDS {
         let mut a: Vec<String> = vec![cmd.to_string()];
         a.extend(extra.iter().map(|s| s.to_string()));
-        a.extend(live_flags(&t));
+        // every live argument except the authorization phrase
+        a.extend(
+            live_flags(&t)
+                .into_iter()
+                .filter(|x| !x.starts_with("--authorize")),
+        );
         a.extend(["--runtime-dir".into(), t.rt.display().to_string()]);
         let args: Vec<&str> = a.iter().map(String::as_str).collect();
         let o = spawn_binary(
@@ -519,15 +525,11 @@ fn the_real_shipping_binary_refuses_them_too_and_no_flag_or_environment_variable
                 ("DOCKER_HOST", "unix:///var/run/docker.sock"),
             ],
         );
-        assert_eq!(
-            o.status.code(),
-            Some(6),
-            "{cmd}: {}",
-            String::from_utf8_lossy(&o.stderr)
-        );
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(6), "{cmd}: {err}");
         assert!(
-            String::from_utf8_lossy(&o.stderr).contains("is not enabled in this build"),
-            "{cmd}"
+            err.contains("explicit opt-in") && err.contains(AUTH_PHRASE),
+            "{cmd}: {err}"
         );
     }
     assert!(!t.rt.exists());
@@ -1299,7 +1301,7 @@ fn simulated_and_live_runs_are_reported_as_what_they_are() {
     seed_release(&t2, false, &[]);
     dead_cutover(&t2);
     assert_exit(&t2.cli(&["recover"]), 0);
-    let shipping = t2.go(&SHIPPING, &["status"]).stdout;
+    let shipping = t2.go(&CLOSED, &["status"]).stdout;
     assert!(
         shipping.contains("this build cannot restore a live runtime"),
         "{shipping}"

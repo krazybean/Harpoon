@@ -257,9 +257,9 @@ fn a_selected_commit_becomes_the_right_checkout_buildx_request_deployment_record
         "{}",
         o.stdout
     );
-    // the request the shipping build would see is refused before a repository is contacted
+    // the request a build with a closed gate would see is refused before a repository is contacted
     let before = t.docker_requests();
-    let o = crun(&t, &SHIPPING, &kc, b"", &["git-deploy", "--repo", "shop"]);
+    let o = crun(&t, &CLOSED, &kc, b"", &["git-deploy", "--repo", "shop"]);
     assert_exit(&o, 6);
     assert!(
         o.stderr

@@ -53,7 +53,7 @@ fn live_replacement_is_refused_before_anything_is_read_even_with_every_authoriza
         "--authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE",
     ];
     a.extend(src.iter().map(String::as_str));
-    for gate in [&SHIPPING, &OPEN] {
+    for gate in [&CLOSED, &OPEN] {
         let o = t.go(gate, &a);
         assert_exit(&o, 6);
         assert!(
