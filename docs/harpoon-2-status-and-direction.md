@@ -112,8 +112,10 @@ intent, source resolution, environment/secrets configuration, serialized orchest
 deployment history, and health-gated replacement while Docker remains the only authority for
 workload state. The first-deployment slice was accepted once on a live disposable deployment;
 permanent SQLite state, replacement, bounded cutover recovery, rollback, durable pause/held-event
-state, and the gated live wiring are implemented. L5–L7 and P1–P2 remain untested because the
-required idle-host precondition failed; the owner-risk acceptance and next milestone are recorded
+state, and the gated live wiring are implemented. Attended deployment and replacement are open in
+the shipping gate behind an explicit confirmation; unattended execution (Gate U) stays closed. Live
+evidence: L1–L7 and P2 pass; P1 (build overhead) was NOT RUN and is a deferred, owner-decided
+performance measurement. The owner-risk acceptance and next milestone are recorded
 in
 [the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker). The
 requirements, acceptance criteria and stop conditions are in

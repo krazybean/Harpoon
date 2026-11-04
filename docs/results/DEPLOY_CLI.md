@@ -3,6 +3,10 @@
 Status: on `feature/deploy-b6-cli`; **not merged**. Nothing here touched the running VM, a live Docker socket, a real build, or a real
 container; the shipping UI and release artifacts are unchanged. B7 is not started.
 
+> **Update (gate opening):** the statements below that live `deploy` is closed by `Gate::shipping()` describe B6/B7. `Gate::shipping()` now
+> opens attended `deploy`, `replace`, `rollback` and `restore` (each still needs the exact authorization phrase and every explicit path) and keeps
+> trigger-driven execution (`git-run`, `watch` without `--queue-only`) closed (Gate U). See `DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md`.
+
 ## What exists
 `deploy-cli/` (binary `harpoon-deploy`, no registry dependencies, no CLI framework; arguments parsed by hand) wires the existing engine,
 `DockerBackend` and `FileJournal`. `deploy-journal` gained `lock_status()` (inspect the writer lock without writing).

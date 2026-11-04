@@ -37,6 +37,12 @@ Add repository (Git URL or local Git folder, branch, Dockerfile, port, health pa
 
 ## 5. Shipping gate
 
+> **Update (gate opening):** this section describes the state when Milestone E merged. The desktop still passes only `Gate::shipping()`, which now
+> opens attended deploy, replace, rollback and restore. The backend adds the engine's authorization phrase only for an operation the person
+> confirmed in a dialog (`deploy_op`'s separate `confirmation` argument), and `--confirm-cutover` only for a replacement the person separately
+> acknowledged. Queued-event execution (`RunQueue`) stays refused by the closed `live_triggered_enabled` gate.
+
+
 `Gate::shipping()` is untouched. `deploy_op` is the only execution path and it cannot construct another gate; the acceptance binary is not referenced by the app (its Cargo feature is off). Deploy, Redeploy, Retry, Rollback and Restore are disabled with the gate's reason in the UI, and if invoked the engine refuses them (exit 6, `refusedByGate`) before reading anything; a refused deployment leaves no record (tested). Read-only inspection, repository/config/secret changes and polling work. No simulated success exists in engine mode.
 
 ## 6. Branch previews — boundary, not implemented
