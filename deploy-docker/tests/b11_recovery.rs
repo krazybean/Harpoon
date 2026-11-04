@@ -187,6 +187,8 @@ fn run(r: &mut Rig, b: &mut DockerBackend<ByPort>) -> harpoon_deploy::engine::Re
 /// An ordinary application: every answer is a plain HTTP response with no marker header; the failing candidate is a 503.
 struct PlainPorts {
     restored_port: u16,
+    /// Whether the candidate (neither a test port nor the previous release's port) answers 200 instead of 503.
+    candidate_ok: bool,
 }
 
 impl HttpTransport for PlainPorts {
@@ -201,7 +203,7 @@ impl HttpTransport for PlainPorts {
         _m: &harpoon_deploy_docker::probe::ResponseMarker,
     ) -> harpoon_deploy_docker::probe::MarkedResponse {
         use harpoon_deploy_docker::probe::MarkedResponse::Unmarked;
-        if port >= 39000 || port == self.restored_port {
+        if port >= 39000 || port == self.restored_port || self.candidate_ok {
             Unmarked(200)
         } else {
             Unmarked(503)
@@ -240,6 +242,17 @@ fn plain_backend(
     DockerBackend<PlainPorts>,
     std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
 ) {
+    plain_backend_with(r, deny, false)
+}
+
+fn plain_backend_with(
+    r: &Rig,
+    deny: Option<u16>,
+    candidate_ok: bool,
+) -> (
+    DockerBackend<PlainPorts>,
+    std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+) {
     let mut cfg = config(&r.h.ws, &r.h.docker);
     cfg.enable_replacement = true;
     cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
@@ -249,6 +262,7 @@ fn plain_backend(
         Some(&r.h.ws.resources()),
         PlainPorts {
             restored_port: PREV_PORT,
+            candidate_ok,
         },
     )
     .expect("bundled buildx resolves")
@@ -277,6 +291,16 @@ fn a_plain_application_is_restored_after_a_failed_cutover_only_through_the_prove
     );
     let rec = r.h.dep.recovery.unwrap();
     assert_eq!(rec.outcome, RecoveryOutcome::Restored, "{:?}", rep.warnings);
+    // the failed final check is never recorded as verified, in its note or its failure
+    assert!(!r.h.dep.step(Step::FinalCheck).note.contains("verified"));
+    assert!(!r
+        .h
+        .dep
+        .failure
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("verified"));
     assert!(
         ports.lock().unwrap().contains(&PREV_PORT),
         "the restoration check proved the path for the previous release's port: {:?}",
@@ -1594,4 +1618,34 @@ fn when_docker_cannot_report_the_serving_containers_port_the_lease_rules_still_r
             .host_port,
         Some(ROLLED_PORT)
     );
+}
+
+/// The replacement path: after a confirmed cutover the final check's durable note carries what it observed and
+/// how it was attributed, like the preliminary check's. (A first deployment's final check is covered in marker_free.)
+#[test]
+fn a_successful_replacement_records_the_attribution_of_both_checks() {
+    let mut r = rig();
+    let (mut b, _) = plain_backend_with(&r, None, true);
+    let (rel, cfg) = (release(&r), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("the engine itself did not error");
+    assert_eq!(
+        rep.status,
+        DeploymentStatus::Succeeded,
+        "{:?}",
+        r.h.dep.failure
+    );
+    assert!(
+        matches!(r.h.dep.cutover, CutoverState::Confirmed { .. }),
+        "{:?}",
+        r.h.dep.cutover
+    );
+    for step in [Step::PreliminaryCheck, Step::FinalCheck] {
+        let note = &r.h.dep.step(step).note;
+        assert!(
+            note.starts_with("health evidence") && note.ends_with("; attribution: path-verified"),
+            "{step:?}: {note}"
+        );
+    }
 }

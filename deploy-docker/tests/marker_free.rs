@@ -228,13 +228,11 @@ fn a_marker_aware_application_stays_marker_verified_and_never_needs_the_path_pro
     );
 }
 
-/// The durable notes of the checks that ran (what the journal and the desktop show). A first deployment has no
-/// cutover, so its final check has no note.
+/// The durable notes of both checks (what the journal and the desktop show).
 fn check_notes(h: &Harness) -> Vec<String> {
     [Step::PreliminaryCheck, Step::FinalCheck]
         .iter()
         .map(|st| h.dep.step(*st).note.clone())
-        .filter(|n| !n.is_empty())
         .collect()
 }
 
@@ -251,7 +249,11 @@ fn the_attribution_survives_into_the_persisted_step_notes() {
         let (h, r) = deploy(mode, proof, None);
         assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
         let notes = check_notes(&h);
-        assert!(!notes.is_empty(), "the preliminary check leaves a note");
+        assert_eq!(
+            notes.len(),
+            2,
+            "the preliminary and the final check each leave a note"
+        );
         for note in notes {
             assert!(
                 note.starts_with("health evidence")

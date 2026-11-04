@@ -941,16 +941,7 @@ impl Run<'_> {
         match res {
             Ok(ev) => {
                 // The step record keeps what was observed, so it survives in the durable store.
-                let note = ev
-                    .as_ref()
-                    .map(|ev| {
-                        format!(
-                            "health evidence{}: {}",
-                            if ev.simulated { " (simulated)" } else { "" },
-                            ev.summary_with_attribution()
-                        )
-                    })
-                    .unwrap_or_default();
+                let note = ev.as_ref().map(evidence_note).unwrap_or_default();
                 if let Some(ev) = ev {
                     self.evidence.push((step, ev));
                 }
@@ -1215,7 +1206,9 @@ impl Run<'_> {
         Ok(res.map_err(|e| (self.describe(Step::Cutover, &e, elapsed, budget), e.timed_out)))
     }
 
-    fn final_check(&mut self) -> R<Result<(), (String, bool)>> {
+    /// `Ok` carries the step note: what the final check observed and how it was attributed (empty when the backend
+    /// gave no evidence).
+    fn final_check(&mut self) -> R<Result<String, (String, bool)>> {
         let budget = self.cfg.budgets.final_ms;
         let (res, elapsed) = self.exec(Step::FinalCheck, budget, |b, io| b.final_check(io))?;
         let res = match res {
@@ -1224,10 +1217,11 @@ impl Run<'_> {
         };
         Ok(match res {
             Ok(ev) => {
+                let note = ev.as_ref().map(evidence_note).unwrap_or_default();
                 if let Some(ev) = ev {
                     self.evidence.push((Step::FinalCheck, ev));
                 }
-                Ok(())
+                Ok(note)
             }
             Err(e) => Err((self.describe(Step::FinalCheck, &e, elapsed, budget), e.timed_out)),
         })
@@ -1385,8 +1379,8 @@ pub fn run_deployment_confirmed(
             let chk = run.final_check()?;
             let now = run.now();
             match chk {
-                Ok(()) => {
-                    run.d.finish_step(Step::FinalCheck, true, "", now)?;
+                Ok(note) => {
+                    run.d.finish_step(Step::FinalCheck, true, &note, now)?;
                     run.succeed()?;
                 }
                 Err((message, timed_out)) => {
@@ -1451,9 +1445,9 @@ pub fn run_deployment_confirmed(
             run.d.start_step(Step::FinalCheck, now)?;
             run.save()?;
             match run.final_check()? {
-                Ok(()) => {
+                Ok(note) => {
                     let now = run.now();
-                    run.d.finish_step(Step::FinalCheck, true, "", now)?;
+                    run.d.finish_step(Step::FinalCheck, true, &note, now)?;
                     run.d.confirm_cutover(now)?;
                     run.succeed()?;
                 }
@@ -1464,6 +1458,16 @@ pub fn run_deployment_confirmed(
             finish(run)
         }
     }
+}
+
+/// The durable note of a check that passed: the observations, then how they were attributed. Built from the evidence
+/// summary and a fixed label only, so it never carries a marker, challenge or response.
+fn evidence_note(ev: &crate::health::CheckEvidence) -> String {
+    format!(
+        "health evidence{}: {}",
+        if ev.simulated { " (simulated)" } else { "" },
+        ev.summary_with_attribution()
+    )
 }
 
 /// The explicit, bounded restoration for a cutover that was interrupted part-way (D10): the
