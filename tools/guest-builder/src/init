@@ -469,7 +469,87 @@ if [ -z "$IFACE" ]; then
   while true; do sleep 5; echo "HARPOON_NET_FAILED" > /dev/hvc0; done
 fi
 echo "HARPOON_NET_IFACE $IFACE" > /dev/hvc0
+# BEGIN harpoon-guest-dns (sourced verbatim by tools/guest-builder/regression-guest-dns.sh; keep it free of side effects at load time)
+# Guest DNS policy. The DHCP server's DNS is preferred. When it does not answer (the VZNAT gateway, 192.168.64.1, runs no DNS
+# service on some hosts), the Mac's resolvers from `harpoon.dns=` are written to resolv.conf, and udhcpc is told not to rewrite
+# resolv.conf for this interface: its renewal script (busybox default.script, `renew()` -> `resolvconf()`) otherwise puts the
+# DHCP DNS back at the first renewal, 30 minutes after boot. Address, route and lease handling are not affected.
+HARPOON_CONSOLE="${HARPOON_CONSOLE:-/dev/hvc0}"   # appended to, so the test can use a file
+HARPOON_RESOLV="${HARPOON_RESOLV:-/etc/resolv.conf}"
+HARPOON_CMDLINE="${HARPOON_CMDLINE:-/proc/cmdline}"
+HARPOON_TMP="${HARPOON_TMP:-/tmp}"
+UDHCPC_CONF="${UDHCPC_CONF:-/etc/udhcpc/udhcpc.conf}"
+HARPOON_DNS_BEGIN='# BEGIN harpoon-dns-hold'
+HARPOON_DNS_END='# END harpoon-dns-hold'
+
+# Forget a hold from an earlier boot, so every boot starts from "DHCP DNS is preferred" (the file lives on the persistent disk).
+harpoon_dns_release() {
+  [ -f "$UDHCPC_CONF" ] || return 0
+  grep -qx "$HARPOON_DNS_BEGIN" "$UDHCPC_CONF" || return 0
+  # a begin marker without its end marker would make sed delete to the end of the file: leave such a file alone
+  grep -qx "$HARPOON_DNS_END" "$UDHCPC_CONF" || return 1
+  sed "/^$HARPOON_DNS_BEGIN\$/,/^$HARPOON_DNS_END\$/d" "$UDHCPC_CONF" > "$UDHCPC_CONF.harpoon.$$" || { rm -f "$UDHCPC_CONF.harpoon.$$"; return 1; }
+  cat "$UDHCPC_CONF.harpoon.$$" > "$UDHCPC_CONF"
+  rm -f "$UDHCPC_CONF.harpoon.$$"
+}
+
+# $1 = interface. default.script skips resolv.conf for the interfaces listed in NO_DNS (documented in the stock udhcpc.conf).
+harpoon_dns_hold() {
+  harpoon_dns_release || return 1
+  mkdir -p "$(dirname "$UDHCPC_CONF")"
+  [ -s "$UDHCPC_CONF" ] && [ "$(tail -c 1 "$UDHCPC_CONF" | wc -l | tr -d ' ')" = 0 ] && echo >> "$UDHCPC_CONF"
+  printf '%s\nNO_DNS="$NO_DNS %s"\n%s\n' "$HARPOON_DNS_BEGIN" "$1" "$HARPOON_DNS_END" >> "$UDHCPC_CONF"
+}
+
+# $1 = interface. 0 when names resolve, 1 when they do not.
+harpoon_dns_select() {
+  if ! command -v nslookup >/dev/null 2>&1; then
+    echo "HARPOON_DNS_FAILED nslookup not found" >> "$HARPOON_CONSOLE"
+    return 1
+  fi
+  if nslookup dl-cdn.alpinelinux.org > "$HARPOON_TMP/nslookup.log" 2>&1; then
+    # DHCP DNS succeeded: nothing is overridden, so renewals keep following the DHCP server
+    echo "HARPOON_DNS_OK" >> "$HARPOON_CONSOLE"
+    cat "$HARPOON_TMP/nslookup.log" 2>&1 | tee -a "$HARPOON_CONSOLE" >/dev/null || true
+    return 0
+  fi
+  echo "HARPOON_DNS_DHCP_FAILED" >> "$HARPOON_CONSOLE"
+  cat "$HARPOON_TMP/nslookup.log" 2>&1 | tee -a "$HARPOON_CONSOLE" >/dev/null || true
+  # Use host DNS passed via kernel cmdline if available (harpoon.dns=IP,IP)
+  HOST_DNS=$(grep -o 'harpoon.dns=[^ ]*' "$HARPOON_CMDLINE" 2>/dev/null | cut -d= -f2)
+  if [ -n "$HOST_DNS" ]; then
+    echo "HARPOON_DNS_HOST $HOST_DNS" >> "$HARPOON_CONSOLE"
+    # HOST_DNS is comma-separated, convert to resolv.conf format
+    printf "" > "$HARPOON_RESOLV"
+    echo "$HOST_DNS" | tr ',' '\n' | while read -r ns; do
+      echo "nameserver $ns" >> "$HARPOON_RESOLV"
+    done
+    cat "$HARPOON_RESOLV" | tee -a "$HARPOON_CONSOLE" >/dev/null
+  else
+    # No host DNS provided — fallback to public for v0.1, but log warning
+    echo "HARPOON_DNS_HOST_MISSING" >> "$HARPOON_CONSOLE"
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$HARPOON_RESOLV"
+  fi
+  echo "HARPOON_DNS_OVERRIDE_APPLIED" >> "$HARPOON_CONSOLE"
+  cat "$HARPOON_RESOLV" 2>&1 | tee -a "$HARPOON_CONSOLE" >/dev/null || true
+  # Keep it: without this the first DHCP renewal replaces it with the DNS that just failed
+  harpoon_dns_hold "$1" && echo "HARPOON_DNS_HOLD $1" >> "$HARPOON_CONSOLE" || echo "HARPOON_DNS_HOLD_FAILED $1" >> "$HARPOON_CONSOLE"
+  # Retry with overridden DNS
+  if nslookup dl-cdn.alpinelinux.org > "$HARPOON_TMP/nslookup2.log" 2>&1; then
+    RESOLVED=$(cat "$HARPOON_TMP/nslookup2.log" 2>&1 | grep -i "Address" | tail -n 1 | awk '{print $2}')
+    echo "HARPOON_DNS_OK $RESOLVED" >> "$HARPOON_CONSOLE"
+    cat "$HARPOON_TMP/nslookup2.log" 2>&1 | tee -a "$HARPOON_CONSOLE" >/dev/null || true
+    return 0
+  fi
+  echo "HARPOON_DNS_FAILED" >> "$HARPOON_CONSOLE"
+  cat "$HARPOON_TMP/nslookup2.log" 2>&1 | tee -a "$HARPOON_CONSOLE" >/dev/null || true
+  echo "HARPOON_DNS_FAILED diagnostic resolv.conf=$(cat "$HARPOON_RESOLV" 2>&1 | head -n 10)" >> "$HARPOON_CONSOLE"
+  return 1
+}
+# END harpoon-guest-dns
+
 # bring up iface and DHCP — udhcpc from busybox
+harpoon_dns_release || echo "HARPOON_DNS_RELEASE_FAILED" > /dev/hvc0
 ip link set "$IFACE" up 2>&1 | tee /dev/hvc0 >/dev/null
 udhcpc -i "$IFACE" > /tmp/udhcpc.log 2>&1 &
 UDHCPC_PID=$!
@@ -514,50 +594,8 @@ else
   echo "HARPOON_INET_FAILED" > /dev/hvc0
   cat /tmp/ping_inet.log 2>&1 | tee /dev/hvc0 >/dev/null || true
 fi
-# DNS — test DHCP-provided DNS first, fallback to public DNS on failure (guest /etc/resolv.conf only)
-if command -v nslookup >/dev/null 2>&1; then
-  if nslookup dl-cdn.alpinelinux.org > /tmp/nslookup.log 2>&1; then
-    # DHCP DNS succeeded
-    echo "HARPOON_DNS_OK" > /dev/hvc0
-    cat /tmp/nslookup.log 2>&1 | tee /dev/hvc0 >/dev/null || true
-  else
-    echo "HARPOON_DNS_DHCP_FAILED" > /dev/hvc0
-    cat /tmp/nslookup.log 2>&1 | tee /dev/hvc0 >/dev/null || true
-    # Use host DNS passed via kernel cmdline if available (harpoon.dns=IP,IP)
-    HOST_DNS=$(grep -o 'harpoon.dns=[^ ]*' /proc/cmdline 2>/dev/null | cut -d= -f2)
-    if [ -n "$HOST_DNS" ]; then
-        echo "HARPOON_DNS_HOST $HOST_DNS" > /dev/hvc0
-        # HOST_DNS is comma-separated, convert to resolv.conf format
-        printf "" > /etc/resolv.conf
-        echo "$HOST_DNS" | tr ',' '\n' | while read -r ns; do
-            echo "nameserver $ns" >> /etc/resolv.conf
-        done
-        cat /etc/resolv.conf | tee /dev/hvc0 >/dev/null
-    else
-        # No host DNS provided — fallback to public for v0.1, but log warning
-        echo "HARPOON_DNS_HOST_MISSING" > /dev/hvc0
-        cat > /etc/resolv.conf <<'RESOLV'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-RESOLV
-    fi
-    echo "HARPOON_DNS_OVERRIDE_APPLIED" > /dev/hvc0
-    cat /etc/resolv.conf 2>&1 | tee /dev/hvc0 >/dev/null || true
-    # Retry with overridden DNS
-    if nslookup dl-cdn.alpinelinux.org > /tmp/nslookup2.log 2>&1; then
-      RESOLVED=$(cat /tmp/nslookup2.log 2>&1 | grep -i "Address" | tail -n 1 | awk '{print $2}')
-      echo "HARPOON_DNS_OK $RESOLVED" > /dev/hvc0
-      cat /tmp/nslookup2.log 2>&1 | tee /dev/hvc0 >/dev/null || true
-    else
-      echo "HARPOON_DNS_FAILED" > /dev/hvc0
-      cat /tmp/nslookup2.log 2>&1 | tee /dev/hvc0 >/dev/null || true
-      echo "HARPOON_DNS_FAILED diagnostic resolv.conf=$(cat /etc/resolv.conf 2>&1 | head -n 10)" > /dev/hvc0
-      echo "HARPOON_DOCKER_FAILED dns resolution failed" > /dev/hvc0
-      while true; do sleep 5; echo "HARPOON_DNS_FAILED" > /dev/hvc0; done
-    fi
-  fi
-else
-  echo "HARPOON_DNS_FAILED nslookup not found" > /dev/hvc0
+# DNS — DHCP DNS first; the Mac's resolvers (held across DHCP renewals) when it does not answer
+if ! harpoon_dns_select "$IFACE"; then
   echo "HARPOON_DOCKER_FAILED dns resolution failed" > /dev/hvc0
   while true; do sleep 5; echo "HARPOON_DNS_FAILED" > /dev/hvc0; done
 fi

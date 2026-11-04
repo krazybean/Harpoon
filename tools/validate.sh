@@ -43,11 +43,17 @@ bash harpoon/build.sh
 say "Run CLI parity regression suite"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/cli-parity-test.sh
 
+say "Run lifecycle isolation regression suite (private namespace, fake engine)"
+HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-lifecycle-isolation.sh
+
 say "Run lifecycle safety regression suite"
 python3 harpoon/regression-lifecycle-safety.py
 
 say "Run host path translation regression suite"
 sh harpoon/regression-host-path.sh
+
+say "Run published-port routing regression"
+sh harpoon/regression-published-port-route.sh
 
 say "Run deterministic host path fuzz suite"
 sh harpoon/fuzz-host-path.sh

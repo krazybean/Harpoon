@@ -103,21 +103,15 @@ else
   ok "port removed after rm"
 fi
 
-say "Test 8: host bind address (loopback safety) — explicit 127.0.0.1 deferred characterization"
-# Observed: -p 127.0.0.1:18087:80 binds guest 127.0.0.1:18087 inside guest loopback, not reachable via VZNAT guestIP:18087 (192.168.64.x).
-# Harpoon Phase 1 VZNAT forwarding path is guestIP:HostPort; guest-loopback binding is therefore a known deferred limitation, not a failure of ordinary -p HostPort:ContainerPort.
-# Ordinary -p 18080:80 and 0.0.0.0 mappings remain Harpoon loopback-only 127.0.0.1 (safety).
+say "Test 8: explicit 127.0.0.1 HostIp (guest-loopback bind, reached through the guest vsock relay)"
+# Docker binds the port on guest loopback only; Harpoon relays to it over vsock (see PublishedPortRoute). Still Mac-loopback only.
 DOCKER_HOST="unix://$HOST_SOCK" docker run -d --name m5-loop --network bridge -p 127.0.0.1:18087:80 nginx:alpine 2>&1 | tail -n 5 || true
-sleep 2
+sleep 12
 if DOCKER_HOST="unix://$HOST_SOCK" docker port m5-loop 2>&1 | grep -q "127.0.0.1:18087"; then
-  echo "[m5] CHARACTERIZED explicit Docker 127.0.0.1 HostIp deferred: guest-loopback binding is not reachable via VZNAT guestIP forwarding"
-  if curl -fsS --max-time 3 http://127.0.0.1:18087/ 2>&1 | grep -qi "nginx\|Welcome"; then
-    echo "[m5] INFO explicit 127.0.0.1:18087 unexpectedly reachable"
-  else
-    echo "[m5] INFO explicit 127.0.0.1:18087 not reachable via VZNAT guestIP as expected (deferred)"
-  fi
+  curl -fsS --max-time 5 http://127.0.0.1:18087/ 2>&1 | grep -qi "nginx\|Welcome" || fail "explicit 127.0.0.1:18087 not reachable from Mac loopback"
+  ok "explicit 127.0.0.1:18087:80 reachable from Mac loopback"
 else
-  echo "[m5] CHARACTERIZED explicit Docker 127.0.0.1 HostIp deferred: guest-loopback binding is not reachable via VZNAT guestIP forwarding"
+  fail "docker port m5-loop did not report 127.0.0.1:18087"
 fi
 DOCKER_HOST="unix://$HOST_SOCK" docker rm -f m5-loop 2>/dev/null || true
 # Preserve: ordinary unspecified HostIp (0.0.0.0) -> Harpoon macOS 127.0.0.1 loopback-only (verified in Tests 1/2)

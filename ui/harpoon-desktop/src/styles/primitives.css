@@ -106,7 +106,9 @@ button { font-family: var(--font-sans); -webkit-appearance: none; appearance: no
 .shell-main--containers .table-wrap { flex: 1; min-height: 0; overflow: auto; }
 .shell-header {
   min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  background: rgba(19,23,27,0.92); border: 1px solid var(--border); border-radius: var(--radius-card);
+  /* opaque: content (banners, tables) scrolls beneath this sticky header and must not show through it */
+  background: rgb(19,23,27); border: 1px solid var(--border); border-radius: var(--radius-card);
+  box-shadow: 0 6px 10px -6px rgba(0,0,0,.6);
   padding: 10px 14px 10px 18px; margin-bottom: 18px; position: sticky; top: 0; z-index: 5;
 }
 .shell-header__left { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
@@ -742,3 +744,17 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
   .resource-search { flex: 1 1 100%; min-width: 0; }
   .resource-note { width: 100%; margin-left: 0; }
 }
+
+/* ---- Containers: long names, image hashes and port lists stay inside their card; badges keep their size ---------------- */
+.container-tile > .text-meta, .stack-card__heading .text-meta { display: block; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.container-tile > .port-exposure { min-width: 0; }
+.container-tile__state, .stack-card__summary .badge { flex: 0 0 auto; white-space: nowrap; }
+.container-tile__top { min-width: 0; gap: 8px; }
+.stack-card__heading { min-width: 0; }
+.stack-card__heading strong { display: block; max-width: 100%; }
+.stack-services .stack-services__ports { grid-column: 1 / -1; align-items: flex-start; white-space: normal; }
+.port-exposure { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+.port-exposure > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.port-exposure__host[data-tone="warn"], .port-exposure__line[data-tone="warn"] { color: var(--warning-fg); }
+.port-exposure__host[data-tone="ok"], .port-exposure__line[data-tone="ok"] { color: var(--text-secondary); }
+.container-detail__list-row { min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }

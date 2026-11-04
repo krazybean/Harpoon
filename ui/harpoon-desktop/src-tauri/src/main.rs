@@ -15,6 +15,10 @@ mod resource_sampler;
 mod context_discovery;
 mod cli_path;
 mod bootstrap;
+mod compose_import;
+mod deploy_api;
+mod namespace;
+mod app_router;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
@@ -255,7 +259,17 @@ const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 fn docker_command(args: &[&str]) -> Result<Command, String> {
     let bin = resolve_docker_binary()?;
     let mut cmd = Command::new(&bin);
-    cmd.args(args);
+    // In a test namespace (debug builds only) `--context harpoon` is replaced by the namespace's own socket and the
+    // user's Docker configuration is not read; any call that does not name the Harpoon context is refused.
+    match namespace::active()? {
+        None => {
+            cmd.args(args);
+        }
+        Some(ns) => {
+            cmd.args(ns.docker_args(args)?);
+            ns.confine_docker(&mut cmd);
+        }
+    }
     Ok(cmd)
 }
 
@@ -998,6 +1012,8 @@ fn get_creds_helper_status() -> Result<serde_json::Value, String> {
 
 #[tauri::command(async)]
 fn ensure_harpoon_context() -> Result<String, String> {
+    // creating or repairing the `harpoon` Docker context rewrites the user's Docker configuration
+    namespace::refuse_in_namespace("Setting up the Harpoon Docker context")?;
     // Reuse Swift logic via harpoon CLI for single source of truth, but also fallback to direct docker logic if harpoon binary not available.
     // Prefer harpoon binary if resolvable
     if let Ok(bin) = resolve_harpoon_binary() {
@@ -1059,6 +1075,7 @@ fn resize_disk_blocking(size: String) -> Result<String, String> {
 
 #[tauri::command(async)]
 fn open_shell_session(app: tauri::AppHandle, manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, context: String, container_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<shell::ShellSession, String> {
+    namespace::refuse_in_namespace("A container shell")?;
     shell::open(app, manager.inner().clone(), context, container_id, cols, rows)
 }
 
@@ -1079,6 +1096,7 @@ fn close_shell_session(manager: tauri::State<'_, std::sync::Arc<shell::ShellMana
 
 #[tauri::command]
 async fn run_universal_command(command: String, targets: Vec<broadcast::Target>) -> Result<Vec<broadcast::ResultRow>, String> {
+    namespace::refuse_in_namespace("Running a command in containers")?;
     off_main(move || {
         let docker = resolve_docker_binary()?;
         broadcast::execute(&docker, &command, targets)
@@ -1292,14 +1310,29 @@ mod tests {
 
 }
 
+/// Open an application's address in the default browser. Only Harpoon's own addresses are accepted.
+#[tauri::command]
+fn open_app_url(url: String) -> Result<(), String> {
+    if !app_router::openable(&url) {
+        return Err("not a Harpoon application address".into());
+    }
+    Command::new("/usr/bin/open").arg(&url).status().map_err(|e| e.to_string()).and_then(|s| if s.success() { Ok(()) } else { Err(format!("open exited with {s}")) })
+}
+
 fn main() {
     let shell_manager = std::sync::Arc::new(shell::ShellManager::new());
     let builder = tauri::Builder::default()
         .manage(shell_manager.clone())
         .setup(|app| {
-            use tauri::Manager;
-            if let Ok(dir) = app.path().app_data_dir() {
-                cli_path::ensure_on_launch(dir);
+            // an unusable test namespace is fatal: the app must never fall back to the production runtime
+            let namespaced = namespace::active()?.is_some();
+            if let Ok(dir) = deploy_api::data_root(app.handle()) {
+                // installing the `harpoon` command-line tool changes the user's PATH setup; never from a test namespace
+                if !namespaced {
+                    cli_path::ensure_on_launch(dir.clone());
+                }
+                let rt = deploy_api::runtime_dir(&dir);
+                app_router::start_default(Box::new(move || deploy_api::route_table(&rt)));
             }
             Ok(())
         })
@@ -1307,12 +1340,13 @@ fn main() {
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
             get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
-            list_containers, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
+            list_containers, compose_import::pick_compose_folder, compose_import::preview_compose_project, compose_import::launch_compose_project, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
             context_discovery::discover_contexts,
-            get_counts,
+            deploy_api::deploy_snapshot, deploy_api::external_runtimes, deploy_api::external_runtime_add, deploy_api::external_runtime_remove, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder, deploy_api::host_tcp_listeners,
+            get_counts, open_app_url, namespace::test_namespace,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,
             start_bootstrap_worker, stop_bootstrap_worker,

@@ -114,7 +114,7 @@ You do not need to invoke this manually — `npm run build:release` / `npm run r
 
 ## 2. Platform requirements
 
-Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The current project targets Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). No Intel or cross-platform claim is made.
+Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The 2.0 target is Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). Intel/universal packaging is experimental post-2.0 work, and no Windows/Linux host claim is made.
 
 Build machine also needs the normal macOS command-line development tools for Swift, Rust, and Tauri:
 
@@ -186,7 +186,7 @@ cd ui/harpoon-desktop
 npm run tauri dev
 ```
 
-This starts Vite (`npm run dev` at `http://localhost:1420` per `tauri.conf.json`) and launches the Tauri window. The UI discovers the Harpoon runtime via its binary resolver (`HARPOON_BIN` → bundled `Harpoon.app` → `harpoon/build/harpoon` → `/usr/local/bin/harpoon` → `PATH`) and follows the current bootstrap state machine: on first launch it will automatically attempt `harpoon start` once and show phased progress (`Checking runtime…` → `Starting Harpoon…` → `Starting Linux VM…` → `Waiting for Docker Engine…` → `Ready`). No manual `harpoon start` is required in development, though the CLI remains available.
+This starts Vite (`npm run dev` at `http://localhost:1420` per `tauri.conf.json`) and launches the Tauri window. The UI discovers the Harpoon runtime via its binary resolver (`HARPOON_BIN` → bundled `Harpoon.app` → `harpoon/build/harpoon` → `/usr/local/bin/harpoon` → `PATH`) and follows the current bootstrap state machine: on first launch it will automatically attempt `harpoon start` once and show phased progress (`Checking runtime…` → `Starting Harpoon…` → `Starting Linux VM…` → `Waiting for Docker Engine…` → `Ready`). No manual `harpoon start` is required in development, though the CLI remains available. Podman/rootless is not required for the 2.0 path.
 
 ## 6. Build Harpoon guest assets (canonical)
 
@@ -212,7 +212,7 @@ bash tools/guest-builder/verify-root.sh    # FAILS if root contains Docker test 
 bash tools/guest-builder/sanitize-root.sh  # deterministically clean to 0/0/0
 ```
 
-- `Image-virt` provenance: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt` (PE+gz wrapper decompressed at gzip offset) `virt` `6.12.110-0-virt`.
+- `Image-virt` provenance: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-3.22.6/vmlinuz-virt` (PE+gz wrapper decompressed at gzip offset) `virt` `6.12.110-0-virt`.
 - `harpoon-initramfs.cpio.gz` is the Docker + management + storage initramfs ported from `spike2/build.sh` (virtio modules injected from `modloop-virt` via `modules.dep`, installs `/usr/local/bin/harpoon-mgmt` and `socat VSOCK-LISTEN:2377` management listener `HARPOON_MGMT_READY`, plus auto `resize2fs /dev/vda` if `blockdev --getsize64 > df -B1` for grow-only sparse).
 - `harpoon-root.img` is a **2 GiB template** raw ext4 populated by real Alpine `apk` inside a disposable Virtualization.framework builder VM. It installs the declared Docker Engine/containerd/runc, Python, socat, networking, filesystem, kmod, and certificate closure, writes an exact package manifest inside the image, and removes APK/Docker build residue. The root path does not use Docker Desktop, Podman, an existing root, or host-side package emulation. **First provision** sparse-grows to **8 GiB logical minimum** (`8589934592`, physical ~1G) via `truncate` + guest `resize2fs`; supports `12G 16G 32G` via `harpoon start --disk-size 16G` (when no disk) or `harpoon disk resize 16G` (grow-only, VM stopped). See `tools/guest-builder/verify-root.sh` and `harpoon disk status`.
 - Management channel (Stage 3A): vsock `2377` dedicated to `harpoon exec`/`harpoon shell`, separate from Docker `2375`, vsock-only (no TCP, no SSH), host bridge at `0600` `/tmp/harpoon-mgmt.sock` → vsock `2377`.
@@ -224,12 +224,12 @@ The canonical order is root image, then initramfs: the initramfs fingerprint inc
 **Pinned guest inputs (Stage 3D, cryptographic — mismatch FAILs, not just prints):**
 ```text
 Alpine 3.22 aarch64
-  vmlinuz-virt: https://dl-cdn.alpinelinux.org/.../netboot/vmlinuz-virt
+  vmlinuz-virt: https://dl-cdn.alpinelinux.org/.../netboot-3.22.6/vmlinuz-virt
     sha256 dd37c4460f933ec909ff022c34944ff7e1a5300aff99750e3bdc02cd4074c332
     kernel 6.12.110-0-virt
-  initramfs-virt: https://.../netboot/initramfs-virt
+  initramfs-virt: https://.../netboot-3.22.6/initramfs-virt
     sha256 384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022554b889c
-  modloop-virt: https://.../netboot/modloop-virt
+  modloop-virt: https://.../netboot-3.22.6/modloop-virt
     sha256 da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218
   alpine-minirootfs-3.22.1-aarch64.tar.gz: https://.../alpine-minirootfs-3.22.1-aarch64.tar.gz
     sha256 188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c
@@ -249,6 +249,17 @@ bash harpoon/build.sh
 ```
 
 This compiles the Swift runtime (`harpoon/Sources/*.swift` with `-framework Virtualization`) to `harpoon/build/harpoon` and ad-hoc signs it with `harpoon/entitlements.plist` (`com.apple.security.virtualization`). Output is a single `Mach-O arm64` executable; `harpoon doctor` validates it.
+
+### Validating while Harpoon is serving
+
+`sh tools/validate.sh` is safe to run on a machine where Harpoon is serving containers. It builds a new binary beside the old one and renames it into place (a running engine keeps its own inode), and every suite that issues `start`/`stop`/`restart` runs inside a private namespace:
+
+- `HARPOON_TEST_TMPDIR=<dir>` moves the **whole** lifecycle namespace under `<dir>`: `harpoon.lock`, `harpoon-lifecycle.lock`, `harpoon-docker.sock`, `harpoon-control`, `harpoon-mgmt.sock`, `harpoon-stop`, the serial log, `runtime.pid`/`runtime.json`, `config.json`, the log and `data/harpoon-root.img`. Production fallbacks (`/tmp/harpoon-runtime`, `~/Library/Application Support/Harpoon`) are not read, and `harpoon status --json` reports `"isolated": true` and every path.
+- Harpoon refuses to run any command (exit 2, `HARPOON_ISOLATION_FAILED`) if the root is relative, resolves to `/tmp` or the production state directory, is too long for a unix socket path, or if `HARPOON_DOCKER_SOCK` / `HARPOON_DISK` point back at production. `harpoon docker setup|remove|use` also refuse unless `DOCKER_CONFIG` is set, so a test cannot repoint your real `harpoon` Docker context.
+- `harpoon/cli-parity-test.sh` and `harpoon/regression-lifecycle-isolation.sh` check this through the binary they are about to drive and refuse to run a lifecycle command if it cannot prove isolation (for example an installed or older build in `HARPOON_BIN`).
+- `harpoon restart ...` validates every option (and the effective configuration, kernel/initramfs/disk) **before** it stops anything; an invalid restart changes nothing.
+
+Do not run the manual VM suites (`harpoon/m*-test.sh`, `ec-test.sh`, `ui-test.sh`, `install.sh`, `uninstall.sh`, `tools/stage-*` gates) on a machine that is serving: they use the machine's real namespace. They are listed in `harpoon/regression-lifecycle-safety.py` (`LIVE_ONLY`); a new script that runs lifecycle verbs must either export `HARPOON_TEST_TMPDIR` or be added there deliberately.
 
 ## 8. Build frontend
 
@@ -498,14 +509,14 @@ Building Harpoon from source does not require Developer ID or notarization; thos
 
 - Tauri `bundle.macOS.minimumSystemVersion` = `12.0` (`tauri.conf.json`) → `LSMinimumSystemVersion` in `Info.plist`.
 - Swift `harpoon/build/harpoon` built with `MACOSX_DEPLOYMENT_TARGET=12.0` and `xcrun swiftc -target <arch>-apple-macosx12.0`, `LC_BUILD_VERSION` `minos 12.0` `sdk 26.5`. RPATHs: `/usr/lib/swift`, `@executable_path/../../../Frameworks`, `@loader_path/../../../Frameworks`.
-- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. 12.0 (Monterey) keeps older Intel Macs, which stop at Monterey or Sonoma, able to open the universal build; the compiler enforces API availability against this target.
+- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. The 2.0 release gate is Apple Silicon; the universal Intel path remains experimental post-2.0.
 
 **Self-containment:**
 
 ```
 Harpoon.app/Contents/
-  MacOS/harpoon-desktop          # 12.0, arm64 (+ x86_64 universal), no Swift deps
-  Resources/harpoon/bin/harpoon  # 12.0, arm64 (+ x86_64 universal), Swift, @rpath to Frameworks, entitlement virtualization
+  MacOS/harpoon-desktop          # 12.0, arm64 for the 2.0 target, no Swift deps
+  Resources/harpoon/bin/harpoon  # 12.0, arm64 for the 2.0 target, Swift, @rpath to Frameworks, entitlement virtualization
   Resources/harpoon/lib/harpoon/ # Image-virt, harpoon-initramfs.cpio.gz, harpoon-root.img (via assets/guest)
   Frameworks/                    # Swift runtime if embedding needed (via swift-stdlib-tool); currently OS-provided
 ```

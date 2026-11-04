@@ -183,6 +183,8 @@ fn discover_contexts_blocking() -> Result<Vec<DiscoveredContext>, String> {
 
 #[tauri::command]
 pub async fn discover_contexts() -> Result<Vec<DiscoveredContext>, String> {
+    // it probes every Docker context and socket on this Mac, the serving engine's included
+    crate::namespace::refuse_in_namespace("Discovering Docker contexts")?;
     tauri::async_runtime::spawn_blocking(discover_contexts_blocking)
         .await
         .map_err(|error| format!("context discovery worker failed: {error}"))?

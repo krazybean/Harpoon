@@ -30,6 +30,16 @@ echo "[prepare-bundle] staging bundled Docker CLI..." >&2
 sh "$REPO_ROOT/harpoon/fetch-docker-cli.sh"
 cp -p "$REPO_ROOT/harpoon/build/docker" "$HARPOON_BIN_DIR/docker"
 
+# Pinned, verified upstream Docker Buildx; the only builder Harpoon-managed builds may use.
+# fetch-buildx.sh fails closed (wrong checksum, bad upstream signature, missing architecture).
+echo "[prepare-bundle] staging bundled Docker Buildx..." >&2
+sh "$REPO_ROOT/harpoon/fetch-buildx.sh"
+cp -p "$REPO_ROOT/harpoon/build/docker-buildx" "$HARPOON_BIN_DIR/docker-buildx"
+chmod 755 "$HARPOON_BIN_DIR/docker-buildx"
+BUILDX_LICENSE_DIR="$BUNDLE_RES/harpoon/share/licenses/docker-buildx"
+mkdir -p "$BUILDX_LICENSE_DIR"
+cp -p "$REPO_ROOT/harpoon/third-party/docker-buildx/LICENSE" "$REPO_ROOT/harpoon/third-party/docker-buildx/NOTICE.md" "$BUILDX_LICENSE_DIR/"
+
 echo "[prepare-bundle] copying kernel/initramfs/root..." >&2
 cp -p "$KERNEL" "$HARPOON_LIB_DIR/Image-virt"
 cp -p "$INITRAMFS" "$HARPOON_LIB_DIR/harpoon-initramfs.cpio.gz"
@@ -57,7 +67,7 @@ if [ "${HARPOON_ARCH:-arm64}" = "universal" ]; then
 fi
 
 # verify
-ls -lh "$HARPOON_BIN_DIR/harpoon" "$HARPOON_BIN_DIR/docker" "$HARPOON_LIB_DIR/"* 2>&1 | tail -n 10 >&2
+ls -lh "$HARPOON_BIN_DIR/harpoon" "$HARPOON_BIN_DIR/docker" "$HARPOON_BIN_DIR/docker-buildx" "$HARPOON_LIB_DIR/"* 2>&1 | tail -n 10 >&2
 echo "[prepare-bundle] bundle-resources ready at $BUNDLE_RES" >&2
 # hashes
 shasum -a 256 "$HARPOON_BIN_DIR/harpoon" | head -c 12 | xargs echo "[prepare-bundle] harpoon" >&2 || true

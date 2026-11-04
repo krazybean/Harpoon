@@ -1,0 +1,11 @@
+[package]
+name = "harpoon-deploy-docker"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Docker Engine API backend for the Harpoon deploy engine (Milestone B3). Talks to one configured Unix socket; tests use a fake server only."
+
+# No registry dependencies: a small JSON reader and an HTTP/1.1 client over a Unix socket are
+# written here so the crate builds offline.
+[dependencies]
+harpoon-deploy = { path = "../deploy" }

@@ -1,0 +1,100 @@
+{
+  "cpu2x_mem768": {
+    "build_rc": 0,
+    "build_wall_s": 18.43761599995196,
+    "before": {
+      "requests": 524,
+      "errors": 0,
+      "p50_ms": 5.106750002596527,
+      "p95_ms": 9.393962513422593,
+      "p99_ms": 16.26296519301829,
+      "max_ms": 32.04412502236664
+    },
+    "during": {
+      "requests": 322,
+      "errors": 0,
+      "p50_ms": 2.514395513571799,
+      "p95_ms": 6.796845770440995,
+      "p99_ms": 15.449406361440202,
+      "max_ms": 51.34379200171679
+    },
+    "after": {
+      "requests": 525,
+      "errors": 0,
+      "p50_ms": 4.900583066046238,
+      "p95_ms": 9.083575592376286,
+      "p99_ms": 18.482892084866734,
+      "max_ms": 34.025375032797456
+    },
+    "oom_lines_before_after": [
+      "0",
+      "0"
+    ]
+  },
+  "cpu2x_mem1536": {
+    "build_rc": 0,
+    "build_wall_s": 18.38234037498478,
+    "before": {
+      "requests": 523,
+      "errors": 0,
+      "p50_ms": 5.614541005343199,
+      "p95_ms": 9.479324659332633,
+      "p99_ms": 16.261321986094043,
+      "max_ms": 20.112833008170128
+    },
+    "during": {
+      "requests": 322,
+      "errors": 0,
+      "p50_ms": 2.5366879417560995,
+      "p95_ms": 7.203189632855355,
+      "p99_ms": 14.012300701579084,
+      "max_ms": 35.814541042782366
+    },
+    "after": {
+      "requests": 523,
+      "errors": 0,
+      "p50_ms": 4.73258295096457,
+      "p95_ms": 9.338404354639351,
+      "p99_ms": 25.593035256024415,
+      "max_ms": 41.194166988134384
+    },
+    "oom_lines_before_after": [
+      "0",
+      "0"
+    ]
+  },
+  "_env": {
+    "date": "2026-10-30T02:33:58-0500",
+    "macos": "27.0.1",
+    "cpu": "Apple M3 Pro",
+    "harpoon_state": {
+      "cpus": 2,
+      "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+      "dockerReady": true,
+      "lockHeld": true,
+      "lockPath": "/tmp/harpoon.lock",
+      "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+      "memoryMiB": 4096,
+      "mgmtReady": true,
+      "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+      "pid": 67874,
+      "socketPath": "/tmp/harpoon-docker.sock",
+      "sockExists": true,
+      "state": "running"
+    },
+    "harpoon_bin": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+    "harpoon_bin_sha256": "33259856f6161ee4f85f60e8022baef518010bf07b157c84404e83aa4558f83a",
+    "docker_server": {
+      "Version": "28.3.3",
+      "Os": "linux",
+      "Arch": "arm64"
+    },
+    "guest": [
+      "MemTotal:        4013416 kB",
+      "MemAvailable:    3696252 kB",
+      "6.12.110-0-virt",
+      "2"
+    ],
+    "host_disk": "/dev/disk3s5   460Gi   396Gi    24Gi    95%    4.4M  257M    2%   /System/Volumes/Data"
+  }
+}

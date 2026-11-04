@@ -4,7 +4,7 @@ import Darwin
 // MARK: - Docker context integration (M8)
 
 let harpoonContextName = "harpoon"
-let harpoonSocketEndpoint = "unix:///tmp/harpoon-docker.sock"
+var harpoonSocketEndpoint: String { "unix://" + HarpoonPaths.dockerSocketPath }
 
 private let dockerResolutionLock = NSLock()
 private var resolvedDocker: String?
@@ -73,6 +73,12 @@ func inspectDockerContext(_ name: String) -> DockerContextInspection {
         return DockerContextInspection(endpoint: nil, error: "invalid context inspect output")
     }
     return DockerContextInspection(endpoint: host, error: nil)
+}
+
+/// Docker arguments that address Harpoon's engine: the "harpoon" context in production,
+/// the isolated socket itself under a test root (the context would name the real engine).
+func harpoonDockerTarget() -> [String] {
+    HarpoonRoots.testRoot != nil ? ["--host", harpoonSocketEndpoint] : ["--context", harpoonContextName]
 }
 
 func runDocker(_ args: [String], env: [String:String]? = nil) -> (Int32, String, String) {
@@ -320,6 +326,12 @@ func handleDocker(args: [String]) -> Int32 {
         cliPrint("  use     activate harpoon context (docker context use harpoon)")
         cliPrint("  env     print DOCKER_HOST for Harpoon")
         return 0
+    }
+    // These rewrite the user's Docker contexts; an isolated run must not point the real "harpoon" context at a test socket.
+    if ["setup", "remove", "use"].contains(args[0]), HarpoonRoots.testRoot != nil,
+       (ProcessInfo.processInfo.environment["DOCKER_CONFIG"] ?? "").isEmpty {
+        cliError("HARPOON_ISOLATION_FAILED: docker \(args[0]) edits Docker contexts; set DOCKER_CONFIG to an isolated directory first")
+        return 2
     }
     switch args[0] {
     case "setup": return handleDockerSetup()

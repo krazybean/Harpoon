@@ -1,0 +1,127 @@
+{
+  "note": "Deployment engine does not exist: engine idle cost is PENDING. Values below are proxies.",
+  "proxy_oneshot:docker version": {
+    "wall_s": {
+      "n": 20,
+      "min": 0.017204124946147203,
+      "median": 0.020939083013217896,
+      "p95": 0.04193352712318301,
+      "max": 0.043190416996367276,
+      "mean": 0.023862254148116335,
+      "stdev": 0.007701243324907879
+    },
+    "peak_rss_kB": {
+      "n": 20,
+      "min": 26960,
+      "median": 28360.0,
+      "p95": 28613.6,
+      "max": 28720,
+      "mean": 28208.0,
+      "stdev": 429.63877116039066
+    }
+  },
+  "proxy_oneshot:docker ps": {
+    "wall_s": {
+      "n": 20,
+      "min": 0.014853041036985815,
+      "median": 0.016051687533035874,
+      "p95": 0.017744293378200385,
+      "max": 0.02277854096610099,
+      "mean": 0.016466335393488407,
+      "stdev": 0.0016896064229627117
+    },
+    "peak_rss_kB": {
+      "n": 20,
+      "min": 27616,
+      "median": 28448.0,
+      "p95": 28864.8,
+      "max": 28880,
+      "mean": 28441.6,
+      "stdev": 272.8852467517012
+    }
+  },
+  "proxy_oneshot:docker image inspect": {
+    "wall_s": {
+      "n": 20,
+      "min": 0.015467124991118908,
+      "median": 0.01682806247845292,
+      "p95": 0.02040679977508262,
+      "max": 0.02386179205495864,
+      "mean": 0.017546972970012575,
+      "stdev": 0.002081942732490352
+    },
+    "peak_rss_kB": {
+      "n": 20,
+      "min": 26864,
+      "median": 28352.0,
+      "p95": 28808.8,
+      "max": 28976,
+      "mean": 28313.6,
+      "stdev": 427.54506072152026
+    }
+  },
+  "proxy_sqlite_commit_ms": {
+    "n": 500,
+    "min": 0.036082929000258446,
+    "median": 0.04822947084903717,
+    "p95": 0.15650829882360984,
+    "max": 0.5891249747946858,
+    "mean": 0.06679809675551951,
+    "stdev": 0.053120834236478585
+  },
+  "proxy_sqlite_python_self_peak_rss_kB": 25824,
+  "proxy_git_ls_remote": {
+    "wall_s": {
+      "n": 10,
+      "min": 0.25677887501660734,
+      "median": 0.30054297897731885,
+      "p95": 0.39574639999191275,
+      "max": 0.40016225003637373,
+      "mean": 0.3162022873875685,
+      "stdev": 0.05549371086467213
+    },
+    "peak_rss_kB": {
+      "n": 10,
+      "min": 12000,
+      "median": 12040.0,
+      "p95": 12096.0,
+      "max": 12096,
+      "mean": 12046.4,
+      "stdev": 33.26392774296038
+    }
+  },
+  "_env": {
+    "date": "2026-10-30T02:37:44-0500",
+    "macos": "27.0.1",
+    "cpu": "Apple M3 Pro",
+    "harpoon_state": {
+      "cpus": 2,
+      "diskPath": "/Users/juancastro/Library/Application Support/Harpoon/data/harpoon-root.img",
+      "dockerReady": true,
+      "lockHeld": true,
+      "lockPath": "/tmp/harpoon.lock",
+      "logPath": "/Users/juancastro/Library/Application Support/Harpoon/harpoon.log",
+      "memoryMiB": 4096,
+      "mgmtReady": true,
+      "mgmtSocketPath": "/tmp/harpoon-mgmt.sock",
+      "pid": 67874,
+      "socketPath": "/tmp/harpoon-docker.sock",
+      "sockExists": true,
+      "state": "running"
+    },
+    "harpoon_bin": "/Users/juancastro/Documents/Github/Harpoon/harpoon/build/harpoon",
+    "harpoon_bin_sha256": "33259856f6161ee4f85f60e8022baef518010bf07b157c84404e83aa4558f83a",
+    "docker_server": {
+      "Version": "28.3.3",
+      "Os": "linux",
+      "Arch": "arm64"
+    },
+    "guest": [
+      "MemTotal:        4013416 kB",
+      "MemAvailable:    3693096 kB",
+      "6.12.110-0-virt",
+      "2"
+    ],
+    "host_disk": "/dev/disk3s5   460Gi   396Gi    23Gi    95%    4.4M  246M    2%   /System/Volumes/Data"
+  }
+}

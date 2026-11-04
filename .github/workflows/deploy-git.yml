@@ -1,0 +1,74 @@
+name: Deploy git
+
+# Milestone D. Git sources and triggers for deployments: a bounded checkout with the system `git`, polling,
+# and a loopback-only signed-webhook listener. The tests use real `git` against local repositories and a
+# loopback smart-HTTP server (git http-backend). No Docker, VM, Keychain or remote network is used. Attended
+# use only: nothing here is a daemon.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy-git/**"
+      - "deploy/**"
+      - "deploy-docker/**"
+      - ".github/workflows/deploy-git.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "deploy-git/**"
+      - "deploy/**"
+      - "deploy-docker/**"
+      - ".github/workflows/deploy-git.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-git:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: deploy-git
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+          git --version
+
+      - name: Path dependencies only; the only processes are Git itself and kill; no environment reads; no credential on a command line
+        run: |
+          deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
+          if echo "$deps" | grep -vE '^harpoon-deploy(-docker)? = \{ path = "\.\./deploy(-docker)?" \}$' | grep -q .; then
+            echo "unexpected dependencies in deploy-git/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
+          fi
+          if grep -rnE 'Command::new' src | grep -vE 'settings\.git|/bin/kill'; then
+            echo "only the configured git binary and /bin/kill may be started" >&2; exit 1
+          fi
+          if grep -rnE 'Command::new\("(sh|bash|docker|ssh)"|env::var|DOCKER_HOST|UnixStream|0\.0\.0\.0|TcpListener::bind\(\(' src; then
+            echo "no shell, Docker, environment read, wildcard bind or socket in the Git crate" >&2; exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --offline --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --offline

@@ -2,6 +2,61 @@ import Foundation
 import Virtualization
 import CryptoKit
 
+/// The lifecycle namespace: lock files, sockets, stop file, serial log, state directory and disk.
+/// Production names are fixed (/tmp/harpoon-*, ~/Library/Application Support/Harpoon).
+/// HARPOON_TEST_TMPDIR moves ALL of it under one directory and switches off every production
+/// fallback, so a test can never read, lock, signal or stop a real engine's files.
+enum HarpoonRoots {
+    static let socketNameBudget = 100 // sun_path is 104 bytes, longest name is /harpoon-docker.sock
+
+    static var testRoot: String? {
+        guard let v = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"], !v.isEmpty else { return nil }
+        return v
+    }
+    static var runDir: String { testRoot ?? "/tmp" }
+    static var productionSupport: String {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon").path
+    }
+    static var productionDisk: String { productionSupport + "/data/harpoon-root.img" }
+
+    private static func resolved(_ p: String) -> String { URL(fileURLWithPath: p).resolvingSymlinksInPath().path }
+
+    /// nil when the namespace is usable; otherwise why it is not. Evaluated before any command runs.
+    static func isolationError() -> String? {
+        guard let root = testRoot else { return nil }
+        let env = ProcessInfo.processInfo.environment
+        guard root.hasPrefix("/") else { return "HARPOON_TEST_TMPDIR must be an absolute path, got \(root)" }
+        do { try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: nil) }
+        catch { return "HARPOON_TEST_TMPDIR \(root) cannot be created: \(error.localizedDescription)" }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue,
+              FileManager.default.isWritableFile(atPath: root) else { return "HARPOON_TEST_TMPDIR \(root) is not a writable directory" }
+        let real = resolved(root)
+        if real == resolved("/tmp") { return "HARPOON_TEST_TMPDIR resolves to /tmp: its lock and socket names would be the production names" }
+        if real == resolved(productionSupport) { return "HARPOON_TEST_TMPDIR resolves to the production state directory" }
+        if (root + "/harpoon-docker.sock").utf8.count > socketNameBudget { return "HARPOON_TEST_TMPDIR is too long for a unix socket path (\(root))" }
+        if let sock = env["HARPOON_DOCKER_SOCK"], !sock.isEmpty, sock != root + "/harpoon-docker.sock" {
+            return "HARPOON_DOCKER_SOCK overrides the isolated Docker socket (\(sock))"
+        }
+        if let disk = env["HARPOON_DISK"], !disk.isEmpty, resolved(disk) == resolved(productionDisk) {
+            return "HARPOON_DISK is the production persistent disk"
+        }
+        return nil
+    }
+
+    /// Disk lookup order. In isolation only the test root's own disk is ever considered.
+    static func userDiskCandidates(testFlags: Bool) -> [String] {
+        if let root = testRoot { return [root + "/data/harpoon-root.img"] }
+        var paths = [productionDisk]
+        if testFlags { paths.append("/tmp/harpoon-runtime/data/harpoon-root.img") }
+        return paths
+    }
+    static func configCandidates() -> [String] {
+        if let root = testRoot { return [root + "/config.json"] }
+        return [productionSupport + "/config.json", "/tmp/harpoon-runtime/config.json"]
+    }
+}
+
 struct SharedRoot {
     let hostPath: String
     let guestPath: String
@@ -18,7 +73,7 @@ struct RuntimeConfig {
     var initramfsURL: URL = RuntimeConfig.resolveResource(named: "harpoon-initramfs.cpio.gz", fallback: "assets/guest/harpoon-initramfs.cpio.gz")
     var diskURL: URL = RuntimeConfig.resolveRootDisk()
 
-    var shareHostPath: String = "/tmp/harpoon-share"
+    var shareHostPath: String = HarpoonRoots.runDir + "/harpoon-share"
     var virtioFSTag: String = "harpoon-share"
     // M4 shared roots: /Users and /private/tmp (covers /tmp symlink via translator alias, no separate /tmp device)
     var sharedRoots: [SharedRoot] {
@@ -50,10 +105,10 @@ struct RuntimeConfig {
         return shares
     }
 
-    var dockerSocketPath: String = "/tmp/harpoon-docker.sock"
-    var balloonControlPath: String = "/tmp/harpoon-control"
-    var mgmtSocketPath: String = "/tmp/harpoon-mgmt.sock"
-    var serialLogPath: String = "/tmp/harpoon-serial.log"
+    var dockerSocketPath: String = HarpoonRoots.runDir + "/harpoon-docker.sock"
+    var balloonControlPath: String = HarpoonRoots.runDir + "/harpoon-control"
+    var mgmtSocketPath: String = HarpoonRoots.runDir + "/harpoon-mgmt.sock"
+    var serialLogPath: String = HarpoonRoots.runDir + "/harpoon-serial.log"
 
     var vsockPort: UInt32 = 2375
     var mgmtVsockPort: UInt32 = 2377 // Stage 3A management channel — vsock-only, no TCP, no SSH
@@ -169,11 +224,7 @@ struct RuntimeConfig {
         // ponytail: no template-size-equality invariant for already-provisioned disk (resize deferred)
         // Production: only ~/Library/...; /tmp fallback only when explicitly enabled for tests (HARPOON_ALLOW_TMP_FALLBACK=1)
         let isTest = ProcessInfo.processInfo.environment["HARPOON_ALLOW_TMP_FALLBACK"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_MODE"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] != nil
-        var userPaths = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path]
-        if isTest {
-            userPaths.append("/tmp/harpoon-runtime/data/harpoon-root.img")
-            if let custom = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] { userPaths.append((custom as NSString).appendingPathComponent("data/harpoon-root.img")) }
-        }
+        let userPaths = HarpoonRoots.userDiskCandidates(testFlags: isTest)
         for p in userPaths {
             if FileManager.default.fileExists(atPath: p) { return URL(fileURLWithPath: p) }
         }
@@ -181,13 +232,13 @@ struct RuntimeConfig {
         let tmpl = rootTemplateURL()
         if FileManager.default.fileExists(atPath: tmpl.path) {
                 // provision on first run: copy to user location — production MUST be ~/Library, fail if not writable
-                let userDest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img")
+                let userDest = URL(fileURLWithPath: userPaths[0])
                 let dest: URL
                 do {
                     try FileManager.default.createDirectory(at: userDest.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
                     dest = userDest
                 } catch {
-                    if isTest {
+                    if isTest && HarpoonRoots.testRoot == nil {
                         let fallback = URL(fileURLWithPath: "/tmp/harpoon-runtime/data/harpoon-root.img")
                         try? FileManager.default.createDirectory(at: fallback.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
                         dest = fallback
@@ -247,13 +298,7 @@ struct RuntimeConfig {
         var c = RuntimeConfig()
         // user config (file) overrides defaults, env overrides config, CLI overrides all
         // load user config if present
-        var configCandidates = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/config.json").path,
-            "/tmp/harpoon-runtime/config.json"
-        ]
-        if let testDir = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"], !testDir.isEmpty {
-            configCandidates.insert((testDir as NSString).appendingPathComponent("config.json"), at: 0)
-        }
+        let configCandidates = HarpoonRoots.configCandidates()
         var fileCfg: HarpoonUserConfig? = nil
         for cand in configCandidates {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),
@@ -278,7 +323,7 @@ struct RuntimeConfig {
         if let p = ProcessInfo.processInfo.environment["HARPOON_INITRAMFS"] { c.initramfsURL = URL(fileURLWithPath: p) }
         if let p = ProcessInfo.processInfo.environment["HARPOON_DISK"] { c.diskURL = URL(fileURLWithPath: p) }
         if let p = ProcessInfo.processInfo.environment["HARPOON_SHARE"] { c.shareHostPath = p }
-        if let p = ProcessInfo.processInfo.environment["HARPOON_DOCKER_SOCK"] { c.dockerSocketPath = p }
+        if let p = ProcessInfo.processInfo.environment["HARPOON_DOCKER_SOCK"], HarpoonRoots.testRoot == nil { c.dockerSocketPath = p }
         return c
     }
 
@@ -386,21 +431,14 @@ struct RuntimeConfig {
 
     static func existingUserDiskPath() -> String? {
         let isTest = ProcessInfo.processInfo.environment["HARPOON_ALLOW_TMP_FALLBACK"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_MODE"] == "1" || ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] != nil
-        var userPaths = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path]
-        if isTest {
-            userPaths.append("/tmp/harpoon-runtime/data/harpoon-root.img")
-            if let custom = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] { userPaths.append((custom as NSString).appendingPathComponent("data/harpoon-root.img")) }
-        }
+        let userPaths = HarpoonRoots.userDiskCandidates(testFlags: isTest)
         for p in userPaths { if FileManager.default.fileExists(atPath: p) { return p } }
         return nil
     }
 
     static func desiredProvisionBytes() -> UInt64 {
         // config file overrides default, env overrides config
-        let cfgCandidates = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/config.json").path,
-            "/tmp/harpoon-runtime/config.json"
-        ]
+        let cfgCandidates = HarpoonRoots.configCandidates()
         for cand in cfgCandidates {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),
                let obj = try? JSONDecoder().decode(HarpoonUserConfig.self, from: data),

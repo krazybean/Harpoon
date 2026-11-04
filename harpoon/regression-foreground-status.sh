@@ -6,10 +6,11 @@ ROOT=assets/guest/harpoon-root.img
 TMP=$(mktemp -d /tmp/harpoon-foreground-status.XXXXXX)
 RUNTIME="$TMP/runtime"
 DISK="$TMP/root.img"
-SOCK=/tmp/harpoon-docker.sock
-MGMT=/tmp/harpoon-mgmt.sock
-CONTROL=/tmp/harpoon-control
-LOCK=/tmp/harpoon.lock
+# Private namespace (HARPOON_TEST_TMPDIR below moves every lock and socket here), so a serving engine is never named.
+SOCK="$RUNTIME/harpoon-docker.sock"
+MGMT="$RUNTIME/harpoon-mgmt.sock"
+CONTROL="$RUNTIME/harpoon-control"
+LOCK="$RUNTIME/harpoon.lock"
 RUN_PID=
 SOCKET_OWNED=0
 
@@ -61,7 +62,7 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 state_is running true || fail "direct run classified running"
-docker --context harpoon version >/dev/null 2>&1 || fail "direct run Docker readiness"
+docker --host "unix://$SOCK" version >/dev/null 2>&1 || fail "direct run Docker readiness"
 stop_run
 state_is stopped false || fail "direct run stopped state"
 

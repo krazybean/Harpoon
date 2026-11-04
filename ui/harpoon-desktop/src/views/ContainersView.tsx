@@ -10,15 +10,19 @@ import { CsshWorkspace } from "./CsshWorkspace";
 import { ContainerTechnologyIcon } from "../components/ContainerTechnologyIcon";
 import { inferContainerTechnology } from "../lib/containerTechnology.js";
 import { confirmAction } from "../components/ConfirmDialog";
+import { PortsLine } from "./PortsLine";
+import type { HostListeners } from "../lib/portExposure.ts";
+import { ComposeProjectWizard } from "./ComposeProjectWizard";
 
 const SAMPLE_CONTAINER_COMMAND = "docker --context harpoon run -d --name hello nginx:alpine";
 
-function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doAction }: {
+function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doAction, onImportCompose }: {
   refreshing: boolean;
   updatedAt: number | null;
   refresh: () => Promise<any>;
   actionInProgress: string | null;
   doAction: (name: string, fn: () => Promise<any>) => Promise<void>;
+  onImportCompose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -36,6 +40,7 @@ function EmptyContainers({ refreshing, updatedAt, refresh, actionInProgress, doA
       </div>
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
         <div className="text-body">No containers yet.</div>
+        <button className="btn btn--primary btn--sm" onClick={onImportCompose} disabled={!!actionInProgress}><FolderSimple size={14} /> Create from Docker Compose</button>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => doAction("start-sample", () => invoke("run_sample_container"))} disabled={!!actionInProgress} className="btn btn--primary btn--sm">
             <Play size={14} /> {starting ? "Starting sample…" : "Run a sample container"}
@@ -60,7 +65,9 @@ export const ContainersView = memo(function ContainersView({
   doAction,
   refresh,
   onOpenContainer,
+  hostListeners,
 }: {
+  hostListeners?: HostListeners;
   containers: any[];
   refreshing: boolean;
   error: string | null;
@@ -73,6 +80,7 @@ export const ContainersView = memo(function ContainersView({
   onOpenContainer: (containerId: string) => void;
 }) {
   const [detail, setDetail] = useState<string>("");
+  const [composeImportOpen, setComposeImportOpen] = useState(false);
   const [confirmContainer, setConfirmContainer] = useState<any>(null);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ ids: string[]; title: string; names: string[] } | null>(null);
   const [batchResult, setBatchResult] = useState<{ message: string; failed: number } | null>(null);
@@ -143,7 +151,7 @@ export const ContainersView = memo(function ContainersView({
     }
     // One stable empty state for every refresh phase, so the periodic refresh never
     // remounts it (which used to clear a text selection mid-copy).
-    if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} />;
+    if (!hasRows) return <EmptyContainers refreshing={refreshing} updatedAt={updatedAt} refresh={refresh} actionInProgress={actionInProgress} doAction={doAction} onImportCompose={() => setComposeImportOpen(true)} />;
     return null;
   })();
 
@@ -280,7 +288,8 @@ export const ContainersView = memo(function ContainersView({
   useEffect(() => {
     if (!selectedStack) requestAnimationFrame(() => { if (galleryRef.current) galleryRef.current.scrollTop = galleryScrollTop.current; });
   }, [selectedStack]);
-  if (earlyView) return earlyView;
+  const composeWizard = composeImportOpen ? <ComposeProjectWizard onClose={() => setComposeImportOpen(false)} onLaunched={async (project) => { await refresh(); setComposeImportOpen(false); setView("stacks"); setSelectedStack(project); }} /> : null;
+  if (earlyView) return <>{earlyView}{composeWizard}</>;
 
   const renderRow = (c:any) => (
     <tr key={c.ID||c.Id} className="table-row">
@@ -320,6 +329,7 @@ export const ContainersView = memo(function ContainersView({
         </div>
         <div className="containers-toolbar__actions">
           {activeStack && <button className="btn btn--secondary" onClick={returnToGallery}><CaretLeft size={15} aria-hidden="true" /> Back to stacks</button>}
+          {!activeStack && <button onClick={() => setComposeImportOpen(true)} disabled={!isRunning || !!actionInProgress} className="btn btn--primary"><FolderSimple size={15} aria-hidden="true" /> Create from Compose</button>}
           <button onClick={refresh} disabled={refreshing} className="btn btn--secondary"><ArrowClockwise size={15} aria-hidden="true" /> Refresh</button>
         </div>
       </div>
@@ -350,14 +360,14 @@ export const ContainersView = memo(function ContainersView({
               {isOpen && <div id={`stack-workspace-${group.project}`} className="stack-workspace" aria-label={`${group.project} containers`}>
                 <div className="stack-workspace__header"><div><div className="overview-eyebrow">Compose stack · main workspace</div><h2>{group.project}</h2><p>{group.containers.length} containers · Docker engine metadata</p></div><button className="btn btn--secondary" onClick={returnToGallery}>Back to stacks <span aria-hidden="true">×</span></button></div>
                 {(group.networks.length > 0 || group.volumes.length > 0) && <div className="stack-resource-row">{group.networks.map((network) => <span className="resource-chip" key={`network-${network}`}><ShareNetwork size={13} aria-hidden="true" />{network}</span>)}{group.volumes.map((volume) => <span className="resource-chip" key={`volume-${volume}`}><Database size={13} aria-hidden="true" />{volume}</span>)}</div>}
-                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><span className="text-meta mono" title={c.Ports || "No published ports"}>{c.Ports || "No published ports"}</span><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}<button role="menuitem" onClick={() => { setOpenContainerMenu(null); setConfirmContainer(c); }} disabled={actionInProgress === `rm-${id}`}><Trash size={14} aria-hidden="true" />Remove</button></div>}</div></article>; })}</div>
+                <div className="container-tile-grid">{group.containers.map((c, index) => { const id = resourceId(c); const name = c.Names || c.Name || id; const kind = stateKind(c); const technology = inferContainerTechnology(c); const menuOpen = openContainerMenu === id; const running = kind === "running"; return <article key={id} className="container-tile-wrap" style={{ "--tile-index": index } as CSSProperties}><button ref={index === 0 ? firstTileRef : undefined} className="container-tile" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="container-tile__top"><span className="container-tile__technology" aria-label={`${technology.label} image`} title={`${technology.label} image`}><ContainerTechnologyIcon technology={technology} size={18} /></span><span className="container-tile__state" data-state={kind}>{kind}</span></span><strong title={name}>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>{c.Image || "Image unavailable"}</span><PortsLine ports={c.Ports} listeners={hostListeners} /><span className="container-tile__attachments">{(c.NetworkNames || []).map((network:string) => <span key={network}><ShareNetwork size={11} aria-hidden="true" />{network}</span>)}{(c.NamedVolumes || []).map((volume:any) => <span key={volume.name}><Database size={11} aria-hidden="true" />{volume.name}</span>)}{(c.BindMounts || []).length > 0 && <span title="Bind mounts are attached paths, not named volumes"><FolderSimple size={11} aria-hidden="true" />{c.BindMounts.length} bind mount{c.BindMounts.length === 1 ? "" : "s"}</span>}</span></button><div className="container-tile__actions"><button ref={(node) => { containerMenuTriggerRefs.current[id] = node; }} className="container-tile__menu-trigger" aria-label={`Actions for ${name}`} aria-expanded={menuOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setOpenContainerMenu(menuOpen ? null : id); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !menuOpen) { event.preventDefault(); setOpenContainerMenu(id); } }}><DotsThree size={18} aria-hidden="true" /></button>{menuOpen && <div className="container-tile__menu-popover" role="menu" aria-label={`${name} lifecycle actions`} onClick={(event) => event.stopPropagation()}>{running ? <><button role="menuitem" onClick={() => runContainerMenuAction(c, "stop")} disabled={actionInProgress === `stop-${id}`}>{actionInProgress === `stop-${id}` ? "Stopping…" : <><Stop size={14} aria-hidden="true" />Stop</>}</button><button role="menuitem" onClick={() => runContainerMenuAction(c, "restart")} disabled={actionInProgress === `restart-${id}`}>{actionInProgress === `restart-${id}` ? "Restarting…" : <><ArrowClockwise size={14} aria-hidden="true" />Restart</>}</button></> : <button role="menuitem" onClick={() => runContainerMenuAction(c, "start")} disabled={actionInProgress === `start-${id}`}>{actionInProgress === `start-${id}` ? "Starting…" : <><Play size={14} aria-hidden="true" />Start</>}</button>}<button role="menuitem" onClick={() => { setOpenContainerMenu(null); setConfirmContainer(c); }} disabled={actionInProgress === `rm-${id}`}><Trash size={14} aria-hidden="true" />Remove</button></div>}</div></article>; })}</div>
                 <CsshWorkspace project={group.project} containers={group.containers} />
               </div>}
             </article>; })}
             {standalone.map((c) => { const id = resourceId(c); const name = c.Names || c.Name || id; return <article key={id} className="stack-card stack-card--standalone">
               <button className="stack-card__menu" aria-label={`Actions for ${name}`} aria-expanded={openMenu === id} onClick={(event) => { event.stopPropagation(); setOpenMenu(openMenu === id ? null : id); }}><DotsThree size={18} aria-hidden="true" /></button>
               {openMenu === id && <div className="stack-card__menu-popover" role="menu" aria-label={`${name} actions`} onClick={(event) => event.stopPropagation()}><span className="stack-card__menu-note">Docker context: harpoon · container scope</span><button role="menuitem" disabled={stateKind(c) === "running"} onClick={() => stackAction(name, "start_container", "started", [c])}><Play size={14} aria-hidden="true" /> Start</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "stop_container", "stopped", [c])}><Stop size={14} aria-hidden="true" /> Stop</button><button role="menuitem" disabled={stateKind(c) !== "running"} onClick={() => stackAction(name, "restart_container", "restarted", [c])}><ArrowClockwise size={14} aria-hidden="true" /> Restart</button><button role="menuitem" disabled={actionInProgress === `rm-${id}`} onClick={() => { setOpenMenu(null); setConfirmContainer(c); }}><Trash size={14} aria-hidden="true" /> Remove</button></div>}
-              <button className="stack-card__body" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="stack-card__heading"><span className="stack-card__icon"><span className="container-technology-icon" role="img" aria-label={`${inferContainerTechnology(c).label} image`} title={`${inferContainerTechnology(c).label} image`}><ContainerTechnologyIcon technology={inferContainerTechnology(c)} size={18} /></span></span><span><strong>{name}</strong><span className="text-meta">Standalone container · {c.Image || "Image unavailable"}</span></span></span><span className="stack-card__summary"><span className="badge badge--info">{stateKind(c)}</span></span><span className="stack-services"><span><i data-state={stateKind(c)} />{c.Ports || "No published ports"}</span></span></button>
+              <button className="stack-card__body" onClick={() => onOpenContainer(c.ID || c.Id)}><span className="stack-card__heading"><span className="stack-card__icon"><span className="container-technology-icon" role="img" aria-label={`${inferContainerTechnology(c).label} image`} title={`${inferContainerTechnology(c).label} image`}><ContainerTechnologyIcon technology={inferContainerTechnology(c)} size={18} /></span></span><span><strong>{name}</strong><span className="text-meta" title={c.Image || "Image unavailable"}>Standalone container · {c.Image || "Image unavailable"}</span></span></span><span className="stack-card__summary"><span className="badge badge--info">{stateKind(c)}</span></span><span className="stack-services"><span className="stack-services__ports"><i data-state={stateKind(c)} /><PortsLine ports={c.Ports} listeners={hostListeners} /></span></span></button>
             </article>; })}
           </div>
           {removeDialog}
@@ -420,6 +430,7 @@ export const ContainersView = memo(function ContainersView({
         )}
         {batchResult && (view !== "table" || activeStack) && <div className="containers-action-status" role="status" aria-live="polite">{batchResult.message}</div>}
       </div>
+      {composeWizard}
     </div>
   );
 });

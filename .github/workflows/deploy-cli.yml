@@ -1,0 +1,120 @@
+name: Deploy CLI
+
+# Milestone B6. Runs the CLI's tests against a fake Docker on a test-owned Unix socket and a fake
+# Buildx script, on temporary directories. It never contacts a real Docker endpoint, builds an
+# image, or starts a container.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy-cli/**"
+      - "deploy-keychain/**"
+      - "deploy-git/**"
+      - "deploy-journal/**"
+      - "deploy-docker/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-cli.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "deploy-cli/**"
+      - "deploy-keychain/**"
+      - "deploy-git/**"
+      - "deploy-journal/**"
+      - "deploy-docker/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-cli.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: deploy-cli
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Path dependencies only; no environment, process, live-socket or prune references in the sources
+        run: |
+          deps="$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && NF && $1 !~ /^#/' Cargo.toml)"
+          if echo "$deps" | grep -vE '^harpoon-deploy(-docker|-journal|-keychain|-git)? = \{ path = "\.\./deploy(-docker|-journal|-keychain|-git)?" \}$' | grep -q .; then
+            echo "unexpected dependencies in deploy-cli/Cargo.toml:" >&2; echo "$deps" >&2; exit 1
+          fi
+          live='/tmp/harpoon-docker''.sock'
+          livemgmt='/tmp/harpoon-mgmt''.sock'
+          if grep -rnF "$livemgmt" src tests; then
+            echo "the live Harpoon management socket must never appear in this crate" >&2; exit 1
+          fi
+          if grep -rnF "$live" src tests; then
+            echo "the live Harpoon socket must never appear in this crate" >&2; exit 1
+          fi
+          # Prohibited operations, not words: reading the environment, spawning processes, calling any
+          # Docker prune endpoint or an identifier named prune*, forcing a removal. Diagnostics and
+          # documentation that merely say "never prunes" are fine.
+          if grep -rnE 'env::var|DOCKER_HOST|DOCKER_CONTEXT|Command::new' src; then
+            echo "the CLI must not read the environment or spawn processes" >&2; exit 1
+          fi
+          if grep -rnE '(system|containers|images|volumes|networks|builder)/prune|[A-Za-z_]prune([^A-Za-z]|$)|(^|[^A-Za-z])prune_[a-z]|(^|[^A-Za-z_])prune[[:space:]]*\(|force=true' src; then
+            echo "the CLI must not call a prune endpoint or force a removal" >&2; exit 1
+          fi
+
+      - name: No fault-injection or crash controls in production deploy sources
+        run: |
+          # Scoped to the deploy crates' sources: legitimate crash-recovery tests (which simulate a
+          # crash by cutting a journal or a fake write) live under tests/ and are not scanned.
+          if grep -rnE 'experimental-(fail-final-check|crash-after-stop)|INJECTED (FAULT|TEST FAULT)|CrashAfterStop|SIGKILL' ../deploy/src ../deploy-docker/src ../deploy-journal/src src; then
+            echo "fault injection or crash controls must never be in production deploy sources" >&2; exit 1
+          fi
+          if grep -rnE 'extern "C" \{[^}]*fn kill' ../deploy/src ../deploy-docker/src ../deploy-journal/src src; then
+            echo "no process may signal itself in production deploy sources" >&2; exit 1
+          fi
+
+      - name: Packaging boundary - nothing that packages a release names or builds the acceptance executable
+        run: |
+          if grep -rIl 'harpoon-deploy-acceptance' ../.github/workflows ../tools ../ui/harpoon-desktop/src-tauri ../package.json 2>/dev/null | grep -v 'deploy-cli.yml'; then
+            echo "the acceptance executable must not be named by any packaging file" >&2; exit 1
+          fi
+          grep -q 'required-features = \["acceptance"\]' Cargo.toml
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --offline --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --offline
+
+      # The acceptance executable is built and tested here and nowhere else. Default builds and
+      # release builds never produce it (required-features); this job never uploads it.
+      - name: Default build does not produce the acceptance executable
+        run: |
+          cargo build --offline
+          test ! -e target/debug/harpoon-deploy-acceptance
+
+      - name: Acceptance feature - Clippy and tests (the binary exists only with --features acceptance)
+        run: |
+          cargo clippy --offline --all-targets --features acceptance -- -D warnings
+          cargo test --offline --features acceptance
+          test -e target/debug/harpoon-deploy-acceptance

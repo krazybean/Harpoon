@@ -1,0 +1,39 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 368B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:3.22
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/5] FROM docker.io/library/alpine:3.22
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 57B done
+#5 DONE 0.0s
+
+#6 [3/5] COPY index.html /www/page.html
+#6 CACHED
+
+#7 [4/5] COPY srv.sh /srv.sh
+#7 CACHED
+
+#8 [2/5] RUN mkdir -p /www && echo ok > /www/index.html
+#8 CACHED
+
+#9 [5/5] RUN chmod +x /srv.sh && echo layer1 > /www/l1 && echo layer2 > /www/l2
+#9 CACHED
+
+#10 exporting to image
+#10 exporting layers done
+#10 writing image sha256:2c4cbe7cd5c5618f7e7db2e5c4fd665ed74eaf98dd89979b81fa31f486396a65 done
+#10 naming to docker.io/harpoon-baseline/fx-web:warm1 0.0s done
+#10 DONE 0.0s
+
+View build details: docker-desktop://dashboard/build/default/default/2fx7zcvo60dhp1og9kw5xwqz0

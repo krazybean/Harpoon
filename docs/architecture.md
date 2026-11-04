@@ -259,7 +259,7 @@ Productionized dynamic Docker `-p` publishing, replacing spike hardcoded `127.0.
 
 Layers: `macOS host -> Harpoon listener -> VZNAT guest address -> guest Docker HostPort -> docker0/container`.
 
-Dynamic design: `PublishedPortKey = 127.0.0.1:HostPort/tcp -> Forward{fd, DispatchSource, guestIP:HostPort, containerId/Name}`. `PortForwardManager` owns `N` forwards, `hostAddrForDockerIP` maps `0.0.0.0`/`""`/`::` -> `127.0.0.1` loopback-only safety (prevents LAN exposure; ordinary `-p 18080:80` remains `127.0.0.1` reachable). Explicit `127.0.0.1:18087:80` binds guest `127.0.0.1:18087` and is **deferred Phase 1 limitation** — not reachable via VZNAT `guestIP:18087` (`192.168.64.x`), characterized in `harpoon/m5-test.sh` Test 8 as `[m5] CHARACTERIZED explicit Docker 127.0.0.1 HostIp deferred: guest-loopback binding is not reachable via VZNAT guestIP forwarding`, not a failure of dynamic `-p`. `HARPOON_PORT_FORWARD_ADD/LISTENING/REMOVE/COLLISION/RESTORE` grep-friendly. TCP required, UDP deferred (`Type=="udp"` skipped, `HARPOON_PORT_FORWARD_SKIP`). IPv4 loopback required, IPv6 not claimed. Ephemeral `HostPort=0`/`""` discovered via `PublicPort` assigned, mirrored if present else deferred. Multiple ports per container and multiple containers concurrent via `forwards` dict keyed by hostAddr:hostPort/proto.
+Dynamic design: `PublishedPortKey = 127.0.0.1:HostPort/tcp -> Forward{fd, DispatchSource, guestIP:HostPort, containerId/Name}`. `PortForwardManager` owns `N` forwards, `hostAddrForDockerIP` maps `0.0.0.0`/`""`/`::` -> `127.0.0.1` loopback-only safety (prevents LAN exposure; ordinary `-p 18080:80` remains `127.0.0.1` reachable). Explicit `127.0.0.1:18087:80` makes Docker bind **guest** loopback only (`docker-proxy -host-ip 127.0.0.1`, a `-d 127.0.0.1` NAT rule and a raw-table DROP for anything not arriving on `lo`), so it is unreachable via VZNAT `guestIP:18087`. `PublishedPortRoute` therefore routes a guest-loopback bind (`127.0.0.0/8`, exact address kept) through a **vsock relay**: one `socat VSOCK-LISTEN:(65536+port),fork TCP4:<that loopback address>:port` per published port, started and stopped through the guest management channel (vsock 2377 `exec`), reachable only from the host and connecting only to guest loopback. The host listener is bound only after the relay is up; a changed route, a stopped/removed container or a lost host-port bind (`HARPOON_PORT_FORWARD_COLLISION`) stops the relay. Ordinary `-p` publishing (what deployments use: no `HostIp`) is unchanged and uses no relay. IPv6 loopback (`[::1]`) is not supported and is reported once as `HARPOON_PORT_FORWARD_UNSUPPORTED`. Relay markers: `HARPOON_PORT_RELAY_STARTED/START_FAILED/STOPPED`, `HOST_FORWARD_RELAY_CONNECT_FAILED`. Covered by `harpoon/regression-published-port-route.sh` (unit) and `harpoon/regression-loopback-publish.sh` (live, isolated engine only). `HARPOON_PORT_FORWARD_ADD/LISTENING/REMOVE/COLLISION/RESTORE` grep-friendly. TCP required, UDP deferred (`Type=="udp"` skipped, `HARPOON_PORT_FORWARD_SKIP`). IPv4 loopback required, IPv6 not claimed. Ephemeral `HostPort=0`/`""` discovered via `PublicPort` assigned, mirrored if present else deferred. Multiple ports per container and multiple containers concurrent via `forwards` dict keyed by hostAddr:hostPort/proto.
 
 Lifecycle: `START` -> `sync` adds listener and forwards to `guestIP:HostPort`; `STOP` -> state != running removes; `REMOVE` -> remove; `RESTART` -> re-add; `Harpoon restart` -> after `HARPOON_GUEST_IP_DISCOVERED` + `HARPOON_DOCKER_READY`, `PortForwardManager` polls and `RESTORE`s active running mappings without recreation.
 
@@ -368,6 +368,41 @@ outbound Internet access and `localhost:<port>` reachability for published ports
 ```text
 container → docker bridge → Linux VM → Harpoon host networking → macOS
 ```
+
+#### Guest DNS
+
+Three different resolvers are involved, and only one of them is Harpoon's responsibility to keep alive:
+
+| Who | Resolver | Set by |
+|---|---|---|
+| Containers | `1.1.1.1`, `8.8.8.8` | `dockerd --dns=…` in the guest `init`; independent of everything below |
+| The guest itself and the Docker daemon (image pull, registry login) | `/etc/resolv.conf` | DHCP, or the Mac's resolvers (below) |
+| The Mac's resolvers | `scutil --dns`, read when the VM starts | passed to the guest as `harpoon.dns=IP,IP` on the kernel command line |
+
+DHCP (VZNAT) advertises the gateway, `192.168.64.1`, as DNS. On some hosts nothing answers there ("connection refused"): Harpoon
+runs no DNS service on it and macOS does not always provide one. The guest `init` therefore decides at every boot:
+
+1. **DHCP DNS answers** → keep it. Nothing is overridden, and every DHCP renewal keeps following the server.
+2. **DHCP DNS does not answer** → write the Mac's resolvers (`harpoon.dns`; `1.1.1.1`/`8.8.8.8` only if none were passed) to
+   `/etc/resolv.conf` **and tell `udhcpc` to leave `/etc/resolv.conf` alone for that interface**. Without this second part the busybox
+   renewal script (`/usr/share/udhcpc/default.script`, `renew()` → `resolvconf()`) puts the dead gateway DNS back at the first renewal,
+   30 minutes after boot, and `docker pull` and guest lookups fail from then on (containers keep working). The mechanism is the stock
+   `NO_DNS` list in `/etc/udhcpc/udhcpc.conf`, which `default.script` sources; address, route and lease handling are untouched.
+
+The hold is a marked block (`# BEGIN harpoon-dns-hold` … `# END harpoon-dns-hold`) in `/etc/udhcpc/udhcpc.conf`, which lives on the
+persistent disk. `init` removes it before `udhcpc` starts, so each boot begins with "DHCP DNS preferred" and only a boot that again
+finds DHCP DNS unusable holds the override. The Mac's resolvers are those at VM start; after a network change they can be stale
+(restart Harpoon to re-read them).
+
+`harpoon doctor` reports **Guest DNS**: it reads the guest's `/etc/resolv.conf` and asks each listed resolver (at most three) for
+`localhost`. Any DNS reply, including NXDOMAIN, proves the resolver is alive; no public name is looked up, so the verdict does not
+depend on public DNS or on the Internet being reachable. A guest whose resolvers all fail to answer is a warning that names them.
+
+Tests: `tools/guest-builder/regression-guest-dns.sh` runs the guest's real `default.script` (pinned copy in
+`tools/guest-builder/fixtures/`) and the real `init` DNS functions in a sandbox for both cases (working DHCP DNS; fallback DNS held
+across repeated renewals), including a control that reproduces the original defect; `harpoon/regression-guest-dns-doctor.sh` covers
+the doctor's classification. A fix to `init` reaches a machine through the rebuilt guest initramfs (it refreshes the root's `init` at
+boot) and a Harpoon restart.
 
 ## Repository Direction
 

@@ -55,11 +55,13 @@ enum HarpoonPaths {
     static var logFile: URL { appSupportDir.appendingPathComponent("harpoon.log") }
     static var logFilePrev: URL { appSupportDir.appendingPathComponent("harpoon.log.1") }
     static var configFile: URL { appSupportDir.appendingPathComponent("config.json") }
-    static var lockPath: String { "/tmp/harpoon.lock" }
-    static var dockerSocketPath: String { "/tmp/harpoon-docker.sock" }
-    static var controlSocketPath: String { "/tmp/harpoon-control" }
-    static var mgmtSocketPath: String { "/tmp/harpoon-mgmt.sock" }
-    static var lifecycleLockPath: String { "/tmp/harpoon-lifecycle.lock" }
+    // Every name below lives in HarpoonRoots.runDir: /tmp in production, the test root under HARPOON_TEST_TMPDIR.
+    static var lockPath: String { HarpoonRoots.runDir + "/harpoon.lock" }
+    static var dockerSocketPath: String { HarpoonRoots.runDir + "/harpoon-docker.sock" }
+    static var controlSocketPath: String { HarpoonRoots.runDir + "/harpoon-control" }
+    static var mgmtSocketPath: String { HarpoonRoots.runDir + "/harpoon-mgmt.sock" }
+    static var lifecycleLockPath: String { HarpoonRoots.runDir + "/harpoon-lifecycle.lock" }
+    static var stopFilePath: String { HarpoonRoots.runDir + "/harpoon-stop" }
 }
 
 final class LifecycleControlLock {
@@ -89,7 +91,7 @@ struct HarpoonUserConfig: Codable {
 func configFilePath() -> String {
     // Production: only primary ~/Library/...; fallback only when explicitly enabled for tests
     var candidates = [HarpoonPaths.configFile.path]
-    if HarpoonPaths.isTestFallbackEnabled {
+    if HarpoonPaths.isTestFallbackEnabled && HarpoonRoots.testRoot == nil {
         candidates.append("/tmp/harpoon-runtime/config.json")
         candidates.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/config.json").path)
         candidates.append(HarpoonPaths.testFallbackDir.appendingPathComponent("config.json").path)
@@ -139,6 +141,8 @@ struct RuntimeMetadata: Codable {
     let diskIdentity: String?
     let diskResolvedPath: String?
     var failure: RuntimeFailure?
+    /// Where the forwarder dials the guest; absent unless the address was discovered (see `ForwardTarget`).
+    var forwardTarget: ForwardTarget? = nil
 }
 
 struct RuntimeFailure: Codable {
@@ -147,6 +151,19 @@ struct RuntimeFailure: Codable {
     let source: String
     let occurredAt: String
     let underlyingError: String?
+}
+
+/// Publish (or withdraw, with nil or an unusable address) the forwarder's guest address in this engine's own runtime.json.
+/// Only the engine that wrote the file may change it: a file that names another pid is left alone.
+func recordForwardTarget(_ address: String?) {
+    guard var metadata = readMetadata(), metadata.pid == getpid() else { return }
+    if let a = address, isUsableForwardAddress(a) {
+        metadata.forwardTarget = ForwardTarget(address: a, source: "discovered", recordedAt: ISO8601DateFormatter().string(from: Date()))
+    } else {
+        metadata.forwardTarget = nil
+    }
+    guard let data = try? JSONEncoder().encode(metadata) else { return }
+    try? data.write(to: HarpoonPaths.jsonFile, options: .atomic)
 }
 
 func recordRuntimeFailure(_ failure: RuntimeFailure) {
@@ -232,22 +249,6 @@ func isLockHeld() -> Bool {
     }
 }
 
-func socketExists0600(_ path: String) -> Bool {
-    var st = stat()
-    if stat(path, &st) != 0 { return false }
-    if (st.st_mode & S_IFMT) != S_IFSOCK { return false }
-    let perms = st.st_mode & 0o777
-    // we report 0600 check elsewhere, but existence check here
-    return perms == 0o600 || true // existence true even if perms off
-}
-
-func socketPerms(_ path: String) -> String {
-    var st = stat()
-    if stat(path, &st) != 0 { return "missing" }
-    let perms = st.st_mode & 0o777
-    return String(format: "%o", perms)
-}
-
 func dockerSocketReady() -> Bool {
     let path = HarpoonPaths.dockerSocketPath
     let fm = FileManager.default
@@ -269,7 +270,7 @@ func dockerSocketReady() -> Bool {
 
 func readPIDFile() -> Int32? {
     var candidates = [HarpoonPaths.pidFile.path]
-    if HarpoonPaths.isTestFallbackEnabled {
+    if HarpoonPaths.isTestFallbackEnabled && HarpoonRoots.testRoot == nil {
         candidates.append("/tmp/harpoon-runtime/runtime.pid")
         candidates.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/runtime.pid").path)
         candidates.append(HarpoonPaths.testFallbackDir.appendingPathComponent("runtime.pid").path)
@@ -285,7 +286,7 @@ func readPIDFile() -> Int32? {
 
 func readMetadata() -> RuntimeMetadata? {
     var candidates = [HarpoonPaths.jsonFile.path]
-    if HarpoonPaths.isTestFallbackEnabled {
+    if HarpoonPaths.isTestFallbackEnabled && HarpoonRoots.testRoot == nil {
         candidates.append("/tmp/harpoon-runtime/runtime.json")
         candidates.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/runtime.json").path)
         candidates.append(HarpoonPaths.testFallbackDir.appendingPathComponent("runtime.json").path)
@@ -408,7 +409,7 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     // fallback: check HARPOON_RUNNING in log (sandbox may block unix connect)
     // check both primary and fallback locations due to sandbox divergence
     var logHasRunning = false
-    let logCandidates = [
+    let logCandidates = HarpoonRoots.testRoot != nil ? [HarpoonPaths.logFile.path] : [
         HarpoonPaths.logFile.path,
         "/tmp/harpoon-runtime/harpoon.log",
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/harpoon.log").path,

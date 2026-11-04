@@ -203,8 +203,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         return s
     }
 
-    func startBridges() {
-        guard let vm = vm else { return }
+    @discardableResult
+    func startBridges() -> Bool {
+        guard let vm = vm else { return false }
         vsockDevice = vm.socketDevices.first as? VZVirtioSocketDevice
         balloonDevice = vm.memoryBalloonDevices.first as? VZVirtioTraditionalMemoryBalloonDevice
         if vsockDevice != nil { log("VSOCK device ready") } else { log("VSOCK device not found") }
@@ -216,7 +217,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             log("HARPOON_BALLOON_RUNTIME_NOT_FOUND count=\(vm.memoryBalloonDevices.count)")
         }
         bridge = BridgeSet(config: config, vsockDevice: vsockDevice, balloonDevice: balloonDevice, log: log)
-        bridge?.startAll()
+        return bridge?.startAll() ?? false
     }
 
     func stopBridges() {

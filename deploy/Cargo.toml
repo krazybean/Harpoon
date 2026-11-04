@@ -1,0 +1,12 @@
+[package]
+name = "harpoon-deploy"
+version = "0.0.0"
+edition = "2021"
+description = "Harpoon deployment engine — offline foundation (identifiers, state machine, fake backend). No Docker, VM, network or daemon."
+publish = false
+license = "Apache-2.0"
+
+# Intentionally no dependencies: the foundation must build and test offline and
+# must not pull in a runtime, async framework or serialization format before the
+# data contract is settled.
+[dependencies]

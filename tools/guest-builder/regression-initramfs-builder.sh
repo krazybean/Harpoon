@@ -10,7 +10,7 @@ BUILDER="$ROOT/tools/guest-builder/build-initramfs.sh"
 
 fail() { echo "initramfs-builder FAIL: $*" >&2; exit 1; }
 mkdir -p "$ROOT/tools/guest-builder/src" "$ROOT/assets/guest"
-for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/rebuild-initramfs-container.sh tools/guest-builder/build-engine.sh tools/guest-builder/guest-arch.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
+for path in tools/guest-builder/build-initramfs.sh tools/guest-builder/rebuild-initramfs-container.sh tools/guest-builder/verify-initramfs-kernel.sh tools/guest-builder/build-engine.sh tools/guest-builder/guest-arch.sh tools/guest-builder/src/init tools/guest-builder/src/harpoon-mgmt tools/guest-builder/src/harpoon-mgmt-wrapper tools/guest-builder/required-modules.txt tools/guest-builder/required-kernel-features.txt tools/guest-builder/kernel-feature-modules.txt; do
   mkdir -p "$ROOT/$(dirname "$path")"
   cp "$REPO_ROOT/$path" "$ROOT/$path"
 done
@@ -18,9 +18,19 @@ printf 'test root\n' > "$ROOT/assets/guest/harpoon-root.img"
 
 bash -n "$BUILDER"
 sh -n "$ROOT/tools/guest-builder/rebuild-initramfs-container.sh"
+sh -n "$ROOT/tools/guest-builder/verify-initramfs-kernel.sh"
+
+for version in 6.12.110-0-virt 6.12.94-0-virt; do
+  fixture="$TMP/$version"
+  mkdir -p "$fixture/lib/modules/$version"
+  : > "$fixture/lib/modules/$version/modules.dep"
+  (cd "$fixture" && find . -print0 | cpio --null -o -H newc --quiet | gzip -n -9 > "$TMP/$version.cpio.gz")
+done
+"$ROOT/tools/guest-builder/verify-initramfs-kernel.sh" "$TMP/6.12.110-0-virt.cpio.gz" 6.12.110-0-virt
+! "$ROOT/tools/guest-builder/verify-initramfs-kernel.sh" "$TMP/6.12.94-0-virt.cpio.gz" 6.12.110-0-virt
 
 HARPOON_INITRAMFS_OUT="$OUT" "$BUILDER" --fingerprint > "$TMP/original"
-: > "$OUT"
+cp "$TMP/6.12.110-0-virt.cpio.gz" "$OUT"
 cp "$TMP/original" "$OUT.inputs"
 HARPOON_INITRAMFS_OUT="$OUT" "$BUILDER" --check
 printf '\n# stale\n' >> "$ROOT/tools/guest-builder/src/init"
@@ -53,10 +63,11 @@ cat > "$FAKE/docker" <<'EOF'
 printf '%s|%s|%s\n' "${DOCKER_HOST:-}" "${DOCKER_CONTEXT:-}" "$*" >> "$DOCKER_LOG"
 case " $* " in
   *' info '*) [ "${1:-}" = "--context" ] && [ "${2:-}" = "harpoon" ] && exit 0; [ -n "${DOCKER_HOST:-}" ] && exit 0; [ "${1:-}" = "--context" ] && exit 0; exit 1 ;;
-  *' run '*) : > "$HARPOON_INITRAMFS_OUT"; exit 0 ;;
+  *' run '*) cp "$HARPOON_INITRAMFS_FIXTURE" "$HARPOON_INITRAMFS_OUT"; exit 0 ;;
 esac
 EOF
 chmod +x "$FAKE/docker"
+export HARPOON_INITRAMFS_FIXTURE="$TMP/6.12.110-0-virt.cpio.gz"
 for mode in override host caller fallback; do
   rm -rf "$OUT" "$OUT.inputs" "$TMP/$mode.log" "$TMP/$mode-config"
   case "$mode" in

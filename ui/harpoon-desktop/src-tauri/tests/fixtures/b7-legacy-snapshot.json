@@ -1,0 +1,159 @@
+{
+  "apps": [
+    {
+      "deployments": [
+        {
+          "config": null,
+          "configDiff": [],
+          "createdMs": 1793608881283,
+          "cutover": "not_required",
+          "cutoverAtMs": null,
+          "failure": null,
+          "finishedMs": 1793608885960,
+          "id": "dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
+          "interruption": null,
+          "mayBeDown": false,
+          "pin": null,
+          "recovery": null,
+          "release": "rel_01M6DPQ543ASWBHW7PW17ZAJ3C",
+          "replaces": null,
+          "resources": [
+            {
+              "id": "sha256:02693c38b1e53e275038a66f9f1ee6133062d573de5fa41f4dfb2c926a53e578",
+              "keep": "retain",
+              "kind": "image",
+              "name": "harpoon/app_01m6dpq543aswbhw7pw17zaj3b:dep_01M6DPQ543ASWBHW7PW17ZAJ3C-0d6a62d13d28a966f67b330bb5b659e3",
+              "state": "created"
+            },
+            {
+              "id": "39000",
+              "keep": "remove_always",
+              "kind": "port",
+              "name": "39000",
+              "state": "released"
+            },
+            {
+              "id": "6b31ddb6814d5cc4ca353f4c24d24063cd5eaa6a4efa92779a392516be9ce0db",
+              "keep": "remove_always",
+              "kind": "container",
+              "name": "hp-dep_01M6DPQ543ASWBHW7PW17ZAJ3C-pre",
+              "state": "released"
+            },
+            {
+              "id": "38000",
+              "keep": "remove_on_failure",
+              "kind": "port",
+              "name": "38000",
+              "state": "created"
+            },
+            {
+              "id": "2f70855fd334312f11ae3b2c5cb2ef42af49203820869637c71c02ead50ed936",
+              "keep": "remove_on_failure",
+              "kind": "container",
+              "name": "hp-dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
+              "state": "created"
+            }
+          ],
+          "rollbackTo": null,
+          "source": null,
+          "startedMs": 1793608881285,
+          "status": "succeeded",
+          "steps": [
+            {
+              "finishedMs": 1793608881473,
+              "log": false,
+              "name": "source",
+              "note": "",
+              "startedMs": 1793608881286,
+              "status": "succeeded"
+            },
+            {
+              "finishedMs": 1793608882680,
+              "log": false,
+              "name": "build",
+              "note": "",
+              "startedMs": 1793608881476,
+              "status": "succeeded"
+            },
+            {
+              "finishedMs": 1793608884628,
+              "log": false,
+              "name": "preliminary_check",
+              "note": "",
+              "startedMs": 1793608882685,
+              "status": "succeeded"
+            },
+            {
+              "finishedMs": 1793608884894,
+              "log": false,
+              "name": "cutover",
+              "note": "",
+              "startedMs": 1793608884630,
+              "status": "succeeded"
+            },
+            {
+              "finishedMs": 1793608885960,
+              "log": false,
+              "name": "final_check",
+              "note": "",
+              "startedMs": 1793608884894,
+              "status": "succeeded"
+            },
+            {
+              "finishedMs": null,
+              "log": false,
+              "name": "recovery",
+              "note": "",
+              "startedMs": null,
+              "status": "skipped"
+            }
+          ],
+          "trigger": "cli",
+          "unfinished": false
+        }
+      ],
+      "events": [],
+      "hostname": "7pw17zaj3b.harpoon.localhost",
+      "id": "app_01M6DPQ543ASWBHW7PW17ZAJ3B",
+      "pauses": [],
+      "repo": null,
+      "route": "external",
+      "serving": {
+        "container": "hp-dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
+        "deployment": "dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
+        "healthPath": null,
+        "hostPort": null,
+        "release": "rel_01M6DPQ543ASWBHW7PW17ZAJ3C",
+        "sinceMs": 1793608885960,
+        "via": "original"
+      }
+    }
+  ],
+  "definitions": [],
+  "gate": {
+    "liveDeploy": true,
+    "liveReplacement": true,
+    "liveTriggered": false,
+    "reason": "Live deployment, replacement, rollback and restoration are closed in this build of Harpoon (the shipping gate). Nothing was started, stopped or changed."
+  },
+  "generatedMs": 1793609000000,
+  "repos": [],
+  "router": {
+    "domain": "harpoon.localhost",
+    "error": null,
+    "port": null,
+    "resolveError": null,
+    "resolves": null
+  },
+  "runtimeDir": "<runtime>",
+  "schema": 1,
+  "source": {
+    "journalFormat": "legacy",
+    "kind": "external",
+    "path": "<runtime>",
+    "readOnly": true
+  },
+  "store": "ok",
+  "storeError": null,
+  "writerHeld": false
+}

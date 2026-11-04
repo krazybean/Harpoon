@@ -56,8 +56,8 @@ re-runs the Universal macOS DMG workflow.
 
 ## Provenance
 
-- Kernel: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt`
-  (Alpine 3.22 virt, 6.12.x). The `vmlinuz-virt` PE+gz wrapper is decompressed at
+- Kernel: `https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-3.22.6/vmlinuz-virt`
+  (Alpine 3.22.6 virt, 6.12.110-0-virt). The `vmlinuz-virt` PE+gz wrapper is decompressed at
   the inner gzip offset to produce the uncompressed `Image-virt` required by
   `Virtualization.framework`.
 - initramfs: built from `alpine-minirootfs` + virtio modules injected from

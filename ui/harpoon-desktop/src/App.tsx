@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 import "./styles/primitives.css";
-import { House, Stack, Images, Database, ShareNetwork, Sliders, Heartbeat, Gear, CaretDown, Play, Stop, ArrowClockwise } from "@phosphor-icons/react";
+import { House, Stack, Images, Database, ShareNetwork, Sliders, Heartbeat, Gear, CaretDown, Play, Stop, ArrowClockwise, RocketLaunch } from "@phosphor-icons/react";
 import { useShelf } from "./hooks/useShelf";
 import { OverviewView } from "./views/OverviewView";
 import { ContainersView } from "./views/ContainersView";
@@ -22,6 +22,12 @@ import { configureResourceSampler } from "./lib/resourceSamplerStore";
 import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
+import { useDeploySimulation } from "./hooks/useDeploySimulation";
+import { useDeployEngine } from "./hooks/useDeployEngine";
+import { navBadge } from "./lib/deployStore";
+import { parseDeployHash } from "./lib/deployPreview";
+import type { HostListeners } from "./lib/portExposure.ts";
+import type { RuntimeState } from "./lib/deployTypes";
 
 type HarpoonStatus = {
   state: string;
@@ -46,6 +52,9 @@ type DiscoveredContext = { id: string; name: string; engine: string; endpoint?: 
 type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting" | "vm_booting" | "docker_starting" | "ready" | "failed";
 type RuntimeRefreshEvent = { key: string; ok: boolean; generation?: number; value?: unknown; error?: string; values?: RuntimeRefreshEvent[] };
 type BootstrapEvent = { status?: HarpoonStatus; observedAtMs?: number; ok?: boolean; error?: string | null };
+// Deployments shows the real deployment engine (a simulation only in an explicit development preview); it is code-split so the
+// existing screens do not pay for it.
+const DeployView = lazy(() => import("./views/deploy/DeployView").then((module) => ({ default: module.DeployView })));
 const DevTopologyPrototype = import.meta.env.DEV ? lazy(() => import("./components/TopologyPrototype").then((module) => ({ default: module.TopologyPrototype }))) : null;
 
 function stateBadge(state: string) {
@@ -115,12 +124,13 @@ function EngineManageMenu({ state, disabled, onAction }: { state: string; disabl
   </div>;
 }
 
-const NavItems = memo(function NavItems({ active, onNav }: { active: Nav; onNav: (n: Nav)=>void }) {
+const NavItems = memo(function NavItems({ active, onNav, deployBadge }: { active: Nav; onNav: (n: Nav)=>void; deployBadge: "none" | "attention" | "error" }) {
   return (
     <>
       {([
         ["overview", House, "Overview"],
         ["containers", Stack, "Containers"],
+        ["deployments", RocketLaunch, "Deployments"],
         ["images", Images, "Images"],
         ["volumes", Database, "Volumes"],
         ["networks", ShareNetwork, "Networks"],
@@ -131,6 +141,7 @@ const NavItems = memo(function NavItems({ active, onNav }: { active: Nav; onNav:
         <button key={n} aria-current={active===n ? "page" : undefined} aria-label={label} title={label} onClick={() => onNav(n as Nav)} className={active===n ? "shell-nav__item shell-nav__item--active" : "shell-nav__item"}>
           <Icon size={20} weight={active===n ? "fill" : "regular"} className="shell-nav__icon" aria-hidden="true" />
           <span className="shell-nav__label">{label}</span>
+          {n === "deployments" && deployBadge !== "none" ? <span role="img" aria-label={deployBadge === "error" ? "a deployment needs attention (error)" : "a deployment needs attention"} title="A deployment needs attention" style={{ marginLeft: "auto", flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: active === "deployments" ? "var(--nav-selected-text)" : deployBadge === "error" ? "var(--error)" : "var(--warning)" }} /> : null}
         </button>
       ))}
     </>
@@ -144,11 +155,11 @@ const NavFooter = memo(function NavFooter({ binaryPath, statusAt }: { binaryPath
     </div>
   );
 });
-const ShellNav = memo(function ShellNav({ active, onNav, binaryPath, statusAt }: { active: Nav; onNav: (n: Nav)=>void; binaryPath: string; statusAt: number | null }) {
+const ShellNav = memo(function ShellNav({ active, onNav, binaryPath, statusAt, deployBadge }: { active: Nav; onNav: (n: Nav)=>void; binaryPath: string; statusAt: number | null; deployBadge: "none" | "attention" | "error" }) {
   return (
     <nav className="shell-nav" aria-label="Primary">
       <div className="text-title" style={{ padding: "4px 0 8px 0", textAlign: "center", fontSize: 12, letterSpacing: "-0.02em" }}>Harpoon</div>
-      <NavItems active={active} onNav={onNav} />
+      <NavItems active={active} onNav={onNav} deployBadge={deployBadge} />
       <NavFooter binaryPath={binaryPath} statusAt={statusAt} />
     </nav>
   );
@@ -183,7 +194,11 @@ export default function App() {
   const topologyPrototype = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("topology-prototype");
   const bootstrapEventPush = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("bootstrap-events");
   const bootstrapTrace = import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("bootstrap-trace");
-  const [destination, setDestination] = useState<Destination>({ kind: "nav", nav: "overview" });
+  // Review-only deep link into simulated Deployments states (development builds only).
+  const deployPreview = import.meta.env.DEV && typeof window !== "undefined" ? parseDeployHash(window.location.hash) : undefined;
+  const deployPreviewActive = Boolean(deployPreview && Object.values(deployPreview).some((v) => v !== undefined));
+  const deploySim = useDeploySimulation({ scenario: deployPreview?.scenario });
+  const [destination, setDestination] = useState<Destination>({ kind: "nav", nav: deployPreviewActive ? "deployments" : "overview" });
   const active: Nav = destination.kind === "container" ? "containers" : destination.nav;
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -191,6 +206,8 @@ export default function App() {
   const [bootstrapPhase, setBootstrapPhase] = useState<BootstrapPhase>("launching");
   const [bootstrapStatus, setBootstrapStatus] = useState("Resolving Harpoon binary…");
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  // Set when the status command itself could not be read; the engine may be running. Kept apart from bootstrapError (a startup failure).
+  const [statusReadFailure, setStatusReadFailure] = useState<string | null>(null);
   const [rustRefreshFallback, setRustRefreshFallback] = useState(false);
   const bootstrapAttempted = useRef(false);
   const bootstrapActiveRef = useRef(false);
@@ -206,6 +223,8 @@ export default function App() {
   const logPathShelf = useShelf<string>(useCallback(()=>invoke<string>("get_log_path"), []), { ttlMs: 60000 });
   const doctorShelf = useShelf<DoctorResult>(useCallback(()=>invoke<DoctorResult>("get_doctor"), []), { ttlMs: 60000 });
   const logsShelf = useShelf<string>(useCallback(()=>invoke<string>("get_recent_logs", { lines: 120 }), []), { ttlMs: 15000 });
+  // what is actually listening on this Mac, refreshed with the containers (Docker's port mappings are not the same thing)
+  const hostListenersShelf = useShelf<HostListeners>(useCallback(()=>invoke<HostListeners>("host_tcp_listeners"), []), { ttlMs: 30000 });
   const containersShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_containers", { all: true }), []), { ttlMs: 30000 });
   const imagesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_images"), []), { ttlMs: 30000 });
   const volumesShelf = useShelf<any[]>(useCallback(()=>invoke<any[]>("list_volumes"), []), { ttlMs: 30000 });
@@ -213,6 +232,11 @@ export default function App() {
   const contextsShelf = useShelf<DiscoveredContext[]>(useCallback(()=>invoke<DiscoveredContext[]>("discover_contexts"), []), { ttlMs: 300000 });
 
   const status = statusShelf.data;
+  // What Harpoon REALLY reports; the Deployments views believe this unless a simulation override is set.
+  const realRuntime: RuntimeState = status?.state === "running" ? (status.dockerReady ? "connected" : "docker-not-ready") : status?.state === "starting" || status?.state === "booting" ? "docker-not-ready" : "stopped";
+  // Production always shows the REAL engine's state; the seeded simulation is reachable only through an explicit development preview link.
+  const deployEngine = useDeployEngine(realRuntime, active === "deployments");
+  const deployBadge = navBadge(deployPreviewActive ? deploySim.state : deployEngine.state, deployPreviewActive ? deploySim.runtimeOverride ?? realRuntime : deployEngine.runtime);
   const statusAt = statusShelf.updatedAt;
   const statusError = statusShelf.error;
   const dockerVersion = dockerShelf.data;
@@ -238,6 +262,8 @@ export default function App() {
   const refreshDoctor = doctorShelf.refresh;
   const refreshLogs = logsShelf.refresh;
   const refreshContainers = containersShelf.refresh;
+  const refreshHostListeners = hostListenersShelf.refresh;
+  useEffect(() => { if (active === "containers") void refreshHostListeners(); }, [active, containersShelf.updatedAt, refreshHostListeners]);
   const refreshImages = imagesShelf.refresh;
   const refreshVolumes = volumesShelf.refresh;
   const refreshNetworks = networksShelf.refresh;
@@ -287,6 +313,7 @@ export default function App() {
     if (bootstrapActiveRef.current) return;
     bootstrapActiveRef.current = true;
     setBootstrapError(null);
+    setStatusReadFailure(null);
     setActionError(null);
     try {
       setBootstrapPhase("launching");
@@ -295,7 +322,7 @@ export default function App() {
       await new Promise(r => setTimeout(r, 120));
       setBootstrapPhase("discovering");
       setBootstrapStatus("Checking runtime status…");
-      const s0 = await refreshStatus();
+      const read0 = await statusShelf.refreshResult();
       setBootstrapStatus("Reading runtime configuration and Docker state…");
       await Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]);
       // Stage 3B: ensure Harpoon docker context exists (idempotent, no default switch, Finder-safe resolver)
@@ -310,7 +337,11 @@ export default function App() {
       }
       // Doctor is independent; keep the verbose log tail out of clean performance runs.
       refreshDoctor();
-      if (!s0) { setBootstrapError("Could not read Harpoon status."); setBootstrapPhase("failed"); return; }
+      if (!read0.ok) {
+        // The status command failed; that says nothing about whether the engine started. Report it as what it is.
+        setStatusReadFailure(read0.error); setBootstrapError(`Could not read Harpoon status: ${read0.error}`); setBootstrapPhase("failed"); return;
+      }
+      const s0 = read0.value;
       if (s0.state === "running" && s0.dockerReady) {
         setBootstrapStatus("Harpoon is ready.");
         setBootstrapPhase("ready");
@@ -383,7 +414,7 @@ export default function App() {
       setBootstrapStatus("Harpoon is ready.");
       setBootstrapPhase("ready");
     } finally { if (!bootstrapEventPush) bootstrapActiveRef.current = false; }
-  }, [bootstrapEventPush, refreshBinary, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
+  }, [bootstrapEventPush, refreshBinary, statusShelf.refreshResult, refreshStatus, refreshConfig, refreshDocker, refreshCounts, refreshLogPath, refreshDoctor, refreshLogs, refreshContainers, refreshImages, refreshVolumes, refreshNetworks]);
 
   useEffect(()=>{
     if (!tauriAvailable) {
@@ -396,6 +427,11 @@ export default function App() {
   // Reconcile bootstrap with live authoritative shelf data — header and overlay must share truth
   useEffect(()=>{
     if (bootstrapActiveRef.current) return;
+    if (statusReadFailure !== null && bootstrapPhase==="failed" && status?.state==="running" && status?.dockerReady && !statusError) {
+      // a later status read succeeded: the earlier read failure is over (a real startup failure never takes this path)
+      setStatusReadFailure(null); setBootstrapError(null); setBootstrapPhase("ready");
+      return;
+    }
     if (status?.state==="running" && status?.dockerReady && binaryPath) {
       if (bootstrapPhase==="discovering" || bootstrapPhase==="launching" || bootstrapPhase==="starting" || bootstrapPhase==="vm_booting" || bootstrapPhase==="docker_starting") {
         setBootstrapPhase("ready");
@@ -407,7 +443,7 @@ export default function App() {
     } else if (status?.state==="failed") {
       if (bootstrapPhase!=="failed") setBootstrapPhase("failed");
     }
-  }, [status, binaryPath, bootstrapPhase]);
+  }, [status, statusError, statusReadFailure, binaryPath, bootstrapPhase]);
 
   // Rust owns normal refresh scheduling; the JS path is an emergency startup fallback only.
   useEffect(()=>{
@@ -529,9 +565,12 @@ export default function App() {
   }, [active, refreshDoctor, refreshLogs, tauriAvailable]);
 
   // Navigation stays synchronous; view refreshes are deferred to their effects.
+  // Clicking Deployments while Deployments is showing goes back to its project list (it keeps its own route).
+  const [deployHome, setDeployHome] = useState(0);
   const handleNav = useCallback((n: Nav)=>{
+    if (n === "deployments" && active === "deployments") setDeployHome((x) => x + 1);
     setDestination({ kind: "nav", nav: n });
-  }, []);
+  }, [active]);
 
   const openContainer = useCallback((containerId: string) => {
     if (!containerId) return;
@@ -622,12 +661,12 @@ export default function App() {
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
   const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
   const showFailed = !technologyShowcase && !topologyPrototype && bootstrapPhase==="failed";
-  const showStoppedPanel = !technologyShowcase && !topologyPrototype && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed;
+  const showStoppedPanel = !technologyShowcase && !topologyPrototype && !deployPreviewActive && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed;
 
   return (
     <div className="shell">
       <ConfirmDialogHost />
-      <ShellNav active={active} onNav={handleNav} binaryPath={binaryPath} statusAt={statusAt} />
+      <ShellNav active={active} onNav={handleNav} binaryPath={binaryPath} statusAt={statusAt} deployBadge={deployBadge} />
       <div className={active === "containers" ? "shell-main shell-main--containers" : "shell-main"}>
         <header className="shell-header">
           <div className="shell-header__left">
@@ -661,7 +700,7 @@ export default function App() {
 
         {showFailed && (
           <div className="panel" style={{ borderColor:"var(--error)", padding:24, minHeight:320 }}>
-            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>{status?.failure?.category === "vm_terminated" ? "Harpoon VM unexpectedly terminated" : status?.failure?.message || "Harpoon could not start"}</div>
+            <div style={{ fontWeight:700, fontSize:16, color:"#991b1b", marginBottom:8 }}>{statusReadFailure !== null ? "Could not read Harpoon status" : status?.failure?.category === "vm_terminated" ? "Harpoon VM unexpectedly terminated" : status?.failure?.message || "Harpoon could not start"}</div>
             <div style={{ fontSize:13, color:"#374151", marginBottom:4 }}>Phase: <code style={{ background:"#f3f4f6", padding:"2px 6px", borderRadius:6 }}>{bootstrapPhase}</code> {status && <span style={{ fontSize:12, color:"#6b7280" }}>• state {status.state}</span>}</div>
             <div role="alert" aria-live="assertive" style={{ fontSize:13, color:"var(--error-fg)", background:"var(--error-bg)", border:"1px solid var(--error)", borderRadius:8, padding:10, marginBottom:12, whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
               <div>{bootstrapError || actionError || "Unknown error"}</div>
@@ -673,7 +712,7 @@ export default function App() {
               <button onClick={()=>handleNav("diagnostics")} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Diagnostics</button>
               <button onClick={()=>{ refreshStatus(); setBootstrapPhase("discovering"); runBootstrap(true); }} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Check again</button>
             </div>
-            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again.</div>
+            <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>{statusReadFailure !== null ? "Reading the status failed; that does not mean Harpoon failed to start. Nothing was started, stopped or restarted. Check again, or review Diagnostics." : "The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again."}</div>
           </div>
         )}
 
@@ -693,8 +732,9 @@ export default function App() {
             {active==="resources" && <ResourcesView config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
             {active==="diagnostics" && <DiagnosticsView binaryPath={binaryPath} logs={logs} logsAt={logsAt} logsRefreshing={logsShelf.refreshing} logsError={logsShelf.error} logPath={logPath} doctor={doctor} doctorAt={doctorAt} doctorRefreshing={doctorShelf.refreshing} doctorError={doctorShelf.error} status={status} configRaw={config?.raw ?? null} bootstrapPhase={bootstrapPhase} onCopy={handleCopyDiagnostics} copied={copied} onRefreshDoctor={()=>doctorShelf.refresh()} onRefreshLogs={()=>logsShelf.refresh()} />}
             {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
-            {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} />}
-            {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} />}
+            {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} hostListeners={hostListenersShelf.data ?? undefined} />}
+            {active==="containers" && destination.kind==="nav" && <ContainersView containers={containersShelf.data ?? []} refreshing={containersShelf.refreshing} error={containersShelf.error} status={status} updatedAt={containersShelf.updatedAt} hasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>containersShelf.refresh()} onOpenContainer={openContainer} hostListeners={hostListenersShelf.data ?? undefined} />}
+            {active==="deployments" && <Suspense fallback={<div className="panel" style={{ padding: 16 }}>Loading Deployments…</div>}><DeployView {...(deployPreviewActive ? { sim: deploySim, preview: deployPreview } : { engine: deployEngine })} realRuntime={realRuntime} onStartHarpoon={()=>doAction("start", ()=>invoke("start_harpoon"))} onOpenContainers={()=>handleNav("containers")} onOpenUrl={(url)=>{ void invoke("open_app_url", { url }).catch(()=>{}); }} homeSignal={deployHome} /></Suspense>}
             {active==="images" && <ImagesView images={imagesShelf.data ?? []} refreshing={imagesShelf.refreshing} error={imagesShelf.error} updatedAt={imagesShelf.updatedAt} hasCache={imagesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>imagesShelf.refresh()} />}
             {active==="volumes" && <VolumesView volumes={volumesShelf.data ?? []} refreshing={volumesShelf.refreshing} error={volumesShelf.error} updatedAt={volumesShelf.updatedAt} hasCache={volumesShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>volumesShelf.refresh()} />}
             {active==="networks" && <NetworksView networks={networksShelf.data ?? []} containers={containersShelf.data ?? []} refreshing={networksShelf.refreshing} error={networksShelf.error} updatedAt={networksShelf.updatedAt} hasCache={networksShelf.hasCache} containersError={containersShelf.error} containersUpdatedAt={containersShelf.updatedAt} containersHasCache={containersShelf.hasCache} actionInProgress={actionInProgress} doAction={doAction} refresh={()=>networksShelf.refresh()} refreshContainers={()=>containersShelf.refresh()} />}

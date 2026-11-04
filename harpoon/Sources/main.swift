@@ -57,6 +57,12 @@ func printUsage() {
     fputs("precedence: CLI > config > environment > defaults\n", stderr)
 }
 
+// A test namespace that cannot be proven separate from production stops everything, before any command.
+if let reason = HarpoonRoots.isolationError() {
+    fputs("HARPOON_ISOLATION_FAILED: \(reason)\n", stderr)
+    exit(2)
+}
+
 // CLI dispatch — must be before VM lifecycle side effects
 let cliArgs = CommandLine.arguments
 if cliArgs.count >= 2 {
@@ -209,7 +215,7 @@ guard VZVirtualMachine.isSupported else {
     exit(3)
 }
 
-let lockPath = "/tmp/harpoon.lock"
+let lockPath = HarpoonPaths.lockPath
 let harpoonLockFd: Int32 = open(lockPath, O_CREAT | O_RDWR, 0o600)
 if harpoonLockFd < 0 {
     log("HARPOON_LOCK_OPEN_FAILED \(lockPath) \(String(cString:strerror(errno)))")
@@ -355,7 +361,13 @@ readyPoll.setEventHandler {
         readyPollCancelled = true
         lifecycle.transition(to: .dockerReady)
         log("HARPOON_DOCKER_READY observed, starting bridges")
-        manager.startBridges()
+        guard manager.startBridges() else {
+            readyPoll.cancel()
+            lifecycle.fail("bridge startup failed")
+            log("HARPOON_BRIDGE_START_FAILURE")
+            initiateShutdown(reason: "BRIDGE_START_FAILURE")
+            return
+        }
         lifecycle.transition(to: .running)
         log("VM Running, vsock bridge active, socket \(config.dockerSocketPath)")
         log("HARPOON_RUNNING")
@@ -375,7 +387,7 @@ readyPoll.resume()
 manager.serialPoll = readyPoll
 
 // M7 stop-file fallback (sandbox-safe): harpoon stop creates /tmp/harpoon-stop
-let stopFile = "/tmp/harpoon-stop"
+let stopFile = HarpoonPaths.stopFilePath
 try? FileManager.default.removeItem(atPath: stopFile)
 let stopPoll = DispatchSource.makeTimerSource(queue: .main)
 stopPoll.schedule(deadline: .now()+1, repeating: 1)

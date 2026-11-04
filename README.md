@@ -14,9 +14,9 @@ Harpoon runs ordinary Docker development workloads on macOS without requiring Do
 
 ## Harpoon 2.0 teaser
 
-[![Watch the Harpoon 2.0 teaser](docs/media/Harpoon-2.0-teaser-v2-thumbnail.jpg)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
+[![Watch the Harpoon 2.0 teaser](docs/media/Harpoon-2.0-teaser-v2-thumbnail.jpg)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.2/Harpoon-2.0-teaser-v2-15s.mp4)
 
-Watch or download the approved 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1). This release candidate is for testing only and is not a stable 2.0.0 release. GitHub README pages use a linked thumbnail so the video remains a reliable release download.
+Watch or download the approved 15-second [Harpoon 2.0 desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.2/Harpoon-2.0-teaser-v2-15s.mp4) from the [v2.0.0-rc.2 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.2). This release candidate is for testing only and is not a stable 2.0.0 release. GitHub README pages use a linked thumbnail so the video remains a reliable release download.
 
 ## Why Harpoon?
 
@@ -29,10 +29,10 @@ Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit 
 
 ## Download Harpoon 2.0 RC
 
-The [v2.0.0-rc.1 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) is for testing only, not a stable 2.0.0 release:
+The [v2.0.0-rc.2 prerelease](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.2) is for testing only, not a stable 2.0.0 release:
 
-- **Apple Silicon DMG:** [Harpoon-2.0.0-rc.1-arm64.dmg](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0.0-rc.1-arm64.dmg)
-- **Desktop teaser:** [Harpoon-2.0-teaser-v2-15s.mp4](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4)
+- **Apple Silicon DMG:** [Harpoon-2.0.0-rc.2-arm64.dmg](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.2/Harpoon-2.0.0-rc.2-arm64.dmg)
+- **Desktop teaser:** [Harpoon-2.0-teaser-v2-15s.mp4](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.2/Harpoon-2.0-teaser-v2-15s.mp4)
 
 Install safely:
 
@@ -43,7 +43,7 @@ Install safely:
 
 The [v0.1.1 release](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) remains the latest stable desktop release. Standalone CLI/runtime archives remain available from [v0.1.0](https://github.com/krazybean/Harpoon/releases/tag/v0.1.0).
 - **Latest desktop release:** `Harpoon-0.1.1-arm64.dmg` + `SHA256SUMS`.
-- **Harpoon 2.0 release candidate:** [v2.0.0-rc.1](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) includes the arm64 DMG and the [15-second desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4). It is for testing only, not a stable release.
+- **Harpoon 2.0 release candidate:** [v2.0.0-rc.2](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.2) includes the arm64 DMG and the [15-second desktop teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.2/Harpoon-2.0-teaser-v2-15s.mp4). It is for testing only, not a stable release.
 - **Standalone CLI/runtime archive:** `harpoon-0.1.0-darwin-arm64.tar.gz` + `SHA256SUMS` remains available from the v0.1.0 release. A standalone v0.1.1 CLI tarball is not currently published.
 
 Source builds remain available for contributors: `bash harpoon/build.sh` (see [Building](docs/building.md)). Use the Releases page above as the authoritative list of published artifacts.
@@ -186,7 +186,9 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Known Limitations / v0.1 Scope
 
-- **Platform:** macOS on Apple Silicon only; ARM64 Linux guests; no Intel or cross-platform claim.
+- **Platform:** macOS on Apple Silicon only; ARM64 Linux guests. Intel/universal
+  packaging is experimental post-2.0 work; Windows/Linux hosts and the proposed
+  deployment control plane are also post-2.0. Podman/rootless is not a 2.0 gate.
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
 - **Distribution signing:** local ad-hoc signing with `com.apple.security.virtualization` (`codesign --verify --deep --strict` passes). Developer ID signing and Apple notarization are not complete for public Gatekeeper distribution.
 - **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
@@ -210,7 +212,11 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Status
 
-Harpoon v2.0.0-rc.1 is a testing prerelease for Apple Silicon. Second-Mac acceptance, notarized distribution, and several follow-up validation items remain open. Harpoon v0.1.1 remains the latest stable desktop release.
+Harpoon v2.0.0-rc.2 is a testing prerelease for Apple Silicon, not a stable
+2.0.0 release. The guest manifest and upgraded-host smoke path are verified;
+second-Mac acceptance, 2×30 cold boots, upgrade/rollback, Developer ID signing,
+notarization, and Gatekeeper validation remain open. Harpoon v0.1.1 remains the
+latest stable desktop release.
 
 Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 

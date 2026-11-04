@@ -2,7 +2,197 @@
 
 > Harpoon is a lightweight Docker-compatible runtime for Apple Silicon macOS. Docker Engine remains authoritative for containers/images/volumes/networks/API/Compose/BuildKit. Harpoon owns only the macOS↔Linux boundary (VM lifecycle, socket bridge, networking, bind-mount transport, resources, memory reclamation, diagnostics).
 
+## Deployment control plane (Harpoon 2.1) — canonical milestone tracker
+
+**This section is the single authoritative status of the Harpoon 2.1 deployment milestones.**
+Everything else is supporting material, not a second tracker:
+
+- Scope, acceptance criteria, failure tests and stop conditions:
+  `docs/deployment-control-plane-requirements.md` (the authority for *what* a milestone must do).
+- Boundary decision: `docs/decisions/0004-deployment-control-plane-boundary.md`.
+- First-slice design and isolation rules: `docs/deployment-first-slice-boundary.md`.
+- Evidence of what was built and observed: `docs/results/DEPLOY_*.md` (historical records; they are
+  not edited when later work supersedes a statement in them — the newer record is linked below).
+- `docs/harpoon-2-status-and-direction.md` is an index that points here.
+
+**Rule for keeping this current.** When a milestone PR merges, the same PR (or an immediately
+accompanying documentation PR) marks its row complete with the PR number and evidence link, and
+updates **Next executable milestone** below. A roadmap question is answered by reading this section
+and the evidence it links; new investigation is warranted only when that evidence is genuinely
+contradictory or missing.
+
+**Tracks.** Harpoon 2.0 runtime/distribution gates (release candidates, second-Mac verification,
+signing, packaging, UI polish, Intel, DNS) are a separate track and are not prerequisites of any 2.1
+milestone below. The "Next milestone" lines under *Current Position* belong to the 2.0 runtime/UI
+track; the 2.1 next milestone is stated only here. Anything that does block a 2.1 milestone must
+name the specific acceptance criterion it blocks; otherwise it is deferred without interrupting
+execution.
+
+Approved decisions (2026-10-30): Rust engine (CLI first), SQLite as the permanent store, macOS
+Keychain for secret values, host-side execution over the existing Docker API/CLI, no mandatory
+Redis/PostgreSQL/Kubernetes, no new daemon until justified, brief documented interruptions
+acceptable. Deploying to Vercel or other providers is an open possibility, deliberately undecided.
+
+### What exists today versus what is still incomplete
+
+**Implemented — the first-deployment slice (offline-tested; live-accepted once for a disposable
+deployment):** a local-directory Dockerfile deployment with bundled, pinned Buildx and image
+identity by id; preliminary and final health checks attributed by per-container marker; loopback-only
+port publishing with LAN isolation measured; a durable checksummed single-writer journal with crash
+recovery; a gated CLI (`status`, `doctor`, `plan`, `recover`, `reconcile`, `deploy`, `teardown`,
+`cleanup-image`, `inventory`, `export-journal`) with ownership-verified, dry-run-by-default cleanup.
+Evidence: `docs/results/DEPLOY_B7_LIVE_RESULTS.md` (B7 first-deployment acceptance: PASS — not
+general production readiness).
+
+**Milestone B implementation status: COMPLETE — OWNER RISK-ACCEPTED / DEFERRED
+EVIDENCE.** The B1–B15 implementation is complete on `main`, including permanent
+SQLite state, health-gated replacement, bounded cutover recovery, explicit rollback,
+runtime configuration pinning, durable pause/held-event state, and the separately
+gated live wiring. This is an implementation closure, not an unconditional
+acceptance PASS. The Nov 1 campaign did not run L5–L7 and P1–P2 (idle-host precondition
+failed). The 2026-11-04 isolated session then **passed L5, L7 and P2** (L6 was verified from
+the Nov 2 canary evidence); **P1 (build overhead) was NOT RUN** because the host again failed
+the agreed idle thresholds. P1 remains an explicit, owner-decided deferred performance
+measurement, not a pass.
+
+**Shipping gate: attended deployment and replacement OPEN; unattended execution CLOSED.**
+`Gate::shipping()` opens live `deploy`, `git-deploy`, `replace`, `rollback` and `restore`, each started
+by a person and each still refused unless the exact `--authorize-live-docker-changes` phrase is given.
+In the desktop that phrase is supplied only by the backend, only after the person confirms that
+operation in a dialog (a replacement additionally needs its own, separate cutover acknowledgement).
+Execution of queued Git events (`git-run`, and `watch` without `--queue-only`) has its own gate,
+`live_triggered_enabled`, which is `false` in the shipping binary: Gate U (unattended execution) has
+not passed. Only the unpackaged `harpoon-deploy-acceptance` binary opens it. Details and the evidence
+behind the decision: `docs/results/DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md` (sections 13 and 14).
+
+### Milestones
+
+| Milestone | Scope | Status |
+|---|---|---|
+| A | Specification and UX discovery | Approved (decisions 2026-10-30; B1 authorized) |
+| B | Deployment engine and lifecycle — see the step table below | **Implementation complete — owner risk-accepted / deferred evidence**: L1–L4 live evidence retained; L5–L7 and P1–P2 not run; not an unconditional acceptance PASS |
+| C | Builds, environments, and secrets (best-effort redaction with leakage tests) | **Implementation-complete by owner decision** (offline slice merged in #141; native Keychain round trip verified once on a disposable item). The real Docker/BuildKit acceptance evidence below stays deferred, not claimed. Scoped Config/Secret definitions and immutable per-deployment snapshots, Keychain-backed immutable secret versions (stdin-only input), Dockerfile target/build args/BuildKit secret mounts, runtime injection, v3 release pins that keep exact secret versions (restore and rollback resolve the original versions), stream redaction with fail-closed withholding, `config-*` commands. Deferred: image reuse for runtime-only changes (rebuild accepted), live Docker/BuildKit evidence (history, layers); build-secret files survive a hard kill until the next writing command (reported by `status`). Details and exact gaps: `docs/results/DEPLOY_MILESTONE_C_CONFIGURATION_SECRETS.md` |
+| Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | **NOT PASSED — unattended operation unproven.** No experiment was run and no agent was built; everything automatic is attended only ("while Harpoon is running"). Recorded in `docs/results/SPIKE_UNATTENDED_EXECUTION.md` |
+| D | Git integration and automation (polling, signed-fixture webhooks); attended only | **Active; implemented and verified offline in one PR (attended only).** Public/private HTTPS and SSH (pinned host key) sources, branch/tag/exact-commit checkout in a bounded private workspace, the immutable commit recorded before every deployment, foreground polling with late detection, loopback-only GitHub-HMAC and GitLab-token webhooks, a CI trigger, B14 delivery-id idempotency, newest-wins supersession and a source executor for held/selected events. **Implementation closure (merged in #142, `3084712`) — residual risks preserved, none cleared:** an SSH server (wrong host key, revoked deploy key) is asserted, not run; TLS handling is Git's and unexercised; real GitHub/GitLab deliveries were never received (they need a tunnel or relay) and GitLab's delivery-id header is unconfirmed (the commit is the fallback key); webhook events buffered in memory during a build are lost if the process dies (polling finds the push later, reported late); a hard-killed process can leave a checkout workspace behind until the next writer sweeps it (owner-pid scoped); submodules and Git LFS are not initialised; an active build is never cancelled by a newer push. Gate U is NOT PASSED: everything is attended-only. `docs/results/DEPLOY_MILESTONE_D_GIT_INTEGRATION.md` |
+| E | Desktop deployment experience and previews | **Active; implemented and verified offline in one PR (attended only; the shipping gate now opens attended deploy, replace, rollback and restore behind an explicit confirmation).** The existing Deployments UI now reads the real engine: a typed read-only snapshot of the SQLite journal (`deploy_snapshot`), recorded redacted step logs, Docker's observed container state kept separate from recorded evidence, and a bounded set of engine operations (`deploy_op`) run through the same CLI library under `Gate::shipping()`. Repository registration, scoped Config, Keychain secrets (stdin only) and attended resume work; live deploy, rollback and restore are visibly disabled with the engine's own refusal reason. The seeded simulation is reachable only through a development-build preview link. **Branch previews are not implemented** (they need per-branch application registration, expiry and ownership-label cleanup, a new subsystem); nothing is shown for them. Not exercised: a live deployment from the desktop (the gate stays closed), a real locked-Keychain prompt. `docs/results/DEPLOY_MILESTONE_E_DESKTOP.md` |
+
+### Milestone B — steps
+
+| Step | Scope | Status | PR(s) | Evidence |
+|---|---|---|---|---|
+| Baseline | Dockerfile build over the bridge, load, publish latency, idle cost | Complete (one host, one session) | #103 | `docs/results/DEPLOY_BASELINE.md` |
+| B1 | Offline engine foundation: state machine, resource ledger, deadlines, redaction, port leases, evidence | Complete | #106, #108 | `docs/results/DEPLOY_ENGINE_FOUNDATION_REVIEW.md` |
+| B2 | Bundled, pinned, signed Buildx | Complete as a verified artifact (not exercised in a released app) | #109 | `docs/results/DEPLOY_BUILDX_PACKAGING.md`, `DEPLOY_BUILDX_VALIDATION.md` |
+| B3 | Docker backend over the Unix socket + Buildx runner | Complete | #110 | `docs/results/DEPLOY_DOCKER_BACKEND.md` |
+| B4 | Source confinement, port allocation, attributed health probing | Complete | #111 | `docs/results/DEPLOY_DOCKER_BACKEND.md` |
+| B5 | Durable journal and crash recovery | Complete | #112 | `docs/results/DEPLOY_JOURNAL.md` |
+| B6 | Gated developer CLI | Complete | #113 | `docs/results/DEPLOY_CLI.md` |
+| B7 | First live disposable deployment, LAN isolation, ownership-verified teardown | **Complete — first-deployment acceptance PASS** (not production readiness) | #114–#118 | `docs/results/DEPLOY_B7_LIVE_RESULTS.md` |
+| B8.1 | Offline failure/recovery coverage (crash sweeps, interrupted-deploy CLI regression) | Complete | #120 | `docs/results/DEPLOY_CLI.md` (B8.1) |
+| B8.2 | Retained-image cleanup (`cleanup-image`, typed conflict outcome) | Complete (offline; simulated Docker only) | #121 | `docs/results/DEPLOY_CLI.md` (B8.2) |
+| **B8.3** | **Controlled live failure and recovery validation** | **Complete — CONDITIONAL PASS: user-reported L1–L4 live results, exact inventory restoration; live Docker HTTP 409 observed, typed `DockerRefused` journal transition remains untested** | — | `docs/results/DEPLOY_B8_3_LIVE_RESULTS.md` |
+| B9 | Permanent SQLite state (replaces the first-slice journal; required before any real replacement or rollback) | **Complete (offline; includes legacy-journal import)** | #124 | `docs/results/DEPLOY_B9_SQLITE_STATE.md`, `docs/deployment-first-slice-boundary.md` decision 1 |
+| B10 | Health-gated replacement of a running release (offline slice) | **Complete (offline; `replace --simulate` only)** | #125 | `docs/results/DEPLOY_B10_REPLACEMENT.md`; requirements D5, Milestone B criteria 2–3 |
+| B11 | Bounded cutover recovery (offline slice and hardening) | **Implementation complete; offline evidence retained**: pinned non-secret release configuration, one bounded restoration (default 60 s) after a failed cutover, recorded outcome and durations, trigger pause, failed candidate preserved, explicit `restore` for an interrupted cutover; hardening: pin before any side effect, serving release/container derived from the records, occupied ports detected before a restoration; live wiring is present behind the separately authorized acceptance gate | #126, #127 | `docs/results/DEPLOY_B11_RECOVERY.md`; requirements D5, D10, criterion 4 |
+| B12 | Explicit manual rollback | **Implementation complete; offline evidence retained**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; live wiring is present behind the separately authorized acceptance gate | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
+| B13 | Runtime configuration, failure hardening, acceptance matrix | **Implementation complete; offline evidence retained**: `--env KEY=VALUE` non-secret variables validated, pinned per release (`v2` pin; `v1` unchanged) and reproduced by restoration and rollback; preliminary-failure next actions (real commands only); status wording and forwarder-default corrections; offline failure matrix audit and additions; canonical acceptance matrix and deferred live procedures; durable pause/resume state is implemented | this PR | `docs/results/DEPLOY_B13_ACCEPTANCE.md`; criteria 1 and 3 |
+| B14 | Durable pauses, held events, explicit resume | **Complete (offline)**: `pause`/`event`/`resume` records in the journal replayed from SQLite; engine ingress (`ingest`) with delivery-id idempotency, isolation and fail-closed replay; `resume --app A --dismiss \| --newest \| --revision REV` and read-only `events`; a selection is recorded as pending attended execution, deploys **nothing** and keeps the application blocked until dismissed; `status` shows pauses, held events and decisions; crash sweeps (every write, every SQLite prefix); no event source and no source executor exist, so real delivery and execution are deferred to Milestone D | this PR | `docs/results/DEPLOY_B14_EVENTS_RESUME.md` |
+| B15 | Reviewed live lifecycle integration | **Implementation complete; live evidence partial**: live `replace`, `rollback` and `restore` wired into the maintained CLI behind a gate that is **closed in the shipping binary**; a separate `harpoon-deploy-acceptance` binary (opt-in Cargo feature, no fault injection) opens it for authorized acceptance runs; honours B13 environment pins and B14 pauses; packaging-isolation tests and CI guards; L1–L4 were demonstrated, while L5–L7 and P1–P2 remain untested under the recorded idle-host precondition failure | this PR | `docs/results/DEPLOY_B15_LIVE_INTEGRATION.md` |
+
+### Acceptance disposition (not a new submilestone)
+
+L1–L4 passed live with the local-only acceptance binary and restored the Docker
+inventory; the records remain `docs/results/DEPLOY_MILESTONE_B_LIVE_RESULTS_L1_L3.md`
+and `docs/results/DEPLOY_MILESTONE_B_L4_RESULTS.md`. The campaign then stopped
+before L5–L7 and P1–P2 because the idle-host precondition failed.
+
+The B implementation is closed for planning by explicit owner risk acceptance. The
+requirements' full acceptance criteria remain the truth: the deferred checks below
+are not passed, and no release or shipping claim may treat them as passed.
+
+### Milestone B deferred evidence and closure boundary — 2026-11-01
+
+The latest-main campaign stopped before S0 because precondition 13 (idle host)
+failed. The recorded sample showed load averages 4.29/6.18/7.44 on 11 cores and
+38.67% CPU idle while VS Code, WindowServer, cloudd, Codex and other work were
+active. No campaign Docker mutation or scenario run occurred. The precondition
+record is preserved at
+`/Users/juancastro/harpoon-b-acceptance-evidence/L567-20261101/00-preconditions/preconditions.txt`.
+
+Deferred, still untested checks:
+
+- **L5:** non-secret environment pinning through replacement, failed-final-check
+  restoration, and rollback.
+- **L6:** preliminary health failure while a previous release is running; the
+  previous release must remain unchanged and the candidate must be retained or
+  cleaned according to the recorded plan.
+- **L7:** store-loss visibility and read-only discovery of labelled Docker
+  workloads, including fail-closed handling of a corrupt store copy.
+- **P1:** Dockerfile build overhead at or below the requirements' 1.2× direct-build
+  ceiling.
+- **P2:** no resident engine process and no idle-cost violation for the one-shot
+  CLI.
+
+L1–L4 remain the existing live evidence; they do not substitute for these checks.
+The offline suites, formatting, Clippy, gate-closed assertions, binary identity
+checks, and no-mutation precondition record support implementation closure but do
+not convert deferred checks into PASS. (Update 2026-11-04: L5, L7 and P2 now pass and L6 is
+verified, see `DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md` section 13; P1 is still NOT RUN. The
+shipping gate now opens attended deployment and replacement; see above.)
+
+### Milestone B12: Explicit manual rollback (complete, offline)
+
+Bounded cutover recovery (B11, #126 and #127) is complete as an offline slice. Explicit manual rollback (B12, #128) is
+implemented offline: a developer lists an application's retained releases (`releases`),
+sees which one serves, and names an earlier release by its exact id (`rollback --to`). A target is
+accepted only when its pinned configuration (an immutable image id) and a retained image are
+recorded; it is then re-served from that image and configuration with nothing rebuilt. The serving
+release keeps running until the target has passed its preliminary check; the plan, the anticipated
+interruption and "Application rollback only. Data, volumes and database schema are NOT rolled back."
+are printed first, and the cutover needs `--confirm-rollback`. A failed cutover gets the same single
+bounded restoration of the release that was serving. The rollback is a durable deployment operation
+(source, target, pin, interruption, outcome); the serving release is derived from the records; a
+successful rollback pauses the application's automatic triggers, shown by `status`, with durable
+`resume` state implemented in B14. The live replacement and rollback wiring exists behind the
+separately authorized acceptance gate and, since the gate-opening change, also in the
+shipping gate for attended use (confirmed in the desktop, authorized on the CLI). Nothing here claims
+production readiness. The deferred evidence remains listed in `docs/results/DEPLOY_B12_ROLLBACK.md`
+and `DEPLOY_B11_RECOVERY.md`.
+
+The separate Harpoon 2.0 track is unchanged by this milestone.
+
+**Current: Milestone E — real desktop deployment experience (attended only).** Milestone C is implementation-complete by owner decision and Gate U is NOT PASSED (see the table above). L1–L4 remain preserved live evidence;
+L5–L7 and P1–P2 are explicitly deferred and untested after the idle-host precondition stopped the
+campaign before S0. This owner-risk acceptance does not reopen any live gate. Revisit the deferred
+checks only when a separately authorized, idle-host campaign is worth the release risk.
+
+Out of scope for this initiative's first release: inbound public webhooks on a laptop,
+Vercel Functions/Edge/Build Output parity, a provider abstraction, zero-downtime routing,
+and automatic Docker-state reconciliation (cleanup stays explicit and ownership-verified, as in
+`reconcile`, `teardown` and `cleanup-image`; see ADR 0004).
+
+**Backlog (recorded, unscheduled, not started).**
+* **`*.harpoon.localhost` DNS and reverse proxy:** friendly per-deployment names (for example `app.harpoon.localhost`) need a local
+  reverse proxy, name resolution of `*.localhost` on macOS, and a routing and TLS design. It is routing work beyond Milestone E and
+  is deliberately not part of any current change.
+* **Effective port exposure beyond what Milestone E shows:** the desktop now shows Docker's reported mapping beside the verified
+  Mac-side listener; a fuller reachability view (other interfaces, firewall, the VM boundary) is not built.
+* **Container-card layout in the Containers view** beyond the overflow fixes in section 13 of the Milestone E report.
+
 ## Current Position
+
+### Harpoon 2.0 Step 1 — release hardening IN PROGRESS (2026-10-29)
+
+The Apple Silicon target is the 2.0 release scope. Intel/universal packaging,
+Windows/Linux hosts, and the 2.1 deployment control plane (tracked above) remain
+outside the 2.0 release scope. Podman/rootless is not a 2.0 gate. The published `v2.0.0-rc.1` remains a
+testing prerelease with stale release documentation; the executable startup
+gate is drafted in `docs/releases/v2.0.0-startup-reliability.md`.
+
+Step 1 evidence currently includes offline fail-closed release preflight and
+socket-permission regressions. Guest asset reconciliation remains blocked until
+the untracked kernel/root inputs and a safe external build engine are available;
+no tracked guest asset was overwritten.
 
 ### Harpoon 2 stabilization transition — FEATURE COMPLETE / RELEASE NOT READY (2026-10-17 America/Chicago)
 
@@ -28,8 +218,9 @@ Evidence classes are deliberately separate:
   applicable; offline fixtures, browser review, and production builds do not
   substitute for it.
 - **Acceptance pending:** the native multi-size Shell/CSSH/Quake/Topology/
-  Context matrix; Docker Desktop, Harpoon, Podman/rootless, stale-socket,
-  duplicate-endpoint, and authentication-required Context cases; and the
+  Context matrix; Docker Desktop, Harpoon, stale-socket, duplicate-endpoint,
+  and authentication-required Context cases; Podman/rootless is experimental
+  and not a 2.0 gate; and the
   dedicated WKWebView CPU/input measurements.
 - **Defects / polish:** compact Compose
   network labels with full tooltips, network-attachment hover metadata,
@@ -39,7 +230,7 @@ Evidence classes are deliberately separate:
   broad pruning, and release distribution work (Developer ID/notarization and
   related packaging gates) until feature and reliability acceptance are both
   complete.
-- **Candidate preparation:** the local `2.0.0-rc.1` plan, second-Mac gate,
+- **Candidate preparation:** the `2.0.0-rc.2` plan, second-Mac gate,
   portability matrix, and redacted diagnostic collection procedure are recorded
   in [`docs/releases/v2.0.0-rc.md`](releases/v2.0.0-rc.md). No version bump,
   tag, signing, notarization, push, or publication has occurred.

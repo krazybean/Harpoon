@@ -32,6 +32,13 @@ if [ -f "$DOCKER_CLI" ]; then
   codesign --force --sign "$IDENTITY" --options runtime --timestamp --verbose "$DOCKER_CLI"
   if [ $? -ne 0 ]; then echo "[sign-app] FAIL: Docker CLI sign failed" >&2; exit 1; fi
 fi
+# 1c. Bundled Docker Buildx (upstream binary, re-signed with Harpoon's identity). Required: Harpoon-managed
+# builds never fall back to Docker Desktop or the legacy builder, so a bundle without it must not be signed.
+BUILDX="$APP/Contents/Resources/harpoon/bin/docker-buildx"
+if [ ! -f "$BUILDX" ]; then echo "[sign-app] FAIL: bundled docker-buildx missing at $BUILDX (run harpoon/fetch-buildx.sh and prepare-bundle.sh)" >&2; exit 1; fi
+echo "[sign-app] signing bundled Docker Buildx..." >&2
+codesign --force --sign "$IDENTITY" --options runtime --timestamp --verbose "$BUILDX"
+if [ $? -ne 0 ]; then echo "[sign-app] FAIL: Docker Buildx sign failed" >&2; exit 1; fi
 # 2. Frameworks if present (Swift libs, etc)
 if [ -d "$APP/Contents/Frameworks" ]; then
   for fw in "$APP/Contents/Frameworks"/*; do
@@ -60,5 +67,6 @@ if [ $status -ne 0 ]; then echo "[sign-app] FAIL verify deep strict $status" >&2
 if ! codesign -d --entitlements :- "$INNER" 2>&1 | grep -q "com.apple.security.virtualization"; then echo "[sign-app] FAIL inner missing virtualization" >&2; exit 1; fi
 if codesign -d --entitlements :- "$OUTER" 2>&1 | grep -q "com.apple.security.virtualization"; then echo "[sign-app] FAIL outer should not have virtualization" >&2; exit 1; fi
 if [ ! -f "$APP/Contents/_CodeSignature/CodeResources" ]; then echo "[sign-app] FAIL CodeResources missing" >&2; exit 1; fi
+if ! bash "$REPO_ROOT/tools/check-bundled-buildx.sh" "$APP" --release; then echo "[sign-app] FAIL: bundled Docker Buildx check failed" >&2; exit 1; fi
 echo "[sign-app] PASS Developer ID signed inside-out" >&2
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp" | head -n 10 >&2

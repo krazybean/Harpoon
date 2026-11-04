@@ -1,0 +1,28 @@
+#!/bin/sh
+# Regenerate the reference screenshots (headless Chrome). Usage: sh shoot.sh
+CH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+cd "$(dirname "$0")" && mkdir -p shots
+shot() { "$CH" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --window-size=$2 --virtual-time-budget=3000 --screenshot="$PWD/shots/$1.png" "file://$PWD/index.html#$3&shot=1" >/dev/null 2>&1 && echo "$1"; }
+shot 01-projects-attention 1440,900 "scenario=cutover-restored&screen=home"
+shot 02-app-healthy 1440,900 "scenario=healthy&screen=app&tab=overview"
+shot 03-app-cutover-restored 1440,1000 "scenario=cutover-restored&screen=app&tab=overview"
+shot 04-app-down 1440,900 "scenario=restore-failed&screen=app&tab=overview"
+shot 05-app-recovering 1440,1000 "scenario=recovering&screen=app&tab=overview"
+shot 06-deployments-history 1440,900 "scenario=build-failed&screen=app&tab=deployments"
+shot 07-deployment-build-failed 1440,1100 "scenario=build-failed&screen=dep&dep=d-43"
+shot 08-deployment-recovery-failed 1440,1300 "scenario=restore-failed&screen=dep&dep=d-43"
+shot 09-logs-live-build 1440,760 "scenario=building&screen=app&tab=logs&log=build"
+shot 10-metrics 1440,900 "scenario=healthy&screen=app&tab=metrics"
+shot 11-variables-keychain-locked 1440,1000 "scenario=healthy&screen=app&tab=variables&keychain=locked"
+shot 12-settings 1440,1000 "scenario=healthy&screen=app&tab=settings"
+shot 13-create-source 1440,900 "scenario=healthy&screen=home&dialog=create"
+shot 14-resume-automation 1440,900 "scenario=cutover-restored&screen=app&dialog=resume"
+shot 15-rollback-confirm 1440,900 "scenario=healthy&screen=app&dialog=rollback"
+shot 16-deploy-plan-keychain-locked 1440,900 "scenario=healthy&screen=app&dialog=deploy&keychain=locked"
+shot 17-empty 1440,800 "scenario=empty&screen=home"
+shot 18-loading 1440,600 "scenario=loading&screen=home"
+shot 19-runtime-stopped 1440,900 "scenario=healthy&screen=app&tab=overview&runtime=vm-stopped"
+shot 20-containers-integration 1440,700 "scenario=healthy&nav=containers"
+shot 21-compact-1100 1100,900 "scenario=cutover-restored&screen=app&tab=overview&w=1100"
+shot 22-narrow-860 860,1100 "scenario=cutover-restored&screen=app&tab=overview&w=860"
+shot 23-minimum-700 700,1100 "scenario=build-failed&screen=dep&dep=d-43&w=700"

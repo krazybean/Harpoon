@@ -1,0 +1,35 @@
+name: guest-dns
+
+on:
+  pull_request:
+    paths:
+      - tools/guest-builder/src/init
+      - tools/guest-builder/regression-guest-dns.sh
+      - tools/guest-builder/fixtures/**
+      - harpoon/Sources/GuestDNS.swift
+      - harpoon/Sources/HarpoonDoctorCLI.swift
+      - harpoon/guest-dns-doctor-test.swift
+      - harpoon/regression-guest-dns-doctor.sh
+      - .github/workflows/guest-dns.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/guest-builder/src/init
+      - tools/guest-builder/regression-guest-dns.sh
+      - tools/guest-builder/fixtures/**
+      - harpoon/Sources/GuestDNS.swift
+      - harpoon/guest-dns-doctor-test.swift
+      - harpoon/regression-guest-dns-doctor.sh
+
+permissions:
+  contents: read
+
+jobs:
+  guest-dns:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guest DNS survives DHCP renewal (real udhcpc script, sandboxed)
+        run: bash tools/guest-builder/regression-guest-dns.sh
+      - name: Doctor guest-DNS classification
+        run: sh harpoon/regression-guest-dns-doctor.sh

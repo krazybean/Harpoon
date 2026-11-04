@@ -16,7 +16,8 @@ EXPECTED_INITRAMFS_SHA="384f2d828bbbf237bc57d03c0b5bb371482f01868b5f5fea151a2022
 EXPECTED_MODLOOP_SHA="da142869626ec9d4543ab46482af10b5ff2c8c1c2e01068ddf32360316a06218"
 INITRAMFS_CACHE="$CACHE/initramfs-virt"
 MODLOOP_CACHE="$CACHE/modloop-virt"
-BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot"
+ALPINE_NETBOOT_RELEASE="3.22.6"
+BASE="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot-$ALPINE_NETBOOT_RELEASE"
 mkdir -p "$CACHE" "$(dirname "$OUT")"
 for tool in curl gzip cpio swiftc codesign shasum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "[build-root-vz] FAIL: missing host tool $tool" >&2; exit 1; }
