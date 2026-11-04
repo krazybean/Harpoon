@@ -23,7 +23,7 @@ fn crun(t: &T, gate: &Gate, kc: &MemorySecretStore, stdin: &[u8], args: &[&str])
     }
     let spawns = matches!(
         args.first().copied(),
-        Some("git-deploy" | "git-run" | "watch")
+        Some("repo-add" | "git-deploy" | "git-run" | "watch")
     ) || a.iter().any(|x| x == "--lsof-path");
     // The product is fail-fast about the journal lock. A fixture process (the smart-HTTP server's
     // `git http-backend`) that another test forks can briefly hold a copy of this test's lock until it
@@ -1633,4 +1633,131 @@ fn a_local_folder_with_spaces_registers_as_an_encoded_file_url_and_a_raw_one_lea
         o.stdout,
         o.stderr
     );
+}
+
+// ------------------------------------------------------------------ registration checks a local source
+
+/// Every byte of the journal directory, in name order: equal before and after means nothing was written.
+fn journal_bytes(t: &T) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(t.journal_dir())
+        .map(|d| {
+            d.flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into(),
+                        std::fs::read(e.path()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_local_source_that_is_not_a_usable_repository_is_refused_and_the_journal_is_untouched() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, second) = fixture(&gt.0);
+    // an earlier, valid registration, so there is a journal whose bytes can be compared
+    let ok = add_repo(&t, &kc, "shop", &url(&repo), APP, &[]);
+    assert_exit(&ok, 0);
+    assert!(
+        ok.stdout
+            .contains(&format!("branch main is at {}", &second[..12])),
+        "{}",
+        ok.stdout
+    );
+    let before = journal_bytes(&t);
+    let plain = gt.0.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let empty = gt.0.join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    git(&empty, &["init", "-q"]);
+    for (name, u, branch, want) in [
+        ("a", url(&gt.0.join("missing")), "main", "does not exist"),
+        ("b", url(&plain), "main", "is not a Git repository"),
+        ("c", url(&empty), "main", "has no commits yet"),
+        ("d", url(&repo), "nope", "has no branch \"nope\""),
+    ] {
+        let o = add_repo(&t, &kc, name, &u, SECOND_APP, &["--branch", branch]);
+        assert_exit(&o, 6);
+        assert!(o.stderr.contains(want), "{want}: {}", o.stderr);
+        assert_eq!(journal_bytes(&t), before, "{name}: the journal changed");
+    }
+    assert_eq!(
+        restored(&t).git.repos.len(),
+        1,
+        "only the first registration exists"
+    );
+    assert!(scratch_clean(&t));
+}
+
+#[test]
+fn a_refused_first_registration_creates_no_journal() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let plain = gt.0.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&plain), APP, &[]), 6);
+    assert!(
+        !t.journal_dir().exists(),
+        "no store was created for a refused registration"
+    );
+}
+
+#[test]
+fn registering_an_existing_name_is_refused_with_new_and_replaces_without_it() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    let before = journal_bytes(&t);
+    let o = add_repo(
+        &t,
+        &kc,
+        "shop",
+        &url(&repo),
+        APP,
+        &["--new", "--branch", "release/1"],
+    );
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("already registered"), "{}", o.stderr);
+    assert_eq!(journal_bytes(&t), before);
+    assert_eq!(restored(&t).git.repos["shop"].branch, "main");
+    // the existing command keeps its meaning for scripts that re-register on purpose
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &url(&repo),
+            APP,
+            &["--branch", "release/1"],
+        ),
+        0,
+    );
+    assert_eq!(restored(&t).git.repos["shop"].branch, "release/1");
+}
+
+#[test]
+fn a_remote_source_is_registered_unverified_without_contacting_it() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    // .invalid never resolves: if registration contacted it, this would fail or hang
+    let o = add_repo(
+        &t,
+        &kc,
+        "shop",
+        "https://git.invalid/acme/shop.git",
+        APP,
+        &[],
+    );
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("not verified yet"), "{}", o.stdout);
+    assert!(!o.stdout.contains("verified: "), "{}", o.stdout);
 }

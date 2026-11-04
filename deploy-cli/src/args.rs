@@ -132,8 +132,9 @@ const SPECS: &[Spec] = &[
             "username",
             "known-host",
             "webhook",
+            "git-timeout-secs",
         ],
-        switches: &["simulate"],
+        switches: &["simulate", "new"],
     },
     Spec {
         command: "repo-secret",
@@ -431,7 +432,8 @@ COMMANDS
   rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   repo-add        register a Git repository for an application (--name N --url U --app A --container-port P [--branch B] [--filter PATTERN]... [--webhook github|gitlab]
-                  [--known-host LINE, required for SSH: there is no trust on first use])
+                  [--known-host LINE, required for SSH: there is no trust on first use] [--new: refuse a name that is already registered]
+                  a file:// source is checked first: it must be a Git repository with that branch; other sources are first contacted by watch/git-deploy)
   repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
   repo-list       registered repositories, what was last observed, and the last deployment from each
   git-deploy      check out a branch, tag or exact commit into a bounded private workspace and deploy it; the immutable commit is recorded

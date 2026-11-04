@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { deploymentOf, liveBlock, logLines, observedFrom, toDeployState } from "./deployEngine.ts";
+import { deploymentOf, liveBlock, logLines, observedFrom, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -421,4 +421,48 @@ test("a test namespace is shown, comes only from the backend, and never changes 
   for (const f of ["../hooks/useDeployEngine.ts", "../lib/deployEngine.ts", "../views/deploy/Dialogs.tsx", "../views/deploy/DeployView.tsx"]) {
     assert.doesNotMatch(read(f), /HARPOON_TEST_TMPDIR/, `${f}: the front end never reads or sends the namespace variable`);
   }
+});
+
+// ------------------------------------------------------------------ Add repository reports the engine's real answer
+
+const op = (extra) => ({ ok: true, exitCode: 0, summary: "", detail: "", refusedByGate: false, ...extra });
+
+test("a refused registration carries the engine's own reason, never a bare exit code", () => {
+  const refused = op({ ok: false, exitCode: 6, summary: "the folder /x is not a Git repository.", hint: "Harpoon refused this before changing anything: the folder /x is not a Git repository. Run `git init`." });
+  const o = registrationOutcome(refused);
+  assert.equal(o.ok, false);
+  assert.match(o.message, /not a Git repository/);
+  assert.match(registrationOutcome(op({ ok: false, exitCode: 6, summary: "", hint: null })).message, /Nothing was retried/);
+});
+
+test("a verified registration says so, and an unverified one says the source has not been contacted", () => {
+  const verified = registrationOutcome(op({ detail: "registered repository shop (file:///x) for application app_1; production branch main; credential: none\nverified: the Git repository exists and branch main is at 0123456789ab\n" }));
+  assert.deepEqual([verified.ok, verified.verified, verified.tokenProblem], [true, true, null]);
+  assert.equal(verified.lines.length, 2);
+  const remote = registrationOutcome(op({ detail: "registered repository shop (https://x/y.git) for application app_1; production branch main; credential: none\nnot verified yet: this source is first contacted by `watch`/`git-deploy`, so a wrong address or credential shows up there\n" }));
+  assert.equal(remote.verified, false);
+  assert.match(remote.lines.join(" "), /not verified yet/);
+});
+
+test("a registration whose token could not be saved still reports it as registered, with the token problem", () => {
+  const saved = op({ detail: "registered repository shop (https://x) for application app_1; production branch main; credential: token\n" });
+  const o = registrationOutcome(saved, op({ ok: false, exitCode: 6, summary: "the Keychain is locked", hint: null }));
+  assert.equal(o.ok, true);
+  assert.match(o.tokenProblem, /Keychain is locked/);
+});
+
+test("the Add repository dialog waits for the engine, keeps its input on failure and closes only on success", () => {
+  const d = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const start = d.indexOf("function EngineCreateDialog");
+  const dialog = d.slice(start, d.indexOf("\n}\n", start));
+  assert.match(dialog, /const r = await c\.engine!\.run\(\{ op: "add-repo"/);
+  assert.doesNotMatch(dialog, /void submit\(\);\s*close\(\)/, "it must not close before the engine answers");
+  assert.match(dialog, /onClick=\{\(\) => void submit\(\)\}/);
+  // closing and leaving the page happen only in finish(), which only the success footer and its Esc/scrim use
+  assert.match(dialog, /const finish = \(\) => \{ close\(\); c\.setRoute\(\{ screen: "home" \}\); \}/);
+  assert.match(dialog, /onClose=\{registered \? finish : close\}/);
+  assert.match(dialog, /outcome\?\.ok === false &&/);
+  // the form state is only cleared for the token, and only after a successful registration
+  assert.match(dialog, /if \(r\.ok\) setToken\(""\)/);
+  assert.doesNotMatch(dialog, /setName\(""\)|setLocation\(""\)/);
 });

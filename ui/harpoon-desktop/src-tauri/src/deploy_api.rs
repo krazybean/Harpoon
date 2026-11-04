@@ -1199,6 +1199,8 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "username", username);
             opt(&mut a, "known-host", known_host);
             opt(&mut a, "webhook", webhook);
+            // the desktop only ever creates: an existing name is refused, never silently replaced
+            a.push("--new".into());
             (a, vec![])
         }
         DeployOp::RepoSecret { name, kind, value } => (

@@ -539,3 +539,23 @@ export function failureText(r: OpResult): string {
   const s = (r.summary ?? "").trim();
   return s || "The engine reported an error. Nothing was retried.";
 }
+
+/**
+ * What the Add repository dialog tells the person after the engine answered. A refusal keeps the dialog open
+ * with the engine's own reason; a success lists what the engine confirmed (registered, and whether the source
+ * was verified or is still unverified), and says plainly when the access token could not be saved.
+ */
+export type RegistrationOutcome =
+  | { ok: true; lines: string[]; verified: boolean; tokenProblem: string | null }
+  | { ok: false; message: string };
+
+export function registrationOutcome(r: OpResult, token?: OpResult | null): RegistrationOutcome {
+  if (!r.ok) return { ok: false, message: failureText(r) };
+  const lines = (r.detail ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(registered|verified|not verified)/.test(l));
+  return {
+    ok: true,
+    lines: lines.length ? lines : [r.summary || "The repository was registered."],
+    verified: lines.some((l) => l.startsWith("verified")),
+    tokenProblem: token && !token.ok ? failureText(token) : null,
+  };
+}

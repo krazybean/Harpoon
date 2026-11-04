@@ -936,10 +936,58 @@ fn a_failed_first_registration_leaves_a_store_that_still_reads_as_missing() {
         ("missing", None),
         "the refusal must not blank the screen"
     );
-    // the encoded form registers, and the store then reads as ok
-    let r = run_op(&dir, &add("file:///Users/x/Harpoon%20UI%20Test"), &kc);
+    // a source that can be registered then makes the store read as ok
+    let r = run_op(&dir, &add("https://example.com/acme/shop.git"), &kc);
     assert!(r.ok, "{}", r.detail);
     assert_eq!(snapshot(&dir, 2).store, "ok");
+}
+
+fn add_named(name: &str, url: &str) -> DeployOp {
+    DeployOp::AddRepo {
+        name: name.into(),
+        url: url.into(),
+        app: None,
+        project: None,
+        environment: None,
+        branch: Some("main".into()),
+        filters: vec![],
+        container_port: 3000,
+        dockerfile: None,
+        context: None,
+        target: None,
+        health_path: None,
+        username: None,
+        known_host: None,
+        webhook: None,
+    }
+}
+
+#[test]
+fn a_local_folder_that_is_not_a_git_repository_is_refused_with_a_reason_and_changes_nothing() {
+    let dir = rt("not-git");
+    let kc = MemorySecretStore::new();
+    let plain = rt("not-git-folder");
+    let r = run_op(&dir, &add_named("hello", &format!("file://{}", plain.display())), &kc);
+    assert!(!r.ok, "{}", r.detail);
+    assert!(r.summary.contains("is not a Git repository"), "{}", r.summary);
+    let hint = r.hint.unwrap_or_default();
+    assert!(hint.contains("refused this before changing anything") && hint.contains("git init"), "{hint}");
+    let s = snapshot(&dir, 1);
+    assert_eq!((s.store.as_str(), s.repos.len(), s.apps.len()), ("missing", 0, 0));
+    let r = run_op(&dir, &add_named("hello", "file:///definitely/not/here"), &kc);
+    assert!(!r.ok && r.summary.contains("does not exist"), "{}", r.summary);
+}
+
+#[test]
+fn the_desktop_never_replaces_an_existing_registration_by_adding_the_same_name() {
+    let dir = rt("same-name");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let r = run_op(&dir, &add_named("shop", "https://example.com/other/shop.git"), &kc);
+    assert!(!r.ok && r.summary.contains("already registered"), "{}", r.summary);
+    let s = snapshot(&dir, 2);
+    assert_eq!(s.repos.len(), 1);
+    assert_eq!(s.repos[0].url, "https://example.com/acme/shop.git", "the first registration is unchanged");
 }
 
 #[test]

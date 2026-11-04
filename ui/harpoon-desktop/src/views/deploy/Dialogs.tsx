@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationOutcome, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -319,15 +319,31 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   const folderUrl = kind === "folder" ? fileUrlFor(location.trim()) : null;
   const url = kind === "folder" ? folderUrl ?? "" : location;
   const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || folderUrl !== null);
+  const [submitting, setSubmitting] = useState(false);
+  const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
   const submit = async () => {
-    const r = await c.engine!.run({ op: "add-repo", name, url, project: project || null, branch: branch || null, filters: [], containerPort: Number(port), dockerfile: dockerfile || null, context: null, target: null, healthPath: health || null, username: username || null, knownHost: null, webhook: null, app: null, environment: null });
-    // a token is handed to the Keychain through standard input, never kept here
-    if (r.ok && username && token) await c.engine!.run({ op: "repo-secret", name, kind: "token", value: token });
-    setToken("");
+    setSubmitting(true);
+    setOutcome(null);
+    try {
+      const r = await c.engine!.run({ op: "add-repo", name, url, project: project || null, branch: branch || null, filters: [], containerPort: Number(port), dockerfile: dockerfile || null, context: null, target: null, healthPath: health || null, username: username || null, knownHost: null, webhook: null, app: null, environment: null });
+      // a token is handed to the Keychain through standard input, never kept here
+      const secret = r.ok && username && token ? await c.engine!.run({ op: "repo-secret", name, kind: "token", value: token }) : null;
+      if (r.ok) setToken("");
+      setOutcome(registrationOutcome(r, secret));
+    } finally { setSubmitting(false); }
   };
+  const registered = outcome?.ok === true;
+  const finish = () => { close(); c.setRoute({ screen: "home" }); };
   return (
-    <Dialog wide title="Add repository" sub="Registers a source with Harpoon's deployment engine. Nothing is built or deployed until you choose Deploy." onClose={close}
-      footer={<button className="btn btn--primary" disabled={!valid || c.engine!.busy} onClick={() => { void submit(); close(); c.setRoute({ screen: "home" }); }}>Add repository</button>}>
+    <Dialog wide title="Add repository" sub="Registers a source with Harpoon's deployment engine. Nothing is built or deployed until you choose Deploy." onClose={registered ? finish : close}
+      footer={registered
+        ? <button className="btn btn--primary" onClick={finish}>Done</button>
+        : <button className="btn btn--primary" disabled={!valid || c.engine!.busy || submitting} onClick={() => void submit()}>{submitting ? "Checking…" : "Add repository"}</button>}>
+      {outcome?.ok === false && <Banner tone="err" title="The repository was not added">{outcome.message}</Banner>}
+      {outcome?.ok === true && <Banner tone={outcome.tokenProblem || !outcome.verified ? "warn" : "ok"} title={outcome.verified ? "Repository added and verified" : "Repository added, source not verified yet"}>
+        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        {outcome.tokenProblem ? <div>The access token was not saved: {outcome.tokenProblem} The repository is registered; store the token again before deploying.</div> : null}
+      </Banner>}
       <div className="dp-field"><label>Source</label><div className="dp-seg"><button aria-pressed={kind === "git"} onClick={() => setKind("git")}>Git repository</button><button aria-pressed={kind === "folder"} onClick={() => setKind("folder")}>Local folder (a Git repository on this Mac)</button></div></div>
       <div className="dp-grid dp-grid--2">
         <div className="dp-field"><label htmlFor="rname">Name</label><input id="rname" className="dp-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="storefront" /></div>
