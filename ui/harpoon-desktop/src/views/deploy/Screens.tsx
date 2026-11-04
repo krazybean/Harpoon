@@ -7,7 +7,7 @@ import {
   EVIDENCE_NOTE, formatAge, heroClassFor, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
 } from "../../lib/deployPresentation.ts";
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
-import { liveBlock } from "../../lib/deployEngine.ts";
+import { displayUrl, hasNoSource, liveBlock, NO_SOURCE_REASON } from "../../lib/deployEngine.ts";
 import type { Ctx, Tab } from "./context.ts";
 import { imageParts } from "../../lib/imageName.ts";
 import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
@@ -106,7 +106,7 @@ export function HomeScreen({ c }: { c: Ctx }) {
     const att = needs.find((n) => n.app.id === app.id);
     return (
       <button key={app.id} className={`dp-card ${att ? (att.attention.tone === "err" ? "dp-card--err" : "dp-card--warn") : ""}`} onClick={() => c.setRoute({ screen: "app", appId: app.id, tab: "overview", env: "production" })}>
-        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }} title={app.name}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>{app.external ? <Tag>External · read-only</Tag> : null}</div>
+        <div className="dp-row"><Dot tone={st.tone} /><b style={{ fontSize: 14 }} title={app.name}>{app.name}</b><span className="dp-spacer" /><Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>{app.external ? <Tag>External · read-only</Tag> : null}{app.disconnected ? <Tag>Source disconnected</Tag> : null}</div>
         <div className="dp-muted" style={{ fontSize: 12 }}>
           {app.source.kind === "git" ? <GitBranch size={12} style={{ verticalAlign: -2 }} /> : <Cube size={12} style={{ verticalAlign: -2 }} />} {app.source.label} · {app.source.detail}{st.live && st.releaseId ? ` · release ${st.releaseId}` : ""}
         </div>
@@ -165,6 +165,9 @@ export function AppScreen({ c }: { c: Ctx }) {
   const gate = ext ? EXT_REASON : gated(c);
   const canAct = ok && !ext; // an attached runtime is looked at, never acted on
   const prodOnly = gate ?? (prod ? undefined : SIM_ONLY);
+  const noSource = hasNoSource(c.state.engine, app); // no registered repository: nothing to build a release from
+  const canBuild = canAct && !noSource;
+  const buildWhy = noSource ? NO_SOURCE_REASON : prodOnly;
 
   const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : st.kind === "idle" ? <Cube size={20} /> : <Check size={20} />;
   const heroClass = heroClassFor(st.kind);
@@ -184,6 +187,7 @@ export function AppScreen({ c }: { c: Ctx }) {
         <span className="dp-faint hide-compact" style={{ fontSize: 11 }}>{env === "production" ? `tracks ${app.settings.productionBranch || "its configured branch"}` : c.engine ? "not available in this build" : env === "preview" ? "one instance per branch · TTL 7 d" : "manual · local folder"} · all environments run locally on this Mac</span>
       </div>
       {ext && <Banner tone="info" icon={<Lock size={18} />} title="External · read-only">Recorded in <span className="mono">{app.external!.path}</span> ({app.external!.format === "legacy" ? "legacy journal.wal, read where it is and not migrated" : "SQLite journal"}). This page shows what that journal recorded and what Docker shows now. Harpoon did not create this deployment here and cannot change it.</Banner>}
+      {app.disconnected && <Banner tone="info" icon={<GitBranch size={18} />} title="Source disconnected">Repository <b>{app.disconnected.name}</b> was removed from this application; its last source was <span className="mono">{displayUrl(app.disconnected.url)}</span>. The application, its deployment history, its serving release and Docker resources are unchanged, and rolling back still works. Deploy needs a registered repository: add one named <b>{app.disconnected.name}</b> to connect a source again.</Banner>}
       {!ext && att && <Banner tone={att.tone} title={att.title}
         actions={<>
           {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !canAct || !prod, title: prodOnly })}
@@ -225,8 +229,8 @@ export function AppScreen({ c }: { c: Ctx }) {
           </div>
         </div>
         <div className="dp-actions" data-tour="recovery-actions">
-          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canAct || !prod, title: prodOnly })}
-          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canAct || !prod || !app.releases.length, title: prodOnly })}
+          {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canBuild || !prod, title: buildWhy })}
+          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canBuild || !prod || !app.releases.length, title: buildWhy })}
           {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
           {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !canAct || !prod || !app.previews.length, title: ext ? EXT_REASON : c.engine ? NO_PREVIEWS : prodOnly })}
         </div>
@@ -632,6 +636,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
   const gate = app.external ? EXT_REASON : gated(c);
   const ok = connected(c) && c.route.env === "production" && !gate; // the mock only models Production release state
   const why = gate;
+  const noSource = hasNoSource(c.state.engine, app); // Retry and Redeploy build from a registered repository
   const r = d.recovery;
   const fail = d.status === "failed" || r?.outcome === "in_progress";
   const rel = d.releaseId ? app.releases.find((x) => x.id === d.releaseId) : null;
@@ -644,9 +649,9 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
         <DeploymentPills d={d} /><span className="mono">{d.revision.sha}</span><span>{d.revision.message}</span>{c.engine ? null : <Tag>simulated</Tag>}<span className="dp-spacer" />
         <div className="dp-actions">
           {r?.outcome === "restore_failed" && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !ok, title: why })}
-          {(d.status === "failed" || d.status === "interrupted") && btn("btn--primary", () => c.open({ kind: "retry", depId: d.id }), <><ArrowsClockwise size={14} /> Retry deployment</>, { disabled: !ok, title: why })}
+          {(d.status === "failed" || d.status === "interrupted") && btn("btn--primary", () => c.open({ kind: "retry", depId: d.id }), <><ArrowsClockwise size={14} /> Retry deployment</>, { disabled: !ok || noSource, title: noSource ? NO_SOURCE_REASON : why })}
           {canRollback && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rel!.id }), <><ArrowCounterClockwise size={14} /> Roll back to {rel!.id}</>, { disabled: !ok, title: why })}
-          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><RocketLaunch size={14} /> Redeploy this revision</>, { disabled: !ok, title: why })}
+          {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><RocketLaunch size={14} /> Redeploy this revision</>, { disabled: !ok || noSource, title: noSource ? NO_SOURCE_REASON : why })}
         </div>
       </div>
       {fail && d.failure && (

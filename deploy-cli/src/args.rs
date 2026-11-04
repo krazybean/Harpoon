@@ -134,7 +134,7 @@ const SPECS: &[Spec] = &[
             "webhook",
             "git-timeout-secs",
         ],
-        switches: &["simulate", "new"],
+        switches: &["simulate", "new", "confirm-reclaim"],
     },
     Spec {
         command: "repo-update",
@@ -447,7 +447,7 @@ COMMANDS
   rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   repo-add        register a Git repository for an application (--name N --url U --app A --container-port P [--branch B] [--filter PATTERN]... [--webhook github|gitlab]
-                  [--known-host LINE, required for SSH: there is no trust on first use] [--new: refuse a name that is already registered]
+                  [--known-host LINE, required for SSH: there is no trust on first use] [--new: refuse a name that is already registered] [--confirm-reclaim: connect a source again to the application a removed registration of this name left behind]
                   a file:// source is checked first: it must be a Git repository with that branch; other sources are first contacted by watch/git-deploy)
   repo-update     change a registration's source, branch, Dockerfile path, container port or health path (--name N --expect-registered-ms T, from repo-list; [--url U] [--branch B] [--dockerfile F] [--container-port P] [--health-path /P]);
                   appends a record, deploys nothing, keeps the name, application and credential; needs --confirm-change once the application has deployments; a credentialed repository keeps its host

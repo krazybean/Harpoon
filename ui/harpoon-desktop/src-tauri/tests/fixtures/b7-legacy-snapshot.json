@@ -112,6 +112,7 @@
           "unfinished": false
         }
       ],
+      "disconnected": null,
       "events": [],
       "hostname": "7pw17zaj3b.harpoon.localhost",
       "id": "app_01M6DPQ543ASWBHW7PW17ZAJ3B",

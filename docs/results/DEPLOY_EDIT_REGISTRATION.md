@@ -23,5 +23,5 @@
 ## Concurrency
 
 - The journal writer lock is exclusive. A running deployment holds it, so an edit during a deployment is refused ("another Harpoon process holds the journal").
-- A deployment reads the whole registration once. Because a registration is one record, it can never see a half-applied edit; the `gitsrc` it writes names the URL it actually used.
+- A deployment reads the whole registration once, so it can never see a half-applied edit. Under the writer lock, just before it records the deployment's `gitsrc`, it checks the registration is still exactly the one it was prepared from; if the registration was edited, re-registered or removed meanwhile, nothing is recorded or deployed and the person deploys again. (See `DEPLOY_GIT_REGISTRATION_REMOVAL.md`.)
 - Polling: an observation made before an edit is not a baseline for the new registration (`seen.at_ms >= registration.at_ms`), so a new source is not compared with the old one's commits; the next pass starts a fresh baseline and queues nothing. A poll that read the registration before an edit discards its result if the registration changed when it came to record it. `watch` re-reads the registration every pass.
