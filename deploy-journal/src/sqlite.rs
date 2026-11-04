@@ -486,7 +486,7 @@ mod tests {
     use super::*;
 
     fn temp_db(name: &str) -> (std::path::PathBuf, Db) {
-        // unique per call without a process id: this crate's sources may not name std::process (CI checks it)
+        // unique per call; a CI hygiene check keeps process APIs out of this crate's sources
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
