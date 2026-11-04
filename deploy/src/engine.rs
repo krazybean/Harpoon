@@ -947,7 +947,7 @@ impl Run<'_> {
                         format!(
                             "health evidence{}: {}",
                             if ev.simulated { " (simulated)" } else { "" },
-                            ev.summary()
+                            ev.summary_with_attribution()
                         )
                     })
                     .unwrap_or_default();

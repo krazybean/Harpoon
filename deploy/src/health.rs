@@ -102,11 +102,24 @@ impl CheckEvidence {
         self
     }
 
-    /// `marker-verified` or `path-verified` when the evidence carries a label.
+    /// `marker-verified` or `path-verified` when the evidence carries a label *and* is itself healthy: a failed or
+    /// unverified check never reports a verified attribution, whatever its `expected` text says.
     pub fn attribution(&self) -> Option<&'static str> {
+        if !self.is_healthy() {
+            return None;
+        }
         [ATTRIBUTION_MARKER, ATTRIBUTION_PATH]
             .into_iter()
             .find(|l| self.expected.ends_with(&format!("[{l}]")))
+    }
+
+    /// The summary for a step note or a report line: the observations, then how they were attributed (only the
+    /// fixed label, never a challenge, token or response).
+    pub fn summary_with_attribution(&self) -> String {
+        match self.attribution() {
+            Some(label) => format!("{}; attribution: {label}", self.summary()),
+            None => self.summary(),
+        }
     }
 
     /// Healthy only if the verdict says so *and* the observations back it up. A verdict alone

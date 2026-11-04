@@ -228,6 +228,55 @@ fn a_marker_aware_application_stays_marker_verified_and_never_needs_the_path_pro
     );
 }
 
+/// The durable notes of the checks that ran (what the journal and the desktop show). A first deployment has no
+/// cutover, so its final check has no note.
+fn check_notes(h: &Harness) -> Vec<String> {
+    [Step::PreliminaryCheck, Step::FinalCheck]
+        .iter()
+        .map(|st| h.dep.step(*st).note.clone())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+#[test]
+fn the_attribution_survives_into_the_persisted_step_notes() {
+    for (mode, proof, label) in [
+        (Mode::Plain, Some(Proof::ok()), ATTRIBUTION_PATH),
+        (
+            Mode::Honest,
+            Some(Proof::denying("unused")),
+            ATTRIBUTION_MARKER,
+        ),
+    ] {
+        let (h, r) = deploy(mode, proof, None);
+        assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
+        let notes = check_notes(&h);
+        assert!(!notes.is_empty(), "the preliminary check leaves a note");
+        for note in notes {
+            assert!(
+                note.starts_with("health evidence")
+                    && note.ends_with(&format!("; attribution: {label}")),
+                "{note}"
+            );
+            // only the fixed label: no marker, challenge or address
+            assert!(
+                !note.contains("HARPOON_DEPLOYMENT_MARKER") && !note.contains("192.168."),
+                "{note}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_refused_check_leaves_no_verified_label_in_its_note_or_failure() {
+    let (h, r) = deploy(Mode::WrongMarker, Some(Proof::ok()), None);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    let note = &h.dep.step(Step::PreliminaryCheck).note;
+    assert!(!note.contains("verified"), "{note}");
+    assert!(!h.dep.failure.as_ref().unwrap().message.contains("verified"));
+    assert!(r.evidence.iter().all(|(_, e)| e.attribution().is_none()));
+}
+
 #[test]
 fn without_a_path_proof_only_the_marker_counts_as_before() {
     let (h, r) = deploy(Mode::Plain, None, None);

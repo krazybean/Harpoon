@@ -2727,6 +2727,20 @@ fn print_prepare_failure(
     }
 }
 
+/// One report line for a check's evidence, ending with how the responses were attributed when that was verified.
+fn evidence_line(
+    step: harpoon_deploy::state::Step,
+    ev: &harpoon_deploy::health::CheckEvidence,
+) -> String {
+    format!(
+        "evidence {}: {:?}{} — {}",
+        step.as_str(),
+        ev.verdict,
+        if ev.simulated { " (simulated)" } else { "" },
+        ev.summary_with_attribution()
+    )
+}
+
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     let _ = writeln!(out, "result: {}", r.status);
     for s in &d.steps {
@@ -2747,14 +2761,7 @@ fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     }
     print_recovery(out, d);
     for (step, ev) in &r.evidence {
-        let _ = writeln!(
-            out,
-            "evidence {}: {:?}{} — {}",
-            step.as_str(),
-            ev.verdict,
-            if ev.simulated { " (simulated)" } else { "" },
-            ev.summary()
-        );
+        let _ = writeln!(out, "{}", evidence_line(*step, ev));
     }
     for w in &r.warnings {
         let _ = writeln!(out, "warning: {w}");
@@ -3845,5 +3852,59 @@ mod forwarder_default_tests {
                 "{bad:?} must be refused"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod evidence_line_tests {
+    use super::evidence_line;
+    use harpoon_deploy::health::{
+        run_health, Attempt, CheckEvidence, HealthSpec, Observation, Probe, ATTRIBUTION_MARKER,
+        ATTRIBUTION_PATH,
+    };
+    use harpoon_deploy::state::Step;
+    use harpoon_deploy::time::ManualClock;
+
+    struct Always(Observation);
+    impl Probe for Always {
+        fn attempt(&mut self, at_ms: u64) -> Attempt {
+            Attempt {
+                at_ms,
+                observation: self.0.clone(),
+                container_running: true,
+            }
+        }
+    }
+
+    fn evidence(o: Observation) -> CheckEvidence {
+        let clock = ManualClock::new(0);
+        run_health(
+            &HealthSpec::first_test("/"),
+            "http://127.0.0.1:39001/",
+            &mut Always(o),
+            &clock,
+            &clock,
+        )
+    }
+
+    /// The report line names how a healthy check was attributed, for both kinds, and for nothing else.
+    #[test]
+    fn the_report_line_carries_the_attribution_of_a_healthy_check_only() {
+        for label in [ATTRIBUTION_PATH, ATTRIBUTION_MARKER] {
+            let line = evidence_line(
+                Step::PreliminaryCheck,
+                &evidence(Observation::Status(200)).with_attribution(label),
+            );
+            assert!(line.ends_with(&format!("; attribution: {label}")), "{line}");
+        }
+        // an unlabelled (historical or simulated) check prints exactly what it always did
+        let plain = evidence(Observation::Status(200));
+        assert_eq!(
+            evidence_line(Step::FinalCheck, &plain),
+            format!("evidence final_check: Healthy — {}", plain.summary())
+        );
+        // an unhealthy check is never reported as verified, even if a label is attached to it
+        let failed = evidence(Observation::Status(503)).with_attribution(ATTRIBUTION_PATH);
+        assert!(!evidence_line(Step::FinalCheck, &failed).contains("verified"));
     }
 }
