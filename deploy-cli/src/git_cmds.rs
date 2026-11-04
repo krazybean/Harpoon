@@ -169,12 +169,40 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             )))
         }
     };
+    let name = need("name")?.to_string();
+    let branch = p.value("branch").unwrap_or("main").to_string();
+    let create_only = p.switch("new");
+    if create_only {
+        // an early, cheap refusal; the authoritative check is made again under the writer lock below
+        if let Some(r) = read_repos(&rt)?.get(&name) {
+            return Err(already_registered(&name, &r.url));
+        }
+    }
+    // A local source is checked before the journal writer is opened, so a refusal leaves every record as it
+    // was. Remote sources are not contacted here (see the closing note).
+    let verified = if kind == policy::UrlKind::File {
+        policy::check_ref_name(&branch).map_err(Fail::refused)?;
+        // outside the runtime directory: a first registration must not create the store's folders
+        let ws = dg::Workspace::create(&std::env::temp_dir(), &nonce())
+            .map_err(|e| Fail::failed(e.to_string()))?;
+        Some(
+            dg::local::verify_local(&ws, &url, &branch, &settings(p)?, &Redactor::none())
+                .map_err(|e| Fail::refused(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let (mut journal, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
+    if create_only {
+        if let Some(r) = restored.git.repos.get(&name) {
+            return Err(already_registered(&name, &r.url));
+        }
+    }
     let app: ApplicationId = match p.value("app") {
         Some(a) => a
             .parse()
             .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?,
-        None => match restored.git.repos.get(need("name")?) {
+        None => match restored.git.repos.get(&name) {
             Some(r) => r.app.clone(),
             None => IdGenerator::new(SystemClock, OsEntropy::new())
                 .application()
@@ -182,7 +210,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         },
     };
     let rec = RepoRec {
-        name: need("name")?.to_string(),
+        name,
         url,
         username,
         cred,
@@ -191,7 +219,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         app,
         project: p.value("project").map(str::to_string),
         environment: p.value("environment").map(str::to_string),
-        branch: p.value("branch").unwrap_or("main").to_string(),
+        branch,
         filters: p.values("filter").to_vec(),
         container_port: need("container-port")?
             .parse()
@@ -225,6 +253,18 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             _ => format!(" (store it with `repo-secret --name {} --kind credential`)", rec.name),
         }
     );
+    let _ = match &verified {
+        Some(c) => writeln!(
+            out,
+            "verified: the Git repository exists and branch {} is at {}",
+            rec.branch,
+            c.get(..12).unwrap_or(c)
+        ),
+        None => writeln!(
+            out,
+            "not verified yet: this source is first contacted by `watch`/`git-deploy`, so a wrong address or credential shows up there"
+        ),
+    };
     if rec.webhook.is_some() {
         let _ = writeln!(
             out,
@@ -233,6 +273,18 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         );
     }
     Ok(exit::OK)
+}
+
+fn read_repos(rt: &Runtime) -> Result<std::collections::BTreeMap<String, RepoRec>, Fail> {
+    Ok(store::read_restored(rt)?
+        .map(|r| r.git.repos)
+        .unwrap_or_default())
+}
+
+fn already_registered(name: &str, url: &str) -> Fail {
+    Fail::refused(format!(
+        "repository {name:?} is already registered ({url}). Nothing was changed; choose another name"
+    ))
 }
 
 fn read_stdin_secret(svc: &mut Services) -> Result<SecretValue, Fail> {
