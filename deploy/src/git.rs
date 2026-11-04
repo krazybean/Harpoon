@@ -157,28 +157,131 @@ pub fn ssh_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
-/// The host a URL talks to, lower-cased, without credentials or port; `None` for a `file://` URL. A stored
-/// credential belongs to this host (see `repo-update`).
-pub fn url_host(url: &str) -> Option<String> {
-    if url.starts_with("file://") {
+/// How a repository is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Https,
+    Http,
+    Ssh,
+}
+
+impl Transport {
+    fn name(self) -> &'static str {
+        match self {
+            Transport::Https => "https",
+            Transport::Http => "http",
+            Transport::Ssh => "ssh",
+        }
+    }
+    fn default_port(self) -> u16 {
+        match self {
+            Transport::Https => 443,
+            Transport::Http => 80,
+            Transport::Ssh => 22,
+        }
+    }
+}
+
+/// Where a repository URL sends its requests (and so any saved credential): the transport, the host and the
+/// port, with defaults filled in so `https://h/x` and `https://h:443/x` are the same destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub transport: Transport,
+    pub host: String,
+    pub port: u16,
+}
+
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}://{}:{}", self.transport.name(), self.host, self.port)
+    }
+}
+
+fn user_ok(u: &str) -> bool {
+    !u.is_empty()
+        && u.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-'))
+}
+
+/// A DNS name or dotted address in plain ASCII: labels of letters, digits and inner hyphens, no empty label, no
+/// trailing dot. Anything else (percent-escapes, Unicode, `#`, `?`, backslashes, ...) is not a host we can compare.
+fn host_ok(h: &str) -> bool {
+    h.len() <= 253
+        && h.split('.').all(|l| {
+            (1..=63).contains(&l.len())
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// `[user@]host[:port]`, or a bracketed IPv6 literal for `host`.
+fn authority(a: &str, default: u16) -> Option<(String, u16)> {
+    if a.matches('@').count() > 1 {
         return None;
     }
-    if url.starts_with("ssh://") || !url.contains("://") {
-        return ssh_host(url).map(|h| h.to_ascii_lowercase());
+    let hostport = match a.split_once('@') {
+        Some((u, h)) if user_ok(u) => h,
+        Some(_) => return None,
+        None => a,
+    };
+    let (host, port) = if let Some(rest) = hostport.strip_prefix('[') {
+        let (inner, after) = rest.split_once(']')?;
+        if !after.is_empty() && !after.starts_with(':') {
+            return None;
+        }
+        let ok = inner.contains(':') && inner.chars().all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'));
+        (
+            ok.then(|| format!("[{}]", inner.to_ascii_lowercase()))?,
+            after.strip_prefix(':'),
+        )
+    } else {
+        match hostport.split_once(':') {
+            Some((h, p)) => (host_ok(h).then(|| h.to_ascii_lowercase())?, Some(p)),
+            None => (host_ok(hostport).then(|| hostport.to_ascii_lowercase())?, None),
+        }
+    };
+    let port = match port {
+        None => default,
+        Some(p) if !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) => {
+            p.parse::<u16>().ok().filter(|n| *n != 0)?
+        }
+        Some(_) => return None,
+    };
+    Some((host, port))
+}
+
+/// The destination a repository URL names, or `None` when it cannot be stated unambiguously. It is deliberately
+/// stricter than the URL grammar: Git hands URLs to libcurl and OpenSSH, whose readings of an odd authority (a
+/// `#` or `?` that ends it early, `%2e`, backslashes, a second `@`) can differ from any other parser's, so
+/// anything but plain `[user@]host[:port]` is refused, and so is any URL that is not https, http, ssh or
+/// scp-style. A saved credential may only follow a URL whose destination is known and unchanged.
+pub fn destination(url: &str) -> Option<Destination> {
+    if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '\\') {
+        return None;
     }
-    let authority = url.split_once("://")?.1.split('/').next()?;
-    let host = authority.rsplit('@').next()?;
-    let host = host
-        .rsplit_once(':')
-        .map(|(h, port)| {
-            if port.chars().all(|c| c.is_ascii_digit()) {
-                h
-            } else {
-                host
-            }
-        })
-        .unwrap_or(host);
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+    let schemed = [
+        ("https://", Transport::Https),
+        ("http://", Transport::Http),
+        ("ssh://", Transport::Ssh),
+    ]
+    .into_iter()
+    .find_map(|(prefix, t)| url.strip_prefix(prefix).map(|rest| (t, rest)));
+    let (transport, host, port) = if let Some((t, rest)) = schemed {
+        let (host, port) = authority(rest.split('/').next()?, t.default_port())?;
+        (t, host, port)
+    } else if url.contains("://") {
+        return None;
+    } else {
+        // scp-style `[user@]host:path`: a colon before any slash
+        let (left, path) = url.split_once(':')?;
+        if left.contains('/') || path.is_empty() {
+            return None;
+        }
+        let (host, _) = authority(left, 22)?;
+        (Transport::Ssh, host, 22)
+    };
+    Some(Destination { transport, host, port })
 }
 
 /// `*` matches any run of characters, `?` one character. Used for branch filters.
@@ -849,24 +952,112 @@ mod tests {
         assert!(decode(&f).is_err());
     }
 
+    fn dest(url: &str) -> Option<(Transport, String, u16)> {
+        destination(url).map(|d| (d.transport, d.host, d.port))
+    }
+
     #[test]
-    fn the_host_of_a_url_ignores_credentials_port_and_case() {
-        for (url, host) in [
-            ("https://GitHub.com/acme/shop.git", Some("github.com")),
+    fn plain_urls_name_one_destination_with_defaults_filled_in() {
+        use Transport::*;
+        for (url, want) in [
+            ("https://github.com/acme/shop.git", (Https, "github.com", 443)),
+            ("https://GitHub.com:443/acme/shop.git", (Https, "github.com", 443)),
             (
-                "https://x-access-token@github.com:443/acme/shop.git",
-                Some("github.com"),
+                "https://x-access-token@github.com/acme/shop.git",
+                (Https, "github.com", 443),
             ),
-            ("http://127.0.0.1:8080/r.git", Some("127.0.0.1")),
-            ("ssh://git@Example.com:2222/acme/shop.git", Some("example.com")),
-            ("git@example.com:acme/shop.git", Some("example.com")),
-            ("file:///Users/x/shop", None),
+            (
+                "https://git.example.com:8443/acme/shop.git",
+                (Https, "git.example.com", 8443),
+            ),
+            ("https://git.example.com", (Https, "git.example.com", 443)),
+            ("http://127.0.0.1:8080/r.git", (Http, "127.0.0.1", 8080)),
+            ("http://localhost/r.git", (Http, "localhost", 80)),
+            ("http://[::1]:9000/r.git", (Http, "[::1]", 9000)),
+            ("ssh://git@Example.com:2222/acme/shop.git", (Ssh, "example.com", 2222)),
+            ("ssh://git@example.com/acme/shop.git", (Ssh, "example.com", 22)),
+            ("git@example.com:acme/shop.git", (Ssh, "example.com", 22)),
         ] {
-            assert_eq!(url_host(url).as_deref(), host, "{url}");
+            assert_eq!(dest(url), Some((want.0, want.1.to_string(), want.2)), "{url}");
         }
-        assert_ne!(
-            url_host("https://github.com/a/b"),
-            url_host("https://github.com.evil.example/a/b")
-        );
+        // the same destination written two ways, and destinations that differ
+        for (a, b) in [
+            ("https://h.example/a", "https://H.example:443/b"),
+            ("git@h.example:a/b.git", "ssh://git@h.example/c.git"),
+            ("https://u@h.example/a", "https://h.example/a"),
+        ] {
+            assert!(destination(a).is_some());
+            assert_eq!(destination(a), destination(b), "{a} {b}");
+        }
+        for (a, b) in [
+            ("https://h.example/a", "http://h.example/a"),
+            ("https://h.example/a", "https://h.example:8443/a"),
+            ("https://h.example/a", "https://h.example.evil.example/a"),
+            ("https://h.example/a", "ssh://h.example/a"),
+            ("ssh://git@h.example:22/a", "ssh://git@h.example:2222/a"),
+            ("http://127.0.0.1:1/a", "https://127.0.0.1/a"),
+        ] {
+            assert_ne!(destination(a), destination(b), "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn urls_that_could_be_read_two_ways_name_no_destination() {
+        for url in [
+            // a `#` or `?` ends the authority for libcurl: Git would contact the part before it
+            "https://evil.example#@good.example/x.git",
+            "https://evil.example?@good.example/x.git",
+            "https://evil.example:8443#@good.example/x.git",
+            "http://127.0.0.1:9#@good.example/x.git",
+            "https://good.example#/x.git",
+            "https://good.example?x=1",
+            "ssh://evil.example#@good.example/x.git",
+            "evil.example#@good.example:x.git",
+            // backslashes, percent-escapes, doubled and empty parts
+            "https://evil.example\\@good.example/x.git",
+            "https://good%2eexample/x.git",
+            "https://good.example%2fevil/x.git",
+            "https://a@b@good.example/x.git",
+            "https://:pw@good.example/x.git",
+            "https://u:pw@good.example/x.git",
+            "https://@good.example/x.git",
+            "https://user@/x.git",
+            "https:///x.git",
+            "https://",
+            // ports
+            "https://good.example:/x.git",
+            "https://good.example:0/x.git",
+            "https://good.example:65536/x.git",
+            "https://good.example:+443/x.git",
+            "https://good.example:44a/x.git",
+            "https://good.example:1:2/x.git",
+            // hosts
+            "https://good.example./x.git",
+            "https://./x.git",
+            "https://a..b/x.git",
+            "https://-bad.example/x.git",
+            "https://bad-.example/x.git",
+            "https://b\u{fc}cher.example/x.git",
+            "https://[::1/x.git",
+            "https://[]/x.git",
+            "https://[zz]/x.git",
+            "https://[::1]x/x.git",
+            // other schemes and shapes
+            "file:///Users/x/shop",
+            "git://good.example/x.git",
+            "ftp://good.example/x.git",
+            "ext::sh -c id",
+            "HTTPS://good.example/x.git",
+            "https://good.example/x.git\n",
+            "https://good .example/x.git",
+            "good.example/x:y",
+            "good.example:",
+            "",
+            "-oProxyCommand=x@good.example:y",
+        ] {
+            assert_eq!(destination(url), None, "{url:?}");
+        }
+        // a path may contain anything harmless: only the authority decides the destination
+        assert!(destination("https://good.example/a%20b/c#d?e").is_some());
     }
 }

@@ -317,11 +317,19 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
             v => Ok(v.map(str::to_string)),
         }
     };
+    // The same rules `deploy` applies, so an edit cannot store a value that deploy would refuse.
     if let Some(d) = value("dockerfile")? {
+        if !harpoon_deploy_docker::confine::plain_relative(&d) || d.chars().any(char::is_control) {
+            return Err(Fail::refused(format!(
+                "the Dockerfile path {d:?} must be a relative path inside the build context, such as Dockerfile or docker/Dockerfile.prod (no leading '/', no '..')"
+            )));
+        }
         set("Dockerfile", Some(&d) != rec.dockerfile.as_ref());
         rec.dockerfile = Some(d);
     }
     if let Some(h) = value("health-path")? {
+        commands::health_path_problem(&h)
+            .map_err(|m| Fail::refused(m.replace("--health-path", "the health check path")))?;
         set("health check path", Some(&h) != rec.health_path.as_ref());
         rec.health_path = Some(h);
     }
@@ -341,16 +349,29 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
     }
     let kind = rec.validate().map_err(Fail::refused)?;
     let source_changed = changed.contains(&"source");
-    // A stored token or SSH key belongs to the host it was issued for. Sending it somewhere else would leak it,
-    // so a credentialed registration keeps its host; a different host is a new registration.
-    if current.cred != CredKind::None
-        && policy::url_host(&rec.url) != policy::url_host(&current.url)
-    {
-        return Err(Fail::refused(format!(
-            "the {} stored for repository {name:?} belongs to {}, so its source cannot move to another host. Add a new repository for the other host",
-            if current.cred == CredKind::SshKey { "SSH key" } else { "access token" },
-            policy::url_host(&current.url).unwrap_or_else(|| "its current host".into()),
-        )));
+    // A stored token or SSH key was issued for one destination (transport, host and port). Moving the source
+    // anywhere else, or to an address whose destination cannot be stated unambiguously, would hand the secret to
+    // whoever answers there, so a credentialed registration keeps its destination; anything else is a new
+    // repository. A URL that is unchanged needs no check.
+    if current.cred != CredKind::None && rec.url != current.url {
+        let kind = if current.cred == CredKind::SshKey {
+            "SSH key"
+        } else {
+            "access token"
+        };
+        match (policy::destination(&current.url), policy::destination(&rec.url)) {
+            (Some(was), Some(now)) if was == now => {}
+            (Some(was), Some(now)) => {
+                return Err(Fail::refused(format!(
+                    "the {kind} stored for repository {name:?} belongs to {was}, and the new address goes to {now}. A saved credential keeps its host, port and protocol; add a new repository for the other destination"
+                )))
+            }
+            _ => {
+                return Err(Fail::refused(format!(
+                    "the {kind} stored for repository {name:?} can only follow an address Harpoon can read unambiguously as [user@]host[:port] over https, http or ssh; the old or the new address of this edit is not one. Add a new repository instead"
+                )))
+            }
+        }
     }
     // A local source is checked before the journal writer is opened, as at registration.
     let verified = if kind == policy::UrlKind::File

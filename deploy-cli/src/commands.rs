@@ -120,6 +120,23 @@ fn deployment_config(health_deadline_ms: u64, prior_ledger: Ledger) -> RunConfig
     cfg
 }
 
+/// The rules for a health check path, shared by `deploy` and by `repo-update`, so a registration cannot hold one
+/// that deploy would refuse.
+pub(crate) fn health_path_problem(path: &str) -> Result<(), String> {
+    if !path.starts_with('/') {
+        return Err("--health-path must start with '/'".into());
+    }
+    // The path becomes the request target: CR, LF or any other control character (or a space)
+    // could split or alter the request.
+    if let Some(c) = path.chars().find(|c| c.is_control() || *c == ' ') {
+        return Err(format!(
+            "--health-path contains a control or space character (U+{:04X}); use a plain absolute path such as /health",
+            c as u32
+        ));
+    }
+    Ok(())
+}
+
 fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Result<SourceCfg, Fail> {
     let project = p
         .value("project-dir")
@@ -151,17 +168,7 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
         cfg.dockerfile = d.to_string();
     }
     let path = p.value("health-path").unwrap_or("/");
-    if !path.starts_with('/') {
-        return Err(Fail::config("--health-path must start with '/'"));
-    }
-    // The path becomes the request target: CR, LF or any other control character (or a space)
-    // could split or alter the request.
-    if let Some(c) = path.chars().find(|c| c.is_control() || *c == ' ') {
-        return Err(Fail::config(format!(
-            "--health-path contains a control or space character (U+{:04X}); use a plain absolute path such as /health",
-            c as u32
-        )));
-    }
+    health_path_problem(path).map_err(Fail::config)?;
     cfg.health = harpoon_deploy::health::HealthSpec::first_test(path);
     if let Some(t) = p.value("health-timeout-secs") {
         let secs: u64 = t

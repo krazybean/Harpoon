@@ -2041,8 +2041,130 @@ fn an_edit_made_from_a_stale_view_is_refused_and_does_not_overwrite_the_newer_on
     );
 }
 
+const PLANTED: &str = "tok-PLANTED-must-never-print";
+
+/// A credentialed https registration whose token has been saved (to the in-memory store).
+fn credentialed(t: &T, kc: &MemorySecretStore, url: &str) -> u64 {
+    assert_exit(&add_repo(t, kc, "shop", url, APP, &["--username", "ci"]), 0);
+    assert_exit(
+        &crun(
+            t,
+            &SHIPPING,
+            kc,
+            format!("{PLANTED}\n").as_bytes(),
+            &[
+                "repo-secret",
+                "--simulate",
+                "--name",
+                "shop",
+                "--kind",
+                "credential",
+            ],
+        ),
+        0,
+    );
+    registered_ms(t, "shop")
+}
+
 #[test]
-fn a_credentialed_registration_keeps_its_host_so_its_secret_is_never_sent_elsewhere() {
+fn a_saved_credential_follows_only_an_address_with_the_same_destination() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let at = credentialed(&t, &kc, "https://git.example.com/acme/shop.git");
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    // each of these would send the token somewhere other than git.example.com:443 over https, or names a
+    // destination that two parsers could read differently
+    for other in [
+        // another host, or a look-alike
+        "https://git.evil.example/acme/shop.git",
+        "https://git.example.com.evil.example/acme/shop.git",
+        "https://git.example.com./acme/shop.git",
+        // the authority a URL parser and libcurl read differently
+        "https://git.evil.example#@git.example.com/acme/shop.git",
+        "https://git.evil.example?@git.example.com/acme/shop.git",
+        "https://git.evil.example:8443#@git.example.com/acme/shop.git",
+        "https://git.evil.example\\@git.example.com/acme/shop.git",
+        "https://git%2eexample.com/acme/shop.git",
+        "https://ci@git.evil.example@git.example.com/acme/shop.git",
+        // port and protocol
+        "https://git.example.com:8443/acme/shop.git",
+        "http://git.example.com/acme/shop.git",
+        "http://127.0.0.1:1/acme/shop.git",
+        "ssh://git@git.example.com/acme/shop.git",
+        "git@git.example.com:acme/shop.git",
+        // nothing to send a credential to, or no way to say where
+        "file:///tmp/shop",
+        "https://",
+        "https://git.example.com:/acme/shop.git",
+    ] {
+        let o = update(&t, &kc, "shop", at, &["--url", other]);
+        assert_ne!(o.code, 0, "{other} must be refused: {}", o.stdout);
+        assert!(!o.stdout.contains("updated"), "{other}: {}", o.stdout);
+        for text in [&o.stdout, &o.stderr] {
+            assert!(!text.contains(PLANTED), "{other}: a secret in the output");
+        }
+        let now = restored(&t);
+        assert_eq!(
+            (&now.git, &now.control),
+            (&before.git, &before.control),
+            "{other}"
+        );
+    }
+    assert_eq!(
+        restored(&t).git.repos["shop"].url,
+        "https://git.example.com/acme/shop.git"
+    );
+    // every refusal happens before the journal writer opens
+    assert_eq!(journal_bytes(&t), bytes, "a refused edit moved the journal");
+    // the same destination written differently is fine, and the credential settings are untouched
+    for ok in [
+        "https://git.example.com/acme/shop2.git",
+        "https://GIT.example.com:443/acme/shop3.git",
+        "https://ci@git.example.com/acme/shop4.git",
+    ] {
+        let at = registered_ms(&t, "shop");
+        let o = update(&t, &kc, "shop", at, &["--url", ok]);
+        assert_exit(&o, 0);
+        assert!(o.stdout.contains("not verified yet"), "{ok}: {}", o.stdout);
+    }
+    let r = restored(&t).git.repos["shop"].clone();
+    assert_eq!(
+        (r.url.as_str(), r.cred, r.username.as_deref()),
+        (
+            "https://ci@git.example.com/acme/shop4.git",
+            harpoon_deploy::git::CredKind::Token,
+            Some("ci")
+        )
+    );
+}
+
+#[test]
+fn a_credentialed_registration_with_an_address_that_cannot_be_read_unambiguously_cannot_move() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    // registered before this rule existed (`?` ends this authority for libcurl): its destination is unknowable
+    let at = credentialed(&t, &kc, "https://git.example.com?ref=1/acme/shop.git");
+    let before = restored(&t);
+    for other in [
+        "https://git.example.com?ref=1/acme/other.git",
+        "https://git.example.com/acme/shop.git",
+    ] {
+        let o = update(&t, &kc, "shop", at, &["--url", other]);
+        assert_exit(&o, 6);
+        assert!(o.stderr.contains("unambiguously"), "{other}: {}", o.stderr);
+    }
+    assert_eq!(restored(&t).git, before.git);
+    // an edit that leaves the address alone is not blocked by it
+    assert_exit(
+        &update(&t, &kc, "shop", at, &["--container-port", "4001"]),
+        0,
+    );
+    assert_eq!(restored(&t).git.repos["shop"].container_port, 4001);
+}
+
+#[test]
+fn a_registration_without_a_credential_may_still_change_its_source_freely() {
     let t = T::new();
     let kc = MemorySecretStore::new();
     assert_exit(
@@ -2052,42 +2174,104 @@ fn a_credentialed_registration_keeps_its_host_so_its_secret_is_never_sent_elsewh
             "shop",
             "https://git.example.com/acme/shop.git",
             APP,
-            &["--username", "ci"],
+            &[],
         ),
         0,
     );
     let at = registered_ms(&t, "shop");
-    for other in [
-        "https://git.evil.example/acme/shop.git",
-        "https://git.example.com.evil.example/acme/shop.git",
-        "http://127.0.0.1:1/acme/shop.git",
-        "ssh://git@git.example.com/acme/shop.git",
-    ] {
-        let o = update(&t, &kc, "shop", at, &["--url", other]);
-        assert_exit(&o, 6);
-        assert!(!o.stdout.contains("updated"), "{other}: {}", o.stdout);
-    }
-    assert_eq!(
-        restored(&t).git.repos["shop"].url,
-        "https://git.example.com/acme/shop.git"
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            at,
+            &["--url", "https://other.example.org/acme/shop.git"],
+        ),
+        0,
     );
-    // the same host, another path, is fine, and the credential settings are untouched
+}
+
+#[test]
+fn an_edit_cannot_store_a_deployment_setting_that_deploy_would_refuse() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            "https://git.example.com/acme/shop.git",
+            APP,
+            &[],
+        ),
+        0,
+    );
+    let at = registered_ms(&t, "shop");
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    for (args, want) in [
+        (vec!["--health-path", "healthz"], "must start with '/'"),
+        (vec!["--health-path", "/health z"], "control or space"),
+        (
+            vec!["--health-path", "/health\nHost: x"],
+            "control or space",
+        ),
+        (
+            vec!["--dockerfile", "/etc/passwd"],
+            "relative path inside the build context",
+        ),
+        (
+            vec!["--dockerfile", "../Dockerfile"],
+            "relative path inside the build context",
+        ),
+        (
+            vec!["--dockerfile", "a/../../b"],
+            "relative path inside the build context",
+        ),
+        (
+            vec!["--dockerfile", "./Dockerfile"],
+            "relative path inside the build context",
+        ),
+        (
+            vec!["--dockerfile", "Docker\nfile"],
+            "relative path inside the build context",
+        ),
+        (vec!["--container-port", "0"], "port number"),
+        (vec!["--container-port", "65536"], "port number"),
+    ] {
+        let o = update(&t, &kc, "shop", at, &args);
+        assert!(o.code == 6 || o.code == 2, "{args:?}: exit {}", o.code);
+        assert!(o.stderr.contains(want), "{args:?}: {}", o.stderr);
+    }
+    assert_eq!(restored(&t).git, before.git);
+    assert_eq!(journal_bytes(&t), bytes);
+    // values deploy accepts are stored
     let o = update(
         &t,
         &kc,
         "shop",
         at,
-        &["--url", "https://git.example.com/acme/shop2.git"],
+        &[
+            "--health-path",
+            "/health?probe=1",
+            "--dockerfile",
+            "docker/Dockerfile.prod",
+            "--container-port",
+            "65535",
+        ],
     );
     assert_exit(&o, 0);
-    assert!(o.stdout.contains("not verified yet"), "{}", o.stdout);
-    let r = restored(&t).git.repos["shop"].clone();
+    let r = &restored(&t).git.repos["shop"];
     assert_eq!(
-        (r.url.as_str(), r.cred, r.username.as_deref()),
         (
-            "https://git.example.com/acme/shop2.git",
-            harpoon_deploy::git::CredKind::Token,
-            Some("ci")
+            r.health_path.as_deref(),
+            r.dockerfile.as_deref(),
+            r.container_port
+        ),
+        (
+            Some("/health?probe=1"),
+            Some("docker/Dockerfile.prod"),
+            65535
         )
     );
 }
@@ -2164,4 +2348,328 @@ fn an_edit_starts_a_fresh_polling_baseline_so_a_new_source_is_not_compared_with_
     commit(&repo, "VERSION", "four\n");
     let o = poll();
     assert!(o.stdout.contains("queued as"), "{}", o.stdout);
+}
+
+// ------------------------------------------------------------------ a poll that straddles an edit
+
+/// `repo-update` run directly, without the fork gate's `holding()`. Only the race test uses it: there the poll
+/// is already inside `spawning`, which keeps every other test from forking or opening a journal meanwhile.
+fn update_direct(
+    t: &T,
+    kc: &MemorySecretStore,
+    name: &str,
+    expect: u64,
+    extra: &[&str],
+) -> Outcome {
+    let mut a: Vec<String> = [
+        "repo-update",
+        "--simulate",
+        "--name",
+        name,
+        "--expect-registered-ms",
+        &expect.to_string(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    a.extend(extra.iter().map(|s| s.to_string()));
+    a.extend(["--runtime-dir".to_string(), t.rt.display().to_string()]);
+    let mut input: &[u8] = b"";
+    let mut svc = Services {
+        secrets: kc,
+        stdin: &mut input,
+        stdin_is_terminal: false,
+        next: None,
+    };
+    run_with(&a, &SHIPPING, &mut svc)
+}
+
+/// Releases a held request even when an assertion fails first, so the server thread never waits on a dead test.
+struct ReleaseOnDrop<'a>(&'a HttpGit);
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[test]
+fn a_poll_that_starts_before_an_edit_and_finishes_after_it_discards_what_it_saw() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    let served = gt.0.join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let bare = served.join("shop.git");
+    git(
+        &gt.0,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let server = HttpGit::start(served, "x-access-token", "tok-race-ONE");
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &server.url("shop.git"),
+            APP,
+            &["--username", "x-access-token"],
+        ),
+        0,
+    );
+    assert_exit(
+        &crun(
+            &t,
+            &SHIPPING,
+            &kc,
+            b"tok-race-ONE\n",
+            &[
+                "repo-secret",
+                "--simulate",
+                "--name",
+                "shop",
+                "--kind",
+                "credential",
+            ],
+        ),
+        0,
+    );
+    let poll = || sim(&t, &kc, &["watch", "--simulate", "--once", "--queue-only"]);
+    let push = |body: &str| {
+        commit(&repo, "VERSION", body);
+        git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
+    };
+    let wait = std::time::Duration::from_secs(30);
+    // the same poll on another thread, built from owned values only (the test fixture itself is not Sync); like
+    // `crun`, it runs inside the fork gate's `spawning`
+    let rt = t.rt.display().to_string();
+    let poll_in_background = || {
+        let a: Vec<String> = [
+            "watch",
+            "--simulate",
+            "--once",
+            "--queue-only",
+            "--runtime-dir",
+            &rt,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut input: &[u8] = b"";
+        let mut svc = Services {
+            secrets: &kc,
+            stdin: &mut input,
+            stdin_is_terminal: false,
+            next: None,
+        };
+        spawning(|| run_with(&a, &SHIPPING, &mut svc))
+    };
+
+    // the baseline
+    let o = poll();
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("first seen"), "{}", o.stdout);
+
+    // control: with the request held and then released and NO edit, the poll records what it saw and queues it
+    push("two-b\n");
+    server.hold_next_request();
+    std::thread::scope(|sc| {
+        let _release = ReleaseOnDrop(&server);
+        let running = sc.spawn(poll_in_background);
+        assert!(
+            server.wait_until_held(wait),
+            "the poll never reached the server"
+        );
+        server.release();
+        let o = running.join().unwrap();
+        assert_exit(&o, 0);
+        assert!(o.stdout.contains("queued as"), "{}", o.stdout);
+    });
+    let seen_after_control = restored(&t).git.seen.clone();
+    assert_eq!(restored(&t).control.events.len(), 1);
+
+    // the race: the poll has sent its request when the registration is edited; it finishes afterwards
+    push("three\n");
+    let at = registered_ms(&t, "shop");
+    server.hold_next_request();
+    std::thread::scope(|sc| {
+        let _release = ReleaseOnDrop(&server);
+        let running = sc.spawn(poll_in_background);
+        assert!(
+            server.wait_until_held(wait),
+            "the poll never reached the server"
+        );
+        assert_exit(
+            &update_direct(&t, &kc, "shop", at, &["--container-port", "4242"]),
+            0,
+        );
+        server.release();
+        let o = running.join().unwrap();
+        assert_exit(&o, 0);
+        assert!(
+            o.stdout
+                .contains("its registration changed while it was being polled"),
+            "{}",
+            o.stdout
+        );
+        assert!(!o.stdout.contains("queued as"), "{}", o.stdout);
+    });
+    let after = restored(&t);
+    assert_eq!(
+        after.git.repos["shop"].container_port, 4242,
+        "the edit stands"
+    );
+    assert_eq!(
+        after.git.seen, seen_after_control,
+        "the stale observation was not recorded"
+    );
+    assert_eq!(
+        after.control.events.len(),
+        1,
+        "the stale observation queued nothing"
+    );
+
+    // the next pass starts from the new registration: a fresh baseline, still nothing queued
+    let o = poll();
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("first seen"), "{}", o.stdout);
+    assert_eq!(restored(&t).control.events.len(), 1);
+}
+
+// ------------------------------------------------------------------ a deployed release is not touched by an edit
+
+#[test]
+fn editing_a_deployed_application_leaves_its_release_ledger_configuration_and_workload_exactly_as_they_were(
+) {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    // a succeeded, serving release: deployment, pinned configuration, image/container/port lease in the ledger,
+    // and its running container in the fake Docker
+    let (_image, cid) = seed_release(&t, true, &[("MODE", "one")]);
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &url(&repo),
+            APP,
+            &["--dockerfile", "Dockerfile"],
+        ),
+        0,
+    );
+    let prev: DeploymentId = PREV.parse().unwrap();
+    {
+        let _h = holding();
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.git(&harpoon_deploy::git::GitRecord::Source(
+            harpoon_deploy::git::SourceRec {
+                deployment: prev.clone(),
+                repo: "shop".into(),
+                url: url(&repo),
+                selector: harpoon_deploy::git::SelectorKind::Branch,
+                requested: "main".into(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                trigger: "manual".into(),
+                delivery: None,
+                at_ms: 104,
+            },
+        ))
+        .unwrap();
+    }
+    let app: ApplicationId = APP.parse().unwrap();
+    let workload = |t: &T| {
+        t.h.docker.with(|s| {
+            s.containers
+                .iter()
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.name.clone(),
+                        c.running,
+                        c.started_at.clone(),
+                        c.restart_count,
+                        c.host_port,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let before = restored(&t);
+    let serving_before =
+        harpoon_deploy::serving::serving_release(&before.ledger, &before.deployments, &app);
+    assert!(serving_before.is_some(), "the fixture must be serving");
+    let (workload_before, requests_before) = (workload(&t), t.docker_requests());
+    assert_eq!(workload_before.len(), 1);
+    assert!(workload_before[0].2, "the container is running");
+
+    let at = registered_ms(&t, "shop");
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        at,
+        &[
+            "--branch",
+            "release/1",
+            "--dockerfile",
+            "docker/Dockerfile.prod",
+            "--container-port",
+            "9090",
+            "--health-path",
+            "/ready",
+            "--confirm-change",
+        ],
+    );
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("Nothing was deployed, rebuilt, restarted or replaced"),
+        "{}",
+        o.stdout
+    );
+
+    let after = restored(&t);
+    // the registration is new; everything a release is made of is as it was
+    assert_eq!(after.git.repos["shop"].container_port, 9090);
+    assert_eq!(
+        after.deployments, before.deployments,
+        "deployment records, pinned configuration included"
+    );
+    assert_eq!(after.deployments[0].pinned, before.deployments[0].pinned);
+    assert_eq!(after.ledger, before.ledger, "the Docker ledger");
+    assert_eq!(
+        after.config, before.config,
+        "configuration definitions and snapshots"
+    );
+    assert_eq!(after.logs, before.logs);
+    assert_eq!(after.control, before.control);
+    assert_eq!(
+        after.git.sources, before.git.sources,
+        "the release keeps its recorded source"
+    );
+    assert_eq!(after.git.seen, before.git.seen);
+    assert_eq!(
+        harpoon_deploy::serving::serving_release(&after.ledger, &after.deployments, &app),
+        serving_before,
+        "the serving release"
+    );
+    assert_eq!(
+        workload(&t),
+        workload_before,
+        "the running container: same id, state, start time and restarts"
+    );
+    assert_eq!(
+        t.docker_requests(),
+        requests_before,
+        "Docker was not contacted at all"
+    );
+    untouched(&t, &cid);
 }

@@ -417,7 +417,7 @@ function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: 
         <div className="dp-field"><label htmlFor="ehp">Health check path</label><input id="ehp" className="dp-input" value={form.health} placeholder="/" readOnly={saved} onChange={(e) => set({ health: e.target.value })} /></div>
       </div>
       {edit.problem && !saved ? <small style={{ color: "var(--error-fg)" }}>{edit.problem}</small> : null}
-      {base.credential !== "none" && <Banner tone="info" icon={<Key size={18} />} title="This repository has a saved credential">It stays with this repository and its host. The path can change, but not the host: to use another host, add a new repository.</Banner>}
+      {base.credential !== "none" && <Banner tone="info" icon={<Key size={18} />} title="This repository has a saved credential">It stays with this repository's destination: the same host, port and protocol (https, http or ssh). The path can change, but not where requests go. To use another destination, add a new repository.</Banner>}
       {hasHistory && !saved && <label className="dp-row" style={{ gap: 8, alignItems: "flex-start" }}><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /><span>This application already has deployments. They keep the source they were built from; the next deployment will use these values.</span></label>}
       <Plan>
         <Row icon={<Check size={14} />}>{edit.changed.length ? <>Record a new version of <b>{base.name}</b>: {edit.changed.join(", ")}</> : "Nothing changed yet"}</Row>
