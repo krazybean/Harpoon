@@ -166,7 +166,7 @@ export type EngineMeta = {
   store: "missing" | "ok" | "error";
   storeError: string | null;
   writerHeld: boolean;
-  gate: { liveDeploy: boolean; liveReplacement: boolean; reason: string };
+  gate: { liveDeploy: boolean; liveReplacement: boolean; gitRemoval?: boolean; reason: string };
   repos: EngineRepo[];
   /** The last refresh failed; what is shown is the last good snapshot (or nothing). */
   loadError: string | null;

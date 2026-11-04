@@ -3473,17 +3473,6 @@ fn a_removed_registrations_credential_destination_survives_every_removal_and_reg
     assert_eq!(saved_token(&kc), PLANTED.as_bytes());
 }
 
-#[test]
-fn this_build_has_no_command_that_removes_a_registration() {
-    let t = T::new();
-    let kc = MemorySecretStore::new();
-    for cmd in ["repo-remove", "repo-drop", "repo-delete", "repo-retire"] {
-        assert!(!harpoon_deploy_cli::command_names().contains(&cmd), "{cmd}");
-        let o = sim(&t, &kc, &[cmd, "--name", "shop"]);
-        assert_exit(&o, 2);
-    }
-}
-
 // ------------------------------------------------------------------ races with a removal (the request is held mid-flight)
 
 /// `shop` registered with a saved token against a local smart-HTTP server that can hold a request.
@@ -3654,4 +3643,943 @@ fn a_deployment_that_straddles_a_removal_or_an_edit_records_no_source_and_deploy
         assert!(scratch_clean(&t), "the checkout was cleaned up");
         assert_eq!(after.git.repos.is_empty(), removal);
     }
+}
+
+// ------------------------------------------------------------------ repo-remove
+
+fn marker(t: &T) -> std::path::PathBuf {
+    std::fs::canonicalize(&t.rt)
+        .unwrap()
+        .join("git-removal.enabled")
+}
+
+/// What the person authorizing removal for this runtime does by hand: a mode-600 file naming the runtime.
+fn authorize_removal(t: &T) {
+    use std::os::unix::fs::PermissionsExt;
+    let canon = std::fs::canonicalize(&t.rt).unwrap();
+    std::fs::write(
+        marker(t),
+        format!("harpoon-git-removal 1\nruntime={}\n", canon.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(marker(t), std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn run_removal(t: &T, gate: &Gate, args: &[&str]) -> Outcome {
+    let mut a: Vec<String> = ["repo-remove", "--simulate"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    a.extend(args.iter().map(|s| s.to_string()));
+    a.extend(["--runtime-dir".to_string(), t.rt.display().to_string()]);
+    let mut input: &[u8] = b"";
+    // a Keychain that fails the test on any access: removal must never touch a secret
+    let mut svc = Services {
+        secrets: &ForbiddenStore,
+        stdin: &mut input,
+        stdin_is_terminal: false,
+        next: None,
+    };
+    run_with(&a, gate, &mut svc)
+}
+
+/// `repo-remove` as a person runs it, in the fork gate like every other command.
+fn remove_with(t: &T, gate: &Gate, name: &str, expect: u64, extra: &[&str]) -> Outcome {
+    let e = expect.to_string();
+    let mut args = vec!["--name", name, "--expect-registered-ms", &e];
+    args.extend_from_slice(extra);
+    let _h = holding();
+    run_removal(t, gate, &args)
+}
+
+fn remove_shop(t: &T) -> Outcome {
+    remove_with(
+        t,
+        &ACCEPTANCE,
+        "shop",
+        registered_ms(t, "shop"),
+        &["--confirm-removal"],
+    )
+}
+
+/// The same without the fork gate, for the race tests (the poll or deployment is inside `spawning`).
+fn remove_direct(t: &T, name: &str) -> Outcome {
+    let e = registered_ms(t, name).to_string();
+    run_removal(
+        t,
+        &ACCEPTANCE,
+        &[
+            "--name",
+            name,
+            "--expect-registered-ms",
+            &e,
+            "--confirm-removal",
+        ],
+    )
+}
+
+fn db_bytes(t: &T) -> Vec<u8> {
+    std::fs::read(t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE)).unwrap()
+}
+
+fn backup_files(t: &T) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(t.journal_dir().join("backups"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn schema_of(t: &T) -> i64 {
+    harpoon_deploy_journal::inspect_file(&t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE))
+        .unwrap()
+        .schema
+}
+
+/// Nothing about the journal changed, and no backup was made.
+fn assert_untouched(
+    t: &T,
+    bytes: &[(String, Vec<u8>)],
+    before: &harpoon_deploy_journal::Restored,
+    what: &str,
+) {
+    assert_eq!(&journal_bytes(t), bytes, "{what}: the journal changed");
+    assert_eq!(&restored(t), before, "{what}: the state changed");
+    assert!(backup_files(t).is_empty(), "{what}: a backup was made");
+    assert!(
+        restored(t).git.retired.is_empty(),
+        "{what}: a removal was recorded"
+    );
+}
+
+#[test]
+fn removal_is_closed_without_the_gate_the_marker_and_an_isolated_runtime_and_nothing_is_opened_to_find_out(
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    let go = |gate: &Gate| remove_with(&t, gate, "shop", at, &["--confirm-removal"]);
+
+    // the shipping gate, the desktop's gate and a closed gate: refused, however well the runtime is authorized
+    authorize_removal(&t);
+    for (label, gate) in [
+        ("shipping", &SHIPPING),
+        ("closed", &CLOSED),
+        ("trigger-open", &OPEN),
+    ] {
+        let o = go(gate);
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("not enabled in this build"),
+            "{label}: {}",
+            o.stderr
+        );
+        assert_untouched(&t, &bytes, &before, label);
+    }
+    std::fs::remove_file(marker(&t)).unwrap();
+
+    // a capable build without a marker
+    let o = go(&ACCEPTANCE);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("marker") && o.stderr.contains("missing"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "no marker");
+
+    let canon = std::fs::canonicalize(&t.rt).unwrap();
+    let good = format!("harpoon-git-removal 1\nruntime={}\n", canon.display());
+    let write = |text: &str, mode: u32| {
+        let _ = std::fs::remove_file(marker(&t));
+        std::fs::write(marker(&t), text).unwrap();
+        std::fs::set_permissions(marker(&t), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    for (label, text, mode, want) in [
+        ("group-readable", good.clone(), 0o640, "mode 600"),
+        ("world-writable", good.clone(), 0o666, "mode 600"),
+        (
+            "another runtime",
+            "harpoon-git-removal 1\nruntime=/private/tmp/some-other-runtime\n".to_string(),
+            0o600,
+            "does not name this runtime",
+        ),
+        (
+            "another version",
+            format!("harpoon-git-removal 2\nruntime={}\n", canon.display()),
+            0o600,
+            "does not name this runtime",
+        ),
+        ("empty", String::new(), 0o600, "does not name this runtime"),
+        (
+            "path only",
+            format!("runtime={}\n", canon.display()),
+            0o600,
+            "does not name this runtime",
+        ),
+        (
+            "too large",
+            format!("{good}{}", "#".repeat(5000)),
+            0o600,
+            "too large",
+        ),
+    ] {
+        write(&text, mode);
+        let o = go(&ACCEPTANCE);
+        assert_exit(&o, 6);
+        assert!(o.stderr.contains(want), "{label}: {}", o.stderr);
+        assert_untouched(&t, &bytes, &before, label);
+    }
+    // a link to a good marker is not a marker
+    std::fs::remove_file(marker(&t)).unwrap();
+    let elsewhere = t.rt.join("elsewhere.txt");
+    std::fs::write(&elsewhere, &good).unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, marker(&t)).unwrap();
+    let o = go(&ACCEPTANCE);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("not a regular file"), "{}", o.stderr);
+    assert_untouched(&t, &bytes, &before, "a link");
+
+    // and with a good marker it works (the same call, so the refusals above were about authorization alone)
+    std::fs::remove_file(marker(&t)).unwrap();
+    authorize_removal(&t);
+    assert_exit(&go(&ACCEPTANCE), 0);
+}
+
+#[test]
+fn the_first_removal_backs_up_the_journal_stamps_schema_2_and_changes_nothing_else() {
+    for credential in [false, true] {
+        let t = T::new();
+        let kc = MemorySecretStore::new();
+        deployed_registered(&t, &kc, credential, false);
+        authorize_removal(&t);
+        let app: ApplicationId = APP.parse().unwrap();
+        let before = restored(&t);
+        let rows_before = harpoon_deploy_journal::inspect_file(
+            &t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE),
+        )
+        .unwrap()
+        .rows;
+        let serving =
+            harpoon_deploy::serving::serving_release(&before.ledger, &before.deployments, &app);
+        assert!(serving.is_some());
+        assert_eq!(schema_of(&t), 1);
+        let requests = t.docker_requests();
+
+        let o = remove_shop(&t);
+        assert_exit(&o, 0);
+        assert!(
+            o.stdout
+                .contains("removed the registration of repository shop"),
+            "{}",
+            o.stdout
+        );
+        assert!(
+            o.stdout
+                .contains("Nothing was built, deployed, stopped or restarted"),
+            "{}",
+            o.stdout
+        );
+        assert!(
+            o.stdout.contains("backup:") && o.stdout.contains("sha256:"),
+            "{}",
+            o.stdout
+        );
+
+        // the verified backup: private, faithful, with its digest beside it
+        use std::os::unix::fs::PermissionsExt;
+        let files = backup_files(&t);
+        assert_eq!(files.len(), 2, "{files:?}");
+        let (db, sidecar) = (&files[0], &files[1]);
+        assert!(
+            db.ends_with(".sqlite3") && sidecar.ends_with(".sqlite3.sha256"),
+            "{files:?}"
+        );
+        let dir = t.journal_dir().join("backups");
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for f in &files {
+            assert_eq!(
+                std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{f}"
+            );
+        }
+        let digest = harpoon_deploy_git::sha256::to_hex(&harpoon_deploy_git::sha256::sha256(
+            &std::fs::read(dir.join(db)).unwrap(),
+        ));
+        assert!(std::fs::read_to_string(dir.join(sidecar))
+            .unwrap()
+            .starts_with(&format!("{digest}  {db}\n")));
+        assert!(o.stdout.contains(&digest), "the digest is reported");
+        let facts = harpoon_deploy_journal::inspect_file(&dir.join(db)).unwrap();
+        assert_eq!((facts.integrity.as_str(), facts.schema), ("ok", 1));
+        assert_eq!(
+            facts.rows, rows_before,
+            "record for record the journal as it was"
+        );
+        assert_eq!(
+            harpoon_deploy_journal::replay_file(&dir.join(db)).unwrap(),
+            before,
+            "and it replays to the same state"
+        );
+
+        // the journal: one record and the stamp, nothing else
+        assert_eq!(schema_of(&t), 2);
+        let after = restored(&t);
+        assert!(after.git.repos.is_empty() && after.git.retired.len() == 1);
+        assert_eq!(after.git.retired[0].app, app);
+        assert_eq!(after.deployments, before.deployments, "deployment records");
+        assert_eq!(after.ledger, before.ledger, "the Docker ledger");
+        assert_eq!(
+            after.config, before.config,
+            "configuration and the saved-credential record"
+        );
+        assert_eq!(after.git.sources, before.git.sources, "provenance");
+        assert_eq!(after.control, before.control);
+        assert_eq!(
+            harpoon_deploy::serving::serving_release(&after.ledger, &after.deployments, &app),
+            serving,
+            "the serving release"
+        );
+        let rows_after = harpoon_deploy_journal::inspect_file(
+            &t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE),
+        )
+        .unwrap()
+        .rows;
+        assert_eq!(
+            &rows_after[..rows_before.len()],
+            &rows_before[..],
+            "append-only: every earlier record is as it was"
+        );
+        assert_eq!(rows_after.len(), rows_before.len() + 1);
+        assert_eq!(t.docker_requests(), requests, "Docker was not contacted");
+        if credential {
+            assert_eq!(
+                saved_token(&kc),
+                PLANTED.as_bytes(),
+                "the stored credential is untouched"
+            );
+        }
+        let list = sim(&t, &kc, &["repo-list"]);
+        assert!(
+            list.stdout.contains("shop  (removed: source disconnected)"),
+            "{}",
+            list.stdout
+        );
+    }
+}
+
+#[test]
+fn a_removal_that_may_not_happen_is_refused_before_anything_is_written() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    for (label, args, code, want) in [
+        (
+            "no confirmation",
+            vec!["--name", "shop"],
+            2,
+            "--expect-registered-ms is required",
+        ),
+        (
+            "not confirmed",
+            vec!["--name", "shop", "--expect-registered-ms", "1"],
+            6,
+            "--confirm-removal",
+        ),
+        (
+            "no name",
+            vec!["--expect-registered-ms", "1", "--confirm-removal"],
+            2,
+            "--name is required",
+        ),
+        (
+            "a bad version",
+            vec![
+                "--name",
+                "shop",
+                "--expect-registered-ms",
+                "yesterday",
+                "--confirm-removal",
+            ],
+            2,
+            "registration time",
+        ),
+        (
+            "a stale version",
+            vec![
+                "--name",
+                "shop",
+                "--expect-registered-ms",
+                "1",
+                "--confirm-removal",
+            ],
+            6,
+            "was changed after you opened it",
+        ),
+        (
+            "an unknown name",
+            vec![
+                "--name",
+                "nope",
+                "--expect-registered-ms",
+                "1",
+                "--confirm-removal",
+            ],
+            6,
+            "is not registered",
+        ),
+    ] {
+        let o = {
+            let _h = holding();
+            run_removal(&t, &ACCEPTANCE, &args)
+        };
+        assert_exit(&o, code);
+        assert!(o.stderr.contains(want), "{label}: {}", o.stderr);
+        assert_untouched(&t, &bytes, &before, label);
+    }
+    // an edit since the person looked: the version they were shown is gone
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            at,
+            &["--container-port", "4001", "--confirm-change"],
+        ),
+        0,
+    );
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    let o = remove_with(&t, &ACCEPTANCE, "shop", at, &["--confirm-removal"]);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("was changed after you opened it"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "an edit");
+    assert!(restored(&t).git.repos.contains_key("shop"));
+}
+
+#[test]
+fn removal_is_refused_while_held_or_selected_events_exist_and_never_dismisses_them() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, true); // a held event
+    authorize_removal(&t);
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    assert_eq!(before.control.events.len(), 1);
+    let o = remove_shop(&t);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("held or selected Git events")
+            && o.stderr.contains("never dismisses or replays"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "a held event");
+    // selecting it is not resolving it
+    let rev = before.control.events[0].rec.revision.clone();
+    assert_exit(
+        &sim(&t, &kc, &["resume", "--app", APP, "--revision", &rev]),
+        0,
+    );
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    assert!(before
+        .control
+        .pending_selection(&APP.parse().unwrap())
+        .is_some());
+    let o = remove_shop(&t);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("held or selected Git events"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "a selected event");
+    // resolved by the person (dismissed), it no longer blocks, and the event record is kept as history
+    assert_exit(&sim(&t, &kc, &["resume", "--app", APP, "--dismiss"]), 0);
+    let events = restored(&t).control.events.clone();
+    assert_exit(&remove_shop(&t), 0);
+    assert_eq!(
+        restored(&t).control.events,
+        events,
+        "removal neither dismissed nor rewrote any event"
+    );
+}
+
+#[test]
+fn a_repeated_or_stale_removal_is_refused_and_adds_no_record_or_backup() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    assert_exit(
+        &remove_with(&t, &ACCEPTANCE, "shop", at, &["--confirm-removal"]),
+        0,
+    );
+    let (bytes, after, files) = (journal_bytes(&t), restored(&t), backup_files(&t));
+    for expect in [at, at + 1, 1] {
+        let o = remove_with(&t, &ACCEPTANCE, "shop", expect, &["--confirm-removal"]);
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("was already removed") && o.stderr.contains("keeps its history"),
+            "{}",
+            o.stderr
+        );
+    }
+    assert_eq!(
+        (journal_bytes(&t), restored(&t), backup_files(&t)),
+        (bytes, after, files)
+    );
+    assert_eq!(restored(&t).git.retired.len(), 1);
+}
+
+#[test]
+fn a_backup_that_cannot_be_made_stops_the_removal_before_it_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    for (label, make) in [
+        ("a file in the way", 0),
+        ("a link in the way", 1),
+        ("a directory open to others", 2),
+    ] {
+        let t = T::new();
+        let kc = MemorySecretStore::new();
+        deployed_registered(&t, &kc, false, false);
+        authorize_removal(&t);
+        let b = t.journal_dir().join("backups");
+        match make {
+            0 => std::fs::write(&b, "x").unwrap(),
+            1 => std::os::unix::fs::symlink(&t.rt, &b).unwrap(),
+            _ => {
+                std::fs::create_dir(&b).unwrap();
+                std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let (bytes, before) = (db_bytes(&t), restored(&t));
+        let o = remove_shop(&t);
+        assert!(o.code != 0, "{label}");
+        assert!(
+            o.stderr.contains("No removal was written"),
+            "{label}: {}",
+            o.stderr
+        );
+        assert_eq!(db_bytes(&t), bytes, "{label}: the journal changed");
+        assert_eq!(restored(&t), before, "{label}");
+        assert_eq!(
+            schema_of(&t),
+            1,
+            "{label}: schema 2 was stamped without a removal"
+        );
+    }
+}
+
+#[test]
+fn a_removal_cannot_start_while_another_writer_holds_the_journal() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    {
+        // another process is writing (this holds the journal's exclusive writer lock)
+        let _writer = harpoon_deploy_journal::SqliteJournal::open(&t.journal_dir()).unwrap();
+        let o = run_removal(
+            &t,
+            &ACCEPTANCE,
+            &[
+                "--name",
+                "shop",
+                "--expect-registered-ms",
+                &at.to_string(),
+                "--confirm-removal",
+            ],
+        );
+        assert_ne!(o.code, 0);
+        assert!(
+            o.stderr.contains("another Harpoon process holds"),
+            "{}",
+            o.stderr
+        );
+    }
+    assert_untouched(&t, &bytes, &before, "a busy journal");
+    // and once it is free, the same request succeeds
+    assert_exit(
+        &remove_with(&t, &ACCEPTANCE, "shop", at, &["--confirm-removal"]),
+        0,
+    );
+}
+
+#[test]
+fn restoring_the_backup_offline_returns_the_journal_to_before_the_removal_and_loses_what_came_after(
+) {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let before = restored(&t);
+    assert_exit(&remove_shop(&t), 0);
+    let files = backup_files(&t);
+    let backup = t.journal_dir().join("backups").join(&files[0]);
+    // something happens after the removal: it will be lost by the restore, as documented
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "late",
+            "https://git.example.com/acme/late.git",
+            SECOND_APP,
+            &[],
+        ),
+        0,
+    );
+    // the person's procedure: the writer is gone; verify the digest; copy the backup over the live file
+    let side = std::fs::read_to_string(format!("{}.sha256", backup.display())).unwrap();
+    let digest = side.split_whitespace().next().unwrap().to_string();
+    assert_eq!(
+        harpoon_deploy_git::sha256::to_hex(&harpoon_deploy_git::sha256::sha256(
+            &std::fs::read(&backup).unwrap()
+        )),
+        digest
+    );
+    let live = t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE);
+    std::fs::copy(&backup, &live).unwrap();
+    assert_eq!(
+        schema_of(&t),
+        1,
+        "schema 1 again, with nothing edited by hand"
+    );
+    let back = restored(&t);
+    assert_eq!(back, before, "exactly the journal from before the removal");
+    assert!(
+        back.git.repos.contains_key("shop") && !back.git.repos.contains_key("late"),
+        "what came after the backup is gone"
+    );
+    // the backup itself was never altered, and the journal can be upgraded again from here
+    assert_eq!(
+        harpoon_deploy_git::sha256::to_hex(&harpoon_deploy_git::sha256::sha256(
+            &std::fs::read(&backup).unwrap()
+        )),
+        digest
+    );
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert_exit(&remove_shop(&t), 0);
+    assert_eq!(
+        backup_files(&t).len(),
+        4,
+        "a second upgrade makes its own backup: {:?}",
+        backup_files(&t)
+    );
+}
+
+#[test]
+fn removal_exists_only_as_repo_remove() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert!(harpoon_deploy_cli::command_names().contains(&"repo-remove"));
+    for cmd in ["repo-drop", "repo-delete", "repo-retire", "repo-unregister"] {
+        assert!(!harpoon_deploy_cli::command_names().contains(&cmd), "{cmd}");
+        assert_exit(&sim(&t, &kc, &[cmd, "--name", "shop"]), 2);
+    }
+}
+
+// ------------------------------------------------------------------ a real removal racing a poll or a deployment
+
+#[test]
+fn a_poll_that_straddles_a_real_removal_records_nothing_and_leaves_a_readable_upgraded_journal() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (server, repo, bare) = served_shop(&t, &kc, &gt);
+    authorize_removal(&t);
+    let rt = t.rt.display().to_string();
+    let wait = std::time::Duration::from_secs(30);
+    assert_exit(
+        &sim(&t, &kc, &["watch", "--simulate", "--once", "--queue-only"]),
+        0,
+    );
+    commit(&repo, "VERSION", "three\n");
+    git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
+    server.hold_next_request();
+    std::thread::scope(|sc| {
+        let _release = ReleaseOnDrop(&server);
+        let running = sc
+            .spawn(|| in_background(&rt, &kc, &["watch", "--simulate", "--once", "--queue-only"]));
+        assert!(
+            server.wait_until_held(wait),
+            "the poll never reached the server"
+        );
+        // the real command, while the poll waits on the network
+        assert_exit(&remove_direct(&t, "shop"), 0);
+        server.release();
+        let o = running.join().unwrap();
+        assert_exit(&o, 0);
+        assert!(
+            o.stdout
+                .contains("its registration was removed while it was being polled"),
+            "{}",
+            o.stdout
+        );
+    });
+    let after = restored(&t); // an observation recorded after the removal would make this fail
+    assert!(
+        after.git.repos.is_empty() && after.git.retired.len() == 1 && after.git.seen.is_empty()
+    );
+    assert!(
+        after.control.events.is_empty(),
+        "the stale poll queued nothing"
+    );
+    assert_eq!(schema_of(&t), 2);
+    assert_eq!(backup_files(&t).len(), 2);
+}
+
+#[test]
+fn a_deployment_that_straddles_a_real_removal_records_no_source_and_deploys_nothing() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (server, _repo, _bare) = served_shop(&t, &kc, &gt);
+    authorize_removal(&t);
+    let rt = t.rt.display().to_string();
+    let wait = std::time::Duration::from_secs(30);
+    let before = restored(&t);
+    server.hold_next_request();
+    let o = std::thread::scope(|sc| {
+        let _release = ReleaseOnDrop(&server);
+        let running =
+            sc.spawn(|| in_background(&rt, &kc, &["git-deploy", "--simulate", "--repo", "shop"]));
+        assert!(
+            server.wait_until_held(wait),
+            "the deployment never reached the server"
+        );
+        assert_exit(&remove_direct(&t, "shop"), 0);
+        server.release();
+        running.join().unwrap()
+    });
+    assert_exit(&o, 7);
+    assert!(
+        o.stderr
+            .contains("was removed while its source was being fetched")
+            && o.stderr.contains("nothing was deployed"),
+        "{}",
+        o.stderr
+    );
+    let after = restored(&t); // a source recorded for a removed registration would make this fail
+    assert!(after.git.sources.is_empty());
+    assert_eq!(
+        (after.deployments, after.ledger),
+        (before.deployments, before.ledger)
+    );
+    assert_eq!(t.docker_requests(), 0);
+    assert!(scratch_clean(&t));
+}
+
+#[test]
+fn two_removals_racing_for_the_same_registration_record_exactly_one() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let attempt = |gate: &Gate| {
+        let e = at.to_string();
+        run_removal(
+            &t,
+            gate,
+            &[
+                "--name",
+                "shop",
+                "--expect-registered-ms",
+                &e,
+                "--confirm-removal",
+            ],
+        )
+    };
+    let _g = holding();
+    // the journal's writer lock makes them take turns; the second finds the registration already gone
+    let (a, b) = (attempt(&ACCEPTANCE), attempt(&ACCEPTANCE));
+    let codes = (a.code, b.code);
+    assert_eq!(codes, (0, 6), "{codes:?}\n{}\n{}", a.stderr, b.stderr);
+    assert!(b.stderr.contains("was already removed"), "{}", b.stderr);
+    assert_eq!(restored(&t).git.retired.len(), 1);
+    assert_eq!(backup_files(&t).len(), 2);
+}
+
+// ------------------------------------------------------------------ identity after a real removal
+
+#[test]
+fn poll_event_ids_follow_the_registrations_incarnation_through_repeated_removal_and_reclaim() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _first, _second) = fixture(&gt.0);
+    let url = format!("file://{}", repo.display());
+    assert_exit(&add_repo(&t, &kc, "shop", &url, APP, &[]), 0);
+    authorize_removal(&t);
+    let poll = || {
+        let o = sim(&t, &kc, &["watch", "--simulate", "--once", "--queue-only"]);
+        assert_exit(&o, 0);
+        o.stdout
+    };
+    let ids = |t: &T| -> Vec<(String, String)> {
+        restored(t)
+            .control
+            .events
+            .iter()
+            .map(|e| (e.rec.delivery.clone(), e.status.as_str().to_string()))
+            .collect()
+    };
+    let reclaim = || {
+        let o = sim(
+            &t,
+            &kc,
+            &[
+                "repo-add",
+                "--simulate",
+                "--name",
+                "shop",
+                "--url",
+                &url,
+                "--app",
+                APP,
+                "--container-port",
+                "8080",
+                "--confirm-reclaim",
+            ],
+        );
+        assert_exit(&o, 0);
+    };
+    assert!(poll().contains("first seen"));
+
+    // incarnation 0: the original ids
+    let c1 = commit(&repo, "VERSION", "one\n");
+    assert!(poll().contains("queued as"));
+    assert_eq!(
+        ids(&t),
+        vec![(format!("poll:shop:{c1}"), "held".to_string())]
+    );
+    assert_exit(&sim(&t, &kc, &["resume", "--app", APP, "--dismiss"]), 0);
+    let legacy = ids(&t);
+    assert_eq!(
+        legacy,
+        vec![(format!("poll:shop:{c1}"), "dismissed".to_string())]
+    );
+
+    // remove, claim it again: incarnation 1, a fresh baseline, and nothing queued by the switch itself
+    assert_exit(&remove_shop(&t), 0);
+    assert!(poll_after_removal_is_not_polled(&t, &kc));
+    reclaim();
+    assert!(
+        poll().contains("first seen"),
+        "the reclaimed registration starts from a baseline"
+    );
+    assert_eq!(ids(&t), legacy, "nothing was replayed or rewritten");
+    let c2 = commit(&repo, "VERSION", "two\n");
+    poll();
+    assert_eq!(
+        ids(&t)[1..],
+        [(format!("poll:shop:r1:{c2}"), "held".to_string())]
+    );
+    // an ordinary edit does not move the incarnation
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            registered_ms(&t, "shop"),
+            &["--container-port", "4001", "--confirm-change"],
+        ),
+        0,
+    );
+    poll(); // an edit re-baselines polling (see the edit tests), so this pass queues nothing
+    let c3 = commit(&repo, "VERSION", "three\n");
+    poll();
+    assert_eq!(ids(&t).last().unwrap().0, format!("poll:shop:r1:{c3}"));
+    // the branch goes back to a commit an earlier incarnation already dismissed: it is queued, not suppressed
+    git(&repo, &["reset", "-q", "--hard", &c1]);
+    poll();
+    assert_eq!(
+        ids(&t).last().unwrap(),
+        &(format!("poll:shop:r1:{c1}"), "held".to_string())
+    );
+    assert_eq!(
+        ids(&t)[0],
+        (format!("poll:shop:{c1}"), "dismissed".to_string()),
+        "the earlier event is exactly as it was"
+    );
+
+    // a second cycle is a new namespace again
+    assert_exit(&sim(&t, &kc, &["resume", "--app", APP, "--dismiss"]), 0);
+    assert_exit(&remove_shop(&t), 0);
+    assert_eq!(
+        backup_files(&t).len(),
+        2,
+        "only the first removal upgrades the journal and backs it up"
+    );
+    reclaim();
+    poll();
+    let c4 = commit(&repo, "VERSION", "four\n");
+    poll();
+    assert_eq!(ids(&t).last().unwrap().0, format!("poll:shop:r2:{c4}"));
+    assert_eq!(restored(&t).git.retired.len(), 2);
+}
+
+/// After a removal the name is not polled at all: a pass finds nothing registered to watch.
+fn poll_after_removal_is_not_polled(t: &T, kc: &MemorySecretStore) -> bool {
+    let o = sim(t, kc, &["watch", "--simulate", "--once", "--queue-only"]);
+    o.code == 6 && o.stderr.contains("no repository is registered to watch")
+}
+
+#[test]
+fn a_fresh_registration_of_a_removed_name_inherits_no_event_identity_polling_state_or_credential() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, true, false);
+    authorize_removal(&t);
+    assert_exit(&remove_shop(&t), 0);
+    let removed = restored(&t);
+    // a fresh registration: a new application, incarnation 0, no baseline, no events, and the same credential destination
+    assert_exit(&replace_shop(&t, &url, &["--username", "ci"]), 0);
+    let now = restored(&t);
+    let fresh = now.git.repos["shop"].app.clone();
+    assert_ne!(fresh.to_string(), APP);
+    assert_eq!(now.git.incarnation(&fresh), 0);
+    assert!(now.git.seen.is_empty() && now.control.events_of(&fresh).next().is_none());
+    assert_eq!(
+        now.git.retired, removed.git.retired,
+        "the history of removals is untouched"
+    );
+    // but the credential still belongs to its destination, through the removal
+    let bytes = journal_bytes(&t);
+    let o = replace_shop(
+        &t,
+        "https://git.evil.example/acme/shop.git",
+        &["--username", "ci"],
+    );
+    assert_exit(&o, 6);
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(saved_token(&kc), PLANTED.as_bytes());
+    // a second removal and registration cycle cannot release it either
+    assert_exit(&remove_shop(&t), 0);
+    assert_exit(
+        &replace_shop(&t, "https://git.evil.example/acme/shop.git", &[]),
+        6,
+    );
+    assert_eq!(restored(&t).git.retired.len(), 2);
 }

@@ -15,6 +15,7 @@ mod args;
 mod commands;
 mod config_cmds;
 mod git_cmds;
+mod journal_upgrade;
 mod next_steps;
 mod store;
 
@@ -50,6 +51,11 @@ pub struct Gate {
     /// `harpoon-deploy-acceptance` binary, which exists only when the `acceptance` Cargo feature is
     /// asked for by name, opens it.
     pub live_triggered_enabled: bool,
+    /// `repo-remove`: disconnect a repository from its application. It is a **one-way journal upgrade** (the first
+    /// removal writes a record, and stamps a schema, that older builds cannot read), so it is closed in the shipping
+    /// binary and in the desktop's shipping build. Only the unpackaged acceptance binary and a debug desktop with an
+    /// active test namespace open it, and even then a runtime-specific marker file is required.
+    pub git_removal_enabled: bool,
 }
 
 impl Gate {
@@ -58,6 +64,7 @@ impl Gate {
             live_deploy_enabled: true,
             live_replacement_enabled: true,
             live_triggered_enabled: false,
+            git_removal_enabled: false,
         }
     }
 }

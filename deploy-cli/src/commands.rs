@@ -36,6 +36,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
     match p.command.as_str() {
         "repo-add" => git_cmds::repo_add(p, out),
         "repo-update" => git_cmds::repo_update(p, out),
+        "repo-remove" => git_cmds::repo_remove(p, gate, out),
         "repo-secret" => git_cmds::repo_secret(p, svc, out),
         "repo-list" => git_cmds::repo_list(p, out),
         "git-deploy" => git_cmds::git_deploy(p, gate, svc, out),

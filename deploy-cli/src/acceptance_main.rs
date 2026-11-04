@@ -27,6 +27,7 @@ fn main() {
             live_deploy_enabled: true,
             live_replacement_enabled: true,
             live_triggered_enabled: true,
+            git_removal_enabled: true,
         },
     );
     print!("{}", out.stdout);

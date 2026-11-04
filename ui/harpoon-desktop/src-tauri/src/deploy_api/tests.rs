@@ -15,6 +15,7 @@ const CLOSED: Gate = Gate {
     live_deploy_enabled: false,
     live_replacement_enabled: false,
     live_triggered_enabled: false,
+    git_removal_enabled: false,
 };
 
 /// `run_op`, but with a closed gate (the test seam `run_op` uses the shipping gate).
@@ -450,6 +451,7 @@ mod runtime {
         live_deploy_enabled: true,
         live_replacement_enabled: true,
         live_triggered_enabled: false,
+        git_removal_enabled: false,
     };
     const AUTH_ARG: &str =
         "--authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE";
@@ -2089,9 +2091,75 @@ fn an_application_whose_registration_was_removed_is_listed_as_disconnected_with_
 }
 
 #[test]
-fn the_desktop_has_no_operation_that_removes_a_registration() {
-    for op in ["remove-repo", "repo-remove", "remove-registration", "drop-repo", "retire-repo"] {
+fn the_desktop_has_no_operation_that_removes_a_registration_but_remove_repo() {
+    for op in ["repo-remove", "remove-registration", "drop-repo", "retire-repo", "remove-app", "delete-repo"] {
         let v = serde_json::json!({ "op": op, "name": "shop", "expectRegisteredMs": 1 });
         assert!(serde_json::from_value::<DeployOp>(v).is_err(), "{op} must not exist in this build");
     }
+}
+
+// ------------------------------------------------------------------ removing a registration through the desktop
+
+fn remove_op(expect: u64, confirm: bool) -> DeployOp {
+    serde_json::from_value(serde_json::json!({
+        "op": "remove-repo", "name": "shop", "expectRegisteredMs": expect, "confirmRemoval": confirm
+    }))
+    .expect("the front end's request shape")
+}
+
+#[test]
+fn the_desktop_operation_gate_is_the_shipping_gate_and_registration_removal_is_closed_here() {
+    // no test namespace is active in this process, so the one capability the desktop can add is off
+    let g = operation_gate();
+    assert!(!g.git_removal_enabled);
+    assert_eq!(
+        (g.live_deploy_enabled, g.live_replacement_enabled, g.live_triggered_enabled),
+        (Gate::shipping().live_deploy_enabled, Gate::shipping().live_replacement_enabled, Gate::shipping().live_triggered_enabled),
+        "and nothing else differs from the shipping gate (Gate U stays closed)"
+    );
+    assert!(!g.live_triggered_enabled);
+    let dir = rt("removal-gate");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let snap = snapshot(&dir, 1);
+    assert!(!snap.gate.git_removal);
+    let v = snap.repos[0].registered_ms;
+    let bytes = std::fs::read(journal_dir(&dir).join(harpoon_deploy_journal::SQLITE_FILE)).unwrap();
+    let r = run_op(&dir, &remove_op(v, true), &kc);
+    assert!(!r.ok && r.summary.contains("not enabled in this build"), "{}", r.summary);
+    assert!(r.refused_by_gate, "a closed capability is reported as the build not allowing it");
+    assert!(r.hint.unwrap_or_default().contains("This build of Harpoon does not allow that operation"));
+    assert_eq!(std::fs::read(journal_dir(&dir).join(harpoon_deploy_journal::SQLITE_FILE)).unwrap(), bytes, "the journal is untouched");
+    assert_eq!(snapshot(&dir, 2).repos.len(), 1);
+}
+
+#[test]
+fn with_the_gate_open_the_engine_still_demands_the_runtimes_marker_and_the_desktop_sends_exactly_the_request() {
+    // a capable build, simulated here by assignment (the packaging test forbids a source that writes the open gate)
+    let mut gate = Gate::shipping();
+    gate.git_removal_enabled = !gate.git_removal_enabled;
+    let dir = rt("removal-marker");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let v = snapshot(&dir, 1).repos[0].registered_ms;
+    let bytes = std::fs::read(journal_dir(&dir).join(harpoon_deploy_journal::SQLITE_FILE)).unwrap();
+    let r = run_op_with(&dir, &remove_op(v, true), &Confirmation::default(), &kc, &gate, &|| Err("no runtime".into()));
+    assert!(!r.ok && r.summary.contains("marker") && r.summary.contains("missing"), "{}", r.summary);
+    assert_eq!(std::fs::read(journal_dir(&dir).join(harpoon_deploy_journal::SQLITE_FILE)).unwrap(), bytes);
+    // the arguments the front end's request becomes
+    let (args, input) = plan(&remove_op(42, true));
+    assert_eq!(args, ["repo-remove", "--name", "shop", "--expect-registered-ms", "42", "--confirm-removal"]);
+    assert!(input.is_empty());
+    let (args, _) = plan(&remove_op(42, false));
+    assert!(!args.contains(&"--confirm-removal".to_string()), "a request that was not confirmed is not sent as confirmed");
+}
+
+#[test]
+fn a_removal_request_cannot_carry_anything_but_the_name_the_version_and_the_confirmation() {
+    for field in ["app", "runtimeDir", "newName", "force", "backup", "gate"] {
+        let v = serde_json::json!({ "op": "remove-repo", "name": "shop", "expectRegisteredMs": 1, field: "x" });
+        assert!(serde_json::from_value::<DeployOp>(v).is_err(), "{field} must not be accepted");
+    }
+    // the version is required: there is no blind removal
+    assert!(serde_json::from_value::<DeployOp>(serde_json::json!({ "op": "remove-repo", "name": "shop" })).is_err());
 }
