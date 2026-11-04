@@ -486,8 +486,12 @@ mod tests {
     use super::*;
 
     fn temp_db(name: &str) -> (std::path::PathBuf, Db) {
-        let dir =
-            std::env::temp_dir().join(format!("harpoon-schema-{}-{name}", std::process::id()));
+        // unique per call without a process id: this crate's sources may not name std::process (CI checks it)
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("harpoon-schema-{nanos}-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(
