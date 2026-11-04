@@ -188,6 +188,25 @@ npm run tauri dev
 
 This starts Vite (`npm run dev` at `http://localhost:1420` per `tauri.conf.json`) and launches the Tauri window. The UI discovers the Harpoon runtime via its binary resolver (`HARPOON_BIN` → bundled `Harpoon.app` → `harpoon/build/harpoon` → `/usr/local/bin/harpoon` → `PATH`) and follows the current bootstrap state machine: on first launch it will automatically attempt `harpoon start` once and show phased progress (`Checking runtime…` → `Starting Harpoon…` → `Starting Linux VM…` → `Waiting for Docker Engine…` → `Ready`). No manual `harpoon start` is required in development, though the CLI remains available. Podman/rootless is not required for the 2.0 path.
 
+### Where a development build finds its resources
+
+A packaged app and a development build look for their bundled resources in different places.
+
+| Build | Where the desktop reads `bin/` (Docker CLI, Buildx, runtime) | Who put them there |
+|---|---|---|
+| Packaged `Harpoon.app` (no debug assertions) | `Harpoon.app/Contents/Resources/harpoon/...` | `tauri build` bundles `tauri.conf.json`'s `"bundle-resources/harpoon": "harpoon"` |
+| Development (`tauri dev`, `cargo build`, `cargo test`: debug assertions on) | `ui/harpoon-desktop/src-tauri/bundle-resources/harpoon/...`, straight from the source tree (`CARGO_MANIFEST_DIR`; see `bundled_resources` in `deploy_api.rs`) | `build.rs` stages that directory from `harpoon/build` and `assets/guest` |
+
+So in a development build nothing reads the copy of those resources that `tauri-build` would otherwise place next to the executable (`target/debug/harpoon`). That copy is not free: the guest root image is a sparse 2 GiB file with about 0.23 GiB allocated, `std::fs::copy` keeps it sparse (an APFS clone) when the destination does not exist, but **overwrites an existing destination with a dense 2 GiB copy**. Every rebuild that re-ran the build script therefore grew the target by about 2 GiB.
+
+`build.rs` now asks `tauri-build` to copy no resources when debug assertions are on (through its documented `TAURI_CONFIG` merge patch `{"bundle":{"resources":[]}}`). `tauri.conf.json` is unchanged, so packaged builds copy and bundle exactly what they did, and the bundler reads that file itself. Not affected, and still copied as before:
+
+- release builds and `tauri build` (no debug assertions);
+- a build with an explicit `TAURI_CONFIG` (the Tauri CLI sets one for `--config`; a normal `tauri dev` sets none);
+- a build with `HARPOON_COPY_DEBUG_RESOURCES=1` in the environment, for anyone who wants `target/debug/harpoon` back.
+
+`tools/release-preflight.sh` (part of `tools/validate.sh`) fails if `tauri.conf.json` stops mapping `bundle-resources/harpoon` to `harpoon`, or if `build.rs` loses the debug-assertions condition around that override.
+
 ## 6. Build Harpoon guest assets (canonical)
 
 Production guest assets are **not** `spike1/cache` or `spike2/cache` — those are frozen historical spikes.
