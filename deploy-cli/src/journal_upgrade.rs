@@ -133,7 +133,7 @@ pub fn backup_before_schema2(
     File::open(&path)
         .and_then(|f| f.sync_all())
         .map_err(|e| cleanup(fail(format!("cannot flush the backup: {e}"))))?;
-    sync_dir(&dir).map_err(&cleanup)?;
+    sync_dir(&dir).map_err(cleanup)?;
 
     // --- proofs ---
     let meta = std::fs::metadata(&path).map_err(|e| cleanup(fail(e)))?;
@@ -193,7 +193,7 @@ pub fn backup_before_schema2(
     sc.write_all(text.as_bytes())
         .and_then(|()| sc.sync_all())
         .map_err(|e| cleanup(fail(e)))?;
-    sync_dir(&dir).map_err(&cleanup)?;
+    sync_dir(&dir).map_err(cleanup)?;
     Ok(BackupReport {
         path,
         digest,
