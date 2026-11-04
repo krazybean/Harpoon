@@ -49,6 +49,7 @@ const FORWARD_VALUES: &[&str] = &[
     "mgmt-socket",
     "forwarder-pid",
     "forwarder-command",
+    "forward-address",
     "lsof-path",
     AUTH_FLAG,
     "health-timeout-secs",

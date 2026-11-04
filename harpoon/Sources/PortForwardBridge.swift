@@ -22,6 +22,7 @@ func startPortForwarding() {
             poll.cancel()
             self.guestIP = ip
             self.log("HARPOON_GUEST_IP_DISCOVERED \(ip)")
+            recordForwardTarget(ip)
             mgr.setGuestIP(ip)
             // trigger initial sync after DOCKER_READY
             mgr.scheduleSync(delayMs: 1000)
@@ -31,6 +32,8 @@ func startPortForwarding() {
             poll.cancel()
             let fallback = "192.168.64.3"
             self.log("HOST_FORWARD_TRY_FALLBACK \(fallback)")
+            // a fallback address is a guess, not an identity: withdraw anything published so clients treat the target as unproven
+            recordForwardTarget(nil)
             self.guestIP = fallback
             mgr.setGuestIP(fallback)
             mgr.scheduleSync(delayMs: 1000)

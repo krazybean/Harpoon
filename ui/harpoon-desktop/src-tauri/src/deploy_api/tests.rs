@@ -368,6 +368,42 @@ mod runtime {
         );
     }
 
+    fn with_target(f: &Fixture, target: &str) {
+        let sock = std::fs::read_to_string(f.support.join("runtime.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sock).unwrap();
+        let text = format!(
+            r#"{{"socketPath":{},"pid":4242,"forwardTarget":{target}}}"#,
+            v["socketPath"]
+        );
+        std::fs::write(f.support.join("runtime.json"), text).unwrap();
+    }
+
+    #[test]
+    fn only_a_discovered_private_guest_address_is_handed_to_the_engine() {
+        let f = fixture("target", 4242);
+        assert_eq!(runtime_of(&f, Some("harpoon")).unwrap().forward_address, None);
+        with_target(&f, r#"{"address":"192.168.64.3","source":"discovered","recordedAt":"x"}"#);
+        let r = runtime_of(&f, Some("harpoon")).unwrap();
+        assert_eq!(r.forward_address.as_deref(), Some("192.168.64.3"));
+        let args = runtime_args(&r);
+        let at = args.iter().position(|a| a == "--forward-address").unwrap();
+        assert_eq!(args[at + 1], "192.168.64.3");
+        for bad in [
+            r#"{"address":"192.168.64.3","source":"fallback","recordedAt":"x"}"#,
+            r#"{"address":"8.8.8.8","source":"discovered","recordedAt":"x"}"#,
+            r#"{"address":"192.168.064.3","source":"discovered","recordedAt":"x"}"#,
+            r#"{"address":"127.0.0.1","source":"discovered","recordedAt":"x"}"#,
+            r#"{"address":3,"source":"discovered","recordedAt":"x"}"#,
+            r#"{"address":"192.168.64.3"}"#,
+            r#""192.168.64.3""#,
+        ] {
+            with_target(&f, bad);
+            let r = runtime_of(&f, Some("harpoon")).unwrap();
+            assert_eq!(r.forward_address, None, "{bad}");
+            assert!(!runtime_args(&r).iter().any(|a| a == "--forward-address"));
+        }
+    }
+
     #[test]
     fn missing_or_stale_runtime_state_is_refused_with_a_reason() {
         let f = fixture("stale", 4242);
@@ -407,6 +443,7 @@ mod runtime {
             resources_dir: "/res".into(),
             forwarder_pid: 4242,
             forwarder_command: "harpoon".into(),
+            forward_address: None,
         }
     }
     const OPEN: Gate = Gate {

@@ -15,6 +15,7 @@ use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::DockerApi;
+use harpoon_deploy_docker::attribution::HostGuestProof;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, Source};
@@ -1765,7 +1766,12 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         let mut b = DockerBackend::new(live_cfg, Some(Path::new(resources)))
             .map_err(|e| Fail::config(e.to_string()))?
             .with_secrets(std::mem::take(&mut prep.bundle))
-            .with_forwarder_check(LsofCheck { lsof, pid, command })
+            .with_forwarder_check(LsofCheck {
+                lsof: lsof.clone(),
+                pid,
+                command: command.clone(),
+            })
+            .with_path_proof(path_proof(p, lsof, pid, command, &sock, &mgmt)?)
             .with_guest_disk(MgmtDfProbe::new(&sock, mgmt, Duration::from_secs(10)));
         run_deployment_with(
             &mut d,
@@ -1838,7 +1844,12 @@ fn live_backend(
     Ok(DockerBackend::new(cfg, Some(Path::new(resources)))
         .map_err(|e| Fail::config(e.to_string()))?
         .with_secrets(secrets)
-        .with_forwarder_check(LsofCheck { lsof, pid, command })
+        .with_forwarder_check(LsofCheck {
+            lsof: lsof.clone(),
+            pid,
+            command: command.clone(),
+        })
+        .with_path_proof(path_proof(p, lsof, pid, command, sock, &mgmt)?)
         .with_guest_disk(MgmtDfProbe::new(sock, mgmt, Duration::from_secs(10))))
 }
 
@@ -2723,6 +2734,20 @@ fn print_prepare_failure(
     }
 }
 
+/// One report line for a check's evidence, ending with how the responses were attributed when that was verified.
+fn evidence_line(
+    step: harpoon_deploy::state::Step,
+    ev: &harpoon_deploy::health::CheckEvidence,
+) -> String {
+    format!(
+        "evidence {}: {:?}{} — {}",
+        step.as_str(),
+        ev.verdict,
+        if ev.simulated { " (simulated)" } else { "" },
+        ev.summary_with_attribution()
+    )
+}
+
 fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     let _ = writeln!(out, "result: {}", r.status);
     for s in &d.steps {
@@ -2743,14 +2768,7 @@ fn print_report(out: &mut String, d: &Deployment, r: &Report) {
     }
     print_recovery(out, d);
     for (step, ev) in &r.evidence {
-        let _ = writeln!(
-            out,
-            "evidence {}: {:?}{} — {}",
-            step.as_str(),
-            ev.verdict,
-            if ev.simulated { " (simulated)" } else { "" },
-            ev.summary()
-        );
+        let _ = writeln!(out, "{}", evidence_line(*step, ev));
     }
     for w in &r.warnings {
         let _ = writeln!(out, "warning: {w}");
@@ -2881,6 +2899,42 @@ fn forwarder_flags(p: &Parsed) -> Result<(PathBuf, u32, String), Fail> {
         return Err(Fail::config("--lsof-path must be an absolute path"));
     }
     Ok((PathBuf::from(lsof), pid, command))
+}
+
+/// The host-to-VM proof that lets an application without the deployment marker pass its health check.
+/// `--forward-address` is the guest address the engine published (`forwardTarget` in runtime.json);
+/// without it the proof fails closed and only marker-echoing applications can pass.
+fn path_proof(
+    p: &Parsed,
+    lsof: PathBuf,
+    pid: u32,
+    command: String,
+    docker_socket: &Path,
+    mgmt: &Path,
+) -> Result<HostGuestProof, Fail> {
+    let addr = match p.value("forward-address") {
+        None => None,
+        Some(a) => Some(
+            a.parse::<std::net::Ipv4Addr>()
+                .ok()
+                .filter(|ip| ip.is_private() && ip.to_string() == a)
+                .ok_or_else(|| {
+                    Fail::config("--forward-address must be a private IPv4 address in dotted form")
+                })?,
+        ),
+    };
+    Ok(HostGuestProof::real(
+        LsofCheck {
+            lsof: lsof.clone(),
+            pid,
+            command,
+        },
+        &lsof,
+        pid,
+        docker_socket,
+        mgmt,
+        addr,
+    ))
 }
 
 // ------------------------------------------------------------------ inventory
@@ -3769,5 +3823,95 @@ mod forwarder_default_tests {
             "harpoon"
         )
         .is_ok());
+    }
+
+    fn proof_with(extra: &[&str]) -> Result<HostGuestProof, Fail> {
+        let mut args = vec!["deploy", "--forwarder-pid", "4242"];
+        args.extend_from_slice(extra);
+        let args: Vec<String> = args.into_iter().map(String::from).collect();
+        path_proof(
+            &crate::args::parse(&args).unwrap(),
+            PathBuf::from("/usr/sbin/lsof"),
+            4242,
+            "harpoon".into(),
+            Path::new("/tmp/eng/d.sock"),
+            Path::new("/tmp/eng/m.sock"),
+        )
+    }
+
+    /// The published guest address is the only thing the path proof dials, so it is a strict private dotted IPv4.
+    #[test]
+    fn the_forward_address_must_be_a_private_dotted_ipv4_and_is_optional() {
+        assert_eq!(proof_with(&[]).unwrap().forward_address, None);
+        let ok = proof_with(&["--forward-address", "192.168.64.3"]).unwrap();
+        assert_eq!(ok.forward_address, Some("192.168.64.3".parse().unwrap()));
+        for bad in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "192.168.064.3",
+            "192.168.64",
+            "host.local",
+            "192.168.64.3:80",
+            "",
+        ] {
+            assert!(
+                proof_with(&["--forward-address", bad]).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod evidence_line_tests {
+    use super::evidence_line;
+    use harpoon_deploy::health::{
+        run_health, Attempt, CheckEvidence, HealthSpec, Observation, Probe, ATTRIBUTION_MARKER,
+        ATTRIBUTION_PATH,
+    };
+    use harpoon_deploy::state::Step;
+    use harpoon_deploy::time::ManualClock;
+
+    struct Always(Observation);
+    impl Probe for Always {
+        fn attempt(&mut self, at_ms: u64) -> Attempt {
+            Attempt {
+                at_ms,
+                observation: self.0.clone(),
+                container_running: true,
+            }
+        }
+    }
+
+    fn evidence(o: Observation) -> CheckEvidence {
+        let clock = ManualClock::new(0);
+        run_health(
+            &HealthSpec::first_test("/"),
+            "http://127.0.0.1:39001/",
+            &mut Always(o),
+            &clock,
+            &clock,
+        )
+    }
+
+    /// The report line names how a healthy check was attributed, for both kinds, and for nothing else.
+    #[test]
+    fn the_report_line_carries_the_attribution_of_a_healthy_check_only() {
+        for label in [ATTRIBUTION_PATH, ATTRIBUTION_MARKER] {
+            let line = evidence_line(
+                Step::PreliminaryCheck,
+                &evidence(Observation::Status(200)).with_attribution(label),
+            );
+            assert!(line.ends_with(&format!("; attribution: {label}")), "{line}");
+        }
+        // an unlabelled (historical or simulated) check prints exactly what it always did
+        let plain = evidence(Observation::Status(200));
+        assert_eq!(
+            evidence_line(Step::FinalCheck, &plain),
+            format!("evidence final_check: Healthy — {}", plain.summary())
+        );
+        // an unhealthy check is never reported as verified, even if a label is attached to it
+        let failed = evidence(Observation::Status(503)).with_attribution(ATTRIBUTION_PATH);
+        assert!(!evidence_line(Step::FinalCheck, &failed).contains("verified"));
     }
 }

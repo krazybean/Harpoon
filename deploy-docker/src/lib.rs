@@ -5,6 +5,7 @@
 //! Buildx, and has no code path that prunes, pulls, or reads the user's Docker configuration.
 
 pub mod api;
+pub mod attribution;
 pub mod backend;
 pub mod buildx_run;
 pub mod confine;

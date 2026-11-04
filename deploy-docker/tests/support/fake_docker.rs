@@ -31,6 +31,9 @@ pub struct Ctr {
     pub image: String,
     pub running: bool,
     pub exit_code: i64,
+    /// `State.StartedAt` and `RestartCount`, as a real Docker reports them.
+    pub started_at: String,
+    pub restart_count: u64,
     pub host_port: Option<u16>,
     /// When set, `NetworkSettings.Ports` is exactly this (to model odd mappings) instead of the usual one.
     pub ports_override: Option<Json>,
@@ -150,6 +153,8 @@ impl St {
             image: "x".into(),
             running,
             exit_code: 0,
+            started_at: "2026-11-04T00:00:00Z".to_string(),
+            restart_count: 0,
             host_port: None,
             ports_override: None,
             create_body: Json::Null,
@@ -438,8 +443,11 @@ pub fn container_inspect_json(c: &Ctr) -> String {
                 ),
                 ("Running", Json::Bool(c.running)),
                 ("ExitCode", Json::Num(c.exit_code as f64)),
+                ("StartedAt", Json::Str(c.started_at.clone())),
             ]),
         ),
+        ("Image", Json::Str(c.image.clone())),
+        ("RestartCount", Json::Num(c.restart_count as f64)),
         (
             "Config",
             obj(vec![
@@ -748,6 +756,8 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                     .to_string(),
                 running: false,
                 exit_code: 0,
+                started_at: "2026-11-04T00:00:00Z".to_string(),
+                restart_count: 0,
                 host_port,
                 ports_override: None,
                 create_body: j,

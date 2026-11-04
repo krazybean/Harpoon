@@ -1,8 +1,9 @@
 //! Real health probing of a published port: an HTTP GET over loopback TCP, and the adaptor that
 //! feeds `harpoon_deploy::health::run_health`. Evidence built from this is never `simulated`.
 
-use crate::api::DockerApi;
+use crate::api::{ContainerInfo, DockerApi};
 use harpoon_deploy::health::{Attempt, Observation, Probe, Waiter};
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -48,6 +49,18 @@ impl ResponseMarker {
     }
 }
 
+/// What one response said about who sent it, judged against a header marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkedResponse {
+    /// The response carried exactly this container's marker.
+    Matched(u16),
+    /// The response carried no marker header at all (an ordinary application). Whether it may count is for the caller to
+    /// decide from proof about the path, never from the response.
+    Unmarked(u16),
+    /// A failure, including a marker header with another value (a stale or foreign marker-aware listener).
+    Failed(Observation),
+}
+
 /// One HTTP request against `127.0.0.1:<port>`.
 pub trait HttpTransport {
     fn get(&self, port: u16, path: &str, timeout: Duration) -> Observation;
@@ -65,6 +78,21 @@ pub trait HttpTransport {
             Some(_) => Observation::ConnectFailed(
                 "this transport cannot verify a response marker, so no response is accepted".into(),
             ),
+        }
+    }
+    /// Like [`get_expecting`](HttpTransport::get_expecting) with a header marker, but a response with no marker header is
+    /// reported as [`MarkedResponse::Unmarked`] instead of a failure. A transport that cannot tell the two apart never
+    /// reports `Unmarked`, so it can only ever accept a response that carries the marker.
+    fn get_marked(
+        &self,
+        port: u16,
+        path: &str,
+        timeout: Duration,
+        marker: &ResponseMarker,
+    ) -> MarkedResponse {
+        match self.get_expecting(port, path, timeout, Some(marker)) {
+            Observation::Status(s) => MarkedResponse::Matched(s),
+            other => MarkedResponse::Failed(other),
         }
     }
     /// True only for test doubles. A backend built on a simulated transport reports simulated
@@ -188,6 +216,41 @@ impl HttpTransport for TcpHttp {
         }
     }
 
+    fn get_marked(
+        &self,
+        port: u16,
+        path: &str,
+        timeout: Duration,
+        marker: &ResponseMarker,
+    ) -> MarkedResponse {
+        let ResponseMarker::Header { name, value } = marker else {
+            return match self.get_expecting(port, path, timeout, Some(marker)) {
+                Observation::Status(s) => MarkedResponse::Matched(s),
+                other => MarkedResponse::Failed(other),
+            };
+        };
+        let r = match TcpHttp::fetch(port, path, timeout, true, false) {
+            Ok(r) => r,
+            Err(e) => return MarkedResponse::Failed(Observation::ConnectFailed(e)),
+        };
+        let seen: Vec<&str> = r
+            .headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        if seen.is_empty() {
+            MarkedResponse::Unmarked(r.status)
+        } else if !value.is_empty() && seen.iter().all(|v| *v == value) {
+            MarkedResponse::Matched(r.status)
+        } else {
+            MarkedResponse::Failed(Observation::ConnectFailed(format!(
+                "HTTP {} response carried a different {name} than this container's; it comes from another listener or a stale one",
+                r.status
+            )))
+        }
+    }
+
     fn get_expecting(
         &self,
         port: u16,
@@ -218,7 +281,7 @@ impl HttpTransport for TcpHttp {
         } else {
             // A response without the marker is *not* a success, whatever its status.
             Observation::ConnectFailed(format!(
-                "HTTP {} response did not carry the expected deployment marker ({}); it may come from a different listener",
+                "HTTP {} response did not carry this container's deployment marker ({}), so Harpoon cannot prove it came from the container it started (it may come from a different listener). Update and restart the Harpoon engine (it must publish the guest address it discovered), or have the application echo that header with the value of its HARPOON_DEPLOYMENT_MARKER environment variable",
                 r.status,
                 m.describe()
             ))
@@ -249,6 +312,49 @@ impl Waiter for SleepWaiter {
     }
 }
 
+/// What must stay the same, for the whole check, about the container being probed. A response is only attributed to a
+/// container that is the same one, started once, from the same image, from the first attempt to the last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerBaseline {
+    pub id: String,
+    pub image_id: String,
+    pub started_at: String,
+    pub restart_count: u64,
+}
+
+impl ContainerBaseline {
+    /// `None` unless every identity fact is known: a fact Docker did not report cannot be compared, so it cannot attribute.
+    pub fn of(c: &ContainerInfo) -> Option<ContainerBaseline> {
+        (c.running && !c.id.is_empty() && !c.image_id.is_empty() && !c.started_at.is_empty()).then(
+            || ContainerBaseline {
+                id: c.id.clone(),
+                image_id: c.image_id.clone(),
+                started_at: c.started_at.clone(),
+                restart_count: c.restart_count,
+            },
+        )
+    }
+
+    /// Why `c` is not the container this baseline was taken from, if it is not.
+    pub fn differs(&self, c: &ContainerInfo) -> Option<String> {
+        if c.id != self.id {
+            Some("the container was replaced while it was being checked".to_string())
+        } else if c.image_id != self.image_id {
+            Some("the container's image changed while it was being checked".to_string())
+        } else if c.started_at != self.started_at || c.restart_count != self.restart_count {
+            Some("the container restarted while it was being checked".to_string())
+        } else {
+            None
+        }
+    }
+}
+
+/// Decides whether a 2xx response that carried no marker may count. `Ok` only when the path from this host to the
+/// container has been proven; `Err` is the reason, in words fit for the person deploying.
+pub trait UnmarkedGate {
+    fn accept(&self, port: u16) -> Result<(), String>;
+}
+
 /// One attempt = "is the container still running?" then one HTTP request.
 pub struct ContainerProbe<'a> {
     pub api: &'a DockerApi,
@@ -258,19 +364,69 @@ pub struct ContainerProbe<'a> {
     pub transport: &'a dyn HttpTransport,
     pub marker: Option<&'a ResponseMarker>,
     pub attempt_timeout: Duration,
+    /// When set, a 2xx response without the marker header may count if the gate proves the path.
+    pub unmarked: Option<&'a dyn UnmarkedGate>,
+    /// Set when an unmarked response was accepted: the evidence is then `path-verified`, not `marker-verified`.
+    pub used_unmarked: &'a Cell<bool>,
+    /// The container's identity, taken at the first attempt that finds it running (only when `unmarked` is set); any
+    /// later difference ends the check as a failure.
+    pub baseline: &'a RefCell<Option<ContainerBaseline>>,
+    /// Why the container changed, if it did.
+    pub changed: &'a RefCell<Option<String>>,
 }
 
 impl Probe for ContainerProbe<'_> {
     fn attempt(&mut self, at_ms: u64) -> Attempt {
         let t = self.attempt_timeout;
         match self.api.container_inspect(self.container_id, t) {
-            Ok(Some(c)) if c.running => Attempt {
-                at_ms,
-                observation: self
-                    .transport
-                    .get_expecting(self.port, self.path, t, self.marker),
-                container_running: true,
-            },
+            Ok(Some(c)) if c.running => {
+                if self.unmarked.is_some() {
+                    let mut base = self.baseline.borrow_mut();
+                    match base.as_ref() {
+                        Some(b) => {
+                            if let Some(why) = b.differs(&c) {
+                                *self.changed.borrow_mut() = Some(why.clone());
+                                return Attempt {
+                                    at_ms,
+                                    observation: Observation::ConnectFailed(why),
+                                    container_running: true,
+                                };
+                            }
+                        }
+                        None => *base = ContainerBaseline::of(&c),
+                    }
+                }
+                let observation = match (self.marker, self.unmarked) {
+                    (Some(m), Some(gate)) => {
+                        match self.transport.get_marked(self.port, self.path, t, m) {
+                            MarkedResponse::Matched(s) => Observation::Status(s),
+                            MarkedResponse::Unmarked(s) if (200..300).contains(&s) => {
+                                if self.baseline.borrow().is_none() {
+                                    Observation::ConnectFailed("Docker did not report this container's image and start time, so a response without the deployment marker cannot be attributed to it".into())
+                                } else {
+                                    match gate.accept(self.port) {
+                                        Ok(()) => {
+                                            self.used_unmarked.set(true);
+                                            Observation::Status(s)
+                                        }
+                                        Err(why) => Observation::ConnectFailed(why),
+                                    }
+                                }
+                            }
+                            MarkedResponse::Unmarked(s) => Observation::Status(s),
+                            MarkedResponse::Failed(o) => o,
+                        }
+                    }
+                    _ => self
+                        .transport
+                        .get_expecting(self.port, self.path, t, self.marker),
+                };
+                Attempt {
+                    at_ms,
+                    observation,
+                    container_running: true,
+                }
+            }
             Ok(Some(c)) => Attempt {
                 at_ms,
                 observation: Observation::ContainerExited(c.exit_code),
