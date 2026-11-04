@@ -1,10 +1,56 @@
 import Foundation
 import Virtualization
 
+/// How a published port is reached from the host, decided by the address Docker bound it to in the guest.
+enum PublishedPortRoute: Equatable {
+    /// Bound on the guest's network address (`-p 8080:80`, HostIp empty/0.0.0.0/::): connect to guestIP:port.
+    case guestAddress
+    /// Bound on guest loopback only (`-p 127.0.0.1:8080:80`): unreachable from the guest's address, so the
+    /// host reaches it through a vsock relay that connects to exactly this loopback address inside the guest.
+    case guestLoopback(ip: String)
+    /// Cannot be forwarded; the reason is logged once.
+    case unsupported(reason: String)
+
+    init(dockerHostIP raw: String?) {
+        let ip = (raw ?? "").trimmingCharacters(in: .whitespaces)
+        if ip == "::1" { self = .unsupported(reason: "IPv6 loopback publishing is not supported; publish on IPv4 (-p 127.0.0.1:port:port)"); return }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, ip, &v4) == 1, UInt32(bigEndian: v4.s_addr) >> 24 == 127 { self = .guestLoopback(ip: ip); return }
+        self = .guestAddress
+    }
+}
+
+/// The guest-side half of a loopback forward: one `socat` per published port, listening on a vsock port
+/// (reachable only from the host, never on a guest network interface) and connecting to a fixed guest
+/// loopback address. Started and stopped through the guest management channel; stateless, so a relay
+/// left over from an earlier sync is found and replaced by its vsock port alone.
+enum GuestRelay {
+    /// Above the TCP range, so a vsock port can never equal 2375 (Docker) or 2377 (management).
+    static let vsockPortBase: UInt32 = 65536
+    static func vsockPort(hostPort: UInt16) -> UInt32 { vsockPortBase + UInt32(hostPort) }
+    // `[V]SOCK` keeps pkill -f from matching the shell that carries this very pattern.
+    static let startScript = """
+    pkill -f "[V]SOCK-LISTEN:$1," 2>/dev/null
+    setsid socat "VSOCK-LISTEN:$1,reuseaddr,fork,backlog=128" "TCP4:$2:$3" </dev/null >/dev/null 2>&1 &
+    sleep 0.3
+    pgrep -f "[V]SOCK-LISTEN:$1," >/dev/null || { echo "guest relay did not start" >&2; exit 1; }
+    """
+    static let stopScript = "pkill -f \"[V]SOCK-LISTEN:$1,\" 2>/dev/null; exit 0"
+    static func startArgv(hostPort: UInt16, loopbackIP: String) -> [String] {
+        ["sh", "-c", startScript, "harpoon-relay", String(vsockPort(hostPort: hostPort)), loopbackIP, String(hostPort)]
+    }
+    static func stopArgv(hostPort: UInt16) -> [String] {
+        ["sh", "-c", stopScript, "harpoon-relay", String(vsockPort(hostPort: hostPort))]
+    }
+}
+
 // ponytail: M5 dynamic port publishing — N listeners, one per published Docker HostPort, loopback-only safety, FD ownership per listing
 final class PortForwardManager {
     let log: (String) ->Void
     var guestIP: String?
+    var mgmtVsockPort: UInt32 = 2377
+    private var pendingRelays: Set<String> = []
+    private var reportedUnsupported: Set<String> = []
     // key = "127.0.0.1:8080/tcp"  (hostAddr:hostPort/proto)
     private var forwards: [String: Forward] = [:]
     private var dockerPoll: DispatchSourceTimer?
@@ -20,6 +66,7 @@ final class PortForwardManager {
         let containerId: String
         let containerName: String
         let guestIP: String
+        let route: PublishedPortRoute
         let fd: Int32
         let source: DispatchSourceRead
     }
@@ -62,6 +109,12 @@ final class PortForwardManager {
 
     func scheduleSync(delayMs: Int = 500) {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in self?.sync() }
+    }
+
+    struct Desired {
+        let hostPort: UInt16, guestHostPort: UInt16, containerPort: UInt16
+        let proto: String, containerId: String, containerName: String
+        let route: PublishedPortRoute
     }
 
     // Docker container Ports from /containers/json
@@ -150,7 +203,7 @@ final class PortForwardManager {
                 self.log("HARPOON_PORT_SYNC_RESULT containers=0 mappings=0")
                 return
             }
-            var desired: [String: (hostPort: UInt16, guestHostPort: UInt16, containerPort: UInt16, proto: String, containerId: String, containerName: String)] = [:]
+            var desired: [String: Desired] = [:]
             for c in arr where c.State == "running" {
                 let name = c.Names.first ?? c.Id
                 let cleanName = name.hasPrefix("/") ? String(name.dropFirst()) : name
@@ -165,11 +218,17 @@ final class PortForwardManager {
                     let guestHostPort = UInt16(pub) // PublicPort — Harpoon forwards to guest HostPort
                     let containerPort = UInt16(p.PrivatePort) // PrivatePort — metadata
                     let proto = p.`Type`.lowercased()
-                    let dockerHostIp = p.IP ?? "0.0.0.0"
-                    // safety: map unspecified to loopback
-                    let hostAddr = self.hostAddrForDockerIP(dockerHostIp)
+                    let route = PublishedPortRoute(dockerHostIP: p.IP)
+                    if case .unsupported(let reason) = route {
+                        if self.reportedUnsupported.insert("\(c.Id):\(hostPort)").inserted {
+                            self.log("HARPOON_PORT_FORWARD_UNSUPPORTED \(cleanName) \(p.IP ?? ""):\(hostPort)/\(proto) \(reason)")
+                        }
+                        continue
+                    }
+                    // safety: every Docker bind address maps to host loopback
+                    let hostAddr = self.hostAddrForDockerIP(p.IP ?? "0.0.0.0")
                     let key = "\(hostAddr):\(hostPort)/\(proto)"
-                    desired[key] = (hostPort, guestHostPort, containerPort, proto, c.Id, cleanName)
+                    desired[key] = Desired(hostPort: hostPort, guestHostPort: guestHostPort, containerPort: containerPort, proto: proto, containerId: c.Id, containerName: cleanName, route: route)
                 }
             }
             self.log("HARPOON_PORT_SYNC_RESULT containers=\(arr.count) mappings=\(desired.count)")
@@ -185,17 +244,44 @@ final class PortForwardManager {
         return "127.0.0.1"
     }
 
-    private func reconcile(desired: [String: (hostPort: UInt16, guestHostPort: UInt16, containerPort: UInt16, proto: String, containerId: String, containerName: String)], guestIP: String) {
-        // remove no-longer-desired
-        for (key, f) in forwards where desired[key] == nil {
+    private func reconcile(desired: [String: Desired], guestIP: String) {
+        // remove no-longer-desired, and replace a forward whose route changed (container recreated with a different bind address)
+        for (key, f) in forwards where desired[key]?.route != f.route {
             log("HARPOON_PORT_FORWARD_REMOVE \(f.containerName) \(f.hostAddr):\(f.hostPort) -> \(f.guestIP):\(f.guestHostPort)/\(f.proto) containerPort=\(f.containerPort)")
             f.source.cancel()
             forwards.removeValue(forKey: key)
+            if case .guestLoopback = f.route {
+                // a loopback replacement restarts the relay itself; stopping it here could race that start
+                if case .guestLoopback? = desired[key]?.route {} else { stopRelay(hostPort: f.hostPort) }
+            }
         }
         // add new
         for (key, val) in desired where forwards[key] == nil {
             let shouldRestore = forwards.isEmpty && !desired.isEmpty // first sync after start = restore
-            addForward(key: key, hostAddr: hostAddrForKey(key), hostPort: val.hostPort, guestHostPort: val.guestHostPort, containerPort: val.containerPort, proto: val.proto, containerId: val.containerId, containerName: val.containerName, guestIP: guestIP, isRestore: shouldRestore)
+            let add = { [weak self] in
+                guard let self = self else { return }
+                let bound = self.addForward(key: key, hostAddr: self.hostAddrForKey(key), hostPort: val.hostPort, guestHostPort: val.guestHostPort, containerPort: val.containerPort, proto: val.proto, containerId: val.containerId, containerName: val.containerName, guestIP: guestIP, route: val.route, isRestore: shouldRestore)
+                // host port not ours (collision): do not leave an unused guest relay behind
+                if !bound, case .guestLoopback = val.route { self.stopRelay(hostPort: val.hostPort) }
+            }
+            switch val.route {
+            case .guestAddress:
+                add()
+            case .guestLoopback(let ip):
+                // no host listener until the guest relay is up: a listener without one would accept and then reset
+                guard pendingRelays.insert(key).inserted else { continue }
+                startRelay(hostPort: val.hostPort, loopbackIP: ip) { [weak self] failure in
+                    guard let self = self else { return }
+                    self.pendingRelays.remove(key)
+                    if let failure = failure {
+                        self.log("HARPOON_PORT_FORWARD_RELAY_FAILED \(val.containerName) \(ip):\(val.hostPort)/\(val.proto) \(failure); retrying at next sync")
+                    } else if self.forwards[key] == nil {
+                        add()
+                    }
+                }
+            case .unsupported:
+                break // filtered out in sync()
+            }
         }
     }
 
@@ -207,13 +293,14 @@ final class PortForwardManager {
         return "127.0.0.1"
     }
 
-    private func addForward(key: String, hostAddr: String, hostPort: UInt16, guestHostPort: UInt16, containerPort: UInt16, proto: String, containerId: String, containerName: String, guestIP: String, isRestore: Bool) {
+    @discardableResult
+    private func addForward(key: String, hostAddr: String, hostPort: UInt16, guestHostPort: UInt16, containerPort: UInt16, proto: String, containerId: String, containerName: String, guestIP: String, route: PublishedPortRoute, isRestore: Bool) -> Bool {
         if proto != "tcp" {
             log("HARPOON_PORT_FORWARD_SKIP \(containerName) \(hostAddr):\(hostPort)/\(proto) udp deferred")
-            return
+            return false
         }
         let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { log("HARPOON_PORT_FORWARD_COLLISION \(containerName) \(hostAddr):\(hostPort) -> \(guestIP):\(guestHostPort)/\(proto) containerPort=\(containerPort) socket failed \(String(cString:strerror(errno)))"); return }
+        guard fd >= 0 else { log("HARPOON_PORT_FORWARD_COLLISION \(containerName) \(hostAddr):\(hostPort) -> \(guestIP):\(guestHostPort)/\(proto) containerPort=\(containerPort) socket failed \(String(cString:strerror(errno)))"); return false }
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
@@ -227,11 +314,11 @@ final class PortForwardManager {
             let err = String(cString:strerror(errno))
             log("HARPOON_PORT_FORWARD_COLLISION \(containerName) \(hostAddr):\(hostPort) -> \(guestIP):\(guestHostPort)/\(proto) containerPort=\(containerPort) bind failed \(err)")
             close(fd)
-            return
+            return false
         }
         guard listen(fd, 16) == 0 else {
             log("HARPOON_PORT_FORWARD_COLLISION \(containerName) \(hostAddr):\(hostPort) -> \(guestIP):\(guestHostPort)/\(proto) containerPort=\(containerPort) listen failed \(String(cString:strerror(errno)))")
-            close(fd); return
+            close(fd); return false
         }
         let flags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
@@ -256,24 +343,14 @@ final class PortForwardManager {
                 }
                 let fid = nextId; nextId += 1
                 self.log("HOST_FORWARD_ACCEPT \(fid) clientFd=\(cfd) -> \(guestIP):\(guestHostPort) containerPort=\(containerPort)")
-                DispatchQueue.global().async {
-                    let gfd = socket(AF_INET, SOCK_STREAM, 0)
-                    if gfd < 0 { self.log("HOST_FORWARD_GUEST_SOCKET_FAILED \(fid) \(String(cString:strerror(errno)))"); close(cfd); return }
-                    var gaddr = sockaddr_in()
-                    gaddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-                    gaddr.sin_family = sa_family_t(AF_INET)
-                    gaddr.sin_port = in_port_t(guestHostPort.bigEndian)
-                    _ = guestIP.withCString { cstr in inet_pton(AF_INET, cstr, &gaddr.sin_addr) }
-                    let conn = withUnsafePointer(to: &gaddr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in connect(gfd, sp, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
-                    if conn != 0 { self.log("HOST_FORWARD_CONNECT_FAILED \(fid) -> \(guestIP):\(guestHostPort) containerPort=\(containerPort) \(String(cString:strerror(errno)))"); close(cfd); close(gfd); return }
-                    self.log("HOST_FORWARD_CONNECTED \(fid) clientFd=\(cfd) guestFd=\(gfd) -> \(guestIP):\(guestHostPort) containerPort=\(containerPort)")
+                self.connectUpstream(route: route, fid: fid, cfd: cfd, guestIP: guestIP, guestHostPort: guestHostPort, hostPort: hostPort, containerPort: containerPort) { gfd, closeGuest in
                     // per-connection proxy
                     let c2g = DispatchSource.makeReadSource(fileDescriptor: cfd, queue: .global())
                     let g2c = DispatchSource.makeReadSource(fileDescriptor: gfd, queue: .global())
                     var closedCr = false, closedGr = false, closed = false
                     func closeBoth(_ reason: String) {
                         if closed { return }; closed = true
-                        c2g.cancel(); g2c.cancel(); close(cfd); close(gfd)
+                        c2g.cancel(); g2c.cancel(); close(cfd); closeGuest()
                         self.log("HOST_FORWARD_CLOSE \(fid) \(reason)")
                     }
                     c2g.setEventHandler {
@@ -318,7 +395,99 @@ final class PortForwardManager {
         }
         source.setCancelHandler { close(fd) }
         source.resume()
-        let fwd = Forward(hostAddr: hostAddr, hostPort: hostPort, guestHostPort: guestHostPort, containerPort: containerPort, proto: proto, containerId: containerId, containerName: containerName, guestIP: guestIP, fd: fd, source: source)
+        let fwd = Forward(hostAddr: hostAddr, hostPort: hostPort, guestHostPort: guestHostPort, containerPort: containerPort, proto: proto, containerId: containerId, containerName: containerName, guestIP: guestIP, route: route, fd: fd, source: source)
         forwards[key] = fwd
+        return true
+    }
+
+    /// Opens the guest side of one accepted connection and hands its fd to the shared proxy. On failure it
+    /// logs the reason and closes the client, so a genuine forwarding failure is never silent.
+    private func connectUpstream(route: PublishedPortRoute, fid: Int, cfd: Int32, guestIP: String, guestHostPort: UInt16, hostPort: UInt16, containerPort: UInt16, proxy: @escaping (Int32, @escaping () -> Void) -> Void) {
+        if case .guestLoopback(let ip) = route {
+            let vport = GuestRelay.vsockPort(hostPort: hostPort)
+            DispatchQueue.main.async {
+                guard let dev = self.vsockDevice else { self.log("HOST_FORWARD_RELAY_CONNECT_FAILED \(fid) vsock device unavailable"); close(cfd); return }
+                // VZVirtioSocketDevice.connect(toPort:) must be called on the VM's queue (main)
+                dev.connect(toPort: vport) { result in
+                    switch result {
+                    case .failure(let e):
+                        self.log("HOST_FORWARD_RELAY_CONNECT_FAILED \(fid) -> guest \(ip):\(guestHostPort) via vsock \(vport) containerPort=\(containerPort) \(e)")
+                        close(cfd)
+                    case .success(let conn):
+                        let vfd = conn.fileDescriptor
+                        let vflags = fcntl(vfd, F_GETFL, 0); if vflags >= 0 { _ = fcntl(vfd, F_SETFL, vflags | O_NONBLOCK) }
+                        self.log("HOST_FORWARD_CONNECTED \(fid) clientFd=\(cfd) guestFd=\(vfd) -> guest \(ip):\(guestHostPort) via vsock \(vport) containerPort=\(containerPort)")
+                        proxy(vfd) { conn.close() }
+                    }
+                }
+            }
+            return
+        }
+        DispatchQueue.global().async {
+            let gfd = socket(AF_INET, SOCK_STREAM, 0)
+            if gfd < 0 { self.log("HOST_FORWARD_GUEST_SOCKET_FAILED \(fid) \(String(cString:strerror(errno)))"); close(cfd); return }
+            var gaddr = sockaddr_in()
+            gaddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            gaddr.sin_family = sa_family_t(AF_INET)
+            gaddr.sin_port = in_port_t(guestHostPort.bigEndian)
+            _ = guestIP.withCString { cstr in inet_pton(AF_INET, cstr, &gaddr.sin_addr) }
+            let conn = withUnsafePointer(to: &gaddr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in connect(gfd, sp, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+            if conn != 0 { self.log("HOST_FORWARD_CONNECT_FAILED \(fid) -> \(guestIP):\(guestHostPort) containerPort=\(containerPort) \(String(cString:strerror(errno)))"); close(cfd); close(gfd); return }
+            self.log("HOST_FORWARD_CONNECTED \(fid) clientFd=\(cfd) guestFd=\(gfd) -> \(guestIP):\(guestHostPort) containerPort=\(containerPort)")
+            proxy(gfd) { close(gfd) }
+        }
+    }
+
+    /// One guest management `exec` over vsock (the channel `harpoon exec` uses). Calls back with nil on exit 0,
+    /// otherwise with a one-line reason.
+    private func guestExec(_ argv: [String], completion: @escaping (String?) -> Void) {
+        if !Thread.isMainThread { DispatchQueue.main.async { self.guestExec(argv, completion: completion) }; return }
+        guard let dev = vsockDevice else { completion("vsock device unavailable"); return }
+        guard let body = try? JSONSerialization.data(withJSONObject: ["op": "exec", "argv": argv], options: []) else { completion("could not encode request"); return }
+        dev.connect(toPort: mgmtVsockPort) { result in
+            switch result {
+            case .failure(let e): completion("guest management channel unavailable: \(e)")
+            case .success(let conn):
+                let fd = conn.fileDescriptor
+                DispatchQueue.global().async {
+                    let line = Array((String(decoding: body, as: UTF8.self) + "\n").utf8)
+                    var tv = timeval(tv_sec: 5, tv_usec: 0)
+                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                    var off = 0, ok = true
+                    while off < line.count {
+                        let w = line.withUnsafeBytes { write(fd, $0.baseAddress!.advanced(by: off), line.count - off) }
+                        if w <= 0 { ok = false; break }
+                        off += w
+                    }
+                    var resp = Data()
+                    var buf = [UInt8](repeating: 0, count: 4096)
+                    while ok && resp.count < 64 * 1024 && !resp.contains(UInt8(ascii: "\n")) {
+                        let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
+                        if n <= 0 { break }
+                        resp.append(contentsOf: buf[0..<n])
+                    }
+                    var failure: String? = "no response from guest management channel"
+                    if let nl = resp.firstIndex(of: UInt8(ascii: "\n")),
+                       let obj = try? JSONSerialization.jsonObject(with: resp.subdata(in: 0..<nl)) as? [String: Any] {
+                        if (obj["exit"] as? Int) == 0 { failure = nil }
+                        else { failure = ((obj["stderr"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init) ?? "guest command failed" }
+                    }
+                    DispatchQueue.main.async { conn.close(); completion(failure) }
+                }
+            }
+        }
+    }
+
+    private func startRelay(hostPort: UInt16, loopbackIP: String, completion: @escaping (String?) -> Void) {
+        guestExec(GuestRelay.startArgv(hostPort: hostPort, loopbackIP: loopbackIP)) { failure in
+            self.log(failure == nil ? "HARPOON_PORT_RELAY_STARTED \(loopbackIP):\(hostPort) vsock=\(GuestRelay.vsockPort(hostPort: hostPort))" : "HARPOON_PORT_RELAY_START_FAILED \(loopbackIP):\(hostPort) \(failure!)")
+            completion(failure)
+        }
+    }
+
+    private func stopRelay(hostPort: UInt16) {
+        guestExec(GuestRelay.stopArgv(hostPort: hostPort)) { failure in
+            self.log(failure == nil ? "HARPOON_PORT_RELAY_STOPPED :\(hostPort) vsock=\(GuestRelay.vsockPort(hostPort: hostPort))" : "HARPOON_PORT_RELAY_STOP_FAILED :\(hostPort) \(failure!)")
+        }
     }
 }

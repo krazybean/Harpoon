@@ -52,6 +52,9 @@ python3 harpoon/regression-lifecycle-safety.py
 say "Run host path translation regression suite"
 sh harpoon/regression-host-path.sh
 
+say "Run published-port routing regression"
+sh harpoon/regression-published-port-route.sh
+
 say "Run deterministic host path fuzz suite"
 sh harpoon/fuzz-host-path.sh
 
