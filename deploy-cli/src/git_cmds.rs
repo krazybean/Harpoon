@@ -131,9 +131,15 @@ fn settings(p: &Parsed) -> Result<dg::Settings, Fail> {
 
 fn repo_named(state: &harpoon_deploy_journal::Restored, name: &str) -> Result<RepoRec, Fail> {
     state.git.repos.get(name).cloned().ok_or_else(|| {
-        Fail::refused(format!(
-            "repository {name:?} is not registered; use `repo-add`"
-        ))
+        match state.git.retired_name(name) {
+            Some(gone) => Fail::refused(format!(
+                "repository {name:?} was removed: its source is disconnected, and application {} keeps its history. Register the name again with `repo-add` to connect a source",
+                gone.app
+            )),
+            None => Fail::refused(format!(
+                "repository {name:?} is not registered; use `repo-add`"
+            )),
+        }
     })
 }
 
@@ -179,6 +185,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         })
         .transpose()?;
     let create_only = p.switch("new");
+    let confirm_reclaim = p.switch("confirm-reclaim");
     if create_only {
         // an early, cheap refusal; the authoritative check is made again under the writer lock below
         if let Some(r) = read_repos(&rt)?.get(&name) {
@@ -189,6 +196,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
     // read-only first, so a refusal leaves every byte of the journal as it was, and again under the writer lock.
     if let Some(state) = store::read_restored(&rt)? {
         guard_application_identity(&state, &name, requested_app.as_ref())?;
+        guard_application_claim(&state, &name, requested_app.as_ref(), confirm_reclaim)?;
         guard_credential_destination(&state, &name, &url)?;
     }
     // A local source is checked before the journal writer is opened, so a refusal leaves every record as it
@@ -212,6 +220,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         }
     }
     guard_application_identity(&restored, &name, requested_app.as_ref())?;
+    guard_application_claim(&restored, &name, requested_app.as_ref(), confirm_reclaim)?;
     guard_credential_destination(&restored, &name, &url)?;
     let app: ApplicationId = match requested_app {
         Some(a) => a,
@@ -428,22 +437,41 @@ fn changed_meanwhile(name: &str) -> Fail {
     ))
 }
 
-/// Whether a credential is on record for this repository: it is registered with one, or a secret version was ever
-/// saved under its name. Read from the journal only (`SecretSaved` records); the Keychain is never consulted, so
-/// this cannot touch, or be fooled by, an item that belongs to another runtime.
-fn credential_on_record(state: &harpoon_deploy_journal::Restored, repo: &RepoRec) -> bool {
-    repo.cred != CredKind::None
+/// Whether a credential is on record for the repository name: its registration (or its removed registration) used
+/// one, or a secret version was ever saved under the name. Read from the journal only (`SecretSaved` records); the
+/// Keychain is never consulted, so this cannot touch, or be fooled by, an item that belongs to another runtime.
+fn credential_on_record(
+    state: &harpoon_deploy_journal::Restored,
+    name: &str,
+    cred: CredKind,
+) -> bool {
+    cred != CredKind::None
         || state
             .config
             .versions
-            .contains_key(&repo.secret_id("credential"))
+            .contains_key(&policy::secret_id_for(name, "credential"))
 }
 
-fn credential_label(repo: &RepoRec) -> &'static str {
-    match repo.cred {
+fn credential_label(cred: CredKind) -> &'static str {
+    match cred {
         CredKind::Token => "access token",
         CredKind::SshKey => "SSH key",
         CredKind::None => "saved credential",
+    }
+}
+
+/// What the name's saved credential was issued for: the live registration's address, or, once that registration
+/// was removed, the address it had. Removing a registration therefore does not release the destination.
+fn credential_anchor<'a>(
+    state: &'a harpoon_deploy_journal::Restored,
+    name: &str,
+) -> Option<(&'a str, CredKind)> {
+    match state.git.repos.get(name) {
+        Some(live) => Some((live.url.as_str(), live.cred)),
+        None => state
+            .git
+            .retired_name(name)
+            .map(|gone| (gone.url.as_str(), gone.cred)),
     }
 }
 
@@ -468,16 +496,16 @@ fn keep_credential_destination(
     }
 }
 
-/// The check for rewriting the registration `name` to `new_url`: nothing to protect unless the URL changes and a
-/// credential is on record.
+/// The check for rewriting the registration `name` to `new_url`, or for registering a removed name again: nothing to
+/// protect unless the URL changes and a credential is on record.
 fn guard_credential_destination(
     state: &harpoon_deploy_journal::Restored,
     name: &str,
     new_url: &str,
 ) -> Result<(), Fail> {
-    match state.git.repos.get(name) {
-        Some(old) if old.url != new_url && credential_on_record(state, old) => {
-            keep_credential_destination(name, credential_label(old), &old.url, new_url)
+    match credential_anchor(state, name) {
+        Some((old_url, cred)) if old_url != new_url && credential_on_record(state, name, cred) => {
+            keep_credential_destination(name, credential_label(cred), old_url, new_url)
         }
         _ => Ok(()),
     }
@@ -498,6 +526,56 @@ fn guard_application_identity(
             old.app
         ))),
         _ => Ok(()),
+    }
+}
+
+/// A removed registration leaves its application behind, and only the name it was registered under may claim it
+/// again: another name taking over would replace the serving release of an application it never deployed. Claiming
+/// it again is explicit (`--app` naming it, and `--confirm-reclaim`), and refused while Git events from before the
+/// removal are still held, so nothing recorded under the old registration is replayed against the new one. Omitting
+/// `--app` is not a claim: the reused name gets a fresh application.
+fn guard_application_claim(
+    state: &harpoon_deploy_journal::Restored,
+    name: &str,
+    requested: Option<&ApplicationId>,
+    confirmed: bool,
+) -> Result<(), Fail> {
+    let Some(app) = requested else {
+        return Ok(());
+    };
+    let Some(owner) = state.git.retired_owner(app) else {
+        return Ok(());
+    };
+    if owner != name {
+        return Err(Fail::refused(format!(
+            "application {app} belongs to the removed repository {owner:?}, and only that name can claim it again; repository {name:?} cannot. Omit --app to create a fresh application. Nothing was changed"
+        )));
+    }
+    if state.git.repos.contains_key(name) {
+        return Ok(()); // already registered: the identity rule decides
+    }
+    if !confirmed {
+        return Err(Fail::refused(format!(
+            "application {app} was disconnected from repository {name:?} when its registration was removed. Registering the name for it again keeps its history and serving release and connects a source to them; confirm with --confirm-reclaim, or omit --app for a fresh application. Nothing was changed"
+        )));
+    }
+    if !state.control.held(app).is_empty() || state.control.pending_selection(app).is_some() {
+        return Err(Fail::refused(format!(
+            "application {app} still has held Git events from before its registration was removed. Resume or dismiss them first: they name revisions of the old source. Nothing was changed"
+        )));
+    }
+    Ok(())
+}
+
+/// The registration `watch` polls in one pass: the current one, `None` once it was removed, and, when the journal
+/// could not be read this pass (`latest` is `None`), the one the process started with.
+fn registration_for_pass<'a>(
+    latest: Option<&'a policy::GitState>,
+    started: &'a RepoRec,
+) -> Option<&'a RepoRec> {
+    match latest {
+        Some(git) => git.repos.get(&started.name),
+        None => Some(started),
     }
 }
 
@@ -626,6 +704,22 @@ pub fn repo_list(p: &Parsed, out: &mut String) -> R {
             );
         }
     }
+    // Removed registrations whose application has no registration now: the source is disconnected, the
+    // application and its history are not.
+    let mut disconnected: std::collections::BTreeMap<String, &policy::RemovedRec> =
+        Default::default();
+    for gone in &state.git.retired {
+        disconnected.insert(gone.app.to_string(), gone);
+    }
+    for gone in disconnected.values() {
+        if state.git.repo_of_app(&gone.app).is_none() {
+            let _ = writeln!(
+                out,
+                "{}  (removed: source disconnected)  app {}  last source {}  removed-ms {}",
+                gone.name, gone.app, gone.url, gone.at_ms
+            );
+        }
+    }
     Ok(exit::OK)
 }
 
@@ -743,8 +837,26 @@ fn run_source(
         .map_err(|e| format!("cannot generate an id: {e}"))?;
     {
         // the source is durable before anything is built
-        let (mut j, _) = store::open_writer(rt, kind_of(rt, p).map_err(|f| f.message)?)
+        let (mut j, restored) = store::open_writer(rt, kind_of(rt, p).map_err(|f| f.message)?)
             .map_err(|f| f.message)?;
+        // A source record names its repository and replay refuses one for a repository that is not registered, so
+        // this is the one place a removal could otherwise make the journal unreadable. Under the writer lock the
+        // registration is either exactly the one this deployment was prepared from, or nothing is recorded.
+        match restored.git.repos.get(&repo.name) {
+            Some(now) if now == repo => {}
+            Some(_) => {
+                return Err(format!(
+                    "repository {} was changed (edited or registered again) while its source was being fetched; nothing was deployed. Deploy again to use the current registration",
+                    repo.name
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "repository {} was removed while its source was being fetched; nothing was deployed",
+                    repo.name
+                ))
+            }
+        }
         j.git(&GitRecord::Source(SourceRec {
             deployment: dep.clone(),
             repo: repo.name.clone(),
@@ -1073,9 +1185,17 @@ fn poll_repo(
     let (mut j, restored) = store::open_writer(rt, kind_of(rt, p)?)?;
     // What was just read came from the registration this pass started with. If it has been edited since,
     // the result belongs to the old source and must not become a baseline for the new one.
-    if restored.git.repos.get(&repo.name) != Some(repo) {
-        let _ = writeln!(out, "{}: its registration changed while it was being polled; this result was discarded and the next pass starts from the new one", repo.name);
-        return Ok(0);
+    match restored.git.repos.get(&repo.name) {
+        Some(now) if now == repo => {}
+        Some(_) => {
+            let _ = writeln!(out, "{}: its registration changed while it was being polled; this result was discarded and the next pass starts from the new one", repo.name);
+            return Ok(0);
+        }
+        None => {
+            // recording an observation for a removed registration would make the journal unreadable
+            let _ = writeln!(out, "{}: its registration was removed while it was being polled; this result was discarded", repo.name);
+            return Ok(0);
+        }
     }
     let mut ctl = restored.control.clone();
     let mut queued = 0;
@@ -1291,14 +1411,18 @@ pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R
     };
     let mut i: u64 = 0;
     let mut code = exit::OK;
+    let mut gone: std::collections::BTreeSet<String> = Default::default();
     loop {
-        // an edit made while this process runs takes effect on the next pass
+        // an edit made while this process runs takes effect on the next pass, and a removed registration stops
+        // being polled (one that is merely unreadable this pass keeps the registration this process started with)
         let latest = store::read_restored(&rt).ok().flatten();
         for r in &repos {
-            let r = latest
-                .as_ref()
-                .and_then(|s| s.git.repos.get(&r.name))
-                .unwrap_or(r);
+            let Some(r) = registration_for_pass(latest.as_ref().map(|s| &s.git), r) else {
+                if gone.insert(r.name.clone()) {
+                    let _ = writeln!(out, "{}: no longer registered; it is not polled", r.name);
+                }
+                continue;
+            };
             match poll_repo(p, svc, &rt, r, i == 0, out) {
                 Ok(_) => {}
                 Err(f) => {
@@ -1343,4 +1467,58 @@ pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R
         let _ = t.join();
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration(name: &str, url: &str, at_ms: u64) -> RepoRec {
+        RepoRec {
+            name: name.into(),
+            url: url.into(),
+            username: None,
+            cred: CredKind::None,
+            known_host: None,
+            webhook: None,
+            app: "app_00000000000000000000000001".parse().unwrap(),
+            project: None,
+            environment: None,
+            branch: "main".into(),
+            filters: vec![],
+            container_port: 8080,
+            dockerfile: None,
+            context: None,
+            target: None,
+            health_path: None,
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn watch_polls_the_current_registration_stops_at_a_removal_and_survives_an_unreadable_pass() {
+        let started = registration("shop", "https://example.com/a.git", 5);
+        let mut git = policy::GitState::default();
+        git.apply(&GitRecord::Repo(Box::new(started.clone())))
+            .unwrap();
+        assert_eq!(registration_for_pass(Some(&git), &started), Some(&started));
+        // an edit takes effect on the next pass
+        let edited = registration("shop", "https://example.com/b.git", 9);
+        git.apply(&GitRecord::Repo(Box::new(edited.clone())))
+            .unwrap();
+        assert_eq!(registration_for_pass(Some(&git), &started), Some(&edited));
+        // a removal ends the polling of that name
+        git.apply(&GitRecord::Removed(policy::RemovedRec {
+            name: "shop".into(),
+            app: edited.app.clone(),
+            registration: 9,
+            url: edited.url.clone(),
+            cred: CredKind::None,
+            at_ms: 12,
+        }))
+        .unwrap();
+        assert_eq!(registration_for_pass(Some(&git), &started), None);
+        // a pass that could not read the journal keeps the registration the process started with
+        assert_eq!(registration_for_pass(None, &started), Some(&started));
+    }
 }

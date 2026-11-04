@@ -527,7 +527,7 @@ pub fn decode_line(line: &str) -> Result<Line, DecodeError> {
             let f: Vec<&str> = body.split('\t').collect();
             crate::steplog::decode(&f).map(Line::StepLog).map_err(DecodeError)
         }
-        "gitrepo" | "gitseen" | "gitsrc" => {
+        "gitrepo" | "gitseen" | "gitsrc" | "gitdrop" => {
             let want = u32::from_str_radix(crc, 16).or_else(|_| err("bad checksum field"))?;
             if crc.len() != 8 || codec::crc32(body.as_bytes()) != want {
                 return err("checksum mismatch");

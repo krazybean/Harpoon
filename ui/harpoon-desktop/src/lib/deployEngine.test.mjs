@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { deploymentOf, liveBlock, logLines, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -530,4 +530,60 @@ test("the Edit registration dialog only edits: version captured at open, history
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
   assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit registration/);
   assert.doesNotMatch(screens, /register the repository again/);
+});
+
+// ------------------------------------------------------------------ an application whose registration was removed
+
+const GONE = { name: "shop", url: "file:///Users/me/Harpoon%20Hello", registeredMs: 1234, removedMs: 5678 };
+const disconnectedSnap = () => snap([app([dep("dep_1")], { repo: null, disconnected: GONE })], { repos: [] });
+
+test("an application whose registration was removed keeps its history and shows the repository's name as disconnected", () => {
+  const state = st(disconnectedSnap());
+  const a = state.apps.app_1;
+  assert.equal(a.name, "shop", "the retired repository's name, not the raw id");
+  assert.deepEqual(a.disconnected, { name: "shop", url: GONE.url, removedMs: 5678 });
+  assert.equal(a.source.label, "shop \u00b7 source disconnected");
+  assert.match(a.source.detail, /last source \/Users\/me\/Harpoon Hello/);
+  assert.match(a.facts.source.value, /Disconnected \(was \/Users\/me\/Harpoon Hello\)/);
+  assert.equal(a.facts.source.from, "journal");
+  assert.equal(a.facts.branch.value, null, "no registration, so no branch is claimed");
+  assert.equal(a.deployments.length, 1, "history is untouched");
+});
+
+test("a registered, a never-registered and a disconnected application are told apart; an attached runtime is not judged", () => {
+  const registered = st(snap([app([dep("dep_1")])])).apps.app_1;
+  assert.equal(registered.disconnected, undefined);
+  assert.equal(hasNoSource(st(snap([app([dep("dep_1")])])).engine, registered), false);
+  const gone = st(disconnectedSnap());
+  assert.equal(hasNoSource(gone.engine, gone.apps.app_1), true);
+  const never = st(snap([app([dep("dep_1")], { repo: null })], { repos: [] }));
+  assert.equal(hasNoSource(never.engine, never.apps.app_1), true);
+  assert.equal(never.apps.app_1.disconnected, undefined);
+  assert.equal(hasNoSource(undefined, never.apps.app_1), false, "simulation mode has no engine to ask");
+  assert.equal(hasNoSource(gone.engine, { ...gone.apps.app_1, external: { path: "/x", format: "sqlite" } }), false);
+  assert.match(NO_SOURCE_REASON, /Rolling back to a retained release still works/);
+});
+
+test("without a registered repository the Git-based actions are disabled with the reason, and rollback is not", () => {
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(screens, /const noSource = hasNoSource\(c\.state\.engine, app\)/);
+  assert.match(screens, /Deploy<\/>, \{ disabled: !canBuild \|\| !prod, title: buildWhy \}/);
+  assert.match(screens, /Redeploy<\/>, \{ disabled: !canBuild \|\| !prod \|\| !app\.releases\.length, title: buildWhy \}/);
+  assert.match(screens, /Retry deployment<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
+  assert.match(screens, /Redeploy this revision<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
+  // rollback and recovery use canAct, so a source-less application can still be rolled back
+  assert.match(screens, /Roll back\u2026<\/>, \{ disabled: !canAct \|\| !prod \|\| !rollbackTarget/);
+  // the disconnected application says so on its card and page
+  assert.match(screens, /app\.disconnected \? <Tag>Source disconnected<\/Tag>/);
+  assert.match(screens, /title="Source disconnected"/);
+});
+
+test("this build offers no way to remove a registration, and Remove application stays disabled", () => {
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
+  for (const [name, text] of [["Screens", screens], ["Dialogs", dialogs], ["deployEngine", engine]]) {
+    assert.doesNotMatch(text, /Remove registration|remove-repo|remove-registration|repo-remove|op: "remove/i, `${name} must not offer a removal`);
+  }
+  assert.match(screens, /disabled title="Removing applications is not part of this build\."><Trash size=\{14\} \/> Remove application\u2026/);
 });

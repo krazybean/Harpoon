@@ -422,9 +422,15 @@ pub struct RepoRec {
     pub at_ms: u64,
 }
 
+/// The Keychain id of a repository's credential or webhook secret. It depends on the repository's name alone, so it
+/// outlives the registration: see [`RemovedRec`].
+pub fn secret_id_for(name: &str, what: &str) -> String {
+    format!("git/{name}/{what}")
+}
+
 impl RepoRec {
     pub fn secret_id(&self, what: &str) -> String {
-        format!("git/{}/{what}", self.name)
+        secret_id_for(&self.name, what)
     }
     /// Whether a push to `branch` should deploy automatically.
     pub fn wants_branch(&self, branch: &str) -> bool {
@@ -516,11 +522,40 @@ pub struct SourceRec {
     pub at_ms: u64,
 }
 
+/// A registration that was removed: the source link is gone, the application, its deployments and its saved
+/// credentials are not. **Readable and replayable only: no command in this build writes it** (see
+/// `docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md`; a build that does not know this record cannot open a journal
+/// that holds one).
+///
+/// What it keeps, and why:
+/// * `name` and `app`: the application stays, and only this name may claim it again (`GitState::apply`);
+/// * `registration`: the version (`at_ms`) of the registration removed, so a stale removal cannot apply;
+/// * `url` and `cred`: the destination a saved credential was issued for. The secret's id depends on the name alone
+///   and survives in the journal, so a later registration of this name must keep that destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedRec {
+    pub name: String,
+    pub app: ApplicationId,
+    pub registration: u64,
+    pub url: String,
+    pub cred: CredKind,
+    pub at_ms: u64,
+}
+
+impl RemovedRec {
+    pub fn validate(&self) -> Result<(), String> {
+        check_name(&self.name)?;
+        validate_url(&self.url)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitRecord {
     Repo(Box<RepoRec>),
     Seen(SeenRec),
     Source(SourceRec),
+    Removed(RemovedRec),
 }
 
 // ------------------------------------------------------------------ codec
@@ -575,6 +610,15 @@ pub fn encode(r: &GitRecord) -> String {
             opt(&x.context),
             opt(&x.target),
             opt(&x.health_path),
+            x.at_ms
+        ),
+        GitRecord::Removed(x) => format!(
+            "gitdrop\t1\t{}\t{}\t{}\t{}\t{}\t{}",
+            x.name,
+            x.app,
+            x.registration,
+            hex(&x.url),
+            x.cred.as_str(),
             x.at_ms
         ),
         GitRecord::Seen(s) => format!(
@@ -649,6 +693,21 @@ pub fn decode(f: &[&str]) -> Result<GitRecord, String> {
             rec.validate()?;
             Ok(GitRecord::Repo(Box::new(rec)))
         }
+        "gitdrop" => {
+            if f.len() != 8 {
+                return bad("a removal record has the wrong number of fields");
+            }
+            let rec = RemovedRec {
+                name: f[2].to_string(),
+                app: f[3].parse().or_else(|_| bad("bad application id"))?,
+                registration: n(f[4], "registration version")?,
+                url: unhex(f[5]).ok_or("the URL is not valid")?,
+                cred: CredKind::parse(f[6])?,
+                at_ms: n(f[7], "time")?,
+            };
+            rec.validate()?;
+            Ok(GitRecord::Removed(rec))
+        }
         "gitseen" => {
             if f.len() != 6 {
                 return bad("an observation has the wrong number of fields");
@@ -699,6 +758,9 @@ pub struct GitState {
     /// The latest observed commit per (repository, ref).
     pub seen: BTreeMap<(String, String), SeenRec>,
     pub sources: Vec<SourceRec>,
+    /// Every removal, in the order they happened. Never pruned: a name that is registered again must not escape
+    /// what an earlier registration of it bound (its credential's destination, its application's identity).
+    pub retired: Vec<RemovedRec>,
 }
 
 impl GitState {
@@ -712,7 +774,47 @@ impl GitState {
                         x.app, other.name
                     ));
                 }
+                // An application whose registration was removed keeps its identity: only the name it was
+                // registered under may claim it again.
+                if let Some(owner) = self.retired_owner(&x.app) {
+                    if owner != x.name {
+                        return bad(format!(
+                            "application {} belongs to the removed repository {owner}; only that name can claim it again",
+                            x.app
+                        ));
+                    }
+                }
                 self.repos.insert(x.name.clone(), (**x).clone());
+            }
+            GitRecord::Removed(x) => {
+                let Some(live) = self.repos.get(&x.name) else {
+                    return bad(format!(
+                        "a removal names repository {}, which is not registered",
+                        x.name
+                    ));
+                };
+                if live.app != x.app {
+                    return bad(format!(
+                        "a removal of repository {} names application {}, which is not its application",
+                        x.name, x.app
+                    ));
+                }
+                if live.at_ms != x.registration {
+                    return bad(format!(
+                        "a removal of repository {} names another version of its registration",
+                        x.name
+                    ));
+                }
+                if live.url != x.url || live.cred != x.cred {
+                    return bad(format!(
+                        "a removal of repository {} does not match the registration it removes",
+                        x.name
+                    ));
+                }
+                self.repos.remove(&x.name);
+                // observations belong to the registration, not to the name
+                self.seen.retain(|(repo, _), _| repo != &x.name);
+                self.retired.push(x.clone());
             }
             GitRecord::Seen(s) => {
                 if !self.repos.contains_key(&s.repo) {
@@ -734,6 +836,25 @@ impl GitState {
             }
         }
         Ok(())
+    }
+
+    /// The name an application was registered under when its registration was removed (a removed application
+    /// belongs to one name for good).
+    pub fn retired_owner(&self, app: &ApplicationId) -> Option<&str> {
+        self.retired.iter().find(|x| x.app == *app).map(|x| x.name.as_str())
+    }
+
+    /// The latest removal of a repository name.
+    pub fn retired_name(&self, name: &str) -> Option<&RemovedRec> {
+        self.retired.iter().rev().find(|x| x.name == name)
+    }
+
+    /// The removal that disconnected an application from its source, while no repository is registered for it.
+    pub fn disconnected(&self, app: &ApplicationId) -> Option<&RemovedRec> {
+        if self.repo_of_app(app).is_some() {
+            return None;
+        }
+        self.retired.iter().rev().find(|x| x.app == *app)
     }
 
     pub fn source_of(&self, d: &DeploymentId) -> Option<&SourceRec> {
@@ -1059,5 +1180,361 @@ mod tests {
         }
         // a path may contain anything harmless: only the authority decides the destination
         assert!(destination("https://good.example/a%20b/c#d?e").is_some());
+    }
+
+    // ------------------------------------------------------------------ removal records (readable, not yet written)
+
+    fn removal_of(r: &RepoRec, at_ms: u64) -> RemovedRec {
+        RemovedRec {
+            name: r.name.clone(),
+            app: r.app.clone(),
+            registration: r.at_ms,
+            url: r.url.clone(),
+            cred: r.cred,
+            at_ms,
+        }
+    }
+
+    fn registered(name: &str, app: &str, at_ms: u64) -> RepoRec {
+        RepoRec {
+            name: name.into(),
+            app: app.parse().unwrap(),
+            at_ms,
+            ..repo()
+        }
+    }
+
+    const APP_A: &str = "app_00000000000000000000000001";
+    const APP_B: &str = "app_00000000000000000000000002";
+    const APP_C: &str = "app_00000000000000000000000003";
+
+    fn fields(line: &str) -> Vec<String> {
+        line.split('\t').map(str::to_string).collect()
+    }
+
+    /// A record as the journal stores it, without its checksum frame.
+    fn body_of(r: &GitRecord) -> String {
+        encode(r).split_once('\t').unwrap().1.to_string()
+    }
+
+    fn decoded(body: &str) -> Result<GitRecord, String> {
+        let f = fields(body);
+        decode(&f.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_removal_record_round_trips_and_keeps_what_credential_safety_needs() {
+        let r = GitRecord::Removed(removal_of(&repo(), 99));
+        let line = body_of(&r);
+        assert!(line.starts_with("gitdrop\t1\tshop\t"), "{line}");
+        assert_eq!(decoded(&line), Ok(r.clone()));
+        // the registration it removes, the application and the destination are all in the record
+        let GitRecord::Removed(x) = r else { unreachable!() };
+        assert_eq!(
+            (x.registration, x.app.to_string(), x.url.as_str(), x.cred),
+            (
+                5,
+                APP_A.to_string(),
+                "https://example.com/acme/shop.git",
+                CredKind::Token
+            )
+        );
+        // and no secret: the record carries no credential, only the kind
+        assert!(!line.contains("x-access-token"));
+    }
+
+    #[test]
+    fn a_malformed_removal_record_is_rejected_not_skipped() {
+        let good = body_of(&GitRecord::Removed(removal_of(&repo(), 99)));
+        let with = |i: usize, v: &str| {
+            let mut f = fields(&good);
+            f[i] = v.to_string();
+            f.join("\t")
+        };
+        for (what, line) in [
+            ("an unknown version", with(1, "2")),
+            ("no version", with(1, "")),
+            ("a bad name", with(2, "no spaces")),
+            ("an empty name", with(2, "")),
+            ("a bad application id", with(3, "app_x")),
+            ("a non-numeric registration version", with(4, "x")),
+            ("an unhexable URL", with(5, "zz")),
+            ("an empty URL", with(5, "")),
+            (
+                "a URL with a control character",
+                with(5, &hex("https://example.com/a\nb")),
+            ),
+            ("a URL with a password", with(5, &hex("https://u:pw@example.com/x.git"))),
+            ("an unknown credential kind", with(6, "oauth")),
+            ("a non-numeric time", with(7, "x")),
+            ("a missing field", good.rsplit_once('\t').unwrap().0.to_string()),
+            ("an extra field", format!("{good}\textra")),
+        ] {
+            assert!(decoded(&line).is_err(), "{what} must be rejected: {line}");
+        }
+        // the older record families are unaffected
+        assert_eq!(
+            decoded(&body_of(&GitRecord::Repo(Box::new(repo())))),
+            Ok(GitRecord::Repo(Box::new(repo())))
+        );
+    }
+
+    #[test]
+    fn replaying_a_removal_disconnects_the_source_but_keeps_the_application_and_its_history() {
+        let mut st = GitState::default();
+        let r = registered("shop", APP_A, 5);
+        st.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        let src = SourceRec {
+            deployment: "dep_00000000000000000000000001".parse().unwrap(),
+            repo: "shop".into(),
+            url: r.url.clone(),
+            selector: SelectorKind::Branch,
+            requested: "main".into(),
+            commit: "a".repeat(40),
+            trigger: "manual".into(),
+            delivery: None,
+            at_ms: 6,
+        };
+        st.apply(&GitRecord::Source(src.clone())).unwrap();
+        for ref_name in ["refs/heads/main", "refs/heads/release"] {
+            st.apply(&GitRecord::Seen(SeenRec {
+                repo: "shop".into(),
+                ref_name: ref_name.into(),
+                commit: "b".repeat(40),
+                at_ms: 7,
+            }))
+            .unwrap();
+        }
+        // another repository's observation must survive
+        st.apply(&GitRecord::Repo(Box::new(registered("blog", APP_B, 8))))
+            .unwrap();
+        st.apply(&GitRecord::Seen(SeenRec {
+            repo: "blog".into(),
+            ref_name: "refs/heads/main".into(),
+            commit: "c".repeat(40),
+            at_ms: 9,
+        }))
+        .unwrap();
+
+        st.apply(&GitRecord::Removed(removal_of(&r, 20))).unwrap();
+        assert!(!st.repos.contains_key("shop") && st.repos.contains_key("blog"));
+        assert!(st.repo_of_app(&r.app).is_none());
+        assert_eq!(
+            st.seen.keys().map(|k| k.0.as_str()).collect::<Vec<_>>(),
+            vec!["blog"],
+            "polling state does not outlive the registration"
+        );
+        assert_eq!(
+            st.sources,
+            vec![src.clone()],
+            "the recorded source of a deployment is history"
+        );
+        assert_eq!(st.source_of(&src.deployment), Some(&src));
+        assert_eq!(
+            st.retired_name("shop").map(|x| x.app.to_string()),
+            Some(APP_A.to_string())
+        );
+        assert_eq!(st.retired_owner(&r.app), Some("shop"));
+        assert_eq!(st.disconnected(&r.app).map(|x| x.name.as_str()), Some("shop"));
+        assert!(
+            st.disconnected(&"app_00000000000000000000000002".parse().unwrap())
+                .is_none(),
+            "a registered application is not disconnected"
+        );
+    }
+
+    #[test]
+    fn a_removal_that_does_not_match_a_live_registration_does_not_apply() {
+        let mut st = GitState::default();
+        let r = registered("shop", APP_A, 5);
+        let rm = removal_of(&r, 20);
+        assert!(st
+            .apply(&GitRecord::Removed(rm.clone()))
+            .unwrap_err()
+            .contains("not registered"));
+        st.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        let before = st.clone();
+        for (what, bad_rm, want) in [
+            (
+                "another application",
+                RemovedRec {
+                    app: APP_B.parse().unwrap(),
+                    ..rm.clone()
+                },
+                "not its application",
+            ),
+            (
+                "an earlier version",
+                RemovedRec {
+                    registration: 4,
+                    ..rm.clone()
+                },
+                "another version",
+            ),
+            (
+                "a later version",
+                RemovedRec {
+                    registration: 6,
+                    ..rm.clone()
+                },
+                "another version",
+            ),
+            (
+                "another URL",
+                RemovedRec {
+                    url: "https://example.com/other.git".into(),
+                    ..rm.clone()
+                },
+                "does not match",
+            ),
+            (
+                "another credential kind",
+                RemovedRec {
+                    cred: CredKind::None,
+                    ..rm.clone()
+                },
+                "does not match",
+            ),
+            (
+                "another name",
+                RemovedRec {
+                    name: "blog".into(),
+                    ..rm.clone()
+                },
+                "not registered",
+            ),
+        ] {
+            let e = st.apply(&GitRecord::Removed(bad_rm)).unwrap_err();
+            assert!(e.contains(want), "{what}: {e}");
+            assert_eq!(st, before, "{what}: a refused removal changed the state");
+        }
+        st.apply(&GitRecord::Removed(rm.clone())).unwrap();
+        // a second removal of the same registration is stale
+        assert!(st
+            .apply(&GitRecord::Removed(rm))
+            .unwrap_err()
+            .contains("not registered"));
+        assert_eq!(st.retired.len(), 1);
+    }
+
+    #[test]
+    fn nothing_can_be_recorded_for_a_removed_registration() {
+        let mut st = GitState::default();
+        let r = registered("shop", APP_A, 5);
+        st.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        st.apply(&GitRecord::Removed(removal_of(&r, 20))).unwrap();
+        // a late poll or a late deployment would make the journal unreadable if it were recorded, so replay says no
+        let late_seen = GitRecord::Seen(SeenRec {
+            repo: "shop".into(),
+            ref_name: "refs/heads/main".into(),
+            commit: "d".repeat(40),
+            at_ms: 21,
+        });
+        assert!(st.apply(&late_seen).unwrap_err().contains("not registered"));
+        let late_source = GitRecord::Source(SourceRec {
+            deployment: "dep_00000000000000000000000009".parse().unwrap(),
+            repo: "shop".into(),
+            url: r.url.clone(),
+            selector: SelectorKind::Branch,
+            requested: "main".into(),
+            commit: "e".repeat(40),
+            trigger: "poll".into(),
+            delivery: None,
+            at_ms: 22,
+        });
+        assert!(st.apply(&late_source).unwrap_err().contains("not registered"));
+        assert!(st.seen.is_empty() && st.sources.is_empty());
+    }
+
+    #[test]
+    fn a_removed_application_can_only_be_claimed_again_by_the_name_it_was_registered_under() {
+        let mut st = GitState::default();
+        let r = registered("shop", APP_A, 5);
+        st.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        st.apply(&GitRecord::Removed(removal_of(&r, 20))).unwrap();
+        let other = st
+            .apply(&GitRecord::Repo(Box::new(registered("blog", APP_A, 30))))
+            .unwrap_err();
+        assert!(other.contains("belongs to the removed repository shop"), "{other}");
+        assert!(st.repos.is_empty());
+        // a fresh application for any name, the original name included, is not a claim
+        st.apply(&GitRecord::Repo(Box::new(registered("blog", APP_B, 31))))
+            .unwrap();
+        st.apply(&GitRecord::Repo(Box::new(registered("shop", APP_C, 32))))
+            .unwrap();
+        // the original name may claim it again, once it is free
+        let mut st2 = GitState::default();
+        st2.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        st2.apply(&GitRecord::Removed(removal_of(&r, 20))).unwrap();
+        st2.apply(&GitRecord::Repo(Box::new(registered("shop", APP_A, 40))))
+            .unwrap();
+        assert_eq!(st2.repo_of_app(&r.app).map(|x| x.at_ms), Some(40));
+        assert!(
+            st2.disconnected(&r.app).is_none(),
+            "claimed again, no longer disconnected"
+        );
+        assert_eq!(st2.retired_owner(&r.app), Some("shop"), "but still remembered");
+    }
+
+    #[test]
+    fn repeated_removal_and_registration_cycles_never_forget_what_an_earlier_registration_bound() {
+        let mut st = GitState::default();
+        let mut t = 10;
+        let mut cycle = |st: &mut GitState, app: &str| {
+            t += 10;
+            let r = registered("shop", app, t);
+            st.apply(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+            st.apply(&GitRecord::Seen(SeenRec {
+                repo: "shop".into(),
+                ref_name: "refs/heads/main".into(),
+                commit: "f".repeat(40),
+                at_ms: t + 1,
+            }))
+            .unwrap();
+            st.apply(&GitRecord::Removed(removal_of(&r, t + 2))).unwrap();
+            r
+        };
+        let first = cycle(&mut st, APP_A);
+        cycle(&mut st, APP_B); // the reused name got a fresh application
+        cycle(&mut st, APP_A); // and may claim the first one again
+        assert_eq!(st.retired.len(), 3, "every removal stays on record");
+        assert_eq!(st.retired_owner(&first.app), Some("shop"));
+        assert_eq!(st.retired_owner(&APP_B.parse().unwrap()), Some("shop"));
+        assert!(st.seen.is_empty(), "no observation survives a removal");
+        assert_eq!(
+            st.retired_name("shop").map(|x| x.registration),
+            Some(40),
+            "the latest removal is the name's last destination"
+        );
+        // another name still cannot take either application
+        for app in [APP_A, APP_B] {
+            assert!(
+                st.apply(&GitRecord::Repo(Box::new(registered("blog", app, 90))))
+                    .is_err(),
+                "{app}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_journal_written_before_removals_existed_replays_unchanged() {
+        // the exact lines older builds wrote for the three families
+        let lines = [
+            body_of(&GitRecord::Repo(Box::new(repo()))),
+            body_of(&GitRecord::Seen(SeenRec {
+                repo: "shop".into(),
+                ref_name: "refs/heads/main".into(),
+                commit: "a".repeat(40),
+                at_ms: 6,
+            })),
+        ];
+        let mut st = GitState::default();
+        for l in &lines {
+            st.apply(&decoded(l).unwrap()).unwrap();
+        }
+        assert_eq!(st.repos.len(), 1);
+        assert_eq!(st.seen.len(), 1);
+        assert!(st.retired.is_empty());
+        assert!(st.disconnected(&app()).is_none());
     }
 }

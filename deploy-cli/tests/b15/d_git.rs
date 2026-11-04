@@ -2960,6 +2960,15 @@ const THIRD_APP: &str = "app_00000000000000000000000003";
 /// A serving release of `APP`, its repository `shop` (with or without a saved credential), a recorded source and
 /// a held Git event: everything an identity change could disturb.
 fn deployed_and_registered(t: &T, kc: &MemorySecretStore, credential: bool) -> String {
+    deployed_registered(t, kc, credential, true)
+}
+
+fn deployed_registered(
+    t: &T,
+    kc: &MemorySecretStore,
+    credential: bool,
+    held_event: bool,
+) -> String {
     let second = "0123456789abcdef0123456789abcdef01234567".to_string();
     seed_release(t, true, &[("MODE", "one")]);
     let shop_url = "https://git.example.com/acme/shop.git".to_string();
@@ -2986,23 +2995,25 @@ fn deployed_and_registered(t: &T, kc: &MemorySecretStore, credential: bool) -> S
         ))
         .unwrap();
     }
-    assert_exit(
-        &sim(
-            t,
-            kc,
-            &[
-                "git-trigger",
-                "--simulate",
-                "--repo",
-                "shop",
-                "--delivery",
-                "d1",
-                "--revision",
-                &second,
-            ],
-        ),
-        0,
-    );
+    if held_event {
+        assert_exit(
+            &sim(
+                t,
+                kc,
+                &[
+                    "git-trigger",
+                    "--simulate",
+                    "--repo",
+                    "shop",
+                    "--delivery",
+                    "d1",
+                    "--revision",
+                    &second,
+                ],
+            ),
+            0,
+        );
+    }
     shop_url
 }
 
@@ -3168,4 +3179,479 @@ fn the_two_command_identity_transfer_is_refused_at_its_first_step() {
     assert_eq!(after, before);
     assert_eq!(after.git.repos["billing"].app.to_string(), SECOND_APP);
     assert_eq!(after.git.repos["shop"].app.to_string(), APP);
+}
+
+// ------------------------------------------------------------------ a removed registration (readable; nothing writes it)
+
+/// The only way a removal gets into a journal in this build: a test appends the record. No command writes it.
+fn removal_record(t: &T, name: &str, at_ms: u64) -> harpoon_deploy::git::RemovedRec {
+    let live = restored(t).git.repos[name].clone();
+    harpoon_deploy::git::RemovedRec {
+        name: live.name,
+        app: live.app,
+        registration: live.at_ms,
+        url: live.url,
+        cred: live.cred,
+        at_ms,
+    }
+}
+
+fn retire(t: &T, name: &str, at_ms: u64) {
+    let rec = removal_record(t, name, at_ms);
+    let _h = holding();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    j.git(&harpoon_deploy::git::GitRecord::Removed(rec))
+        .unwrap();
+}
+
+/// The same, for the race tests: the poll or deployment is already inside the fork gate's `spawning`, which keeps
+/// every other test from forking or opening a journal, so this opens the journal directly.
+fn retire_direct(t: &T, name: &str, at_ms: u64) {
+    let rec = removal_record(t, name, at_ms);
+    let (mut j, _) = harpoon_deploy_journal::SqliteJournal::open(&t.journal_dir()).unwrap();
+    j.git(&harpoon_deploy::git::GitRecord::Removed(rec))
+        .unwrap();
+}
+
+#[test]
+fn a_journal_with_a_removed_registration_reads_back_with_the_application_and_its_history_intact() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    let app: ApplicationId = APP.parse().unwrap();
+    let before = restored(&t);
+    let serving =
+        harpoon_deploy::serving::serving_release(&before.ledger, &before.deployments, &app);
+    assert!(serving.is_some());
+    let requests = t.docker_requests();
+
+    retire(&t, "shop", 5_000_000_000_000);
+    let after = restored(&t);
+    assert!(after.git.repos.is_empty() && after.git.retired.len() == 1);
+    assert_eq!(after.git.retired[0].app, app);
+    assert_eq!(after.deployments, before.deployments, "deployment records");
+    assert_eq!(after.ledger, before.ledger, "the Docker ledger");
+    assert_eq!(after.config, before.config);
+    assert_eq!(
+        after.git.sources, before.git.sources,
+        "the release keeps its recorded source"
+    );
+    assert_eq!(
+        harpoon_deploy::serving::serving_release(&after.ledger, &after.deployments, &app),
+        serving,
+        "the serving release"
+    );
+    assert_eq!(t.docker_requests(), requests);
+    let list = sim(&t, &kc, &["repo-list"]);
+    assert_exit(&list, 0);
+    assert!(
+        list.stdout.contains("shop  (removed: source disconnected)"),
+        "{}",
+        list.stdout
+    );
+    assert!(list.stdout.contains(APP), "{}", list.stdout);
+}
+
+#[test]
+fn commands_aimed_at_a_removed_name_say_it_was_removed_and_write_nothing() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    deployed_registered(&t, &kc, false, false);
+    retire(&t, "shop", 5_000_000_000_000);
+    let before = restored(&t);
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    for args in [
+        vec!["git-deploy", "--simulate", "--repo", "shop"],
+        vec![
+            "git-trigger",
+            "--simulate",
+            "--repo",
+            "shop",
+            "--delivery",
+            "d9",
+            "--revision",
+            sha,
+        ],
+        vec![
+            "repo-update",
+            "--simulate",
+            "--name",
+            "shop",
+            "--expect-registered-ms",
+            "1",
+            "--branch",
+            "x",
+        ],
+    ] {
+        let o = sim(&t, &kc, &args);
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("was removed") && o.stderr.contains("keeps its history"),
+            "{args:?}: {}",
+            o.stderr
+        );
+    }
+    let o = crun(
+        &t,
+        &SHIPPING,
+        &kc,
+        b"x\n",
+        &[
+            "repo-secret",
+            "--simulate",
+            "--name",
+            "shop",
+            "--kind",
+            "credential",
+        ],
+    );
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("was removed"), "{}", o.stderr);
+    assert_eq!(restored(&t), before);
+}
+
+#[test]
+fn only_the_original_name_can_claim_a_removed_application_and_only_explicitly() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, false, false);
+    retire(&t, "shop", 5_000_000_000_000);
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    // another name: refused, with or without confirmation
+    for extra in [vec!["--app", APP], vec!["--app", APP, "--confirm-reclaim"]] {
+        let o = replace_named(&t, "blog", "https://git.example.com/acme/blog.git", &extra);
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("only that name can claim it again"),
+            "{}",
+            o.stderr
+        );
+    }
+    // the original name: naming the application is not enough
+    let o = replace_shop(&t, &url, &["--app", APP]);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("--confirm-reclaim"), "{}", o.stderr);
+    assert_eq!(journal_bytes(&t), bytes, "refusals wrote nothing");
+    assert_eq!(restored(&t), before);
+    // with the explicit identity and confirmation it connects a source to the same application again
+    assert_exit(
+        &replace_shop(&t, &url, &["--app", APP, "--confirm-reclaim"]),
+        0,
+    );
+    let after = restored(&t);
+    assert_eq!(after.git.repos["shop"].app.to_string(), APP);
+    assert_eq!(after.git.retired.len(), 1, "the removal stays on record");
+    assert_eq!(
+        (&after.deployments, &after.ledger, &after.git.sources),
+        (&before.deployments, &before.ledger, &before.git.sources)
+    );
+}
+
+#[test]
+fn a_removed_application_with_held_events_cannot_be_claimed_again_until_they_are_resolved() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, false, true); // a held event from before the removal
+    retire(&t, "shop", 5_000_000_000_000);
+    assert_eq!(restored(&t).control.events.len(), 1);
+    let bytes = journal_bytes(&t);
+    let o = replace_shop(&t, &url, &["--app", APP, "--confirm-reclaim"]);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("held Git events"), "{}", o.stderr);
+    assert_eq!(journal_bytes(&t), bytes);
+    assert!(restored(&t).git.repos.is_empty());
+}
+
+#[test]
+fn a_reused_name_gets_a_fresh_application_and_inherits_no_polling_state_or_held_events() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, false, true);
+    // an observation made under the old registration
+    {
+        let _h = holding();
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let live = restored(&t).git.repos["shop"].clone();
+        j.git(&harpoon_deploy::git::GitRecord::Seen(
+            harpoon_deploy::git::SeenRec {
+                repo: "shop".into(),
+                ref_name: "refs/heads/main".into(),
+                commit: "a".repeat(40),
+                at_ms: live.at_ms + 1,
+            },
+        ))
+        .unwrap();
+    }
+    retire(&t, "shop", 5_000_000_000_000);
+    assert!(
+        restored(&t).git.seen.is_empty(),
+        "polling state does not outlive the registration"
+    );
+    assert_exit(&replace_shop(&t, &url, &[]), 0);
+    let after = restored(&t);
+    let fresh = after.git.repos["shop"].app.clone();
+    assert_ne!(
+        fresh.to_string(),
+        APP,
+        "a fresh application, not the removed one"
+    );
+    assert!(after.git.seen.is_empty());
+    assert!(
+        after.control.events_of(&fresh).next().is_none(),
+        "no held event of the old application"
+    );
+    // the old application is untouched, still registered to nobody, and still the original name's
+    assert_eq!(after.git.retired_owner(&APP.parse().unwrap()), Some("shop"));
+    assert!(after
+        .deployments
+        .iter()
+        .all(|d| d.application_id.to_string() == APP));
+    assert_eq!(after.control.events.len(), 1);
+}
+
+#[test]
+fn a_removed_registrations_credential_destination_survives_every_removal_and_registration_cycle() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    credentialed(&t, &kc, "https://git.example.com/acme/shop.git");
+    retire(&t, "shop", 5_000_000_000_000);
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    let elsewhere = [
+        "https://git.evil.example/acme/shop.git",
+        "https://git.evil.example#@git.example.com/acme/shop.git",
+        "https://git.example.com:8443/acme/shop.git",
+        "ssh://git@git.example.com/acme/shop.git",
+        "file:///tmp/shop",
+    ];
+    for url in elsewhere {
+        for extra in [
+            &["--username", "ci"][..],
+            &[][..],
+            &["--app", APP, "--confirm-reclaim"][..],
+        ] {
+            let o = replace_shop(&t, url, extra);
+            assert!(
+                o.code == 6 || o.code == 2,
+                "{url} {extra:?}: exit {}: {}",
+                o.code,
+                o.stderr
+            );
+            for text in [&o.stdout, &o.stderr] {
+                assert!(!text.contains(PLANTED), "a secret in the output");
+            }
+        }
+    }
+    assert_eq!(journal_bytes(&t), bytes, "refusals wrote nothing");
+    assert_eq!(restored(&t), before);
+    assert_eq!(
+        saved_token(&kc),
+        PLANTED.as_bytes(),
+        "the saved token is untouched"
+    );
+    // the same destination is fine, with a fresh application; then a second and a third cycle change nothing
+    for (i, url) in [
+        "https://git.example.com/acme/a.git",
+        "https://GIT.example.com:443/acme/b.git",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_exit(&replace_shop(&t, url, &["--username", "ci"]), 0);
+        retire(&t, "shop", 5_000_000_000_100 + i as u64);
+        for url in elsewhere {
+            let o = replace_shop(&t, url, &[]);
+            assert!(
+                o.code == 6 || o.code == 2,
+                "cycle {i}: {url}: exit {}",
+                o.code
+            );
+        }
+    }
+    assert_eq!(restored(&t).git.retired.len(), 3);
+    assert_eq!(saved_token(&kc), PLANTED.as_bytes());
+}
+
+#[test]
+fn this_build_has_no_command_that_removes_a_registration() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    for cmd in ["repo-remove", "repo-drop", "repo-delete", "repo-retire"] {
+        assert!(!harpoon_deploy_cli::command_names().contains(&cmd), "{cmd}");
+        let o = sim(&t, &kc, &[cmd, "--name", "shop"]);
+        assert_exit(&o, 2);
+    }
+}
+
+// ------------------------------------------------------------------ races with a removal (the request is held mid-flight)
+
+/// `shop` registered with a saved token against a local smart-HTTP server that can hold a request.
+fn served_shop(
+    t: &T,
+    kc: &MemorySecretStore,
+    gt: &Tmp,
+) -> (HttpGit, std::path::PathBuf, std::path::PathBuf) {
+    let (repo, _, _) = fixture(&gt.0);
+    let served = gt.0.join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let bare = served.join("shop.git");
+    git(
+        &gt.0,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let server = HttpGit::start(served, "x-access-token", "tok-race-ONE");
+    assert_exit(
+        &add_repo(
+            t,
+            kc,
+            "shop",
+            &server.url("shop.git"),
+            APP,
+            &["--username", "x-access-token"],
+        ),
+        0,
+    );
+    assert_exit(
+        &crun(
+            t,
+            &SHIPPING,
+            kc,
+            b"tok-race-ONE\n",
+            &[
+                "repo-secret",
+                "--simulate",
+                "--name",
+                "shop",
+                "--kind",
+                "credential",
+            ],
+        ),
+        0,
+    );
+    (server, repo, bare)
+}
+
+/// Run `args` on another thread (inside the fork gate like `crun`), with only owned values captured.
+fn in_background(rt: &str, kc: &MemorySecretStore, args: &[&str]) -> Outcome {
+    let mut a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    a.extend(["--runtime-dir".to_string(), rt.to_string()]);
+    let mut input: &[u8] = b"";
+    let mut svc = Services {
+        secrets: kc,
+        stdin: &mut input,
+        stdin_is_terminal: false,
+        next: None,
+    };
+    spawning(|| run_with(&a, &SHIPPING, &mut svc))
+}
+
+#[test]
+fn a_poll_that_straddles_a_removal_records_nothing_and_leaves_a_readable_journal() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (server, repo, bare) = served_shop(&t, &kc, &gt);
+    let rt = t.rt.display().to_string();
+    let wait = std::time::Duration::from_secs(30);
+    assert_exit(
+        &sim(&t, &kc, &["watch", "--simulate", "--once", "--queue-only"]),
+        0,
+    ); // the baseline
+    let seen_before = restored(&t).git.seen.clone();
+    assert!(!seen_before.is_empty());
+    commit(&repo, "VERSION", "three\n");
+    git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
+
+    server.hold_next_request();
+    std::thread::scope(|sc| {
+        let _release = ReleaseOnDrop(&server);
+        let running = sc
+            .spawn(|| in_background(&rt, &kc, &["watch", "--simulate", "--once", "--queue-only"]));
+        assert!(
+            server.wait_until_held(wait),
+            "the poll never reached the server"
+        );
+        retire_direct(&t, "shop", 5_000_000_000_000);
+        server.release();
+        let o = running.join().unwrap();
+        assert_exit(&o, 0);
+        assert!(
+            o.stdout
+                .contains("its registration was removed while it was being polled"),
+            "{}",
+            o.stdout
+        );
+        assert!(!o.stdout.contains("queued as"), "{}", o.stdout);
+    });
+    // an observation recorded after the removal would make this restore fail
+    let after = restored(&t);
+    assert!(after.git.repos.is_empty() && after.git.retired.len() == 1);
+    assert!(
+        after.git.seen.is_empty(),
+        "the removal dropped the baseline and the stale poll added none"
+    );
+    assert!(after.control.events.is_empty(), "nothing was queued");
+}
+
+#[test]
+fn a_deployment_that_straddles_a_removal_or_an_edit_records_no_source_and_deploys_nothing() {
+    for removal in [true, false] {
+        let t = T::new();
+        let kc = MemorySecretStore::new();
+        let gt = Tmp::new();
+        let (server, _repo, _bare) = served_shop(&t, &kc, &gt);
+        let rt = t.rt.display().to_string();
+        let wait = std::time::Duration::from_secs(30);
+        let at = registered_ms(&t, "shop");
+        let before = restored(&t);
+        server.hold_next_request();
+        let o = std::thread::scope(|sc| {
+            let _release = ReleaseOnDrop(&server);
+            let running = sc
+                .spawn(|| in_background(&rt, &kc, &["git-deploy", "--simulate", "--repo", "shop"]));
+            assert!(
+                server.wait_until_held(wait),
+                "the deployment never reached the server"
+            );
+            if removal {
+                retire_direct(&t, "shop", 5_000_000_000_000);
+            } else {
+                assert_exit(
+                    &update_direct(&t, &kc, "shop", at, &["--container-port", "4242"]),
+                    0,
+                );
+            }
+            server.release();
+            running.join().unwrap()
+        });
+        assert_exit(&o, 7);
+        let want = if removal {
+            "was removed while its source was being fetched"
+        } else {
+            "was changed"
+        };
+        assert!(
+            o.stderr.contains(want) && o.stderr.contains("nothing was deployed"),
+            "removal={removal}: {}",
+            o.stderr
+        );
+        // a source record for a removed registration would make this restore fail
+        let after = restored(&t);
+        assert!(after.git.sources.is_empty(), "no source was recorded");
+        assert_eq!(
+            after.deployments, before.deployments,
+            "no deployment was started"
+        );
+        assert_eq!(after.ledger, before.ledger);
+        assert_eq!(t.docker_requests(), 0);
+        assert!(scratch_clean(&t), "the checkout was cleaned up");
+        assert_eq!(after.git.repos.is_empty(), removal);
+    }
 }

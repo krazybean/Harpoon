@@ -31,6 +31,8 @@ export type SnapDeployment = {
 };
 export type SnapApp = {
   id: string; repo: string | null;
+  /** Present while the application has no registered repository because its registration was removed. */
+  disconnected?: { name: string; url: string; registeredMs: number; removedMs: number } | null;
   /** The stable `<label>.harpoon.localhost` name of the application, and whether it routes (serving / idle / conflict / external). */
   hostname?: string; route?: "serving" | "idle" | "conflict" | "external"; deployments: SnapDeployment[];
   serving: { release: string; deployment: string; container: string; via: string; sinceMs: number; hostPort: number | null; healthPath: string | null } | null;
@@ -236,7 +238,7 @@ function factsOf(a: SnapApp, repo: SnapRepo | null, servDep: SnapDeployment | un
   else if (dep && dep.cutover === "not_required") replacement = { value: "Nothing was replaced (first deployment)", from: "journal", detail: "cutover not required" };
   const image = dep?.resources.find((r) => r.kind === "image");
   return {
-    source: repo ? { value: `${displayUrl(repo.url)}`, from: "registration" } : src ? { value: `${displayUrl(src.url)} @ ${src.commit.slice(0, 7)}`, from: "journal", detail: "recorded with the deployment" } : NOT,
+    source: repo ? { value: `${displayUrl(repo.url)}`, from: "registration" } : a.disconnected ? { value: `Disconnected (was ${displayUrl(a.disconnected.url)})`, from: "journal", detail: `repository ${a.disconnected.name} was removed` } : src ? { value: `${displayUrl(src.url)} @ ${src.commit.slice(0, 7)}`, from: "journal", detail: "recorded with the deployment" } : NOT,
     branch: reg(repo?.branch), dockerfile: reg(repo?.dockerfile), context: reg(repo?.context), target: reg(repo?.target),
     containerPort,
     hostPort: a.serving?.hostPort != null ? { value: String(a.serving.hostPort), from: "journal", detail: "pinned in the release configuration" } : leasePort ? { value: String(leasePort), from: "journal", detail: "recorded port lease" } : NOT,
@@ -273,10 +275,11 @@ function appsFrom(snap: EngineSnapshot, observed: Observed, hostListeners: HostL
     const row = sv && observed ? observed[sv.container] : undefined;
     const projectId = ext ? ext.id : repo?.project ?? repo?.name ?? "ungrouped";
     apps[idOf(a.id)] = {
-      id: idOf(a.id), projectId, name: repo?.name ?? a.id,
+      id: idOf(a.id), projectId, name: repo?.name ?? a.disconnected?.name ?? a.id,
+      ...(a.disconnected && !repo ? { disconnected: { name: a.disconnected.name, url: a.disconnected.url, removedMs: a.disconnected.removedMs } } : {}),
       ...(ext ? { external: { path: ext.path, format: snap.source.journalFormat } } : {}),
       observation, facts: factsOf(a, repo, servDep, row, leasePort), urlSource: sv?.hostPort != null ? "pin" : leasePort ? "lease" : undefined,
-      source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : { kind: "folder", label: a.id, detail: ext ? "recorded in an external runtime" : "no repository registered" },
+      source: repo ? { kind: "git", label: displayUrl(repo.url), detail: repo.branch } : a.disconnected ? { kind: "folder", label: `${a.disconnected.name} · source disconnected`, detail: `last source ${displayUrl(a.disconnected.url)}` } : { kind: "folder", label: a.id, detail: ext ? "recorded in an external runtime" : "no repository registered" },
       address: addressOf(a, snap.router, running, !!ext),
       url: running && port ? `http://127.0.0.1:${port}` : "", containerName: sv?.container ?? "",
       currentReleaseId: running ? sv!.release : null, lastKnownReleaseId: sv?.release ?? null,
@@ -594,4 +597,18 @@ export function registrationEdit(r: EngineRepo, f: RegistrationForm, confirm: bo
   if (!Number.isInteger(port) || port < 1 || port > 65535) return fail("The container port must be a number from 1 to 65535.");
   if (port !== r.containerPort) { op.containerPort = port; changed.push("container port"); }
   return changed.length ? { op, changed, problem: null } : { op: null, changed: [], problem: null };
+}
+
+// ------------------------------------------------------------------ an application without a registered repository
+
+/** Why Deploy, Redeploy and Retry are unavailable for an application that has no registered repository. */
+export const NO_SOURCE_REASON = "No Git repository is registered for this application, so Harpoon cannot build a new release from a source. Rolling back to a retained release still works. Add a repository with the same name to connect a source again.";
+
+/**
+ * Whether this application, one of Harpoon's own, has no registered repository: nothing to build a release from, so
+ * the Git-based actions (Deploy, Redeploy, Retry, Check for new commits) would only be refused by the engine. Rollback
+ * and everything that reads history do not need a source. An attached read-only runtime is handled elsewhere.
+ */
+export function hasNoSource(engine: EngineMeta | undefined, app: AppModel): boolean {
+  return !!engine && !app.external && !engine.repos.some((r) => r.app === app.id);
 }

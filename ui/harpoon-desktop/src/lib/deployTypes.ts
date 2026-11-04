@@ -129,6 +129,8 @@ export type AppModel = {
   address?: AppAddress;
   /** Set when this application comes from a runtime attached read-only by path: Harpoon did not create it here and cannot change it. */
   external?: { path: string; format: string };
+  /** Engine mode: the application's registration was removed. `name` is the repository it had, shown instead of the raw id. */
+  disconnected?: { name: string; url: string; removedMs: number };
   observation?: Observation;
   /** Engine mode: configuration as recorded, each value with its origin; never a default or a guess. */
   facts?: ConfigFacts;

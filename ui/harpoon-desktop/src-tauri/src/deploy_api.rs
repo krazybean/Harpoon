@@ -183,10 +183,22 @@ pub struct AppDto {
     /// `external` (read-only attached runtime: not routed).
     pub route: &'static str,
     pub repo: Option<String>,
+    /// Set while the application has no registered repository because its registration was removed: the name it
+    /// had, and the address it last had. The application, its history and its serving release are unaffected.
+    pub disconnected: Option<DisconnectedDto>,
     pub deployments: Vec<DeploymentDto>,
     pub serving: Option<ServingDto>,
     pub pauses: Vec<PauseDto>,
     pub events: Vec<EventDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectedDto {
+    pub name: String,
+    pub url: String,
+    pub registered_ms: u64,
+    pub removed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -668,6 +680,12 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
                 _ => "idle",
             },
             repo: r.git.repo_of_app(&app).map(|x| x.name.clone()),
+            disconnected: r.git.disconnected(&app).map(|x| DisconnectedDto {
+                name: x.name.clone(),
+                url: x.url.clone(),
+                registered_ms: x.registration,
+                removed_ms: x.at_ms,
+            }),
             deployments: dtos,
             serving,
             pauses: pauses

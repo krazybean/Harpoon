@@ -2036,3 +2036,62 @@ fn an_edit_request_cannot_name_a_runtime_an_application_or_a_new_name() {
     // the version is required: there is no blind overwrite
     assert!(serde_json::from_value::<DeployOp>(serde_json::json!({ "op": "update-repo", "name": "shop", "branch": "x" })).is_err());
 }
+
+#[test]
+fn an_application_whose_registration_was_removed_is_listed_as_disconnected_with_its_history() {
+    let dir = rt("disconnected");
+    let kc = MemorySecretStore::new();
+    seed(&dir, &[dep(D1, Some(DeploymentStatus::Succeeded))]);
+    let mut add = add_named("shop", "https://example.com/acme/shop.git");
+    if let DeployOp::AddRepo { app, .. } = &mut add {
+        *app = Some(APP.into());
+    }
+    assert!(run_op(&dir, &add, &kc).ok);
+    let live = snapshot(&dir, 1);
+    assert_eq!((live.repos.len(), live.apps.len()), (1, 1));
+    assert!(live.apps[0].disconnected.is_none() && live.apps[0].repo.as_deref() == Some("shop"));
+    let registered = live.repos[0].registered_ms;
+
+    // the only way a removal gets into a journal in this build is a test appending the record
+    {
+        let (mut j, _) = open_journal(&dir);
+        j.git(&harpoon_deploy::git::GitRecord::Removed(harpoon_deploy::git::RemovedRec {
+            name: "shop".into(),
+            app: APP.parse().unwrap(),
+            registration: registered,
+            url: "https://example.com/acme/shop.git".into(),
+            cred: harpoon_deploy::git::CredKind::None,
+            at_ms: registered + 10,
+        }))
+        .unwrap();
+    }
+    let gone = snapshot(&dir, 2);
+    assert_eq!(gone.store, "ok", "{:?}", gone.store_error);
+    assert!(gone.repos.is_empty(), "no registration is left to poll or edit");
+    assert_eq!(gone.apps.len(), 1, "the application stays");
+    let a = &gone.apps[0];
+    assert_eq!(a.id, APP);
+    assert!(a.repo.is_none());
+    let d = a.disconnected.as_ref().expect("disconnected");
+    assert_eq!(
+        (d.name.as_str(), d.url.as_str(), d.registered_ms, d.removed_ms),
+        ("shop", "https://example.com/acme/shop.git", registered, registered + 10)
+    );
+    assert_eq!(a.deployments.len(), 1, "its history is untouched");
+    // another name cannot take the disconnected application, through the desktop's own operation either
+    let mut other = add_named("blog", "https://example.com/acme/blog.git");
+    if let DeployOp::AddRepo { app, .. } = &mut other {
+        *app = Some(APP.into());
+    }
+    let r = run_op(&dir, &other, &kc);
+    assert!(!r.ok && r.summary.contains("only that name can claim it again"), "{}", r.summary);
+    assert!(snapshot(&dir, 3).repos.is_empty());
+}
+
+#[test]
+fn the_desktop_has_no_operation_that_removes_a_registration() {
+    for op in ["remove-repo", "repo-remove", "remove-registration", "drop-repo", "retire-repo"] {
+        let v = serde_json::json!({ "op": op, "name": "shop", "expectRegisteredMs": 1 });
+        assert!(serde_json::from_value::<DeployOp>(v).is_err(), "{op} must not exist in this build");
+    }
+}

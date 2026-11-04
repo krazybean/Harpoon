@@ -69,6 +69,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int;
     fn sqlite3_column_text(stmt: *mut sqlite3_stmt, column: c_int) -> *const u8;
+    fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, column: c_int) -> i64;
     fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int;
 }
 
@@ -226,7 +227,38 @@ fn migrate(db: &Db) -> Result<(), SqliteOpenError> {
     db.exec("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, body TEXT NOT NULL); INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);")
 }
 
+/// The journal schema this build can read. 1: every record up to the removal record. 2: the journal may also hold
+/// `gitdrop` (a removed Git registration). A writer that emits a record older builds cannot decode records the
+/// higher number first (see docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md), so this build names the problem
+/// instead of reporting an obscure undecodable record. No build writes 2 yet.
+pub const SUPPORTED_SCHEMA: i64 = 2;
+
+/// The newest schema a journal declares (0 when it declares none).
+fn declared_schema(db: &Db) -> i64 {
+    let Ok(stmt) = statement(
+        db,
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+    ) else {
+        return 0;
+    };
+    if unsafe { sqlite3_step(stmt.0) } == SQLITE_ROW {
+        unsafe { sqlite3_column_int64(stmt.0, 0) }
+    } else {
+        0
+    }
+}
+
+fn check_schema(declared: i64) -> Result<(), SqliteOpenError> {
+    if declared > SUPPORTED_SCHEMA {
+        return Err(SqliteOpenError(format!(
+            "this deployment journal was written by a newer Harpoon (journal schema {declared}); this build reads up to schema {SUPPORTED_SCHEMA}. Update Harpoon. The journal is not damaged and was not changed"
+        )));
+    }
+    Ok(())
+}
+
 fn restore(db: &Db) -> Result<Restored, SqliteOpenError> {
+    check_schema(declared_schema(db))?;
     let stmt = statement(db, "SELECT body FROM records ORDER BY seq")?;
     let mut lines = Vec::new();
     loop {
@@ -446,5 +478,77 @@ impl Journal for SqliteJournal {
     }
     fn step_log(&mut self, r: &harpoon_deploy::steplog::StepLogRec) -> Result<(), JournalError> {
         self.insert("steplog", &harpoon_deploy::steplog::encode(r))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db(name: &str) -> (std::path::PathBuf, Db) {
+        // unique per call; a CI hygiene check keeps process APIs out of this crate's sources
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("harpoon-schema-{nanos}-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(
+            &dir.join(SQLITE_FILE),
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn a_journal_declaring_a_newer_schema_is_refused_by_name_and_left_unchanged() {
+        let (dir, db) = temp_db("newer");
+        assert_eq!(declared_schema(&db), 1, "a fresh journal declares schema 1");
+        assert!(restore(&db).is_ok());
+        // schema 2 (may hold a removed registration) is understood by this build
+        db.exec("INSERT INTO schema_migrations(version) VALUES (2)")
+            .unwrap();
+        assert_eq!(declared_schema(&db), 2);
+        assert!(restore(&db).is_ok());
+        // a schema this build does not know is refused, with an actionable message, before any record is read
+        db.exec("INSERT INTO schema_migrations(version) VALUES (3)")
+            .unwrap();
+        let before = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+        let err = restore(&db).expect_err("refused").0;
+        assert!(
+            err.contains("newer Harpoon")
+                && err.contains("journal schema 3")
+                && err.contains("Update Harpoon"),
+            "{err}"
+        );
+        assert!(err.contains("not damaged"), "{err}");
+        drop(db);
+        assert_eq!(
+            std::fs::read(dir.join(SQLITE_FILE)).unwrap(),
+            before,
+            "refusing wrote nothing"
+        );
+        // the public entry points report it too
+        let read = SqliteJournal::read_only(&dir)
+            .expect_err("read_only refuses")
+            .0;
+        assert!(read.contains("newer Harpoon"), "{read}");
+        let open = match SqliteJournal::open(&dir) {
+            Err(e) => e.0,
+            Ok(_) => panic!("open must refuse"),
+        };
+        assert!(open.contains("newer Harpoon"), "{open}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_checks_accept_what_this_build_reads() {
+        for v in [0, 1, SUPPORTED_SCHEMA] {
+            assert!(check_schema(v).is_ok(), "{v}");
+        }
+        assert!(check_schema(SUPPORTED_SCHEMA + 1).is_err());
     }
 }

@@ -33,7 +33,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 mod sqlite;
-pub use sqlite::{writer_lock_status, SqliteJournal, SqliteOpenError, SQLITE_FILE};
+pub use sqlite::{
+    writer_lock_status, SqliteJournal, SqliteOpenError, SQLITE_FILE, SUPPORTED_SCHEMA,
+};
 
 pub const JOURNAL_FILE: &str = "journal.wal";
 pub const LOCK_FILE: &str = "journal.lock";
