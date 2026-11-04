@@ -341,3 +341,74 @@ test("Copy and Open act on exactly the URL shown, and the primary view hides the
   assert.match(src, /app\.address \? null : <>\{app\.url/, "the direct 127.0.0.1 URL is only the fallback when there is no address");
   assert.match(src, /Direct URL \(diagnostic\)/);
 });
+
+// ---- attended deployment: the confirmation flow (Milestone B gate opening)
+
+import { CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, failureText } from "./deployEngine.ts";
+
+const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
+
+test("a first deployment confirms only the Docker changes; a replacement needs its own cutover acknowledgement", () => {
+  assert.deepEqual(deployConfirmation({ replacing: false, cutoverAcknowledged: false }), { liveChanges: true, cutover: false });
+  assert.deepEqual(deployConfirmation({ replacing: false, cutoverAcknowledged: true }), { liveChanges: true, cutover: false }, "nothing to switch on a first deployment");
+  // a replacement without the acknowledgement may send nothing at all
+  assert.equal(deployConfirmation({ replacing: true, cutoverAcknowledged: false }), null);
+  assert.deepEqual(deployConfirmation({ replacing: true, cutoverAcknowledged: true }), { liveChanges: true, cutover: true });
+  // "prepare only" builds and checks the candidate and never switches, so it needs no acknowledgement and never sends a cutover
+  assert.deepEqual(deployConfirmation({ replacing: true, cutoverAcknowledged: false, prepareOnly: true }), { liveChanges: true, cutover: false });
+  assert.deepEqual(deployConfirmation({ replacing: true, cutoverAcknowledged: true, prepareOnly: true }), { liveChanges: true, cutover: false });
+  assert.match(CUTOVER_ACKNOWLEDGEMENT, /unavailable/);
+});
+
+test("a failed operation is shown in plain words, never as a bare exit code", () => {
+  const r = (over) => ({ ok: false, exitCode: 6, summary: "this changes Docker state and needs the explicit opt-in --authorize-live-docker-changes=…", detail: "", refusedByGate: false, ...over });
+  assert.equal(failureText(r({ hint: "Harpoon needs your confirmation before it changes Docker." })), "Harpoon needs your confirmation before it changes Docker.");
+  assert.equal(failureText(r({ hint: "  " })), r({}).summary, "a blank hint falls back to the engine's own first line");
+  assert.match(failureText(r({ summary: "", hint: null })), /Nothing was retried/);
+  assert.doesNotMatch(failureText(r({ hint: "Harpoon refused this before changing anything: x" })), /exit code|exitCode/i);
+});
+
+test("with attended deployment open no gate banner shows; a closed gate still shows the engine's reason", () => {
+  const open = st(snap([], { gate: { liveDeploy: true, liveReplacement: true, liveTriggered: false, reason: "closed" } }));
+  assert.equal(liveBlock(open), null);
+  assert.equal(liveBlock(st(snap([], { gate: { liveDeploy: true, liveReplacement: false, reason: "replacement closed" } }))), "replacement closed");
+});
+
+test("Cancel only closes: the shared dialog's Cancel never runs an operation", () => {
+  const d = read("../views/deploy/Dialogs.tsx");
+  assert.match(d, /<button className="btn btn--ghost" onClick=\{onClose\}>Cancel<\/button>/);
+  // closing by the scrim or Escape is the same function
+  assert.match(d, /onMouseDown=\{\(e\) => \{ if \(e\.target === e\.currentTarget\) onClose\(\); \}\}/);
+});
+
+test("only an explicit confirmation sends a confirmation, and a replacement needs the separate acknowledgement first", () => {
+  const d = read("../views/deploy/Dialogs.tsx");
+  // the confirmation constant for rollback and recovery exists exactly once
+  assert.equal((d.match(/liveChanges: true/g) ?? []).length, 1, "liveChanges: true appears only in CONFIRM_LIVE");
+  // every Docker-changing call in engine mode passes a confirmation as the third argument, and no other call does
+  for (const op of ["rollback", "restore"]) assert.match(d, new RegExp(`act\\(\\{ op: "${op}"[^;]*CONFIRM_LIVE\\)`));
+  assert.match(d, /act\(\{ op: "deploy", repo: app\.name, branch \}, goLogs, confirmation\)/);
+  assert.doesNotMatch(d, /run\(\{ op: "(deploy|rollback|restore)"/, "no dialog runs a Docker-changing operation without going through act(op, after, confirmation)");
+  // the replacement button cannot be pressed until the acknowledgement is ticked, and a null confirmation sends nothing
+  assert.match(d, /disabled=\{engineBlocked \|\| !cutoverAck\}/);
+  assert.match(d, /if \(!confirmation\) return;/);
+  // the acknowledgement is per dialog and application: never carried over, never pre-ticked
+  assert.match(d, /const ackKey = `\$\{dialog\.kind\}:\$\{app\.id\}`/);
+  assert.match(d, /useState<string \| null>\(null\)/);
+  // resume, poll and configuration dialogs never confirm Docker changes
+  for (const op of ["resume", "poll", "set-config", "set-secret", "add-repo", "repo-secret"]) assert.doesNotMatch(d, new RegExp(`op: "${op}"[^;]*(liveChanges|CONFIRM_LIVE)`));
+});
+
+test("the engine hook sends the confirmation beside the operation and only when one was given; the phrase never exists in the front end", () => {
+  const hook = read("../hooks/useDeployEngine.ts");
+  assert.match(hook, /confirmation \? \{ op, confirmation \} : \{ op \}/);
+  for (const f of ["../hooks/useDeployEngine.ts", "../lib/deployEngine.ts", "../views/deploy/Dialogs.tsx", "../views/deploy/DeployView.tsx", "../views/deploy/Screens.tsx"]) {
+    assert.doesNotMatch(read(f), /authorize-live|I-UNDERSTAND/, `${f} must not hold the engine's authorization phrase`);
+  }
+});
+
+test("a failed operation's banner uses the plain-language hint", () => {
+  const v = read("../views/deploy/DeployView.tsx");
+  assert.match(v, /failureText\(last\)/);
+  assert.doesNotMatch(v, /Refused by the shipping gate/);
+});

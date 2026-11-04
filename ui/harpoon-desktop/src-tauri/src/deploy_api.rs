@@ -138,6 +138,8 @@ pub struct ResourceDto {
 pub struct GateDto {
     pub live_deploy: bool,
     pub live_replacement: bool,
+    /// Executing queued Git events (Gate U, unattended execution). Closed in every shipping build.
+    pub live_triggered: bool,
     pub reason: &'static str,
 }
 
@@ -560,6 +562,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
         gate: GateDto {
             live_deploy: Gate::shipping().live_deploy_enabled,
             live_replacement: Gate::shipping().live_replacement_enabled,
+            live_triggered: Gate::shipping().live_triggered_enabled,
             reason: GATE_REASON,
         },
         router: {
@@ -1110,6 +1113,25 @@ pub enum DeployOp {
     },
 }
 
+/// What the person confirmed in the dialog for ONE operation. It is a separate argument from the operation, so an
+/// operation payload can never carry it and an operation that changes no Docker state ignores it. Absent means
+/// "not confirmed": the engine then refuses a Docker-changing command at its own explicit opt-in.
+///
+/// * `live_changes`: the person confirmed that Harpoon may change real Docker state for this operation. Only this
+///   adds the engine's `--authorize-live-docker-changes` argument.
+/// * `cutover`: for a replacement only, the person separately confirmed that the running release is stopped to
+///   switch (the application is down until the new release passes its check). Only this adds `--confirm-cutover`;
+///   without it an existing application is only prepared (built and checked), never switched. It is refused unless
+///   `live_changes` is also true.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Confirmation {
+    #[serde(default)]
+    pub live_changes: bool,
+    #[serde(default)]
+    pub cutover: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpResult {
@@ -1121,6 +1143,8 @@ pub struct OpResult {
     pub detail: String,
     /// The shipping gate refused it (the exact reason is in `summary`).
     pub refused_by_gate: bool,
+    /// What the person can do about a failure, in plain words (never an exit code). `None` on success.
+    pub hint: Option<String>,
 }
 
 fn opt(a: &mut Vec<String>, flag: &str, v: &Option<String>) {
@@ -1407,30 +1431,128 @@ pub fn runtime_args(r: &RuntimeInfo) -> Vec<String> {
     ]
 }
 
+/// A refusal produced here, before the engine is reached.
+fn refusal(msg: String, hint: String) -> OpResult {
+    OpResult {
+        ok: false,
+        exit_code: harpoon_deploy_cli::exit::REFUSED,
+        summary: msg.clone(),
+        detail: msg,
+        refused_by_gate: false,
+        hint: Some(hint),
+    }
+}
+
 /// The engine arguments and standard input for an operation, or the refusal that stops it here.
+///
+/// The live-change authorization is added in exactly one place: here, and only when the person confirmed it
+/// (`confirmation.live_changes`) for an operation that changes Docker state and whose runtime coordinates were
+/// found. `--confirm-cutover` is added only for a Deploy the person confirmed as a cutover, and never without
+/// the authorization.
 pub fn build_args(
     op: &DeployOp,
+    confirmation: &Confirmation,
     gate: &Gate,
     runtime: &dyn Fn() -> Result<RuntimeInfo, String>,
 ) -> Result<(Vec<String>, Vec<u8>), OpResult> {
     let (mut args, stdin) = plan(op);
+    if confirmation.cutover && !confirmation.live_changes {
+        return Err(refusal(
+            "Refused: a cutover confirmation arrived without the confirmation to change Docker. Nothing was changed.".into(),
+            "Confirm the deployment in the dialog again. Nothing was changed.".into(),
+        ));
+    }
+    if confirmation.cutover && !matches!(op, DeployOp::Deploy { .. }) {
+        return Err(refusal(
+            "Refused: a cutover confirmation applies only to a deployment. Nothing was changed."
+                .into(),
+            "Nothing was changed.".into(),
+        ));
+    }
     if needs_runtime(op) {
         match runtime() {
-            Ok(info) => args.extend(runtime_args(&info)),
+            Ok(info) => {
+                args.extend(runtime_args(&info));
+                if confirmation.live_changes {
+                    args.push(format!(
+                        "--{}={}",
+                        harpoon_deploy_cli::AUTH_FLAG,
+                        harpoon_deploy_cli::AUTH_PHRASE
+                    ));
+                }
+                if confirmation.cutover {
+                    args.push("--confirm-cutover".into());
+                }
+            }
             Err(e) if gate_open_for(op, gate) => {
                 let msg = format!("Refused before contacting Docker: {e}");
-                return Err(OpResult {
-                    ok: false,
-                    exit_code: harpoon_deploy_cli::exit::REFUSED,
-                    summary: msg.clone(),
-                    detail: msg,
-                    refused_by_gate: false,
-                });
+                return Err(refusal(
+                    msg,
+                    format!("Harpoon's runtime is not ready ({e}). Start Harpoon and wait until Docker shows as ready, then try again. Nothing was changed."),
+                ));
             }
             Err(_) => {}
         }
     }
     Ok((args, stdin))
+}
+
+/// Plain words for a failed operation: what happened and what to do next, from the engine's exit code and its
+/// own text. `None` for success. The engine's full output stays in `detail`.
+pub fn actionable(op: &DeployOp, code: i32, stdout: &str, stderr: &str) -> Option<String> {
+    use harpoon_deploy_cli::exit;
+    if code == exit::OK {
+        return None;
+    }
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let nothing = "Nothing was changed.";
+    Some(match code {
+        c if c == exit::REFUSED && stderr.contains(harpoon_deploy_cli::AUTH_FLAG) => {
+            format!("Harpoon needs your confirmation before it changes Docker, and none was given. Open the operation again and confirm it. {nothing}")
+        }
+        c if c == exit::REFUSED && stderr.contains("Gate U") => {
+            "Running queued Git events is closed in this build because unattended execution has not been approved. Use Deploy to build a revision you choose; checking for new commits only queues them. Nothing was changed.".to_string()
+        }
+        c if c == exit::REFUSED && (stderr.contains("not enabled in this build") || stderr.contains("disabled in this build")) => {
+            format!("This build of Harpoon does not allow that operation. {nothing}")
+        }
+        c if c == exit::REFUSED && stderr.contains("another Harpoon process holds") => {
+            "Another Harpoon deployment command is still running and holds the deployment history. Wait for it to finish, then try again. Nothing was changed.".to_string()
+        }
+        c if c == exit::REFUSED => {
+            format!("Harpoon refused this before changing anything: {first}")
+        }
+        c if c == exit::USAGE => {
+            format!("Harpoon sent the engine a request it could not read (an internal error, not something you did): {first} Please report it. {nothing}")
+        }
+        c if c == exit::CONFIG => {
+            format!("The configuration was rejected before anything was built or started: {first} Fix it in the repository or variable settings and try again.")
+        }
+        c if c == exit::JOURNAL => {
+            format!("The deployment history could not be used: {first} Do not delete it; it is the record of what Harpoon created. {nothing}")
+        }
+        c if c == exit::RUNTIME => {
+            format!("Harpoon could not reach Docker or its management channel: {first} Check that Harpoon shows Docker as ready and try again. {nothing}")
+        }
+        c if c == exit::FAILED => {
+            let step = stdout
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("failure at ") || l.starts_with("nothing was deployed"))
+                .unwrap_or(first);
+            let verb = match op {
+                DeployOp::Rollback { .. } => "The rollback",
+                DeployOp::Restore { .. } => "The recovery",
+                _ => "The deployment",
+            };
+            format!("{verb} did not succeed: {step} Open the step logs for the details. Harpoon retried nothing and removed nothing it did not create; the engine's output lists the next steps.")
+        }
+        _ => format!("The operation did not complete: {first}"),
+    })
 }
 
 /// Test seam with no runtime: the shipping gate and a runtime that cannot be found.
@@ -1439,7 +1561,7 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
     // a lock refusal caused only by a stray copy of the lock (see `tests::LOCK_WAIT`) is waited out; every other answer is returned as is
     let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let r = run_op_with(rt, op, keychain, &Gate::shipping(), &|| {
+        let r = run_op_with(rt, op, &Confirmation::default(), keychain, &Gate::shipping(), &|| {
             Err("no runtime in this test".into())
         });
         if !r.ok && r.detail.contains("another Harpoon process holds") && std::time::Instant::now() < end {
@@ -1459,6 +1581,7 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
 pub fn run_op_with(
     rt: &Path,
     op: &DeployOp,
+    confirmation: &Confirmation,
     keychain: &dyn SecretStore,
     gate: &Gate,
     runtime: &dyn Fn() -> Result<RuntimeInfo, String>,
@@ -1472,6 +1595,10 @@ pub fn run_op_with(
             summary: msg.clone(),
             detail: msg,
             refused_by_gate: false,
+            hint: Some(
+                "Operations act only on Harpoon's own deployment store. Nothing was changed."
+                    .into(),
+            ),
         };
     }
     if let Err(e) = prepare(rt) {
@@ -1479,11 +1606,12 @@ pub fn run_op_with(
             ok: false,
             exit_code: 1,
             summary: e.clone(),
-            detail: e,
+            detail: e.clone(),
             refused_by_gate: false,
+            hint: Some(format!("Harpoon could not prepare its deployment store: {e} Check the disk and the folder's permissions, then try again.")),
         };
     }
-    let (mut args, stdin) = match build_args(op, gate, runtime) {
+    let (mut args, stdin) = match build_args(op, confirmation, gate, runtime) {
         Ok(v) => v,
         Err(refusal) => return refusal,
     };
@@ -1519,6 +1647,7 @@ pub fn run_op_with(
         exit_code: out.code,
         refused_by_gate: out.code == harpoon_deploy_cli::exit::REFUSED
             && (out.stderr.contains("not enabled in this build") || out.stderr.contains("disabled in this build")),
+        hint: actionable(op, out.code, &out.stdout, &out.stderr),
         summary,
         detail: text,
     }
@@ -1606,7 +1735,11 @@ pub async fn deploy_step_logs(app: tauri::AppHandle, deployment: String) -> Resu
 }
 
 #[tauri::command]
-pub async fn deploy_op(app: tauri::AppHandle, op: DeployOp) -> Result<OpResult, String> {
+pub async fn deploy_op(
+    app: tauri::AppHandle,
+    op: DeployOp,
+    confirmation: Option<Confirmation>,
+) -> Result<OpResult, String> {
     let dir = app_dir(&app)?;
     use tauri::Manager;
     let support = app
@@ -1619,7 +1752,7 @@ pub async fn deploy_op(app: tauri::AppHandle, op: DeployOp) -> Result<OpResult, 
         // one engine command at a time from the desktop; the journal's own lock covers other processes
         let _one = OPS.lock().unwrap_or_else(|e| e.into_inner());
         let kc = harpoon_deploy_keychain::Keychain::new();
-        run_op_with(&dir, &op, &kc, &Gate::shipping(), &|| {
+        run_op_with(&dir, &op, &confirmation.unwrap_or_default(), &kc, &Gate::shipping(), &|| {
             discover_runtime(&support, Path::new(MGMT_SOCKET), &resources, &process_command)
         })
     })

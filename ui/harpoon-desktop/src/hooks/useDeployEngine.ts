@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HostListeners } from "../lib/portExposure.ts";
-import { announceHeld, externalOpProblem, logLines, observedFrom, toDeployState, type EngineApi, type ExternalInput, type EngineSnapshot, type LastResult, type NewHeld, type Observed, type OpResult, type StepLog } from "../lib/deployEngine.ts";
+import { announceHeld, externalOpProblem, logLines, observedFrom, toDeployState, type EngineApi, type ExternalInput, type EngineSnapshot, type LastResult, type LiveConfirmation, type NewHeld, type Observed, type OpResult, type StepLog } from "../lib/deployEngine.ts";
 import type { DeployState, KeychainState, LogLine, RuntimeState } from "../lib/deployTypes.ts";
 
 const FAST_MS = 3000;
@@ -63,17 +63,18 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
     return () => clearInterval(t);
   }, [refresh, active]);
 
-  const run = useCallback(async (op: Record<string, unknown>): Promise<OpResult> => {
+  const run = useCallback(async (op: Record<string, unknown>, confirmation?: LiveConfirmation): Promise<OpResult> => {
     const refused = externalOpProblem(op);
     if (refused) {
-      const r: LastResult = { ok: false, exitCode: 6, summary: refused, detail: refused, refusedByGate: false, op: String(op.op ?? "") };
+      const r: LastResult = { ok: false, exitCode: 6, summary: refused, detail: refused, refusedByGate: false, hint: refused, op: String(op.op ?? "") };
       setLast(r);
       return r;
     }
     setBusy(true);
     let r: OpResult;
-    try { r = await invoke<OpResult>("deploy_op", { op }); }
-    catch (e) { r = { ok: false, exitCode: -1, summary: String(e), detail: String(e), refusedByGate: false }; }
+    // the confirmation travels beside the operation, never inside it, and only when the person gave one for this call
+    try { r = await invoke<OpResult>("deploy_op", confirmation ? { op, confirmation } : { op }); }
+    catch (e) { r = { ok: false, exitCode: -1, summary: String(e), detail: String(e), refusedByGate: false, hint: `Harpoon could not reach its deployment engine: ${String(e)} Nothing was changed.` }; }
     setLast({ ...r, op: String(op.op ?? "") });
     // The Keychain is only known to be locked when the engine said so; any successful operation clears it.
     if (r.ok) setKeychain("unlocked"); else if (/keychain.*lock|lock.*keychain/i.test(r.detail)) setKeychain("locked");
