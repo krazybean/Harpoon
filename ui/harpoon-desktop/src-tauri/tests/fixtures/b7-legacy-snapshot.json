@@ -131,8 +131,9 @@
   ],
   "definitions": [],
   "gate": {
-    "liveDeploy": false,
-    "liveReplacement": false,
+    "liveDeploy": true,
+    "liveReplacement": true,
+    "liveTriggered": false,
     "reason": "Live deployment, replacement, rollback and restoration are closed in this build of Harpoon (the shipping gate). Nothing was started, stopped or changed."
   },
   "generatedMs": 1793609000000,

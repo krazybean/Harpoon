@@ -7,7 +7,9 @@
 //! * Nothing is read from the environment. Docker is contacted only through `--docker-socket`.
 //! * Read-only commands (`status`, `doctor`, `plan`, `reconcile` without `--apply`,
 //!   `export-journal`) never write the journal, mark anything interrupted, or create directories.
-//! * Live execution is a build-time gate ([`Gate`]) that this crate's binary keeps closed until B7.
+//! * Live execution is a build-time gate ([`Gate`]). The shipping binary opens attended `deploy`, `replace`,
+//!   `rollback` and `restore` (each still needs the explicit authorization flag) and keeps
+//!   trigger-driven execution (`watch`, `git-run`) closed: Gate U has not passed.
 
 mod args;
 mod commands;
@@ -29,23 +31,33 @@ pub mod exit {
     pub const FAILED: i32 = 7;
 }
 
-/// What the build allows. The shipping binary uses [`Gate::shipping`]: live deployment closed.
-/// Tests open it to prove the wiring against a fake Docker; there is no flag, environment
-/// variable or file that opens it at run time.
+/// What the build allows. Tests open and close each gate independently; there is no flag, environment
+/// variable or file that changes one at run time.
+///
+/// The shipping binary uses [`Gate::shipping`]: attended live deployment and replacement are open (every
+/// live command still needs the exact `--authorize-live-docker-changes` phrase, an explicit Docker socket
+/// and the other explicit paths), and execution driven by a trigger rather than by a person who chose the
+/// revision is closed.
 #[derive(Debug, Clone, Copy)]
 pub struct Gate {
+    /// Live `deploy` and `git-deploy` of a revision a person chose.
     pub live_deploy_enabled: bool,
-    /// Live `replace`, `rollback` and `restore`. Closed in the shipping binary. Only the
-    /// `harpoon-deploy-acceptance` binary, which exists only when the `acceptance` Cargo feature is
-    /// asked for by name, opens it; nothing at run time can.
+    /// Live `replace`, `rollback` and `restore`, each started by a person.
     pub live_replacement_enabled: bool,
+    /// Live execution of queued Git events (`git-run`, and `watch` without `--queue-only`): a revision
+    /// that arrived from a poll or a webhook rather than one a person chose. This is Gate U (unattended
+    /// execution), which has not passed. Closed in the shipping binary; only the unpackaged
+    /// `harpoon-deploy-acceptance` binary, which exists only when the `acceptance` Cargo feature is
+    /// asked for by name, opens it.
+    pub live_triggered_enabled: bool,
 }
 
 impl Gate {
     pub const fn shipping() -> Gate {
         Gate {
-            live_deploy_enabled: false,
-            live_replacement_enabled: false,
+            live_deploy_enabled: true,
+            live_replacement_enabled: true,
+            live_triggered_enabled: false,
         }
     }
 }

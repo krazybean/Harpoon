@@ -422,23 +422,25 @@ COMMANDS
   plan            validate source/config and show what a deploy would do (starts nothing)
   recover         mark interrupted deployments (writes the journal); never touches Docker
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
-  deploy          first-deployment workflow; live execution is disabled until B7 (--simulate is offline)
-  replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; live only in the separate acceptance build (closed in this one); offline with --simulate
+  deploy          first-deployment workflow; live only with the explicit --authorize-live-docker-changes opt-in (--simulate is offline)
+  replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   releases        list an application's retained releases, the one serving, and why any cannot be rolled back to (reads the journal only)
   resume          record ONE explicit decision for a paused application's held events: --dismiss (clear the pause), --newest or --revision REV
                   (select a held revision: it deploys NOTHING and the application stays blocked until dismissed). Never contacts Docker
   events          read-only: pause records and held/selected/dismissed/superseded events with their decisions
-  rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only in the separate acceptance build (closed in this one); offline with --simulate
-  restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only in the separate acceptance build (closed in this one); offline with --simulate
+  rollback        explicit, developer-initiated rollback to a named earlier release (--to REL; needs --confirm-rollback); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
+  restore         explicit, bounded restoration after an interrupted cutover (dry run by default; --apply); live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   repo-add        register a Git repository for an application (--name N --url U --app A --container-port P [--branch B] [--filter PATTERN]... [--webhook github|gitlab]
                   [--known-host LINE, required for SSH: there is no trust on first use])
   repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
   repo-list       registered repositories, what was last observed, and the last deployment from each
   git-deploy      check out a branch, tag or exact commit into a bounded private workspace and deploy it; the immutable commit is recorded
   git-trigger     queue one push event (--repo N --delivery ID --revision FULL_SHA) for a CI job that can reach this machine; deploys nothing by itself
-  git-run         execute what is queued: the newest event of an unpaused application (older ones are superseded); a paused application waits for `resume`
+  git-run         execute what is queued: the newest event of an unpaused application (older ones are superseded); a paused application waits for `resume`.
+                  LIVE execution of queued events is closed in the shipping build (unattended execution, Gate U, has not passed); use git-deploy for a revision you choose
   watch           foreground only: poll the remotes (--interval-secs N, at least 60), optionally listen for signed webhooks on loopback (--webhook-port P), and run the queue.
-                  Automatic WHILE HARPOON IS RUNNING; nothing runs when it is not, and nothing here is unattended
+                  Automatic WHILE HARPOON IS RUNNING; nothing runs when it is not, and nothing here is unattended.
+                  Without --queue-only a live run is closed in the shipping build (Gate U); --queue-only polls and queues and never deploys
   config-set      define a NON-SECRET Config value at a scope (--scope global|project:NAME|app:ID[@ENV] --name N --value V [--build] [--runtime])
   secret-set      save a Secret at a scope; the value is read from standard input only (never argv). Saving again creates the next
                   immutable version (a rotation); the value goes to the macOS Keychain and is never shown again

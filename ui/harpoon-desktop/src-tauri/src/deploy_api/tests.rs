@@ -10,6 +10,20 @@ const APP: &str = "app_00000000000000000000000001";
 const D1: &str = "dep_00000000000000000000000001";
 const D2: &str = "dep_00000000000000000000000002";
 
+/// Every gate closed: tests that prove "refused at the gate" use this, whatever `Gate::shipping()` opens.
+const CLOSED: Gate = Gate {
+    live_deploy_enabled: false,
+    live_replacement_enabled: false,
+    live_triggered_enabled: false,
+};
+
+/// `run_op`, but with a closed gate (the test seam `run_op` uses the shipping gate).
+fn run_op_closed(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult {
+    run_op_with(rt, op, &Confirmation::default(), keychain, &CLOSED, &|| {
+        Err("no runtime in this test".into())
+    })
+}
+
 fn rt(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("harpoon-deploy-api-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
@@ -81,8 +95,8 @@ fn nothing_recorded_is_reported_as_missing_not_invented() {
         ("missing", 0, 0, 0)
     );
     assert!(
-        !s.gate.live_deploy && !s.gate.live_replacement,
-        "the shipping gate stays closed"
+        s.gate.live_deploy && s.gate.live_replacement && !s.gate.live_triggered,
+        "the shipping gate opens attended deployment and replacement and keeps trigger-driven execution closed"
     );
 }
 
@@ -144,9 +158,9 @@ fn live_operations_are_refused_by_the_gate_with_the_engines_reason_and_change_no
         },
         DeployOp::Restore { deployment: D1.into() },
     ] {
-        let r = run_op(&dir, &op, &kc);
+        let r = run_op_closed(&dir, &op, &kc);
         assert!(!r.ok && r.refused_by_gate, "{}", r.detail);
-        assert!(!r.summary.is_empty());
+        assert!(!r.summary.is_empty() && r.hint.is_some());
     }
     assert_eq!(snapshot(&dir, 1).apps.len(), 0);
 }
@@ -281,7 +295,7 @@ fn adding_a_repository_records_it_and_deploying_it_is_refused_by_the_gate() {
         "the registered application exists with no deployments and no serving release"
     );
     assert!(s.apps[0].deployments.is_empty() && s.apps[0].serving.is_none());
-    let d = run_op(
+    let d = run_op_closed(
         &dir,
         &DeployOp::Deploy {
             repo: "shop".into(),
@@ -422,7 +436,7 @@ mod runtime {
         assert!(runtime_of(&f, Some("harpoon")).unwrap_err().contains("Docker socket"));
     }
 
-    fn info() -> RuntimeInfo {
+    pub(super) fn info() -> RuntimeInfo {
         RuntimeInfo {
             docker_socket: "/d.sock".into(),
             mgmt_socket: "/m.sock".into(),
@@ -435,10 +449,16 @@ mod runtime {
     const OPEN: Gate = Gate {
         live_deploy_enabled: true,
         live_replacement_enabled: true,
+        live_triggered_enabled: false,
     };
+    const AUTH_ARG: &str =
+        "--authorize-live-docker-changes=I-UNDERSTAND-THIS-CHANGES-REAL-DOCKER-STATE";
 
     fn args_of(op: &DeployOp, gate: &Gate, r: Result<RuntimeInfo, String>) -> Result<Vec<String>, OpResult> {
-        build_args(op, gate, &|| r.clone()).map(|(a, _)| a)
+        args_with(op, &Confirmation::default(), gate, r)
+    }
+    fn args_with(op: &DeployOp, c: &Confirmation, gate: &Gate, r: Result<RuntimeInfo, String>) -> Result<Vec<String>, OpResult> {
+        build_args(op, c, gate, &|| r.clone()).map(|(a, _)| a)
     }
     fn pair<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
         a.iter().position(|x| x == flag).map(|i| a[i + 1].as_str())
@@ -540,10 +560,336 @@ mod runtime {
         };
         // a runtime that is found: still refused by the gate; one that is not found: the same refusal
         for found in [Ok(info()), Err("no runtime".to_string())] {
-            let r = run_op_with(&dir, &op, &kc, &Gate::shipping(), &|| found.clone());
+            let r = run_op_with(&dir, &op, &Confirmation::default(), &kc, &CLOSED, &|| {
+                found.clone()
+            });
             assert!(!r.ok && r.refused_by_gate, "{}", r.detail);
         }
         assert!(snapshot(&dir, 1).apps.is_empty(), "nothing was recorded");
+    }
+
+    pub(super) fn deploy_op_for(repo: &str) -> DeployOp {
+        DeployOp::Deploy {
+            repo: repo.into(),
+            branch: None,
+            tag: None,
+            commit: None,
+        }
+    }
+    fn has_auth(a: &[String]) -> bool {
+        a.iter()
+            .any(|x| x.contains("authorize-live") || x.contains("I-UNDERSTAND"))
+    }
+    pub(super) const CONFIRMED: Confirmation = Confirmation {
+        live_changes: true,
+        cutover: false,
+    };
+
+    #[test]
+    fn the_authorization_is_added_only_for_a_confirmed_docker_changing_operation() {
+        for op in [
+            deploy_op_for("shop"),
+            DeployOp::RunQueue { repo: None },
+            DeployOp::Rollback {
+                app: "app_x".into(),
+                release: "rel_x".into(),
+            },
+            DeployOp::Restore {
+                deployment: "dep_x".into(),
+            },
+        ] {
+            for gate in [Gate::shipping(), OPEN] {
+                // not confirmed (Cancel never reaches here at all; an absent confirmation is the same as none)
+                assert!(!has_auth(&args_of(&op, &gate, Ok(info())).unwrap()));
+                assert!(!has_auth(
+                    &args_with(
+                        &op,
+                        &Confirmation {
+                            live_changes: false,
+                            cutover: false
+                        },
+                        &gate,
+                        Ok(info())
+                    )
+                    .unwrap()
+                ));
+                // confirmed: exactly one authorization argument, exactly the engine's phrase, and no cutover switch
+                let a = args_with(&op, &CONFIRMED, &gate, Ok(info())).unwrap();
+                assert_eq!(
+                    a.iter().filter(|x| x.as_str() == AUTH_ARG).count(),
+                    1,
+                    "{a:?}"
+                );
+                assert!(!a.contains(&"--confirm-cutover".to_string()), "{a:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_confirmation_is_not_sent_without_a_runtime_and_the_refusal_says_what_to_do() {
+        let r = args_with(
+            &deploy_op_for("shop"),
+            &CONFIRMED,
+            &OPEN,
+            Err("process 4242 is not running".into()),
+        )
+        .unwrap_err();
+        assert!(!r.ok && r.exit_code == harpoon_deploy_cli::exit::REFUSED);
+        let hint = r.hint.expect("an actionable hint");
+        assert!(
+            hint.contains("Start Harpoon") && hint.contains("Nothing was changed"),
+            "{hint}"
+        );
+        // while the gate is closed the same missing runtime is not the reason: the engine will say the gate is
+        let ok = args_with(
+            &deploy_op_for("shop"),
+            &CONFIRMED,
+            &CLOSED,
+            Err("no runtime".into()),
+        )
+        .unwrap();
+        assert!(!has_auth(&ok));
+    }
+
+    #[test]
+    fn operations_that_change_no_docker_state_get_no_authorization_even_when_confirmed() {
+        for op in [
+            DeployOp::Poll { repo: None },
+            DeployOp::Recover {},
+            DeployOp::Resume {
+                app: "app_x".into(),
+                mode: "dismiss".into(),
+                revision: None,
+            },
+            DeployOp::Unset {
+                scope: "global".into(),
+                name: "X".into(),
+            },
+        ] {
+            let a = args_with(&op, &CONFIRMED, &Gate::shipping(), Ok(info())).unwrap();
+            assert!(
+                !has_auth(&a) && pair(&a, "--docker-socket").is_none(),
+                "{a:?}"
+            );
+        }
+        // checking for new commits queues events and can never deploy
+        let a = args_with(
+            &DeployOp::Poll { repo: None },
+            &CONFIRMED,
+            &Gate::shipping(),
+            Ok(info()),
+        )
+        .unwrap();
+        assert_eq!(a, ["watch", "--once", "--queue-only"]);
+    }
+
+    #[test]
+    fn the_cutover_confirmation_is_separate_deploy_only_and_never_without_the_authorization() {
+        let both = Confirmation {
+            live_changes: true,
+            cutover: true,
+        };
+        let a = args_with(&deploy_op_for("shop"), &both, &Gate::shipping(), Ok(info())).unwrap();
+        assert!(
+            a.contains(&"--confirm-cutover".to_string()) && a.contains(&AUTH_ARG.to_string()),
+            "{a:?}"
+        );
+        // confirming the deployment alone never switches an existing release
+        let a = args_with(
+            &deploy_op_for("shop"),
+            &CONFIRMED,
+            &Gate::shipping(),
+            Ok(info()),
+        )
+        .unwrap();
+        assert!(!a.contains(&"--confirm-cutover".to_string()), "{a:?}");
+        // a cutover with no authorization, or on anything but a deployment, is refused here, before the engine
+        let only_cutover = Confirmation {
+            live_changes: false,
+            cutover: true,
+        };
+        for (op, c) in [
+            (deploy_op_for("shop"), only_cutover),
+            (
+                DeployOp::Rollback {
+                    app: "app_x".into(),
+                    release: "rel_x".into(),
+                },
+                both,
+            ),
+            (DeployOp::Poll { repo: None }, both),
+        ] {
+            let r = args_with(&op, &c, &Gate::shipping(), Ok(info())).unwrap_err();
+            assert!(!r.ok && r.hint.is_some(), "{}", r.detail);
+        }
+    }
+
+    #[test]
+    fn a_confirmation_is_strict_and_an_operation_payload_cannot_carry_one() {
+        assert_eq!(
+            serde_json::from_str::<Confirmation>("{}").unwrap(),
+            Confirmation::default()
+        );
+        assert_eq!(
+            serde_json::from_str::<Confirmation>(r#"{"liveChanges":true,"cutover":true}"#).unwrap(),
+            Confirmation {
+                live_changes: true,
+                cutover: true
+            }
+        );
+        assert!(
+            serde_json::from_str::<Confirmation>(r#"{"liveChanges":true,"authorize":true}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<DeployOp>(
+            r#"{"op":"deploy","repo":"shop","liveChanges":true}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DeployOp>(
+            r#"{"op":"deploy","repo":"shop","authorize":true}"#
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<DeployOp>(r#"{"op":"poll","confirmCutover":true}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn every_failure_has_an_actionable_hint_in_plain_words_and_success_has_none() {
+        use harpoon_deploy_cli::exit;
+        let op = deploy_op_for("shop");
+        assert!(actionable(&op, exit::OK, "ok", "").is_none());
+        let cases: [(i32, &str, &str, &str); 9] = [
+            (exit::REFUSED, "", "this changes Docker state and needs the explicit opt-in --authorize-live-docker-changes=…", "confirmation"),
+            (exit::REFUSED, "", "executing queued Git events is not enabled in this build (unattended execution, Gate U, has not passed).", "queued Git events"),
+            (exit::REFUSED, "", "live replacement is not enabled in this build", "does not allow"),
+            (exit::REFUSED, "", "another Harpoon process holds the deployment journal", "Wait for it"),
+            (exit::USAGE, "", "usage error: bad flag", "internal error"),
+            (exit::CONFIG, "", "--env NAME=VALUE: bad name", "configuration was rejected"),
+            (exit::JOURNAL, "", "the journal is not usable: checksum mismatch", "Do not delete"),
+            (exit::RUNTIME, "", "cannot reach /tmp/harpoon-docker.sock", "Docker as ready"),
+            (exit::FAILED, "failure at preliminary_check: timed out after 60 s\n", "", "preliminary_check"),
+        ];
+        for (code, out, err, want) in cases {
+            let h = actionable(&op, code, out, err).unwrap_or_else(|| panic!("no hint for {code}"));
+            assert!(h.contains(want), "{code}: {h}");
+            assert!(
+                !h.to_lowercase().contains("exit code") && !h.contains(&format!("({code})")),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_snapshot_reports_attended_operations_open_and_trigger_driven_execution_closed() {
+        let g = snapshot(&rt("snap-gate"), 1).gate;
+        assert!(g.live_deploy && g.live_replacement && !g.live_triggered);
+    }
+}
+
+// ---- the test namespace: a debug desktop drives an isolated engine and cannot reach the serving one
+
+mod namespaced {
+    use super::*;
+    use crate::namespace::{resolve, Namespace};
+    use std::os::unix::net::UnixListener;
+
+    struct Iso {
+        home: PathBuf,
+        ns: Namespace,
+        resources: PathBuf,
+        _socks: Vec<UnixListener>,
+    }
+
+    /// A fake home with a production-looking runtime (different pid and socket) and a namespace root with its own.
+    fn iso(name: &str, root_pid: u32) -> Iso {
+        let home = rt(&format!("ns-home-{name}"));
+        let prod = home.join("Library/Application Support/Harpoon");
+        std::fs::create_dir_all(&prod).unwrap();
+        std::fs::create_dir_all(home.join("Library/Application Support/com.harpoon.desktop")).unwrap();
+        std::fs::write(prod.join("runtime.json"), r#"{"socketPath":"/tmp/harpoon-docker.sock","pid":9999}"#).unwrap();
+        std::fs::write(prod.join("runtime.pid"), "9999\n").unwrap();
+        // short root: unix socket paths are limited to about 100 bytes
+        let root = std::env::temp_dir().join(format!("hpns-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ns = resolve(root.to_str(), true, &home).unwrap().unwrap();
+        let socks = vec![UnixListener::bind(ns.docker_socket()).unwrap(), UnixListener::bind(ns.mgmt_socket()).unwrap()];
+        std::fs::write(ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":{root_pid}}}"#, ns.docker_socket().display())).unwrap();
+        std::fs::write(ns.support_dir().join("runtime.pid"), format!("{root_pid}\n")).unwrap();
+        let resources = home.join("resources");
+        std::fs::create_dir_all(resources.join("harpoon/bin")).unwrap();
+        std::fs::write(resources.join("harpoon/bin/docker-buildx"), b"#!/bin/sh\n").unwrap();
+        Iso { home, ns, resources, _socks: socks }
+    }
+
+    #[test]
+    fn without_a_namespace_the_production_locations_are_unchanged() {
+        let home = rt("ns-prod-home");
+        let e = environment_for(None, &home);
+        assert_eq!(e.support, home.join("Library/Application Support/Harpoon"));
+        assert_eq!(e.mgmt_socket, Path::new("/tmp/harpoon-mgmt.sock"));
+        assert!(e.namespace.is_none());
+        if std::env::var(crate::namespace::ENV).is_err() {
+            let live = environment(&home).unwrap();
+            assert_eq!((live.support, live.mgmt_socket, live.namespace), (e.support, e.mgmt_socket, None));
+        }
+    }
+
+    #[test]
+    fn a_namespace_selects_its_own_state_sockets_pid_and_never_reads_the_production_files() {
+        let i = iso("select", 4242);
+        let e = environment_for(Some(i.ns.clone()), &i.home);
+        assert_eq!(e.support, i.ns.root(), "runtime.json and runtime.pid come from the namespace root");
+        assert_eq!(e.mgmt_socket, i.ns.docker_socket().with_file_name("harpoon-mgmt.sock"));
+        let info = discover_runtime(&e.support, &e.mgmt_socket, &i.resources, &|pid| (pid == 4242).then(|| "harpoon".to_string())).unwrap();
+        // Docker socket, management socket, forwarder pid and resource directory are the namespace's / unchanged
+        assert_eq!(info.docker_socket, i.ns.docker_socket());
+        assert_eq!(info.mgmt_socket, i.ns.mgmt_socket());
+        assert_eq!(info.forwarder_pid, 4242, "the isolated engine's pid, not the production runtime's 9999");
+        assert_eq!(info.forwarder_command, "harpoon");
+        assert_eq!(info.resources_dir, i.resources, "the resource directory is chosen by the caller, never by the namespace variable");
+        assert!(confine_to_namespace(info, &i.ns).is_ok());
+        // the production state is still the production state
+        assert!(std::fs::read_to_string(i.home.join("Library/Application Support/Harpoon/runtime.json")).unwrap().contains("9999"));
+    }
+
+    #[test]
+    fn a_state_file_that_points_outside_the_namespace_is_refused_not_followed() {
+        let i = iso("outside", 4242);
+        // runtime.json inside the namespace names another (live) socket: the serving engine's, say
+        let other = std::env::temp_dir().join(format!("hpns-other-{}", std::process::id()));
+        let _ = std::fs::remove_file(&other);
+        let _live = UnixListener::bind(&other).unwrap();
+        std::fs::write(i.ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":4242}}"#, other.display())).unwrap();
+        let info = discover_runtime(&i.ns.support_dir(), &i.ns.mgmt_socket(), &i.resources, &|_| Some("harpoon".into())).unwrap();
+        let err = confine_to_namespace(info, &i.ns).unwrap_err();
+        assert!(err.contains("not the test namespace's"), "{err}");
+        // a runtime process that is not the engine is refused before that
+        std::fs::write(i.ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":4242}}"#, i.ns.docker_socket().display())).unwrap();
+        assert!(discover_runtime(&i.ns.support_dir(), &i.ns.mgmt_socket(), &i.resources, &|_| Some("bash".into())).unwrap_err().contains("not the Harpoon runtime"));
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn a_namespaced_desktop_never_uses_the_real_keychain_store_or_user_setup() {
+        let src = include_str!("../deploy_api.rs");
+        // the Keychain is constructed only in the production branch of deploy_op; the namespace gets an in-memory store
+        let op = src.split("pub async fn deploy_op(").nth(1).unwrap().split("host listeners").next().unwrap();
+        let ns_branch = op.split("if env.namespace.is_some() {").nth(1).unwrap().split("} else {").next().unwrap();
+        assert!(ns_branch.contains("MemorySecretStore") && !ns_branch.contains("Keychain::new"), "{ns_branch}");
+        assert_eq!(src.matches("Keychain::new()").count(), 1, "the real Keychain is built in exactly one place");
+        // the desktop's own deployment store and attached-runtime references follow the namespace
+        assert!(src.contains("if let Some(ns) = crate::namespace::active()? {\n        return Ok(ns.data_dir());"));
+        // main.rs: Docker calls are translated, setup skips the CLI installer, and user-setup features refuse
+        let main = include_str!("../main.rs");
+        let dc = main.split("fn docker_command(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(dc.contains("ns.docker_args(args)?") && dc.contains("ns.confine_docker(&mut cmd)"), "{dc}");
+        assert!(main.contains("if !namespaced {\n                    cli_path::ensure_on_launch"));
+        for feature in ["Setting up the Harpoon Docker context", "Running a command in containers", "A container shell"] {
+            assert!(main.contains(&format!("namespace::refuse_in_namespace(\"{feature}\")?;")), "{feature}");
+        }
+        assert!(include_str!("../context_discovery.rs").contains("refuse_in_namespace(\"Discovering Docker contexts\")"));
     }
 }
 
@@ -614,6 +960,7 @@ fn an_unreadable_journal_file_is_still_an_error_whichever_format_it_is() {
 // ---- held Git events: recorded, decided, and still there after a restart
 
 mod held {
+    use super::runtime::{deploy_op_for, info, CONFIRMED};
     use super::*;
     use harpoon_deploy_cli::{run_with, Gate, Services};
 
@@ -680,6 +1027,60 @@ mod held {
         };
         assert!(run_op(&dir, &add, &kc).ok);
         (dir, kc)
+    }
+
+    #[test]
+    fn an_unconfirmed_live_deploy_is_refused_before_the_repository_is_contacted_with_an_actionable_hint(
+    ) {
+        let (dir, kc) = registered("unconfirmed-deploy");
+        let before = snapshot(&dir, 1);
+        let r = run_op_with(
+            &dir,
+            &deploy_op_for("shop"),
+            &Confirmation::default(),
+            &kc,
+            &Gate::shipping(),
+            &|| Ok(info()),
+        );
+        assert!(
+            !r.ok && r.exit_code == harpoon_deploy_cli::exit::REFUSED,
+            "{}",
+            r.detail
+        );
+        assert!(
+            !r.refused_by_gate,
+            "the gate is open; the missing confirmation is the reason"
+        );
+        let hint = r.hint.expect("hint");
+        assert!(
+            hint.contains("confirmation") && !hint.to_lowercase().contains("exit code"),
+            "{hint}"
+        );
+        assert!(r.detail.contains("explicit opt-in"), "{}", r.detail);
+        let after = snapshot(&dir, 1);
+        assert_eq!(after.apps.len(), before.apps.len());
+        assert!(
+            after.apps[0].deployments.is_empty(),
+            "no deployment was recorded"
+        );
+    }
+
+    #[test]
+    fn queued_event_execution_stays_closed_in_the_shipping_gate_even_when_confirmed() {
+        let (dir, kc) = registered("run-queue-closed");
+        let r = run_op_with(
+            &dir,
+            &DeployOp::RunQueue { repo: None },
+            &CONFIRMED,
+            &kc,
+            &Gate::shipping(),
+            &|| Ok(info()),
+        );
+        assert!(!r.ok && r.refused_by_gate, "{}", r.detail);
+        assert!(r.detail.contains("Gate U"), "{}", r.detail);
+        let hint = r.hint.expect("hint");
+        assert!(hint.contains("Use Deploy"), "{hint}");
+        assert!(snapshot(&dir, 1).apps[0].deployments.is_empty());
     }
 
     fn events(dir: &Path) -> Vec<(String, String, String)> {

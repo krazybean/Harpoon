@@ -47,10 +47,10 @@ export type SnapRouter = { domain: string; port: number | null; error: string | 
 export type EngineSnapshot = {
   router?: SnapRouter;
   schema: number; generatedMs: number; runtimeDir: string; source: SnapSource; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
-  gate: { liveDeploy: boolean; liveReplacement: boolean; reason: string };
+  gate: { liveDeploy: boolean; liveReplacement: boolean; /** Executing queued Git events (Gate U): closed in every shipping build. */ liveTriggered?: boolean; reason: string };
   repos: SnapRepo[]; apps: SnapApp[]; definitions: SnapDefinition[];
 };
-export type OpResult = { ok: boolean; exitCode: number; summary: string; detail: string; refusedByGate: boolean };
+export type OpResult = { ok: boolean; exitCode: number; summary: string; detail: string; refusedByGate: boolean; /** What the person can do about a failure, in plain words; absent on success. */ hint?: string | null };
 /** What the views show after an operation: the engine's answer, tagged with the operation that produced it. */
 export type LastResult = OpResult & { op: string };
 export type StepLog = { step: string; text: string; withheld: boolean; truncated: boolean; atMs: number };
@@ -65,7 +65,10 @@ export type ExternalInput = { path: string; snapshot: EngineSnapshot | null; err
 
 /** What the views may do with the real engine. They never see `invoke`. */
 export type EngineApi = {
-  run: (op: Record<string, unknown>) => Promise<OpResult>;
+  /** The isolated test namespace this desktop drives (debug builds only), or null: the usual, production case. */
+  testNamespace?: string | null;
+  /** `confirmation` is what the person confirmed in a dialog for THIS operation; it is sent only with it and never remembered. */
+  run: (op: Record<string, unknown>, confirmation?: LiveConfirmation) => Promise<OpResult>;
   refresh: () => void;
   busy: boolean;
   /** The engine's own answer to the last operation, shown as-is (refusal reasons included). */
@@ -506,4 +509,33 @@ export function summarizePoll(ok: boolean, detail: string): string {
 export function liveBlock(s: DeployState): string | null {
   const g = s.engine?.gate;
   return g && (!g.liveDeploy || !g.liveReplacement) ? g.reason : null;
+}
+
+/**
+ * What the person confirmed in a dialog for one operation that changes real Docker state. The desktop backend turns
+ * `liveChanges` into the engine's explicit opt-in and `cutover` into its cutover switch; nothing else ever does, and
+ * nothing is remembered between operations.
+ */
+export type LiveConfirmation = { liveChanges: boolean; cutover: boolean };
+
+/** The acknowledgement a replacement needs before Harpoon may stop the running release to switch. */
+export const CUTOVER_ACKNOWLEDGEMENT = "I understand that the running release is stopped to switch, so the application is unavailable until the new release passes its health check.";
+
+/**
+ * The confirmation a Deploy dialog may send, or `null` when it may not send anything yet.
+ * A first deployment has nothing to switch, so confirming it confirms only the Docker changes. A replacement needs the
+ * separate cutover acknowledgement; `prepareOnly` builds and checks the candidate and never switches, so it does not.
+ */
+export function deployConfirmation(o: { replacing: boolean; cutoverAcknowledged: boolean; prepareOnly?: boolean }): LiveConfirmation | null {
+  if (!o.replacing) return { liveChanges: true, cutover: false };
+  if (o.prepareOnly) return { liveChanges: true, cutover: false };
+  return o.cutoverAcknowledged ? { liveChanges: true, cutover: true } : null;
+}
+
+/** The words shown for a failed operation: the plain-language hint when the backend gave one, never a bare exit code. */
+export function failureText(r: OpResult): string {
+  const h = (r.hint ?? "").trim();
+  if (h) return h;
+  const s = (r.summary ?? "").trim();
+  return s || "The engine reported an error. Nothing was retried.";
 }

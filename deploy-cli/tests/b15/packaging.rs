@@ -52,7 +52,7 @@ fn the_acceptance_binary_needs_its_feature_and_the_feature_is_not_a_default() {
 }
 
 #[test]
-fn the_shipping_binary_ignores_features_and_keeps_the_closed_gate() {
+fn the_shipping_binary_ignores_features_and_keeps_trigger_driven_execution_closed() {
     let main = read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"));
     assert!(main.contains("Gate::shipping()"));
     assert!(
@@ -62,9 +62,11 @@ fn the_shipping_binary_ignores_features_and_keeps_the_closed_gate() {
     let lib = read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"));
     let shipping = lib.split("pub const fn shipping()").nth(1).unwrap();
     let shipping = &shipping[..shipping.find('}').unwrap() + 1];
+    // attended deployment and replacement are open; trigger-driven execution (Gate U) is closed
     assert!(
-        shipping.contains("live_deploy_enabled: false")
-            && shipping.contains("live_replacement_enabled: false"),
+        shipping.contains("live_deploy_enabled: true")
+            && shipping.contains("live_replacement_enabled: true")
+            && shipping.contains("live_triggered_enabled: false"),
         "{shipping}"
     );
     // no library source branches on a feature: `--all-features` cannot open the gate
@@ -78,6 +80,36 @@ fn the_shipping_binary_ignores_features_and_keeps_the_closed_gate() {
         assert!(
             !s.contains("cfg(feature") && !s.contains("cfg!(feature"),
             "{} branches on a Cargo feature",
+            f.display()
+        );
+    }
+}
+
+#[test]
+fn only_the_unpackaged_acceptance_source_opens_trigger_driven_execution() {
+    let mut files = Vec::new();
+    files_under(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut openers = Vec::new();
+    for f in files {
+        if read(&f).contains("live_triggered_enabled: true") {
+            openers.push(f.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    assert_eq!(
+        openers,
+        vec!["acceptance_main.rs".to_string()],
+        "Gate U: no shipping source may open trigger-driven execution"
+    );
+    // and nothing the desktop (which ships) compiles in can name that field as open
+    let mut desk = Vec::new();
+    files_under(&repo().join("ui/harpoon-desktop/src-tauri/src"), &mut desk);
+    for f in desk {
+        assert!(
+            !read(&f).contains("live_triggered_enabled: true"),
+            "{} opens trigger-driven execution",
             f.display()
         );
     }

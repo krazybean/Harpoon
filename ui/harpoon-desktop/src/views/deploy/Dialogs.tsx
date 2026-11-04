@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, fileUrlFor, liveBlock, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -24,11 +24,20 @@ function Dialog({ title, sub, wide, onClose, children, footer }: { title: string
   );
 }
 
+/** Shown in every dialog whose confirmation lets Harpoon change real Docker state. Cancel never sends anything. */
+const LiveNote = () => (
+  <Banner tone="warn" icon={<Warning size={18} />} title="Confirming changes real Docker state">
+    Harpoon will build images and start or stop containers in your Harpoon VM and publish them on this Mac's loopback address only. It touches only what it created and labelled, and prunes nothing. Cancel changes nothing.
+  </Banner>
+);
+
 const Plan = ({ children }: { children: ReactNode }) => <div className="dp-plan">{children}</div>;
 const Row = ({ icon, children }: { icon: ReactNode; children: ReactNode }) => <div>{icon}<span>{children}</span></div>;
 
 export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const close = () => c.open(null);
+  // The cutover acknowledgement belongs to ONE dialog on ONE application: it is never carried to another dialog or reopened pre-ticked.
+  const [ack, setAck] = useState<string | null>(null);
   const app: AppModel | undefined = c.state.apps[c.route.appId] ?? Object.values(c.state.apps)[0];
   const locked = c.state.keychain === "locked";
   const st = app ? appStatus(app, c.runtime) : null;
@@ -37,7 +46,9 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const gate = c.engine ? liveBlock(c.state) : null;
   const busy = !!c.engine?.busy;
   /** Run an engine operation, close the dialog, and let the page-level result banner show the engine's own answer. */
-  const act = (op: Record<string, unknown>, after?: () => void) => { void c.engine!.run(op); close(); after?.(); };
+  const act = (op: Record<string, unknown>, after?: () => void, confirmation?: LiveConfirmation) => { void c.engine!.run(op, confirmation); close(); after?.(); };
+  /** Confirming a Docker-changing dialog (not a replacement's cutover) confirms exactly the Docker changes. */
+  const CONFIRM_LIVE: LiveConfirmation = { liveChanges: true, cutover: false };
   if (dialog.kind === "create") return c.engine ? <EngineCreateDialog c={c} close={close} /> : <CreateDialog c={c} dialog={dialog} close={close} />;
   if (dialog.kind === "variable") return <VariableDialog c={c} name={dialog.name} close={close} />;
   if (!app) return null;
@@ -49,11 +60,28 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
       : retryDep ? retryDep.revision : dialog.kind === "redeploy" ? (app.releases.find((r) => r.id === app.currentReleaseId)?.revision ?? REV.next) : REV.next;
     const title = dialog.kind === "retry" ? `Retry deployment ${retryDep?.id}` : dialog.kind === "promote" ? "Promote to Production" : dialog.kind === "redeploy" ? `Redeploy ${app.name}` : `Deploy ${app.name} to Production`;
     const trigger = dialog.kind === "retry" ? "retry" : dialog.kind === "promote" ? "promote" : dialog.kind === "redeploy" ? "redeploy" : "manual";
+    // a replacement (an application already has a running release) needs its own, separate cutover acknowledgement
+    const replacing = !!c.engine && hasPrev;
+    const ackKey = `${dialog.kind}:${app.id}`;
+    const cutoverAck = ack === ackKey;
+    const engineBlocked = locked || !!c.state.job || (!!c.engine && (!!gate || busy || !branch || dialog.kind === "promote"));
+    const goLogs = () => c.setRoute({ screen: "app", tab: "logs" });
+    const confirmEngine = (prepareOnly: boolean) => {
+      const confirmation = deployConfirmation({ replacing, cutoverAcknowledged: cutoverAck, prepareOnly });
+      if (!confirmation) return; // a replacement without the acknowledgement sends nothing
+      act({ op: "deploy", repo: app.name, branch }, goLogs, confirmation);
+    };
     return (
       <Dialog title={title} sub={c.engine ? "Review the plan before anything changes." : "Review the plan before anything changes. (Simulated: confirming starts a mock deployment.)"} onClose={close}
-        footer={<button className="btn btn--primary" disabled={locked || !!c.state.job || (!!c.engine && (!!gate || busy || !branch || dialog.kind === "promote"))} title={gate ?? undefined}
-          onClick={() => { if (c.engine) { act({ op: "deploy", repo: app.name, branch }, () => c.setRoute({ screen: "app", tab: "logs" })); return; } c.dispatch({ type: "start-deploy", appId: app.id, trigger, revision, env: "production" }, true); c.open(null); c.setRoute({ screen: "app", tab: "logs" }); }}><RocketLaunch size={14} /> {dialog.kind === "promote" ? "Promote" : "Deploy"}</button>}>
+        footer={replacing ? <>
+          <button className="btn btn--secondary" disabled={engineBlocked} title={gate ?? "Builds the new version and runs its preliminary check. The running release is not stopped and nothing is switched."} data-testid="prepare-only"
+            onClick={() => confirmEngine(true)}>Prepare only</button>
+          <button className="btn btn--primary" disabled={engineBlocked || !cutoverAck} title={gate ?? (cutoverAck ? undefined : "Tick the acknowledgement above to switch releases")} data-testid="replace-and-switch"
+            onClick={() => confirmEngine(false)}><RocketLaunch size={14} /> Replace and switch</button>
+        </> : <button className="btn btn--primary" disabled={engineBlocked} title={gate ?? undefined}
+          onClick={() => { if (c.engine) { confirmEngine(false); return; } c.dispatch({ type: "start-deploy", appId: app.id, trigger, revision, env: "production" }, true); c.open(null); c.setRoute({ screen: "app", tab: "logs" }); }}><RocketLaunch size={14} /> {dialog.kind === "promote" ? "Promote" : "Deploy"}</button>}>
         {c.engine && gate && <Banner tone="info" title="This build cannot deploy">{gate}</Banner>}
+        {c.engine && !gate && <LiveNote />}
         <Plan>
           <Row icon={<Cube size={14} />}>{c.engine ? <>Fetch the tip of <span className="mono">{branch ?? "the configured branch"}</span>, then build it from <code>{app.settings.dockerfile}</code> — <b>the running release is not touched</b></> : dialog.kind === "promote" ? <>A <b>new deployment</b> of <span className="mono">{revision.sha}</span> under Production configuration — Production secrets are resolved, not Preview's. The image is <b>rebuilt</b> because a build-time variable differs.</> : <>Build <span className="mono">{revision.sha}</span> from <code>{app.settings.dockerfile}</code> — <b>the running release is not touched</b></>}</Row>
           <Row icon={<Check size={14} />}>Run a preliminary health check on the new build using a temporary port</Row>
@@ -62,6 +90,10 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
             <Row icon={<ArrowCounterClockwise size={14} />}>If the new release fails after the switch, Harpoon makes <b>one bounded attempt (60 s)</b> to restore {app.currentReleaseId} and tells you the outcome. No guarantee.</Row>
           </> : <Row icon={<Info size={14} />}>Nothing is running yet, so there is no interruption and nothing to restore.</Row>}
         </Plan>
+        {replacing && <label className="dp-ack" data-testid="cutover-ack" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 10 }}>
+          <input type="checkbox" checked={cutoverAck} onChange={(e) => setAck(e.target.checked ? ackKey : null)} aria-describedby="dp-ack-help" style={{ marginTop: 3 }} />
+          <span><b>Switch releases.</b> {CUTOVER_ACKNOWLEDGEMENT}<small id="dp-ack-help" className="dp-faint" style={{ display: "block" }}>Leave this unticked to only prepare the new version: it is built and health-checked while the current release keeps running, and nothing is switched.</small></span>
+        </label>}
         {locked && <Banner tone="err" icon={<Key size={18} />} title="Keychain is locked">This deployment needs its pinned secrets. It would fail before any change, so it is blocked here.</Banner>}
         {c.state.job && <Banner tone="info" title="Another simulated deployment is running">One deployment runs at a time per runtime. Wait for it to finish.</Banner>}
         {c.engine ? null : <small className="dp-faint">Simulated outcome of this deployment: <b>{c.state.nextOutcome.replace("-", " ")}</b> (change it in the simulation bar).</small>}
@@ -74,8 +106,9 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
     if (!rel) return null;
     return (
       <Dialog title={`Roll back to release ${rel.id}`} sub={`${rel.revision.message} · ${rel.revision.sha}`} onClose={close}
-        footer={<button className="btn btn--primary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { if (c.engine) { act({ op: "rollback", app: app.id, release: rel.id }, () => c.setRoute({ screen: "app", tab: "overview" })); return; } c.dispatch({ type: "rollback", appId: app.id, releaseId: rel.id }); close(); c.setRoute({ screen: "app", tab: "overview" }); }}><ArrowCounterClockwise size={14} /> Roll back to {rel.id}</button>}>
+        footer={<button className="btn btn--primary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { if (c.engine) { act({ op: "rollback", app: app.id, release: rel.id }, () => c.setRoute({ screen: "app", tab: "overview" }), CONFIRM_LIVE); return; } c.dispatch({ type: "rollback", appId: app.id, releaseId: rel.id }); close(); c.setRoute({ screen: "app", tab: "overview" }); }}><ArrowCounterClockwise size={14} /> Roll back to {rel.id}</button>}>
         {c.engine && gate && <Banner tone="info" title="This build cannot roll back">{gate}</Banner>}
+        {c.engine && !gate && <LiveNote />}
         <Plan>
           <Row icon={<ArrowCounterClockwise size={14} />}>Restart <b>{rel.id}</b> from its retained image with its pinned configuration snapshot ({rel.secrets.map((s) => `${s.name}@v${s.version}`).join(", ") || "no secrets"})</Row>
           <Row icon={<Warning size={14} />}>Brief interruption{c.engine ? "" : " (about 4 s in this simulation)"}: Harpoon stops {app.currentReleaseId ?? "nothing — the application is down"} first.</Row>
@@ -108,8 +141,8 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
     const d = latestDeployment(app);
     return (
       <Dialog title={`Retry recovery of ${app.lastKnownReleaseId}`} sub="One bounded attempt (60 s). Nothing else changes." onClose={close}
-        footer={<><button className="btn btn--secondary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { const rb = app.releases.find((r) => r.id !== app.lastKnownReleaseId); if (rb) { if (c.engine) { act({ op: "rollback", app: app.id, release: rb.id }); return; } c.dispatch({ type: "rollback", appId: app.id, releaseId: rb.id }); } close(); }}>Roll back to {app.releases.find((r) => r.id !== app.lastKnownReleaseId)?.deploymentId ?? "an earlier release"} instead</button>
-          <button className="btn btn--primary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { if (c.engine) { act({ op: "restore", deployment: d?.id }); return; } c.dispatch({ type: "recover", appId: app.id }); close(); }}><ArrowCounterClockwise size={14} /> Retry recovery</button></>}>
+        footer={<><button className="btn btn--secondary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { const rb = app.releases.find((r) => r.id !== app.lastKnownReleaseId); if (rb) { if (c.engine) { act({ op: "rollback", app: app.id, release: rb.id }, undefined, CONFIRM_LIVE); return; } c.dispatch({ type: "rollback", appId: app.id, releaseId: rb.id }); } close(); }}>Roll back to {app.releases.find((r) => r.id !== app.lastKnownReleaseId)?.deploymentId ?? "an earlier release"} instead</button>
+          <button className="btn btn--primary" disabled={!!c.engine && (!!gate || busy)} title={gate ?? undefined} onClick={() => { if (c.engine) { act({ op: "restore", deployment: d?.id }, undefined, CONFIRM_LIVE); return; } c.dispatch({ type: "recover", appId: app.id }); close(); }}><ArrowCounterClockwise size={14} /> Retry recovery</button></>}>
         <Banner tone={locked ? "err" : "info"} icon={<Key size={18} />} title={locked ? "The Keychain is still locked" : "Last attempt failed: a pinned secret was unavailable"}>
           {locked ? `Retrying now would fail again. Unlock the Keychain${c.engine ? "" : " (simulation bar)"}, or roll back to a release that pins different secret versions.` : `${d?.recovery?.detail ?? ""} The Keychain is unlocked now, so a retry can succeed.`}
         </Banner>

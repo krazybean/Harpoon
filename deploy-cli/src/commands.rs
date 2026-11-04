@@ -49,7 +49,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "config-diff" => config_cmds::config_diff(p, out),
         "status" => status(p, gate, out),
         "doctor" => doctor(p, out),
-        "plan" => plan(p, out),
+        "plan" => plan(p, gate, out),
         "recover" => recover(p, out),
         "reconcile" => reconcile_cmd(p, out),
         "deploy" => deploy(p, gate, svc, out),
@@ -88,7 +88,7 @@ fn api(socket: &Path) -> DockerApi {
     DockerApi::new(socket, Duration::from_secs(10))
 }
 
-fn authorized(p: &Parsed) -> Result<(), Fail> {
+pub(crate) fn authorized(p: &Parsed) -> Result<(), Fail> {
     match p.value(AUTH_FLAG) {
         Some(v) if v == AUTH_PHRASE => Ok(()),
         Some(_) => Err(Fail::refused(format!(
@@ -1224,7 +1224,7 @@ fn doctor(p: &Parsed, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ plan
 
-fn plan(p: &Parsed, out: &mut String) -> R {
+fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let socket = socket_flag(p)?;
     let s = source_cfg(
@@ -1356,7 +1356,14 @@ fn plan(p: &Parsed, out: &mut String) -> R {
         out,
         "host listeners on candidate ports are checked at deploy time"
     );
-    let _ = writeln!(out, "live execution: disabled in this build until B7");
+    let _ = if gate.live_deploy_enabled {
+        writeln!(
+            out,
+            "live execution: available in this build, but only with the explicit --{AUTH_FLAG} opt-in; this command changed nothing"
+        )
+    } else {
+        writeln!(out, "live execution: disabled in this build")
+    };
 
     let mut blockers: Vec<String> = Vec::new();
     for m in &missing {
@@ -1875,7 +1882,7 @@ fn mode_label(simulate: bool) -> &'static str {
 fn live_banner(out: &mut String, what: &str) {
     let _ = writeln!(
         out,
-        "*** LIVE {} (acceptance build) — real Docker; run only under written authorization ***",
+        "*** LIVE {} — real Docker: this changes real containers, images and ports, and runs only with the explicit authorization flag ***",
         what.to_ascii_uppercase()
     );
 }

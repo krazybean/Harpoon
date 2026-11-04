@@ -43,6 +43,11 @@ Not a cherry-pick: the experimental branch predates B13 and B14 and merges into 
 - **Locking and replay:** unchanged. The writer is opened after every read-only refusal; a held journal stops every live command
   before Docker is contacted.
 
+> **Update (gate opening):** the gate decision described in this section was taken after the live evidence in
+> `DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md`. `Gate::shipping()` now has `live_deploy_enabled: true`, `live_replacement_enabled: true` and a
+> new third field, `live_triggered_enabled: false` (Gate U). The acceptance binary stays unpackaged and now additionally opens
+> `live_triggered_enabled`. The text below is the state when B15 merged.
+
 ## 3. Why shipping stays closed
 
 - `Gate::shipping()` has `live_deploy_enabled: false` and `live_replacement_enabled: false`. `src/main.rs` uses it

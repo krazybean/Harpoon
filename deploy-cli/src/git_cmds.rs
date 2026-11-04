@@ -11,7 +11,9 @@
 //!   sequential, so a running build is never interrupted and events that arrive meanwhile queue behind it.
 //! * `watch`: a foreground process that polls the remotes (at least every 60 s), listens for signed
 //!   webhooks on loopback if asked, and runs the queue. It is "automatic while Harpoon is running": nothing
-//!   here is a daemon, and nothing claims unattended operation (Gate U has not passed).
+//!   here is a daemon, and nothing claims unattended operation (Gate U has not passed). Executing queued
+//!   events (`git-run`, `watch` without `--queue-only`) therefore has its own gate, `live_triggered_enabled`,
+//!   which the shipping binary keeps closed even though it opens attended `git-deploy`.
 //!
 //! A pushed commit seen for the first time by a **new** process is reported as late: it landed while no
 //! Harpoon was running (or since the previous run), and it is deployed like any other event.
@@ -62,12 +64,29 @@ fn kind_of(rt: &Runtime, p: &Parsed) -> Result<Kind, Fail> {
     }))
 }
 
-/// A live run is refused up front, before a repository is contacted, when the build's gate is closed.
-/// The same gates guard `deploy` and `replace` themselves; this just does not waste a checkout.
+/// A live run is refused up front, before a repository is contacted, when the build's gate is closed or the
+/// explicit opt-in for real Docker changes is missing. The same checks guard `deploy` and `replace` themselves;
+/// this just does not waste a checkout (or a network round trip) on a request that would be refused anyway.
 fn check_gate(p: &Parsed, gate: &Gate) -> Result<(), Fail> {
-    if !p.switch("simulate") && !gate.live_deploy_enabled {
+    if !p.switch("simulate") {
+        if !gate.live_deploy_enabled {
+            return Err(Fail::refused(
+                "live deployment is disabled in this build (the shipping gate is closed). Nothing was read, checked out or contacted. Use --simulate against a separate runtime directory for an offline run.",
+            ));
+        }
+        commands::authorized(p)?;
+    }
+    Ok(())
+}
+
+/// Executing queued events deploys a revision that arrived from a poll or a webhook, not one a person
+/// chose. That is unattended execution (Gate U), which has not passed, so it has its own gate: a build that
+/// opens attended deployment still refuses it here, before a repository is contacted. `git-deploy` (a
+/// revision the person names), `git-trigger` and `watch --queue-only` (which only queue) are not affected.
+fn check_triggered_gate(p: &Parsed, gate: &Gate) -> Result<(), Fail> {
+    if !p.switch("simulate") && !gate.live_triggered_enabled {
         return Err(Fail::refused(
-            "live deployment is disabled in this build (the shipping gate is closed). Nothing was read, checked out or contacted. Use --simulate against a separate runtime directory for an offline run.",
+            "executing queued Git events is not enabled in this build (unattended execution, Gate U, has not passed). Nothing was read, checked out or contacted. `git-deploy --repo NAME` deploys a revision you choose; `git-trigger` and `watch --queue-only` only queue events; --simulate runs offline against a separate runtime directory.",
         ));
     }
     Ok(())
@@ -740,6 +759,7 @@ fn drain_all(
 }
 
 pub fn git_run(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
+    check_triggered_gate(p, gate)?;
     check_gate(p, gate)?;
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let n = drain_all(p, gate, svc, &rt, p.value("repo"), out)?;
@@ -896,6 +916,7 @@ pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R
     // desktop shows what is waiting without running anything.
     let queue_only = p.switch("queue-only");
     if !queue_only {
+        check_triggered_gate(p, gate)?;
         check_gate(p, gate)?;
     }
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;

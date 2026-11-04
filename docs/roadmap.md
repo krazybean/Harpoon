@@ -49,12 +49,21 @@ EVIDENCE.** The B1–B15 implementation is complete on `main`, including permane
 SQLite state, health-gated replacement, bounded cutover recovery, explicit rollback,
 runtime configuration pinning, durable pause/held-event state, and the separately
 gated live wiring. This is an implementation closure, not an unconditional
-acceptance PASS: L5–L7 and P1–P2 were not run because the required idle-host
-precondition failed, and therefore remain explicitly untested.
+acceptance PASS. The Nov 1 campaign did not run L5–L7 and P1–P2 (idle-host precondition
+failed). The 2026-11-04 isolated session then **passed L5, L7 and P2** (L6 was verified from
+the Nov 2 canary evidence); **P1 (build overhead) was NOT RUN** because the host again failed
+the agreed idle thresholds. P1 remains an explicit, owner-decided deferred performance
+measurement, not a pass.
 
-**Shipping gate: closed.** `Gate::shipping()` refuses live `deploy`, `replace`, `rollback` and
-`restore`. The acceptance binary is separately built and authorized for live scenarios; it is not
-the shipping binary and does not open the product gate.
+**Shipping gate: attended deployment and replacement OPEN; unattended execution CLOSED.**
+`Gate::shipping()` opens live `deploy`, `git-deploy`, `replace`, `rollback` and `restore`, each started
+by a person and each still refused unless the exact `--authorize-live-docker-changes` phrase is given.
+In the desktop that phrase is supplied only by the backend, only after the person confirms that
+operation in a dialog (a replacement additionally needs its own, separate cutover acknowledgement).
+Execution of queued Git events (`git-run`, and `watch` without `--queue-only`) has its own gate,
+`live_triggered_enabled`, which is `false` in the shipping binary: Gate U (unattended execution) has
+not passed. Only the unpackaged `harpoon-deploy-acceptance` binary opens it. Details and the evidence
+behind the decision: `docs/results/DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md` (sections 13 and 14).
 
 ### Milestones
 
@@ -65,7 +74,7 @@ the shipping binary and does not open the product gate.
 | C | Builds, environments, and secrets (best-effort redaction with leakage tests) | **Implementation-complete by owner decision** (offline slice merged in #141; native Keychain round trip verified once on a disposable item). The real Docker/BuildKit acceptance evidence below stays deferred, not claimed. Scoped Config/Secret definitions and immutable per-deployment snapshots, Keychain-backed immutable secret versions (stdin-only input), Dockerfile target/build args/BuildKit secret mounts, runtime injection, v3 release pins that keep exact secret versions (restore and rollback resolve the original versions), stream redaction with fail-closed withholding, `config-*` commands. Deferred: image reuse for runtime-only changes (rebuild accepted), live Docker/BuildKit evidence (history, layers); build-secret files survive a hard kill until the next writing command (reported by `status`). Details and exact gaps: `docs/results/DEPLOY_MILESTONE_C_CONFIGURATION_SECRETS.md` |
 | Gate U | Unattended-execution feasibility (Keychain and headless credentials, execution prerequisites); decision only, agent deferred | **NOT PASSED — unattended operation unproven.** No experiment was run and no agent was built; everything automatic is attended only ("while Harpoon is running"). Recorded in `docs/results/SPIKE_UNATTENDED_EXECUTION.md` |
 | D | Git integration and automation (polling, signed-fixture webhooks); attended only | **Active; implemented and verified offline in one PR (attended only).** Public/private HTTPS and SSH (pinned host key) sources, branch/tag/exact-commit checkout in a bounded private workspace, the immutable commit recorded before every deployment, foreground polling with late detection, loopback-only GitHub-HMAC and GitLab-token webhooks, a CI trigger, B14 delivery-id idempotency, newest-wins supersession and a source executor for held/selected events. **Implementation closure (merged in #142, `3084712`) — residual risks preserved, none cleared:** an SSH server (wrong host key, revoked deploy key) is asserted, not run; TLS handling is Git's and unexercised; real GitHub/GitLab deliveries were never received (they need a tunnel or relay) and GitLab's delivery-id header is unconfirmed (the commit is the fallback key); webhook events buffered in memory during a build are lost if the process dies (polling finds the push later, reported late); a hard-killed process can leave a checkout workspace behind until the next writer sweeps it (owner-pid scoped); submodules and Git LFS are not initialised; an active build is never cancelled by a newer push. Gate U is NOT PASSED: everything is attended-only. `docs/results/DEPLOY_MILESTONE_D_GIT_INTEGRATION.md` |
-| E | Desktop deployment experience and previews | **Active; implemented and verified offline in one PR (attended only; shipping gate closed).** The existing Deployments UI now reads the real engine: a typed read-only snapshot of the SQLite journal (`deploy_snapshot`), recorded redacted step logs, Docker's observed container state kept separate from recorded evidence, and a bounded set of engine operations (`deploy_op`) run through the same CLI library under `Gate::shipping()`. Repository registration, scoped Config, Keychain secrets (stdin only) and attended resume work; live deploy, rollback and restore are visibly disabled with the engine's own refusal reason. The seeded simulation is reachable only through a development-build preview link. **Branch previews are not implemented** (they need per-branch application registration, expiry and ownership-label cleanup, a new subsystem); nothing is shown for them. Not exercised: a live deployment from the desktop (the gate stays closed), a real locked-Keychain prompt. `docs/results/DEPLOY_MILESTONE_E_DESKTOP.md` |
+| E | Desktop deployment experience and previews | **Active; implemented and verified offline in one PR (attended only; the shipping gate now opens attended deploy, replace, rollback and restore behind an explicit confirmation).** The existing Deployments UI now reads the real engine: a typed read-only snapshot of the SQLite journal (`deploy_snapshot`), recorded redacted step logs, Docker's observed container state kept separate from recorded evidence, and a bounded set of engine operations (`deploy_op`) run through the same CLI library under `Gate::shipping()`. Repository registration, scoped Config, Keychain secrets (stdin only) and attended resume work; live deploy, rollback and restore are visibly disabled with the engine's own refusal reason. The seeded simulation is reachable only through a development-build preview link. **Branch previews are not implemented** (they need per-branch application registration, expiry and ownership-label cleanup, a new subsystem); nothing is shown for them. Not exercised: a live deployment from the desktop (the gate stays closed), a real locked-Keychain prompt. `docs/results/DEPLOY_MILESTONE_E_DESKTOP.md` |
 
 ### Milestone B — steps
 
@@ -127,8 +136,9 @@ Deferred, still untested checks:
 L1–L4 remain the existing live evidence; they do not substitute for these checks.
 The offline suites, formatting, Clippy, gate-closed assertions, binary identity
 checks, and no-mutation precondition record support implementation closure but do
-not convert deferred checks into PASS. The shipping `Gate::shipping()` remains
-closed, and no Docker/VM rerun is authorized by this closure.
+not convert deferred checks into PASS. (Update 2026-11-04: L5, L7 and P2 now pass and L6 is
+verified, see `DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md` section 13; P1 is still NOT RUN. The
+shipping gate now opens attended deployment and replacement; see above.)
 
 ### Milestone B12: Explicit manual rollback (complete, offline)
 
@@ -144,7 +154,8 @@ bounded restoration of the release that was serving. The rollback is a durable d
 (source, target, pin, interruption, outcome); the serving release is derived from the records; a
 successful rollback pauses the application's automatic triggers, shown by `status`, with durable
 `resume` state implemented in B14. The live replacement and rollback wiring exists behind the
-separately authorized acceptance gate; the shipping gate stays closed. Nothing here claims
+separately authorized acceptance gate and, since the gate-opening change, also in the
+shipping gate for attended use (confirmed in the desktop, authorized on the CLI). Nothing here claims
 production readiness. The deferred evidence remains listed in `docs/results/DEPLOY_B12_ROLLBACK.md`
 and `DEPLOY_B11_RECOVERY.md`.
 
