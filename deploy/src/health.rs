@@ -89,7 +89,26 @@ pub struct CheckEvidence {
     pub scope_note: &'static str,
 }
 
+/// How a healthy response was tied to the container that gave it. Carried as a suffix of `expected` (no new field, so no
+/// journal or fixture changes): `marker-verified` means the response carried this container's own marker;
+/// `path-verified` means it did not, and the whole host-to-container path was proven instead.
+pub const ATTRIBUTION_MARKER: &str = "marker-verified";
+pub const ATTRIBUTION_PATH: &str = "path-verified";
+
 impl CheckEvidence {
+    /// The same evidence, labelled with how its responses were attributed.
+    pub fn with_attribution(mut self, label: &str) -> CheckEvidence {
+        self.expected = format!("{} [{label}]", self.expected);
+        self
+    }
+
+    /// `marker-verified` or `path-verified` when the evidence carries a label.
+    pub fn attribution(&self) -> Option<&'static str> {
+        [ATTRIBUTION_MARKER, ATTRIBUTION_PATH]
+            .into_iter()
+            .find(|l| self.expected.ends_with(&format!("[{l}]")))
+    }
+
     /// Healthy only if the verdict says so *and* the observations back it up. A verdict alone
     /// establishes nothing.
     pub fn is_healthy(&self) -> bool {

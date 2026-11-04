@@ -15,6 +15,7 @@ use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::DockerApi;
+use harpoon_deploy_docker::attribution::HostGuestProof;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, Source};
@@ -1758,7 +1759,12 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         let mut b = DockerBackend::new(live_cfg, Some(Path::new(resources)))
             .map_err(|e| Fail::config(e.to_string()))?
             .with_secrets(std::mem::take(&mut prep.bundle))
-            .with_forwarder_check(LsofCheck { lsof, pid, command })
+            .with_forwarder_check(LsofCheck {
+                lsof: lsof.clone(),
+                pid,
+                command: command.clone(),
+            })
+            .with_path_proof(path_proof(p, lsof, pid, command, &sock, &mgmt)?)
             .with_guest_disk(MgmtDfProbe::new(&sock, mgmt, Duration::from_secs(10)));
         run_deployment_with(
             &mut d,
@@ -1831,7 +1837,12 @@ fn live_backend(
     Ok(DockerBackend::new(cfg, Some(Path::new(resources)))
         .map_err(|e| Fail::config(e.to_string()))?
         .with_secrets(secrets)
-        .with_forwarder_check(LsofCheck { lsof, pid, command })
+        .with_forwarder_check(LsofCheck {
+            lsof: lsof.clone(),
+            pid,
+            command: command.clone(),
+        })
+        .with_path_proof(path_proof(p, lsof, pid, command, sock, &mgmt)?)
         .with_guest_disk(MgmtDfProbe::new(sock, mgmt, Duration::from_secs(10))))
 }
 
@@ -2876,6 +2887,42 @@ fn forwarder_flags(p: &Parsed) -> Result<(PathBuf, u32, String), Fail> {
     Ok((PathBuf::from(lsof), pid, command))
 }
 
+/// The host-to-VM proof that lets an application without the deployment marker pass its health check.
+/// `--forward-address` is the guest address the engine published (`forwardTarget` in runtime.json);
+/// without it the proof fails closed and only marker-echoing applications can pass.
+fn path_proof(
+    p: &Parsed,
+    lsof: PathBuf,
+    pid: u32,
+    command: String,
+    docker_socket: &Path,
+    mgmt: &Path,
+) -> Result<HostGuestProof, Fail> {
+    let addr = match p.value("forward-address") {
+        None => None,
+        Some(a) => Some(
+            a.parse::<std::net::Ipv4Addr>()
+                .ok()
+                .filter(|ip| ip.is_private() && ip.to_string() == a)
+                .ok_or_else(|| {
+                    Fail::config("--forward-address must be a private IPv4 address in dotted form")
+                })?,
+        ),
+    };
+    Ok(HostGuestProof::real(
+        LsofCheck {
+            lsof: lsof.clone(),
+            pid,
+            command,
+        },
+        &lsof,
+        pid,
+        docker_socket,
+        mgmt,
+        addr,
+    ))
+}
+
 // ------------------------------------------------------------------ inventory
 
 /// Read-only snapshot for the before/after comparison of a live acceptance run. Sorted and free of
@@ -3762,5 +3809,41 @@ mod forwarder_default_tests {
             "harpoon"
         )
         .is_ok());
+    }
+
+    fn proof_with(extra: &[&str]) -> Result<HostGuestProof, Fail> {
+        let mut args = vec!["deploy", "--forwarder-pid", "4242"];
+        args.extend_from_slice(extra);
+        let args: Vec<String> = args.into_iter().map(String::from).collect();
+        path_proof(
+            &crate::args::parse(&args).unwrap(),
+            PathBuf::from("/usr/sbin/lsof"),
+            4242,
+            "harpoon".into(),
+            Path::new("/tmp/eng/d.sock"),
+            Path::new("/tmp/eng/m.sock"),
+        )
+    }
+
+    /// The published guest address is the only thing the path proof dials, so it is a strict private dotted IPv4.
+    #[test]
+    fn the_forward_address_must_be_a_private_dotted_ipv4_and_is_optional() {
+        assert_eq!(proof_with(&[]).unwrap().forward_address, None);
+        let ok = proof_with(&["--forward-address", "192.168.64.3"]).unwrap();
+        assert_eq!(ok.forward_address, Some("192.168.64.3".parse().unwrap()));
+        for bad in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "192.168.064.3",
+            "192.168.64",
+            "host.local",
+            "192.168.64.3:80",
+            "",
+        ] {
+            assert!(
+                proof_with(&["--forward-address", bad]).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
     }
 }

@@ -5,6 +5,9 @@ on:
     paths:
       - harpoon/Sources/PortForwardManager.swift
       - harpoon/Sources/PortForwardBridge.swift
+      - harpoon/Sources/ForwardTarget.swift
+      - harpoon/regression-forward-target.swift
+      - harpoon/regression-forward-target.sh
       - harpoon/regression-published-port-route.swift
       - harpoon/regression-published-port-route.sh
       - .github/workflows/published-ports.yml
@@ -13,6 +16,9 @@ on:
     paths:
       - harpoon/Sources/PortForwardManager.swift
       - harpoon/Sources/PortForwardBridge.swift
+      - harpoon/Sources/ForwardTarget.swift
+      - harpoon/regression-forward-target.swift
+      - harpoon/regression-forward-target.sh
       - harpoon/regression-published-port-route.swift
       - harpoon/regression-published-port-route.sh
 
@@ -29,3 +35,6 @@ jobs:
       # isolated engine and is run by hand.
       - name: Published-port routing and guest relay commands
         run: sh harpoon/regression-published-port-route.sh
+      # The published guest address (forwardTarget in runtime.json): validation and JSON shape. Pure unit test.
+      - name: Forward target publication
+        run: sh harpoon/regression-forward-target.sh

@@ -102,6 +102,12 @@ pub struct ContainerInfo {
     pub labels: Labels,
     pub running: bool,
     pub exit_code: Option<i32>,
+    /// The image id the container was created from (`Image`); empty when Docker did not say.
+    pub image_id: String,
+    /// `State.StartedAt`; empty when Docker did not say. It changes at every start.
+    pub started_at: String,
+    /// `RestartCount`; zero when Docker did not say.
+    pub restart_count: u64,
     /// `NetworkSettings.Ports`: the host side of each published container port, as Docker reports
     /// it for the running container (empty when nothing is published).
     pub published: Vec<Published>,
@@ -650,6 +656,21 @@ impl DockerApi {
                         .get("ExitCode")
                         .and_then(Json::as_i64)
                         .map(|c| c as i32),
+                    image_id: j
+                        .get("Image")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    started_at: state
+                        .get("StartedAt")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    restart_count: j
+                        .get("RestartCount")
+                        .and_then(Json::as_i64)
+                        .unwrap_or(0)
+                        .max(0) as u64,
                     published: published_of(&j)?,
                 }))
             }

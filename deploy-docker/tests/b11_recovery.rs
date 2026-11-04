@@ -182,6 +182,128 @@ fn run(r: &mut Rig, b: &mut DockerBackend<ByPort>) -> harpoon_deploy::engine::Re
         .expect("the engine itself did not error")
 }
 
+// ---- marker-free applications: the restoration check attributes a plain 200 only through the proven path
+
+/// An ordinary application: every answer is a plain HTTP response with no marker header; the failing candidate is a 503.
+struct PlainPorts {
+    restored_port: u16,
+}
+
+impl HttpTransport for PlainPorts {
+    fn get(&self, _p: u16, _path: &str, _t: Duration) -> Observation {
+        Observation::Status(200)
+    }
+    fn get_marked(
+        &self,
+        port: u16,
+        _path: &str,
+        _t: Duration,
+        _m: &harpoon_deploy_docker::probe::ResponseMarker,
+    ) -> harpoon_deploy_docker::probe::MarkedResponse {
+        use harpoon_deploy_docker::probe::MarkedResponse::Unmarked;
+        if port >= 39000 || port == self.restored_port {
+            Unmarked(200)
+        } else {
+            Unmarked(503)
+        }
+    }
+    fn is_simulated(&self) -> bool {
+        true
+    }
+}
+
+struct RecordingProof {
+    ports: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+    /// The one port whose path cannot be proven, if any.
+    deny: Option<u16>,
+}
+
+impl harpoon_deploy_docker::attribution::PathProof for RecordingProof {
+    fn prove(
+        &self,
+        port: u16,
+        _r: harpoon_deploy_docker::attribution::Route,
+    ) -> Result<(), String> {
+        self.ports.lock().unwrap().push(port);
+        if self.deny != Some(port) {
+            Ok(())
+        } else {
+            Err("the machine at 192.168.64.3 could not be proven to be the Harpoon VM".into())
+        }
+    }
+}
+
+fn plain_backend(
+    r: &Rig,
+    deny: Option<u16>,
+) -> (
+    DockerBackend<PlainPorts>,
+    std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+) {
+    let mut cfg = config(&r.h.ws, &r.h.docker);
+    cfg.enable_replacement = true;
+    cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
+    let ports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let b = DockerBackend::with_transport(
+        cfg,
+        Some(&r.h.ws.resources()),
+        PlainPorts {
+            restored_port: PREV_PORT,
+        },
+    )
+    .expect("bundled buildx resolves")
+    .with_entropy(test_entropy())
+    .with_port_probe(NoListeners)
+    .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+    .with_path_proof(RecordingProof {
+        ports: ports.clone(),
+        deny,
+    });
+    (b, ports)
+}
+
+#[test]
+fn a_plain_application_is_restored_after_a_failed_cutover_only_through_the_proven_path() {
+    let mut r = rig();
+    let (mut b, ports) = plain_backend(&r, None);
+    let (rel, cfg) = (release(&r), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("the engine itself did not error");
+    assert_eq!(rep.status, DeploymentStatus::Failed);
+    assert_eq!(
+        r.h.dep.failure.as_ref().unwrap().kind,
+        FailureKind::FinalCheck
+    );
+    let rec = r.h.dep.recovery.unwrap();
+    assert_eq!(rec.outcome, RecoveryOutcome::Restored, "{:?}", rep.warnings);
+    assert!(
+        ports.lock().unwrap().contains(&PREV_PORT),
+        "the restoration check proved the path for the previous release's port: {:?}",
+        ports.lock().unwrap()
+    );
+    only_the_previous_release_was_stopped(&r);
+}
+
+#[test]
+fn a_restoration_whose_path_cannot_be_proven_is_not_reported_as_restored() {
+    let mut r = rig();
+    let (mut b, _) = plain_backend(&r, Some(PREV_PORT));
+    let (rel, cfg) = (release(&r), r.cfg.clone());
+    let rep =
+        r.h.run_replacing_with(&mut b, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("the engine itself did not error");
+    assert_eq!(rep.status, DeploymentStatus::Failed);
+    // the candidate was cut over and failed its final check; the previous release was started again but
+    // its path could not be proven, so the outcome is not `restored`
+    assert_eq!(
+        r.h.dep.failure.as_ref().unwrap().kind,
+        FailureKind::FinalCheck
+    );
+    let rec = r.h.dep.recovery.expect("a restoration was attempted");
+    assert_ne!(rec.outcome, RecoveryOutcome::Restored, "{:?}", rep.warnings);
+}
+
 /// The previous release's container was stopped and nothing else was done to it; no unrelated
 /// object, volume or network was touched; nothing was forced, pruned or removed behind Docker's back.
 fn only_the_previous_release_was_stopped(r: &Rig) {

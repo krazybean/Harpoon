@@ -899,7 +899,10 @@ impl Run<'_> {
             msg = format!("timed out after {elapsed} ms (budget {budget} ms): {msg}");
         }
         if let Some(ev) = e.evidence.as_deref() {
-            msg = format!("{msg} ({})", ev.summary());
+            // a backend that already put the evidence summary in its message is not told it twice
+            if !msg.contains(&ev.summary()) {
+                msg = format!("{msg} ({})", ev.summary());
+            }
             self.evidence.push((step, ev.clone()));
         }
         msg
