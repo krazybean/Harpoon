@@ -4546,6 +4546,60 @@ fn poll_after_removal_is_not_polled(t: &T, kc: &MemorySecretStore) -> bool {
     o.code == 6 && o.stderr.contains("no repository is registered to watch")
 }
 
+/// What `repo-list` says about `shop`'s last deployment, or `None` when it names none.
+fn listed_deployment(t: &T, kc: &MemorySecretStore) -> Option<String> {
+    let o = sim(t, kc, &["repo-list"]);
+    assert_exit(&o, 0);
+    o.stdout.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("last deployment from it: ")
+            .map(String::from)
+    })
+}
+
+#[test]
+fn repo_list_names_a_registrations_last_deployment_only_when_its_own_application_made_it() {
+    // an ordinary registration shows its deployment
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, false, false);
+    let shown = listed_deployment(&t, &kc).expect("an ordinary registration shows its deployment");
+    assert!(shown.starts_with(PREV), "{shown}");
+
+    // removed: the retired application is listed as disconnected, with no deployment line of a registration
+    authorize_removal(&t);
+    assert_exit(&remove_shop(&t), 0);
+    assert_eq!(listed_deployment(&t, &kc), None);
+
+    // the name reused by a fresh application does not show the retired application's deployment
+    assert_exit(&replace_shop(&t, &url, &[]), 0);
+    assert_ne!(restored(&t).git.repos["shop"].app.to_string(), APP);
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    assert_eq!(listed_deployment(&t, &kc), None);
+    // listing is display only
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), before);
+}
+
+#[test]
+fn repo_list_shows_the_history_of_an_explicitly_reclaimed_application() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    assert_exit(&remove_shop(&t), 0);
+    assert_exit(
+        &replace_shop(&t, &url, &["--app", APP, "--confirm-reclaim"]),
+        0,
+    );
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    assert_eq!(before.git.repos["shop"].app.to_string(), APP);
+    let shown = listed_deployment(&t, &kc).expect("a reclaimed application keeps its history");
+    assert!(shown.starts_with(PREV), "{shown}");
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), before);
+}
+
 #[test]
 fn a_fresh_registration_of_a_removed_name_inherits_no_event_identity_polling_state_or_credential() {
     let t = T::new();
