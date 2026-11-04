@@ -178,6 +178,11 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             return Err(already_registered(&name, &r.url));
         }
     }
+    // Replacing a registration that has a saved credential may not move it to another destination. Checked
+    // read-only first, so a refusal leaves every byte of the journal as it was, and again under the writer lock.
+    if let Some(state) = store::read_restored(&rt)? {
+        guard_credential_destination(&state, &name, &url)?;
+    }
     // A local source is checked before the journal writer is opened, so a refusal leaves every record as it
     // was. Remote sources are not contacted here (see the closing note).
     let verified = if kind == policy::UrlKind::File {
@@ -198,6 +203,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             return Err(already_registered(&name, &r.url));
         }
     }
+    guard_credential_destination(&restored, &name, &url)?;
     let app: ApplicationId = match p.value("app") {
         Some(a) => a
             .parse()
@@ -292,7 +298,8 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
     let expect: u64 = need("expect-registered-ms")?.parse().map_err(|_| {
         Fail::usage("--expect-registered-ms is the registration time you were shown")
     })?;
-    let current = repo_named(&state_of(&rt)?, &name)?;
+    let state = state_of(&rt)?;
+    let current = repo_named(&state, &name)?;
     if current.at_ms != expect {
         return Err(changed_meanwhile(&name));
     }
@@ -349,30 +356,9 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
     }
     let kind = rec.validate().map_err(Fail::refused)?;
     let source_changed = changed.contains(&"source");
-    // A stored token or SSH key was issued for one destination (transport, host and port). Moving the source
-    // anywhere else, or to an address whose destination cannot be stated unambiguously, would hand the secret to
-    // whoever answers there, so a credentialed registration keeps its destination; anything else is a new
-    // repository. A URL that is unchanged needs no check.
-    if current.cred != CredKind::None && rec.url != current.url {
-        let kind = if current.cred == CredKind::SshKey {
-            "SSH key"
-        } else {
-            "access token"
-        };
-        match (policy::destination(&current.url), policy::destination(&rec.url)) {
-            (Some(was), Some(now)) if was == now => {}
-            (Some(was), Some(now)) => {
-                return Err(Fail::refused(format!(
-                    "the {kind} stored for repository {name:?} belongs to {was}, and the new address goes to {now}. A saved credential keeps its host, port and protocol; add a new repository for the other destination"
-                )))
-            }
-            _ => {
-                return Err(Fail::refused(format!(
-                    "the {kind} stored for repository {name:?} can only follow an address Harpoon can read unambiguously as [user@]host[:port] over https, http or ssh; the old or the new address of this edit is not one. Add a new repository instead"
-                )))
-            }
-        }
-    }
+    // A saved token or SSH key keeps its destination (see `keep_credential_destination`); an unchanged address
+    // needs no check.
+    guard_credential_destination(&state, &name, &rec.url)?;
     // A local source is checked before the journal writer is opened, as at registration.
     let verified = if kind == policy::UrlKind::File
         && (source_changed || changed.contains(&"branch"))
@@ -433,6 +419,61 @@ fn changed_meanwhile(name: &str) -> Fail {
     Fail::refused(format!(
         "repository {name:?} was changed after you opened it (another edit or a re-registration). Nothing was changed; reload and try again"
     ))
+}
+
+/// Whether a credential is on record for this repository: it is registered with one, or a secret version was ever
+/// saved under its name. Read from the journal only (`SecretSaved` records); the Keychain is never consulted, so
+/// this cannot touch, or be fooled by, an item that belongs to another runtime.
+fn credential_on_record(state: &harpoon_deploy_journal::Restored, repo: &RepoRec) -> bool {
+    repo.cred != CredKind::None
+        || state
+            .config
+            .versions
+            .contains_key(&repo.secret_id("credential"))
+}
+
+fn credential_label(repo: &RepoRec) -> &'static str {
+    match repo.cred {
+        CredKind::Token => "access token",
+        CredKind::SshKey => "SSH key",
+        CredKind::None => "saved credential",
+    }
+}
+
+/// A saved credential was issued for one destination (transport, host and port) and is found again by the
+/// repository's name. Whatever rewrites that registration (`repo-update`, or `repo-add` replacing it) may only
+/// move it to an address with the same destination; an address that cannot be read unambiguously never matches,
+/// not even another unreadable one. There is no override: another destination is another repository.
+fn keep_credential_destination(
+    name: &str,
+    label: &str,
+    old_url: &str,
+    new_url: &str,
+) -> Result<(), Fail> {
+    match (policy::destination(old_url), policy::destination(new_url)) {
+        (Some(was), Some(now)) if was == now => Ok(()),
+        (Some(was), Some(now)) => Err(Fail::refused(format!(
+            "the {label} of repository {name:?} belongs to {was}, and the new address goes to {now}. A saved credential keeps its host, port and protocol; add a new repository with another name for the other destination. Nothing was changed"
+        ))),
+        _ => Err(Fail::refused(format!(
+            "the {label} of repository {name:?} can only follow an address Harpoon can read unambiguously as [user@]host[:port] over https, http or ssh; the old or the new address is not one. Add a new repository with another name instead. Nothing was changed"
+        ))),
+    }
+}
+
+/// The check for rewriting the registration `name` to `new_url`: nothing to protect unless the URL changes and a
+/// credential is on record.
+fn guard_credential_destination(
+    state: &harpoon_deploy_journal::Restored,
+    name: &str,
+    new_url: &str,
+) -> Result<(), Fail> {
+    match state.git.repos.get(name) {
+        Some(old) if old.url != new_url && credential_on_record(state, old) => {
+            keep_credential_destination(name, credential_label(old), &old.url, new_url)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn read_repos(rt: &Runtime) -> Result<std::collections::BTreeMap<String, RepoRec>, Fail> {

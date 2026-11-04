@@ -2673,3 +2673,278 @@ fn editing_a_deployed_application_leaves_its_release_ledger_configuration_and_wo
     );
     untouched(&t, &cid);
 }
+
+// ------------------------------------------------------------------ replacing a registration that has a credential
+
+/// A Keychain that fails the test on any access: registering, replacing and editing must never read, write or
+/// delete a secret, so none of them can touch an item that belongs to another runtime.
+struct ForbiddenStore;
+impl harpoon_deploy::secrets::SecretStore for ForbiddenStore {
+    fn put(
+        &self,
+        _: &harpoon_deploy::secrets::SecretRef,
+        _: &harpoon_deploy::secrets::SecretValue,
+    ) -> Result<(), harpoon_deploy::secrets::SecretError> {
+        panic!("the Keychain must not be written")
+    }
+    fn get(
+        &self,
+        _: &harpoon_deploy::secrets::SecretRef,
+    ) -> Result<harpoon_deploy::secrets::SecretValue, harpoon_deploy::secrets::SecretError> {
+        panic!("the Keychain must not be read")
+    }
+    fn delete(
+        &self,
+        _: &harpoon_deploy::secrets::SecretRef,
+    ) -> Result<(), harpoon_deploy::secrets::SecretError> {
+        panic!("the Keychain must not be deleted from")
+    }
+}
+
+/// A `repo-add` of the registration `shop` with no access to any Keychain.
+fn replace_shop(t: &T, url: &str, extra: &[&str]) -> Outcome {
+    let mut a: Vec<String> = [
+        "repo-add",
+        "--simulate",
+        "--name",
+        "shop",
+        "--url",
+        url,
+        "--container-port",
+        "8080",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    a.extend(extra.iter().map(|s| s.to_string()));
+    a.extend(["--runtime-dir".to_string(), t.rt.display().to_string()]);
+    let _h = holding();
+    let mut input: &[u8] = b"";
+    let mut svc = Services {
+        secrets: &ForbiddenStore,
+        stdin: &mut input,
+        stdin_is_terminal: false,
+        next: None,
+    };
+    run_with(&a, &SHIPPING, &mut svc)
+}
+
+/// The saved token, read from the in-memory test store (never a real Keychain).
+fn saved_token(kc: &MemorySecretStore) -> Vec<u8> {
+    use harpoon_deploy::secrets::SecretStore;
+    kc.get(&harpoon_deploy::secrets::SecretRef::new(
+        "git/shop/credential",
+        1,
+    ))
+    .expect("the saved token is still there")
+    .expose()
+    .to_vec()
+}
+
+#[test]
+fn replacing_a_registration_that_has_a_saved_credential_cannot_move_its_destination() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    credentialed(&t, &kc, "https://git.example.com/acme/shop.git");
+    seed_history(&t, "shop", "https://git.example.com/acme/shop.git");
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    for other in [
+        // another host, or a look-alike
+        "https://git.evil.example/acme/shop.git",
+        "https://git.example.com.evil.example/acme/shop.git",
+        // an authority that a URL parser and libcurl read differently
+        "https://git.evil.example#@git.example.com/acme/shop.git",
+        "https://git.evil.example?@git.example.com/acme/shop.git",
+        "https://git.evil.example\\@git.example.com/acme/shop.git",
+        "https://git%2eexample.com/acme/shop.git",
+        // another port or protocol
+        "https://git.example.com:8443/acme/shop.git",
+        "http://git.example.com/acme/shop.git",
+        "http://127.0.0.1:9/acme/shop.git",
+        "ssh://git@git.example.com/acme/shop.git",
+        "git@git.example.com:acme/shop.git",
+        // no destination at all
+        "file:///tmp/shop",
+        "https://git.example.com:/acme/shop.git",
+    ] {
+        // both ways a replacement can use a credential, and with none: all are refused
+        for extra in [&["--username", "ci"][..], &[][..]] {
+            let o = replace_shop(&t, other, extra);
+            // 2: not an acceptable URL at all (plain http to a real host); 6: refused by the destination rule
+            assert!(
+                o.code == 6 || o.code == 2,
+                "{other} {extra:?}: exit {}: {}",
+                o.code,
+                o.stderr
+            );
+            if o.code == 6 {
+                assert!(
+                    o.stderr.contains("Nothing was changed"),
+                    "{other}: {}",
+                    o.stderr
+                );
+            }
+            for text in [&o.stdout, &o.stderr] {
+                assert!(!text.contains(PLANTED), "{other}: a secret in the output");
+            }
+            assert_eq!(
+                journal_bytes(&t),
+                bytes,
+                "{other} {extra:?}: the journal changed"
+            );
+        }
+    }
+    let now = restored(&t);
+    assert_eq!(
+        now, before,
+        "registration, application, provenance and credential record are as they were"
+    );
+    assert_eq!(
+        saved_token(&kc),
+        PLANTED.as_bytes(),
+        "the saved token is untouched"
+    );
+}
+
+#[test]
+fn replacing_a_registration_with_the_same_destination_is_still_allowed_and_keeps_its_identity() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    credentialed(&t, &kc, "https://git.example.com/acme/shop.git");
+    let (dep, src) = seed_history(&t, "shop", "https://git.example.com/acme/shop.git");
+    let app = restored(&t).git.repos["shop"].app.clone();
+    for (url, extra) in [
+        (
+            "https://git.example.com/acme/shop2.git",
+            vec!["--username", "ci", "--branch", "release/1"],
+        ),
+        (
+            "https://GIT.example.com:443/acme/shop3.git",
+            vec!["--username", "ci"],
+        ),
+        (
+            "https://ci@git.example.com/acme/shop4.git",
+            vec!["--username", "ci"],
+        ),
+        // dropping the credential at the same destination is a replacement too
+        ("https://git.example.com/acme/shop5.git", vec![]),
+    ] {
+        let o = replace_shop(&t, url, &extra);
+        assert_exit(&o, 0);
+        let r = restored(&t);
+        assert_eq!(r.git.repos["shop"].url, url);
+        assert_eq!(
+            r.git.repos["shop"].app, app,
+            "no --app: the application is kept"
+        );
+        assert_eq!(r.deployments, vec![dep.clone()]);
+        assert_eq!(
+            r.git.sources,
+            vec![src.clone()],
+            "the deployment keeps its recorded source"
+        );
+    }
+    assert_eq!(saved_token(&kc), PLANTED.as_bytes());
+}
+
+#[test]
+fn a_replacement_without_a_credential_on_record_may_still_change_everything() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            "https://git.example.com/acme/shop.git",
+            APP,
+            &[],
+        ),
+        0,
+    );
+    let app = restored(&t).git.repos["shop"].app.clone();
+    for url in [
+        "https://other.example.org/acme/shop.git",
+        "http://127.0.0.1:9/acme/shop.git",
+        "https://other.example.org:8443/acme/shop.git",
+    ] {
+        assert_exit(&replace_shop(&t, url, &[]), 0);
+        let r = restored(&t);
+        assert_eq!(
+            (r.git.repos["shop"].url.as_str(), &r.git.repos["shop"].app),
+            (url, &app)
+        );
+    }
+}
+
+#[test]
+fn a_credential_stays_bound_to_its_destination_even_after_a_replacement_that_stopped_using_it() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    credentialed(&t, &kc, "https://git.example.com/acme/shop.git");
+    // the registration stops using the credential, at the same destination: allowed, but a token is still on record
+    assert_exit(
+        &replace_shop(&t, "https://git.example.com/acme/shop.git", &[]),
+        0,
+    );
+    assert_eq!(
+        restored(&t).git.repos["shop"].cred,
+        harpoon_deploy::git::CredKind::None
+    );
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    // so neither a replacement nor an edit may move it, or the token could be picked up again elsewhere
+    let o = replace_shop(
+        &t,
+        "https://git.evil.example/acme/shop.git",
+        &["--username", "ci"],
+    );
+    assert_exit(&o, 6);
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        registered_ms(&t, "shop"),
+        &["--url", "https://git.evil.example/acme/shop.git"],
+    );
+    assert_exit(&o, 6);
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), before);
+    // the same destination can use it again
+    assert_exit(
+        &replace_shop(
+            &t,
+            "https://git.example.com/acme/shop.git",
+            &["--username", "ci"],
+        ),
+        0,
+    );
+    assert_eq!(saved_token(&kc), PLANTED.as_bytes());
+}
+
+#[test]
+fn a_credentialed_registration_whose_address_cannot_be_read_cannot_be_replaced_by_another_address()
+{
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let legacy = "https://git.example.com?ref=1/acme/shop.git";
+    credentialed(&t, &kc, legacy);
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    for other in [
+        "https://git.example.com/acme/shop.git",
+        "https://git.example.com?ref=2/acme/shop.git",
+    ] {
+        let o = replace_shop(&t, other, &["--username", "ci"]);
+        assert_exit(&o, 6);
+        assert!(o.stderr.contains("unambiguously"), "{other}: {}", o.stderr);
+    }
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), before);
+    // re-registering the very same address (for example to change the branch) is not a move
+    assert_exit(
+        &replace_shop(&t, legacy, &["--username", "ci", "--branch", "release/1"]),
+        0,
+    );
+}
