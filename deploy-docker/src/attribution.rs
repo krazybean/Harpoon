@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The guest TCP port the one-shot identity listener uses. Chosen next to Docker's (2375) and management (2377) ports.
+/// Longer than the whole proof can take (10 s management `exec`, 3 s connect, 3 s read).
+const LISTENER_LIFETIME_SECS: &str = "20";
 pub const CHALLENGE_PORT: u16 = 2378;
 /// The vsock port base the engine's guest relays use (`PortForwardManager.GuestRelay.vsockPortBase`).
 pub const RELAY_VSOCK_BASE: u32 = 65536;
@@ -139,9 +141,12 @@ impl Challenges for OsChallenges {
 
 /// Starts a single-use listener on the guest that answers one connection with the challenge, then is gone. `$1` is the
 /// challenge (32 hex digits, validated by the caller), `$2` the port. Standard input, output and error are detached so the
-/// management channel's `exec` returns.
+/// management channel's `exec` returns. `$3` is its lifetime in seconds: a detached watchdog ends exactly this
+/// challenge's listener (the pattern names the challenge, so a later probe's listener is never touched) when it has
+/// not been used by then, e.g. because the CLI died before it could stop it.
 pub const START_SCRIPT: &str = r#"pkill -f "[T]CP4-LISTEN:$2," 2>/dev/null
 setsid socat "TCP4-LISTEN:$2,reuseaddr,backlog=1" "SYSTEM:echo $1" </dev/null >/dev/null 2>&1 &
+setsid sh -c 'sleep "$3"; pkill -f "[T]CP4-LISTEN:$2,.*$1"' harpoon-attest-expiry "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &
 sleep 0.3
 pgrep -f "[T]CP4-LISTEN:$2," >/dev/null || { echo "identity listener did not start" >&2; exit 1; }"#;
 pub const STOP_SCRIPT: &str = r#"pkill -f "[T]CP4-LISTEN:$1," 2>/dev/null; exit 0"#;
@@ -212,9 +217,15 @@ impl HostGuestProof {
             return Err("internal error: the identity challenge is not 32 hex digits".into());
         }
         let port = CHALLENGE_PORT.to_string();
-        let started = self
-            .guest
-            .exec(&["sh", "-c", START_SCRIPT, "harpoon-attest", &token, &port]);
+        let started = self.guest.exec(&[
+            "sh",
+            "-c",
+            START_SCRIPT,
+            "harpoon-attest",
+            &token,
+            &port,
+            LISTENER_LIFETIME_SECS,
+        ]);
         // always stop the listener, whatever happened
         let answer = match &started {
             Ok(r) if r.exit == 0 => self.dial.read_answer(addr, CHALLENGE_PORT),

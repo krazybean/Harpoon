@@ -33,6 +33,7 @@ Two consecutive successful probes are still required. The same `health()` serves
 - **TOCTOU.** Between the last proof and the last response there is a millisecond-scale window; a container swap inside it is caught by the baseline comparison afterwards, but a response in that window is not retroactively invalidated beyond that.
 - **Hostile peer on the NAT segment** that races the VM for the address is out of scope for the TCP challenge; the vsock-bound challenge and relay route do not depend on it.
 - An application behind a guest-local reverse proxy, or one that serves from a *different* container of the same release, is not distinguished by the path.
+- The guest identity listener is single-use and also expires on its own after 20 s (a detached watchdog that names that challenge), so a CLI that dies mid-proof leaves nothing lingering.
 - Old engines, or a CLI run without `--forward-address`, keep the strict marker-only behavior.
 
 ## Engine restart
