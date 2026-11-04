@@ -12,6 +12,7 @@
 //! * health evidence comes only from real observations of the published port.
 
 use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, Limits};
+use crate::attribution::{route_of, PathProof};
 use crate::buildx_run::{run_build, BuildRequest, BuildRunError, SecretFiles, StdFileProbe};
 use crate::confine::{confine, Source};
 use crate::dockerfile::required_images;
@@ -20,7 +21,8 @@ use crate::guest::{check_guest_free, GuestDiskProbe};
 use crate::ignore::{always_sent, IgnoreRules};
 use crate::preflight::{context_size_with, DfProbe, DiskProbe};
 use crate::probe::{
-    BindProbe, ContainerProbe, HttpTransport, PortProbe, ResponseMarker, SleepWaiter, TcpHttp,
+    BindProbe, ContainerBaseline, ContainerProbe, HttpTransport, PortProbe, ResponseMarker,
+    SleepWaiter, TcpHttp, UnmarkedGate,
 };
 use crate::snapshot;
 use harpoon_deploy::backend::{Backend, PreviousRelease, ResourceOps, RestoreResult, StepError};
@@ -36,6 +38,7 @@ use harpoon_deploy::release::ReleaseConfig;
 use harpoon_deploy::secrets::{SecretBundle, SecretRef};
 use harpoon_deploy::state::Reason;
 use harpoon_deploy::time::{Entropy, OsEntropy, SystemClock};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -156,6 +159,8 @@ struct State {
     context_bytes: u64,
     /// Per-container response markers (container name → value).
     markers: std::collections::BTreeMap<String, String>,
+    /// The verified image id each container was created from (container name → id), to attribute a marker-free response.
+    created_images: std::collections::BTreeMap<String, String>,
     pre: Option<(String, u16)>, // container name, test port
     app: Option<(String, u16)>, // container name, application port
     replaced_from: Option<u16>,
@@ -181,6 +186,9 @@ pub struct DockerBackend<T: HttpTransport = TcpHttp> {
     entropy: Box<dyn Entropy>,
     forwarder: Option<Box<dyn HostListenerCheck>>,
     guest_disk: Option<Box<dyn GuestDiskProbe>>,
+    /// Proof about the host-to-guest path. When present, a 2xx response with no marker header may count (`path-verified`);
+    /// when absent, only a response carrying the container's own marker counts.
+    path_proof: Option<Box<dyn PathProof>>,
     copy_hook: Option<CopyHook>,
     /// Resolved secret values for this operation, in memory only (never formatted, never stored).
     secrets: SecretBundle,
@@ -307,6 +315,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             entropy: Box::new(OsEntropy::new()),
             forwarder: None,
             guest_disk: None,
+            path_proof: None,
             copy_hook: None,
             secrets: SecretBundle::new(),
             st: State::default(),
@@ -333,6 +342,12 @@ impl<T: HttpTransport> DockerBackend<T> {
         self
     }
     /// Checked after a healthy response: the host listener for the port must be the forwarder's.
+    /// Allow a response without the marker header to count when `p` proves the whole path (see [`crate::attribution`]).
+    pub fn with_path_proof(mut self, p: impl PathProof + 'static) -> Self {
+        self.path_proof = Some(Box::new(p));
+        self
+    }
+
     pub fn with_forwarder_check(mut self, c: impl HostListenerCheck + 'static) -> Self {
         self.forwarder = Some(Box::new(c));
         self
@@ -501,6 +516,9 @@ impl<T: HttpTransport> DockerBackend<T> {
             let value = random_hex(&mut *self.entropy)?;
             env.push(format!("{MARKER_ENV}={value}"));
             self.st.markers.insert(name.to_string(), value);
+            self.st
+                .created_images
+                .insert(name.to_string(), image_id.clone());
         }
         let intent = io.intend(ResourceKey::new(ResourceKind::Container, name), disposition)?;
         let spec = CreateSpec {
@@ -689,6 +707,23 @@ impl<T: HttpTransport> DockerBackend<T> {
                 })?,
             _ => {}
         }
+        // A response without the marker header may count only when a path proof is configured and proves the whole path,
+        // around the check (first accepted response, and again before the evidence is trusted).
+        let used_unmarked = Cell::new(false);
+        let baseline: RefCell<Option<ContainerBaseline>> = RefCell::new(None);
+        let changed: RefCell<Option<String>> = RefCell::new(None);
+        let gate = match (&self.path_proof, self.cfg.attribution) {
+            (Some(proof), Attribution::PerContainer) => Some(PathGate {
+                proof: proof.as_ref(),
+                api: &self.api,
+                id,
+                container_port,
+                host_port: port,
+                timeout: Duration::from_secs(10).min(self.cfg.api_timeout),
+                proven: Cell::new(false),
+            }),
+            _ => None,
+        };
         let mut probe = ContainerProbe {
             api: &self.api,
             container_id: id,
@@ -697,9 +732,20 @@ impl<T: HttpTransport> DockerBackend<T> {
             transport: &self.transport,
             marker: marker.as_ref(),
             attempt_timeout: Duration::from_secs(2).min(self.cfg.api_timeout),
+            unmarked: gate.as_ref().map(|g| g as &dyn UnmarkedGate),
+            used_unmarked: &used_unmarked,
+            baseline: &baseline,
+            changed: &changed,
         };
         let mut ev = run_health(&spec, &target, &mut probe, &SystemClock, &SleepWaiter);
         ev.simulated = self.transport.is_simulated();
+        if let Some(why) = changed.borrow().clone() {
+            self.attach_logs(io, b, id);
+            return Err(StepError::new(format!(
+                "{what}: {why}; the check was stopped and nothing was switched"
+            ))
+            .with_evidence(ev));
+        }
         if ev.verdict == Verdict::Healthy && ev.validate().is_ok() {
             // Mapping, after, and the host listener: the response was this container's, and the
             // path it came by is the one that was verified.
@@ -708,9 +754,23 @@ impl<T: HttpTransport> DockerBackend<T> {
                 .container_inspect(id, b.left("re-reading the port mapping")?)
                 .map_err(|e| api_err("re-reading the container's port mapping", e))?;
             let problem = match post {
-                Some(info) if info.running => {
-                    Self::verify_mapping(&info, container_port, port).err()
-                }
+                Some(info) if info.running => Self::verify_mapping(&info, container_port, port)
+                    .err()
+                    .or_else(|| {
+                        if !used_unmarked.get() {
+                            return None;
+                        }
+                        // marker-free: the same container, started once, from the image Harpoon created
+                        baseline
+                            .borrow()
+                            .as_ref()
+                            .and_then(|b| b.differs(&info))
+                            .or_else(|| match (baseline.borrow().as_ref(), self.st.created_images.get(name)) {
+                                (Some(b), Some(created)) if &b.image_id == created => None,
+                                _ => Some("the container's image is not the one Harpoon created for it".to_string()),
+                            })
+                            .or_else(|| gate.as_ref().and_then(|g| g.prove_now().err()))
+                    }),
                 _ => Some("the container is not running after the health probe".to_string()),
             }
             .or_else(|| {
@@ -719,7 +779,16 @@ impl<T: HttpTransport> DockerBackend<T> {
                     .and_then(|f| f.verify(port).err().map(|e| format!("host listener: {e}")))
             });
             match problem {
-                None => return Ok(ev),
+                None => {
+                    return Ok(match self.cfg.attribution {
+                        Attribution::PerContainer => ev.with_attribution(if used_unmarked.get() {
+                            harpoon_deploy::health::ATTRIBUTION_PATH
+                        } else {
+                            harpoon_deploy::health::ATTRIBUTION_MARKER
+                        }),
+                        Attribution::Off => ev,
+                    })
+                }
                 Some(m) => {
                     self.attach_logs(io, b, id);
                     return Err(StepError::new(format!(
@@ -737,6 +806,47 @@ impl<T: HttpTransport> DockerBackend<T> {
             StepError::new(msg)
         }
         .with_evidence(ev))
+    }
+}
+
+/// Proves the path for a marker-free response, once per check (and again, on demand, after it).
+struct PathGate<'a> {
+    proof: &'a dyn PathProof,
+    api: &'a DockerApi,
+    id: &'a str,
+    container_port: u16,
+    host_port: u16,
+    timeout: Duration,
+    proven: Cell<bool>,
+}
+
+impl PathGate<'_> {
+    /// Prove now, from Docker's current report of the container: the mapping is the lease and implies the route.
+    fn prove_now(&self) -> Result<(), String> {
+        let info = self
+            .api
+            .container_inspect(self.id, self.timeout)
+            .map_err(|e| format!("could not inspect the container: {e}"))?
+            .ok_or_else(|| "the container no longer exists".to_string())?;
+        if !info.running {
+            return Err("the container is not running".into());
+        }
+        DockerBackend::<TcpHttp>::verify_mapping(&info, self.container_port, self.host_port)?;
+        let route = route_of(&info.published, self.container_port).ok_or_else(|| {
+            "Docker does not report a single route for the published port".to_string()
+        })?;
+        self.proof.prove(self.host_port, route)
+    }
+}
+
+impl UnmarkedGate for PathGate<'_> {
+    fn accept(&self, _port: u16) -> Result<(), String> {
+        if self.proven.get() {
+            return Ok(());
+        }
+        self.prove_now()?;
+        self.proven.set(true);
+        Ok(())
     }
 }
 

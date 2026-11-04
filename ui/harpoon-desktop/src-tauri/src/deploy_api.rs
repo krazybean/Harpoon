@@ -1272,6 +1272,9 @@ pub struct RuntimeInfo {
     /// The Harpoon runtime process that owns the published-port listeners.
     pub forwarder_pid: u32,
     pub forwarder_command: String,
+    /// The guest address the engine discovered and published (`forwardTarget`); `None` for an engine that does not
+    /// publish one. Only an address with `source: "discovered"` is carried; the CLI proves it is the VM.
+    pub forward_address: Option<String>,
 }
 
 /// The management socket is a fixed path of the Harpoon runtime (`HarpoonPaths.mgmtSocketPath`); it is
@@ -1357,7 +1360,20 @@ pub fn discover_runtime(
         resources_dir: resources.to_path_buf(),
         forwarder_pid: pid,
         forwarder_command: RUNTIME_COMMAND.into(),
+        forward_address: forward_address(&v),
     })
+}
+
+/// The engine's published forwarding address: a discovered, private, dotted IPv4 address, or nothing.
+/// A fallback or malformed value is dropped here, so the strict marker-only behavior applies.
+fn forward_address(v: &serde_json::Value) -> Option<String> {
+    let t = v.get("forwardTarget")?;
+    if t.get("source")?.as_str()? != "discovered" {
+        return None;
+    }
+    let a = t.get("address")?.as_str()?;
+    let ip: std::net::Ipv4Addr = a.parse().ok()?;
+    (ip.is_private() && ip.to_string() == a).then(|| a.to_string())
 }
 
 /// The running program name of a process (`ps`), for the stale-state check.
@@ -1393,7 +1409,7 @@ fn gate_open_for(op: &DeployOp, gate: &Gate) -> bool {
 /// authorization is deliberately NOT among them: that opt-in is the user's explicit act and is never
 /// supplied implicitly.
 pub fn runtime_args(r: &RuntimeInfo) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--docker-socket".into(),
         r.docker_socket.display().to_string(),
         "--mgmt-socket".into(),
@@ -1404,7 +1420,11 @@ pub fn runtime_args(r: &RuntimeInfo) -> Vec<String> {
         r.forwarder_pid.to_string(),
         "--forwarder-command".into(),
         r.forwarder_command.clone(),
-    ]
+    ];
+    if let Some(a) = &r.forward_address {
+        args.extend(["--forward-address".into(), a.clone()]);
+    }
+    args
 }
 
 /// The engine arguments and standard input for an operation, or the refusal that stops it here.

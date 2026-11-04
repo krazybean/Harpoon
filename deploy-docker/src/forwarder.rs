@@ -143,6 +143,31 @@ impl LsofCheck {
 
 /// Run lsof with fixed arguments, a cleared environment and a 5 s limit; parse its `-F` output.
 fn run_lsof(lsof: &std::path::Path, args: &[String]) -> Result<Vec<Listener>, String> {
+    let text = run_lsof_text(lsof, args)?;
+    parse_lsof_f(&text).map_err(|e| format!("cannot read lsof output: {e}"))
+}
+
+/// The unix-domain socket paths a process has open (`lsof -nP -a -p PID -U -Fn`; fixed arguments, cleared environment,
+/// 5 s limit, read-only). Used to prove which process owns the Docker and management sockets.
+pub fn unix_sockets_of(lsof: &std::path::Path, pid: u32) -> Result<Vec<String>, String> {
+    let text = run_lsof_text(
+        lsof,
+        &[
+            "-nP".into(),
+            "-a".into(),
+            format!("-p{pid}"),
+            "-U".into(),
+            "-Fn".into(),
+        ],
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .map(str::to_string)
+        .collect())
+}
+
+fn run_lsof_text(lsof: &std::path::Path, args: &[String]) -> Result<String, String> {
     let mut child = Command::new(lsof)
         .env_clear()
         .args(args)
@@ -173,7 +198,7 @@ fn run_lsof(lsof: &std::path::Path, args: &[String]) -> Result<Vec<Listener>, St
         .take(4 * 1024 * 1024)
         .read_to_string(&mut text)
         .map_err(|e| format!("lsof output: {e}"))?;
-    parse_lsof_f(&text).map_err(|e| format!("cannot read lsof output: {e}"))
+    Ok(text)
 }
 
 /// Every TCP listener on the host whose port is in `lo..=hi` (read-only; for inventories).

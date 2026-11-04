@@ -141,6 +141,8 @@ struct RuntimeMetadata: Codable {
     let diskIdentity: String?
     let diskResolvedPath: String?
     var failure: RuntimeFailure?
+    /// Where the forwarder dials the guest; absent unless the address was discovered (see `ForwardTarget`).
+    var forwardTarget: ForwardTarget? = nil
 }
 
 struct RuntimeFailure: Codable {
@@ -149,6 +151,19 @@ struct RuntimeFailure: Codable {
     let source: String
     let occurredAt: String
     let underlyingError: String?
+}
+
+/// Publish (or withdraw, with nil or an unusable address) the forwarder's guest address in this engine's own runtime.json.
+/// Only the engine that wrote the file may change it: a file that names another pid is left alone.
+func recordForwardTarget(_ address: String?) {
+    guard var metadata = readMetadata(), metadata.pid == getpid() else { return }
+    if let a = address, isUsableForwardAddress(a) {
+        metadata.forwardTarget = ForwardTarget(address: a, source: "discovered", recordedAt: ISO8601DateFormatter().string(from: Date()))
+    } else {
+        metadata.forwardTarget = nil
+    }
+    guard let data = try? JSONEncoder().encode(metadata) else { return }
+    try? data.write(to: HarpoonPaths.jsonFile, options: .atomic)
 }
 
 func recordRuntimeFailure(_ failure: RuntimeFailure) {

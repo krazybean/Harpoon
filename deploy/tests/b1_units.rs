@@ -785,3 +785,27 @@ fn a_container_that_exits_can_never_be_healthy() {
     let e = health(vec![(Observation::Status(200), false)], HealthSpec::first_test("/"));
     assert_eq!(e.verdict, Verdict::Exited);
 }
+
+// ---------------------------------------------------------------- attribution label
+
+#[test]
+fn a_healthy_check_reports_its_attribution_and_an_unhealthy_one_never_does() {
+    use harpoon_deploy::health::{ATTRIBUTION_MARKER, ATTRIBUTION_PATH};
+    for label in [ATTRIBUTION_MARKER, ATTRIBUTION_PATH] {
+        let e = health(vec![ok(), ok()], HealthSpec::first_test("/")).with_attribution(label);
+        assert_eq!(e.attribution(), Some(label));
+        assert_eq!(
+            e.summary_with_attribution(),
+            format!("{}; attribution: {label}", e.summary())
+        );
+        // a check that did not succeed is not verified, whatever label was attached
+        let bad = health(vec![refused()], HealthSpec::first_test("/")).with_attribution(label);
+        assert_eq!(bad.attribution(), None);
+        assert_eq!(bad.summary_with_attribution(), bad.summary());
+        assert!(!bad.summary_with_attribution().contains("verified"));
+    }
+    // a record without a label (every historical one) is not classified after the fact
+    let old = health(vec![ok(), ok()], HealthSpec::first_test("/"));
+    assert_eq!(old.attribution(), None);
+    assert_eq!(old.summary_with_attribution(), old.summary());
+}
