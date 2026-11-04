@@ -140,6 +140,9 @@ pub struct GateDto {
     pub live_replacement: bool,
     /// Executing queued Git events (Gate U, unattended execution). Closed in every shipping build.
     pub live_triggered: bool,
+    /// Disconnecting a repository from its application (`repo-remove`): a one-way journal upgrade, closed in every
+    /// shipping build; open only in a debug build with an active test namespace (an isolated runtime).
+    pub git_removal: bool,
     pub reason: &'static str,
 }
 
@@ -521,6 +524,17 @@ fn deployment_dto(d: &Deployment, r: &Restored, prev_snapshot: Option<&config::S
     }
 }
 
+/// The gate every operation runs with: the shipping gate, plus registration removal only in a **debug build with an
+/// active test namespace**, i.e. an isolated runtime. A release build has no namespace, and no setting, environment
+/// variable or UI action opens it. Even then the runtime needs its own enablement marker (checked by the engine).
+pub fn operation_gate() -> Gate {
+    let isolated = cfg!(debug_assertions) && matches!(crate::namespace::active(), Ok(Some(_)));
+    Gate {
+        git_removal_enabled: isolated,
+        ..Gate::shipping()
+    }
+}
+
 /// Everything the Deployments views need, from the engine's own records. Read-only.
 pub fn snapshot(rt: &Path, now_ms: u64) -> EngineSnapshot {
     build_snapshot(rt, now_ms, "own")
@@ -577,6 +591,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
             live_deploy: Gate::shipping().live_deploy_enabled,
             live_replacement: Gate::shipping().live_replacement_enabled,
             live_triggered: Gate::shipping().live_triggered_enabled,
+            git_removal: operation_gate().git_removal_enabled,
             reason: GATE_REASON,
         },
         router: {
@@ -1073,6 +1088,15 @@ pub enum DeployOp {
         known_host: Option<String>,
         webhook: Option<String>,
     },
+    /// Disconnect a repository from its application (the engine refuses unless the build and the runtime are authorized).
+    /// The version is the one the person was shown; `confirm_removal` is their explicit confirmation.
+    #[serde(rename_all = "camelCase")]
+    RemoveRepo {
+        name: String,
+        expect_registered_ms: u64,
+        #[serde(default)]
+        confirm_removal: bool,
+    },
     /// Change an existing registration. Only the fields given are changed; the name, application and credential
     /// settings never are. `expect_registered_ms` is the version the person was looking at.
     #[serde(rename_all = "camelCase")]
@@ -1265,6 +1289,23 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             }
             if *confirm_change {
                 a.push("--confirm-change".into());
+            }
+            (a, vec![])
+        }
+        DeployOp::RemoveRepo {
+            name,
+            expect_registered_ms,
+            confirm_removal,
+        } => {
+            let mut a = s(&[
+                "repo-remove",
+                "--name",
+                name,
+                "--expect-registered-ms",
+                &expect_registered_ms.to_string(),
+            ]);
+            if *confirm_removal {
+                a.push("--confirm-removal".into());
             }
             (a, vec![])
         }
@@ -1648,7 +1689,7 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
     // a lock refusal caused only by a stray copy of the lock (see `tests::LOCK_WAIT`) is waited out; every other answer is returned as is
     let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let r = run_op_with(rt, op, &Confirmation::default(), keychain, &Gate::shipping(), &|| {
+        let r = run_op_with(rt, op, &Confirmation::default(), keychain, &operation_gate(), &|| {
             Err("no runtime in this test".into())
         });
         if !r.ok && r.detail.contains("another Harpoon process holds") && std::time::Instant::now() < end {
@@ -1659,7 +1700,7 @@ pub fn run_op(rt: &Path, op: &DeployOp, keychain: &dyn SecretStore) -> OpResult 
     }
 }
 
-/// Run one operation through the engine's CLI library. The app passes `Gate::shipping()`. The store is
+/// Run one operation through the engine's CLI library. The app passes `operation_gate()` (the shipping gate; registration removal only for an isolated debug runtime). The store is
 /// created (private) on first use. `keychain` is the real Keychain in the app and a fake in tests.
 /// `runtime` reads and verifies the runtime's coordinates; it is consulted only for Docker-touching
 /// operations. While the gate is closed for an operation, a runtime that cannot be found is not a
@@ -1884,7 +1925,7 @@ pub async fn deploy_op(
             real_keychain = harpoon_deploy_keychain::Keychain::new();
             &real_keychain
         };
-        run_op_with(&dir, &op, &confirmation.unwrap_or_default(), kc, &Gate::shipping(), &|| {
+        run_op_with(&dir, &op, &confirmation.unwrap_or_default(), kc, &operation_gate(), &|| {
             let info = discover_runtime(&env.support, &env.mgmt_socket, &resources, &process_command)?;
             match &env.namespace {
                 Some(ns) => confine_to_namespace(info, ns),

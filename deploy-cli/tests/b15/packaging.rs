@@ -66,7 +66,8 @@ fn the_shipping_binary_ignores_features_and_keeps_trigger_driven_execution_close
     assert!(
         shipping.contains("live_deploy_enabled: true")
             && shipping.contains("live_replacement_enabled: true")
-            && shipping.contains("live_triggered_enabled: false"),
+            && shipping.contains("live_triggered_enabled: false")
+            && shipping.contains("git_removal_enabled: false"),
         "{shipping}"
     );
     // no library source branches on a feature: `--all-features` cannot open the gate
@@ -110,6 +111,36 @@ fn only_the_unpackaged_acceptance_source_opens_trigger_driven_execution() {
         assert!(
             !read(&f).contains("live_triggered_enabled: true"),
             "{} opens trigger-driven execution",
+            f.display()
+        );
+    }
+}
+
+#[test]
+fn only_the_unpackaged_acceptance_source_opens_registration_removal() {
+    let mut files = Vec::new();
+    files_under(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut openers = Vec::new();
+    for f in files {
+        if read(&f).contains("git_removal_enabled: true") {
+            openers.push(f.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    assert_eq!(
+        openers,
+        vec!["acceptance_main.rs".to_string()],
+        "registration removal is a one-way journal upgrade: no shipping source may open it"
+    );
+    // the desktop never writes the open value; it derives the capability from a debug build and a test namespace
+    let mut desk = Vec::new();
+    files_under(&repo().join("ui/harpoon-desktop/src-tauri/src"), &mut desk);
+    for f in desk {
+        assert!(
+            !read(&f).contains("git_removal_enabled: true"),
+            "{} opens registration removal",
             f.display()
         );
     }

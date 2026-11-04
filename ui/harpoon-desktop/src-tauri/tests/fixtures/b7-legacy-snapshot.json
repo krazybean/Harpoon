@@ -132,6 +132,7 @@
   ],
   "definitions": [],
   "gate": {
+    "gitRemoval": false,
     "liveDeploy": true,
     "liveReplacement": true,
     "liveTriggered": false,

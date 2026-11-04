@@ -49,7 +49,7 @@ export type SnapRouter = { domain: string; port: number | null; error: string | 
 export type EngineSnapshot = {
   router?: SnapRouter;
   schema: number; generatedMs: number; runtimeDir: string; source: SnapSource; store: "missing" | "ok" | "error"; storeError: string | null; writerHeld: boolean;
-  gate: { liveDeploy: boolean; liveReplacement: boolean; /** Executing queued Git events (Gate U): closed in every shipping build. */ liveTriggered?: boolean; reason: string };
+  gate: { liveDeploy: boolean; liveReplacement: boolean; /** Executing queued Git events (Gate U): closed in every shipping build. */ liveTriggered?: boolean; /** Removing a registration: closed in every shipping build; open only for an isolated debug runtime. */ gitRemoval?: boolean; reason: string };
   repos: SnapRepo[]; apps: SnapApp[]; definitions: SnapDefinition[];
 };
 export type OpResult = { ok: boolean; exitCode: number; summary: string; detail: string; refusedByGate: boolean; /** What the person can do about a failure, in plain words; absent on success. */ hint?: string | null };
@@ -554,7 +554,7 @@ export type RegistrationOutcome =
 
 export function registrationOutcome(r: OpResult, token?: OpResult | null): RegistrationOutcome {
   if (!r.ok) return { ok: false, message: failureText(r) };
-  const lines = (r.detail ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(registered|updated|verified|not verified)/.test(l));
+  const lines = (r.detail ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(registered|updated|removed|verified|not verified|first removal|backup:|sha256:|restoring it)/.test(l));
   return {
     ok: true,
     lines: lines.length ? lines : [r.summary || "The repository was registered."],
@@ -611,4 +611,30 @@ export const NO_SOURCE_REASON = "No Git repository is registered for this applic
  */
 export function hasNoSource(engine: EngineMeta | undefined, app: AppModel): boolean {
   return !!engine && !app.external && !engine.repos.some((r) => r.app === app.id);
+}
+
+// ------------------------------------------------------------------ removing a registration
+
+export const REMOVAL_CLOSED_REASON = "Removing a registration is not enabled in this build. It permanently upgrades the deployment journal so that older Harpoon versions can no longer open it, so it is available only in an isolated test runtime that was authorized for it.";
+
+export type RemovalPlan = {
+  /** The request to send, once everything holds. */
+  op: Record<string, unknown> | null;
+  /** Why removal cannot go ahead at all right now (a held event, a closed gate); null when only the confirmation is missing. */
+  blocked: string | null;
+};
+
+/**
+ * What a removal needs before it is sent: the build must allow it, no Git event of the application may be waiting (the
+ * engine refuses too; this says so before the person types anything), and the person must type the repository's name.
+ * The request carries the registration version the person was shown, so the engine refuses if it changed meanwhile.
+ */
+export function registrationRemoval(engine: EngineMeta | undefined, app: AppModel, repo: EngineRepo, typedName: string): RemovalPlan {
+  if (!engine?.gate.gitRemoval) return { op: null, blocked: REMOVAL_CLOSED_REASON };
+  const waiting = app.automation.held.length + (app.automation.selected?.length ?? 0);
+  if (waiting > 0) {
+    return { op: null, blocked: `${waiting} held or selected Git event${waiting === 1 ? "" : "s"} from this repository ${waiting === 1 ? "is" : "are"} still waiting. Review ${waiting === 1 ? "it" : "them"} first: removing the registration never dismisses or replays events.` };
+  }
+  if (typedName.trim() !== repo.name) return { op: null, blocked: null };
+  return { op: { op: "remove-repo", name: repo.name, expectRegisteredMs: repo.registeredMs, confirmRemoval: true }, blocked: null };
 }

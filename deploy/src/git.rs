@@ -422,6 +422,21 @@ pub struct RepoRec {
     pub at_ms: u64,
 }
 
+/// The delivery id of a commit that a poll found. Event de-duplication is per (application, delivery id), so the id
+/// must say which incarnation of the application's registration found it: a registration that was removed and
+/// claimed again must be able to queue a commit that an earlier incarnation already queued, dismissed or deployed.
+///
+/// Incarnation 0 (never removed) keeps the original `poll:<name>:<commit>`; later ones are `poll:<name>:r<n>:<commit>`.
+/// The `r<n>` segment cannot be a commit id, and names contain no `:`, so the two forms cannot collide. Events already
+/// recorded keep the id they were recorded with.
+pub fn poll_delivery(name: &str, incarnation: usize, commit: &str) -> String {
+    if incarnation == 0 {
+        format!("poll:{name}:{commit}")
+    } else {
+        format!("poll:{name}:r{incarnation}:{commit}")
+    }
+}
+
 /// The Keychain id of a repository's credential or webhook secret. It depends on the repository's name alone, so it
 /// outlives the registration: see [`RemovedRec`].
 pub fn secret_id_for(name: &str, what: &str) -> String {
@@ -842,6 +857,13 @@ impl GitState {
     /// belongs to one name for good).
     pub fn retired_owner(&self, app: &ApplicationId) -> Option<&str> {
         self.retired.iter().find(|x| x.app == *app).map(|x| x.name.as_str())
+    }
+
+    /// How many times this application's registration has been removed: its **incarnation**. Derived from the full,
+    /// immutable removal history (`retired` is never pruned), so every reader agrees, an edit never changes it, and
+    /// every removal and explicit reclaim gives the next number. A never-removed application is incarnation 0.
+    pub fn incarnation(&self, app: &ApplicationId) -> usize {
+        self.retired.iter().filter(|x| x.app == *app).count()
     }
 
     /// The latest removal of a repository name.

@@ -152,6 +152,11 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "confirm-change"],
     },
     Spec {
+        command: "repo-remove",
+        values: &["runtime-dir", "name", "expect-registered-ms"],
+        switches: &["simulate", "confirm-removal"],
+    },
+    Spec {
         command: "repo-secret",
         values: &["runtime-dir", "name", "kind"],
         switches: &["simulate"],
@@ -451,6 +456,8 @@ COMMANDS
                   a file:// source is checked first: it must be a Git repository with that branch; other sources are first contacted by watch/git-deploy)
   repo-update     change a registration's source, branch, Dockerfile path, container port or health path (--name N --expect-registered-ms T, from repo-list; [--url U] [--branch B] [--dockerfile F] [--container-port P] [--health-path /P]);
                   appends a record, deploys nothing, keeps the name, application and credential; needs --confirm-change once the application has deployments; a credentialed repository keeps its host
+  repo-remove     disconnect a repository from its application (--name N --expect-registered-ms T, from repo-list; --confirm-removal): appends a removal record; the application, history, serving release, Docker resources and
+                  credentials are untouched; refused while held or selected Git events exist. A ONE-WAY journal upgrade (the first removal makes a verified backup, then stamps schema 2); disabled unless the build and an isolated runtime are authorized
   repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
   repo-list       registered repositories, what was last observed, and the last deployment from each
   git-deploy      check out a branch, tag or exact commit into a bounded private workspace and deploy it; the immutable commit is recorded

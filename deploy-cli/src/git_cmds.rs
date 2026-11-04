@@ -20,6 +20,7 @@
 
 use crate::args::{self, Parsed, AUTH_FLAG};
 use crate::commands::{self, current_release, now_ms};
+use crate::journal_upgrade;
 use crate::store::{self, Kind, Runtime};
 use crate::{exit, Fail, Gate, Services};
 use harpoon_deploy::config::{ConfigRecord, SecretSaved};
@@ -36,6 +37,7 @@ use harpoon_deploy::time::{OsEntropy, SystemClock};
 use harpoon_deploy_git as dg;
 use std::fmt::Write as _;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -577,6 +579,200 @@ fn registration_for_pass<'a>(
         Some(git) => git.repos.get(&started.name),
         None => Some(started),
     }
+}
+
+/// The one marker file that makes a runtime directory eligible for `repo-remove`, written by hand by the person who
+/// authorizes it (never by a command, and never by the desktop): `harpoon-git-removal 1` on the first line and
+/// `runtime=<the runtime directory's canonical path>` on the second, mode 600, a regular file owned by the owner of the
+/// runtime directory. It names the one runtime it is for, so it cannot be copied to another.
+const REMOVAL_MARKER: &str = "git-removal.enabled";
+
+/// Why a runtime directory is not an isolated runtime, or `None`. The production data directory (and anything shaped
+/// like an application's data directory) is never eligible; an isolated runtime lives under a temporary directory.
+fn removal_location_problem(canon: &Path, temp_roots: &[PathBuf]) -> Option<String> {
+    let shown = canon.to_string_lossy();
+    if shown.contains("/Library/Application Support") {
+        return Some(format!("{shown} is an application data directory"));
+    }
+    if !temp_roots.iter().any(|r| canon.starts_with(r)) {
+        return Some(format!(
+            "{shown} is not an isolated runtime (those live under a temporary directory)"
+        ));
+    }
+    None
+}
+
+/// Everything that must hold before a removal may even look at the journal. Order matters: the build's gate, then
+/// where the runtime lives, then the marker. None of it opens a journal.
+fn check_removal_capability(gate: &Gate, rt: &Runtime) -> Result<(), Fail> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if !gate.git_removal_enabled {
+        return Err(Fail::refused(
+            "removing a Git registration is not enabled in this build: it is a one-way upgrade of the deployment journal that older Harpoon builds cannot read. Nothing was read or changed",
+        ));
+    }
+    let refuse = |why: String| {
+        Fail::refused(format!(
+            "removing a Git registration is not authorized for this runtime directory: {why}. Nothing was read or changed"
+        ))
+    };
+    let canon = std::fs::canonicalize(&rt.dir)
+        .map_err(|e| refuse(format!("{} cannot be resolved ({e})", rt.dir.display())))?;
+    let shown = canon.to_string_lossy().into_owned();
+    let roots: Vec<PathBuf> = [
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+        std::env::temp_dir(),
+    ]
+    .iter()
+    .filter_map(|r| std::fs::canonicalize(r).ok())
+    .collect();
+    if let Some(why) = removal_location_problem(&canon, &roots) {
+        return Err(refuse(why));
+    }
+    let marker = canon.join(REMOVAL_MARKER);
+    let m = std::fs::symlink_metadata(&marker).map_err(|_| {
+        refuse(format!(
+            "the enablement marker {} is missing; the person authorizing removal creates it by hand (see docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md)",
+            marker.display()
+        ))
+    })?;
+    if !m.file_type().is_file() {
+        return Err(refuse("the enablement marker is not a regular file".into()));
+    }
+    if m.permissions().mode() & 0o777 != 0o600 {
+        return Err(refuse("the enablement marker must be mode 600".into()));
+    }
+    let owner = std::fs::metadata(&canon)
+        .map_err(|e| refuse(format!("cannot inspect the runtime directory ({e})")))?
+        .uid();
+    if m.uid() != owner {
+        return Err(refuse(
+            "the enablement marker is not owned by the runtime directory's owner".into(),
+        ));
+    }
+    if m.len() > 4096 {
+        return Err(refuse("the enablement marker is too large".into()));
+    }
+    let text = std::fs::read_to_string(&marker)
+        .map_err(|e| refuse(format!("the enablement marker cannot be read ({e})")))?;
+    let mut lines = text.lines();
+    let named = format!("runtime={shown}");
+    if lines.next() != Some("harpoon-git-removal 1") || lines.next() != Some(named.as_str()) {
+        return Err(refuse(format!(
+            "the enablement marker does not name this runtime ({shown}); a marker only authorizes the runtime it names"
+        )));
+    }
+    Ok(())
+}
+
+/// Disconnect a repository from its application, durably and auditably. It appends one `gitdrop` record; the
+/// application, its deployments, its serving release, its Docker resources and its stored credentials are not
+/// touched, and neither is the Keychain. The first removal also upgrades the journal to schema 2, after a verified
+/// backup (see `journal_upgrade`).
+pub fn repo_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    // capability first: nothing below runs, and no journal is opened, in a build or runtime that is not authorized
+    check_removal_capability(gate, &rt)?;
+    let need = |f: &str| {
+        p.value(f)
+            .ok_or_else(|| Fail::usage(format!("--{f} is required")))
+    };
+    let name = need("name")?.to_string();
+    let expect: u64 = need("expect-registered-ms")?.parse().map_err(|_| {
+        Fail::usage("--expect-registered-ms is the registration time you were shown (`repo-list`)")
+    })?;
+    if !p.switch("confirm-removal") {
+        return Err(Fail::refused(format!(
+            "removing repository {name:?} disconnects it from its application; confirm with --confirm-removal. The application, its history, its serving release, its Docker resources and its stored credentials are not removed. Nothing was changed"
+        )));
+    }
+
+    // read-only preflight: every refusal here leaves the journal exactly as it was
+    let state = state_of(&rt)?;
+    let repo = removable(&state, &name, expect)?;
+
+    // the writer lock, then everything again under it
+    let (mut journal, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
+    let now = removable(&restored, &name, expect)?;
+    if now != repo {
+        return Err(changed_meanwhile(&name));
+    }
+    let mut report = None;
+    if journal.declared_schema() < harpoon_deploy_journal::REMOVAL_SCHEMA {
+        report = Some(journal_upgrade::backup_before_schema2(
+            &journal,
+            &restored,
+            &rt.journal_dir(),
+            now_ms(),
+            &journal_upgrade::WriteProbe,
+        )?);
+    }
+    let rec = policy::RemovedRec {
+        name: repo.name.clone(),
+        app: repo.app.clone(),
+        registration: repo.at_ms,
+        url: repo.url.clone(),
+        cred: repo.cred,
+        at_ms: now_ms(),
+    };
+    // the replay rules, on a copy, before anything is written
+    let mut probe = restored.git.clone();
+    probe
+        .apply(&GitRecord::Removed(rec.clone()))
+        .map_err(Fail::refused)?;
+    journal
+        .remove_registration(&rec)
+        .map_err(|e| Fail::journal(format!("cannot record the removal: {e:?}")))?;
+    let _ = writeln!(
+        out,
+        "removed the registration of repository {name} (application {}). Its source is disconnected; the application, its deployment history, its serving release, its Docker resources and its stored credentials are unchanged. Nothing was built, deployed, stopped or restarted",
+        rec.app
+    );
+    if let Some(b) = report {
+        let _ = writeln!(
+            out,
+            "first removal in this journal: it is now schema {} and older Harpoon builds cannot open it. A verified backup of the schema-1 journal ({} records, {} bytes) was made first:\n  backup: {}\n  sha256: {}\nrestoring it is offline and loses every journal change made after it was taken (docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md)",
+            harpoon_deploy_journal::REMOVAL_SCHEMA,
+            b.records,
+            b.bytes,
+            b.path.display(),
+            b.digest
+        );
+    }
+    Ok(exit::OK)
+}
+
+/// The registration `name` if it may be removed now: it exists in the version the person was shown, and no Git event
+/// of its application is waiting. Every way it may not be is a refusal that changes nothing.
+fn removable(
+    state: &harpoon_deploy_journal::Restored,
+    name: &str,
+    expect: u64,
+) -> Result<RepoRec, Fail> {
+    let Some(repo) = state.git.repos.get(name) else {
+        return Err(match state.git.retired_name(name) {
+            Some(gone) => Fail::refused(format!(
+                "repository {name:?} was already removed (application {} keeps its history); there is nothing to remove. Nothing was changed",
+                gone.app
+            )),
+            None => Fail::refused(format!(
+                "repository {name:?} is not registered. Nothing was changed"
+            )),
+        });
+    };
+    if repo.at_ms != expect {
+        return Err(changed_meanwhile(name));
+    }
+    if !state.control.held(&repo.app).is_empty()
+        || state.control.pending_selection(&repo.app).is_some()
+    {
+        return Err(Fail::refused(format!(
+            "application {} still has held or selected Git events from repository {name:?}. Resolve them first (Resume: dismiss, or run the selected one): removal never dismisses or replays them. Nothing was changed",
+            repo.app
+        )));
+    }
+    Ok(repo.clone())
 }
 
 fn read_repos(rt: &Runtime) -> Result<std::collections::BTreeMap<String, RepoRec>, Fail> {
@@ -1217,7 +1413,8 @@ fn poll_repo(
         }
         if let Some(old) = &previous {
             let late = first_pass;
-            let delivery = format!("poll:{}:{sha}", repo.name);
+            let delivery =
+                policy::poll_delivery(&repo.name, restored.git.incarnation(&repo.app), &sha);
             let source = if late { "poll-late" } else { "poll" };
             let r = control::queue_event(
                 &mut j,
@@ -1492,6 +1689,42 @@ mod tests {
             target: None,
             health_path: None,
             at_ms,
+        }
+    }
+
+    #[test]
+    fn only_a_runtime_under_a_temporary_directory_and_outside_any_data_directory_is_eligible() {
+        let roots = [
+            PathBuf::from("/private/tmp"),
+            PathBuf::from("/private/var/folders/xx/T"),
+        ];
+        for ok in [
+            "/private/tmp/hpft/desktop-data/deploy",
+            "/private/tmp/rt",
+            "/private/var/folders/xx/T/hdd-ws-1/runtime",
+        ] {
+            assert_eq!(
+                removal_location_problem(Path::new(ok), &roots),
+                None,
+                "{ok}"
+            );
+        }
+        for (bad, why) in [
+            (
+                "/Users/me/Library/Application Support/com.harpoon.desktop/deploy",
+                "application data directory",
+            ),
+            (
+                "/private/tmp/x/Library/Application Support/com.harpoon.desktop/deploy",
+                "application data directory",
+            ),
+            ("/Users/me/work/rt", "not an isolated runtime"),
+            ("/private/tmpfoo/rt", "not an isolated runtime"),
+            ("/Applications/Harpoon.app/rt", "not an isolated runtime"),
+            ("/", "not an isolated runtime"),
+        ] {
+            let got = removal_location_problem(Path::new(bad), &roots).unwrap_or_default();
+            assert!(got.contains(why), "{bad}: {got:?}");
         }
     }
 

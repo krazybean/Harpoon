@@ -7,7 +7,7 @@ import {
   EVIDENCE_NOTE, formatAge, heroClassFor, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
 } from "../../lib/deployPresentation.ts";
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
-import { displayUrl, hasNoSource, liveBlock, NO_SOURCE_REASON } from "../../lib/deployEngine.ts";
+import { displayUrl, hasNoSource, liveBlock, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON } from "../../lib/deployEngine.ts";
 import type { Ctx, Tab } from "./context.ts";
 import { imageParts } from "../../lib/imageName.ts";
 import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
@@ -597,7 +597,7 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
           {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}{fact("Health check", "healthCheck")}{fact("Replacement", "replacement")}</div></section>
         <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Source</h2></div><div className="dp-panel__body dp-col">
           {fact("Source", "source")}{fact("Branch", "branch")}
-          {app.external || !c.state.engine?.repos.some((r) => r.app === app.id) ? null : <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit registration…</button></div>}
+          {app.external || !c.state.engine?.repos.some((r) => r.app === app.id) ? null : <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit registration…</button> <button className="btn btn--destructive" disabled={!!c.engine?.busy || !c.state.engine?.gate.gitRemoval} title={c.state.engine?.gate.gitRemoval ? "Disconnect this repository from the application. The application and its history stay." : REMOVAL_CLOSED_REASON} onClick={() => c.open({ kind: "remove-registration" })}><Trash size={14} /> Remove registration…</button></div>}
           {app.external ? null : <div className="dp-evidence"><Warning size={12} />New commits are found only when you press Check for new commits. Unattended deployment is not offered.</div>}</div></section>
         {app.external ? null : <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
           <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>

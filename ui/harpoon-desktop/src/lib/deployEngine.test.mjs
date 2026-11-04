@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -578,12 +578,76 @@ test("without a registered repository the Git-based actions are disabled with th
   assert.match(screens, /title="Source disconnected"/);
 });
 
-test("this build offers no way to remove a registration, and Remove application stays disabled", () => {
+
+// ------------------------------------------------------------------ removing a registration
+
+const openGate = { ...GATE, gitRemoval: true };
+const heldEvent = { delivery: "poll:shop:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source: "poll", revision: "a".repeat(40), receivedMs: NOW - 1000, status: "held", decidedMs: null, related: null };
+const removalFixture = (gate, events = []) => {
+  const state = st(snap([app([dep("dep_1")], { events })], { gate }));
+  return { engine: state.engine, app: state.apps.app_1, repo: state.engine.repos[0] };
+};
+
+test("removal is available only when the build allows it, nothing waits, and the repository's name was typed", () => {
+  // a shipping build: closed, with the reason, whatever is typed
+  let { engine, app: a, repo } = removalFixture(GATE);
+  assert.deepEqual(registrationRemoval(engine, a, repo, "shop"), { op: null, blocked: REMOVAL_CLOSED_REASON });
+  assert.match(REMOVAL_CLOSED_REASON, /older Harpoon versions can no longer open it/);
+  // an authorized isolated build: only the confirmation is missing
+  ({ engine, app: a, repo } = removalFixture(openGate));
+  assert.deepEqual(registrationRemoval(engine, a, repo, ""), { op: null, blocked: null });
+  assert.deepEqual(registrationRemoval(engine, a, repo, "Shop"), { op: null, blocked: null }, "the name is case-sensitive");
+  assert.deepEqual(registrationRemoval(engine, a, repo, "shop-2"), { op: null, blocked: null });
+  // typed correctly: the request carries the version that was shown, and nothing else
+  const plan = registrationRemoval(engine, a, repo, "  shop ");
+  assert.deepEqual(plan, { op: { op: "remove-repo", name: "shop", expectRegisteredMs: repo.registeredMs, confirmRemoval: true }, blocked: null });
+  assert.deepEqual(Object.keys(plan.op).sort(), ["confirmRemoval", "expectRegisteredMs", "name", "op"]);
+  // a held Git event blocks it before anything is typed
+  ({ engine, app: a, repo } = removalFixture(openGate, [heldEvent]));
+  const held = registrationRemoval(engine, a, repo, "shop");
+  assert.equal(held.op, null);
+  assert.match(held.blocked, /1 held or selected Git event from this repository is still waiting/);
+  assert.match(held.blocked, /never dismisses or replays/);
+});
+
+test("the removal answer shows the engine's words, the backup and its digest", () => {
+  const ok = registrationOutcome(op({ detail: "removed the registration of repository shop (application app_1). Its source is disconnected; the application, its deployment history, its serving release, its Docker resources and its stored credentials are unchanged. Nothing was built, deployed, stopped or restarted\nfirst removal in this journal: it is now schema 2 and older Harpoon builds cannot open it. A verified backup of the schema-1 journal (12 records, 16384 bytes) was made first:\n  backup: /tmp/rt/deploy-journal/backups/pre-schema2-1.sqlite3\n  sha256: abc123\nrestoring it is offline and loses every journal change made after it was taken (docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md)\n" }));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.lines.length, 5);
+  assert.match(ok.lines.join("\n"), /backup: \/tmp\/rt\/deploy-journal\/backups\/pre-schema2-1\.sqlite3/);
+  assert.match(ok.lines.join("\n"), /sha256: abc123/);
+  const refused = registrationOutcome(op({ ok: false, exitCode: 6, summary: "", hint: "Harpoon refused this before changing anything: application app_1 still has held or selected Git events." }));
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /still has held or selected Git events/);
+});
+
+test("the Remove registration dialog needs the typed name, sends only the planned request, and never closes on a refusal", () => {
+  const d = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const dialog = d.slice(d.indexOf("function RemoveRegistrationDialog"));
+  assert.match(dialog, /const \[base\] = useState\(repo\)/, "the version the person was shown is the one sent");
+  assert.match(dialog, /registrationRemoval\(c\.state\.engine, app, base, typed\)/);
+  assert.match(dialog, /const canRemove = !!plan\.op &&/);
+  assert.match(dialog, /c\.engine!\.run\(plan\.op\)/);
+  assert.doesNotMatch(dialog, /op: "(deploy|rollback|restore|add-repo|update-repo|repo-secret)"|liveChanges|CONFIRM_LIVE|setRoute/, "removal starts nothing and does not navigate");
+  assert.doesNotMatch(dialog, /confirmRemoval: true/, "the confirmation exists only in the plan, after the name was typed");
+  assert.match(dialog, /outcome\?\.ok === false &&/);
+  assert.doesNotMatch(dialog, /void submit\(\);\s*close\(\)/);
+  // what it says is removed and what is kept
+  for (const phrase of [/Keeps<\/b> the application and its address/, /saved credentials/, /One-way upgrade/, /older Harpoon versions can no longer open it/, /Rolling back still works/]) assert.match(dialog, phrase);
+});
+
+test("the Settings screen offers Remove registration separately from Remove application, which is unchanged and disabled", () => {
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  assert.match(screens, /disabled=\{!!c\.engine\?\.busy \|\| !c\.state\.engine\?\.gate\.gitRemoval\}/, "disabled unless this build allows it");
+  assert.match(screens, /title=\{c\.state\.engine\?\.gate\.gitRemoval \? [^}]*: REMOVAL_CLOSED_REASON\}/);
+  assert.match(screens, /c\.open\(\{ kind: "remove-registration" \}\)\}><Trash size=\{14\} \/> Remove registration\u2026/);
+  // the application button is exactly what it was: disabled, with the same reason, in both places
+  assert.equal((screens.match(/disabled title="Removing applications is not part of this build\."><Trash size=\{14\} \/> Remove application\u2026/g) ?? []).length, 1);
+  assert.equal((screens.match(/disabled title="Not part of this mock"><Trash size=\{14\} \/> Remove application\u2026/g) ?? []).length, 1);
+  const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
+  assert.match(ctx, /MUTATING_DIALOGS[^\n]*"remove-registration"/, "an attached read-only runtime can never open it");
+  // the front end never names the open value of the capability
   const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
-  for (const [name, text] of [["Screens", screens], ["Dialogs", dialogs], ["deployEngine", engine]]) {
-    assert.doesNotMatch(text, /Remove registration|remove-repo|remove-registration|repo-remove|op: "remove/i, `${name} must not offer a removal`);
-  }
-  assert.match(screens, /disabled title="Removing applications is not part of this build\."><Trash size=\{14\} \/> Remove application\u2026/);
+  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(engine + screens + dialogs, /gitRemoval: true/);
 });

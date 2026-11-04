@@ -227,6 +227,34 @@ fn migrate(db: &Db) -> Result<(), SqliteOpenError> {
     db.exec("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, body TEXT NOT NULL); INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);")
 }
 
+/// The schema a journal declares once it may hold a `gitdrop` (see [`SqliteJournal::remove_registration`]).
+pub const REMOVAL_SCHEMA: i64 = 2;
+
+/// What a journal file contains, read without writing: whether SQLite finds it intact, the schema it declares, and
+/// every record body in order. Used to prove a backup is a faithful, readable copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalFileFacts {
+    pub integrity: String,
+    pub schema: i64,
+    pub rows: Vec<String>,
+}
+
+/// Inspect a journal file read-only (a backup, typically).
+pub fn inspect_file(path: &Path) -> Result<JournalFileFacts, SqliteOpenError> {
+    let db = Db::open(path, SQLITE_OPEN_READONLY)?;
+    let integrity = strings_of(&db, "PRAGMA integrity_check")?.join("; ");
+    Ok(JournalFileFacts {
+        integrity,
+        schema: declared_schema(&db),
+        rows: strings_of(&db, "SELECT body FROM records ORDER BY seq")?,
+    })
+}
+
+/// Replay a journal file read-only into its full state (a backup, typically).
+pub fn replay_file(path: &Path) -> Result<Restored, SqliteOpenError> {
+    restore(&Db::open(path, SQLITE_OPEN_READONLY)?)
+}
+
 /// The journal schema this build can read. 1: every record up to the removal record. 2: the journal may also hold
 /// `gitdrop` (a removed Git registration). A writer that emits a record older builds cannot decode records the
 /// higher number first (see docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md), so this build names the problem
@@ -245,6 +273,29 @@ fn declared_schema(db: &Db) -> i64 {
         unsafe { sqlite3_column_int64(stmt.0, 0) }
     } else {
         0
+    }
+}
+
+/// The first text column of every row of `sql`, in order.
+fn strings_of(db: &Db, sql: &str) -> Result<Vec<String>, SqliteOpenError> {
+    let stmt = statement(db, sql)?;
+    let mut out = Vec::new();
+    loop {
+        match unsafe { sqlite3_step(stmt.0) } {
+            SQLITE_ROW => {
+                let p = unsafe { sqlite3_column_text(stmt.0, 0) };
+                if p.is_null() {
+                    return Err(SqliteOpenError("SQLite returned a NULL value".into()));
+                }
+                out.push(
+                    unsafe { CStr::from_ptr(p.cast()) }
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            SQLITE_DONE => return Ok(out),
+            _ => return Err(SqliteOpenError(message(db))),
+        }
     }
 }
 
@@ -366,26 +417,67 @@ impl SqliteJournal {
 
     /// The stored record lines in order, for diagnostics and tests. Reads only.
     pub fn record_lines(dir: &Path) -> Result<Vec<String>, SqliteOpenError> {
-        let db = Db::open(&dir.join(SQLITE_FILE), SQLITE_OPEN_READONLY)?;
-        let stmt = statement(&db, "SELECT body FROM records ORDER BY seq")?;
-        let mut out = Vec::new();
-        loop {
-            match unsafe { sqlite3_step(stmt.0) } {
-                SQLITE_ROW => {
-                    let p = unsafe { sqlite3_column_text(stmt.0, 0) };
-                    if p.is_null() {
-                        return Err(SqliteOpenError("SQLite record has NULL body".into()));
-                    }
-                    out.push(
-                        unsafe { CStr::from_ptr(p.cast()) }
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
-                }
-                SQLITE_DONE => return Ok(out),
-                _ => return Err(SqliteOpenError(message(&db))),
-            }
+        strings_of(
+            &Db::open(&dir.join(SQLITE_FILE), SQLITE_OPEN_READONLY)?,
+            "SELECT body FROM records ORDER BY seq",
+        )
+    }
+
+    /// The journal schema this open journal declares (0 when it declares none).
+    pub fn declared_schema(&self) -> i64 {
+        declared_schema(&self.db)
+    }
+
+    /// Every stored record body in order, read through this writer's own connection.
+    pub fn record_rows(&self) -> Result<Vec<String>, SqliteOpenError> {
+        strings_of(&self.db, "SELECT body FROM records ORDER BY seq")
+    }
+
+    /// A consistent copy of the whole journal in a new SQLite file, made with `VACUUM INTO` from this connection
+    /// (outside any transaction). `target` must not exist (SQLite refuses an existing file, which some versions accept only when it is empty,
+    /// so callers must not depend on that), so an existing backup is never overwritten. The copy is compacted, not byte-identical: compare it by record, not by hash.
+    pub fn backup_into(&self, target: &Path) -> Result<(), SqliteOpenError> {
+        let stmt = statement(&self.db, "VACUUM INTO ?1")?;
+        bind(&stmt, 1, &target.to_string_lossy())?;
+        if unsafe { sqlite3_step(stmt.0) } != SQLITE_DONE {
+            return Err(SqliteOpenError(format!(
+                "cannot write the journal backup {}: {}",
+                target.display(),
+                message(&self.db)
+            )));
         }
+        Ok(())
+    }
+
+    /// Record the removal of a Git registration. In **one SQLite transaction** it stamps schema 2 on a journal that
+    /// does not declare it yet and appends the `gitdrop` record, so there is never a `gitdrop` without the stamp, nor
+    /// a stamp from a removal that failed. Returns whether this call stamped the journal (the first removal).
+    pub fn remove_registration(
+        &mut self,
+        rec: &harpoon_deploy::git::RemovedRec,
+    ) -> Result<bool, JournalError> {
+        let io = |e: String| JournalError::Io(e);
+        self.db
+            .exec("BEGIN IMMEDIATE")
+            .map_err(|e| io(e.to_string()))?;
+        let result = (|| {
+            let stamp = declared_schema(&self.db) < REMOVAL_SCHEMA;
+            if stamp {
+                self.db
+                    .exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)")
+                    .map_err(|e| e.to_string())?;
+            }
+            self.insert_row(
+                "git",
+                &harpoon_deploy::git::encode(&harpoon_deploy::git::GitRecord::Removed(rec.clone())),
+            )?;
+            self.db.exec("COMMIT").map_err(|e| e.to_string())?;
+            Ok(stamp)
+        })();
+        if result.is_err() {
+            let _ = self.db.exec("ROLLBACK");
+        }
+        result.map_err(io)
     }
 
     /// Store `body` without validating it. Only for tests that forge damaged or misplaced records
@@ -541,6 +633,183 @@ mod tests {
             Ok(_) => panic!("open must refuse"),
         };
         assert!(open.contains("newer Harpoon"), "{open}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use harpoon_deploy::git::{GitRecord, RemovedRec, RepoRec};
+
+    fn repo(name: &str, app: &str, at_ms: u64) -> RepoRec {
+        // built by decoding a stored form, as a replay would, rather than from a struct literal
+        let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        let at = at_ms.to_string();
+        let url = hex("https://example.com/acme/shop.git");
+        let branch = hex("main");
+        let f = [
+            "gitrepo", "1", name, &url, "-", "none", "-", "-", app, "-", "-", &branch, "-", "8080",
+            "-", "-", "-", "-", &at,
+        ];
+        match harpoon_deploy::git::decode(&f).expect("a valid registration") {
+            GitRecord::Repo(r) => *r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn removal(r: &RepoRec) -> RemovedRec {
+        RemovedRec {
+            name: r.name.clone(),
+            app: r.app.clone(),
+            registration: r.at_ms,
+            url: r.url.clone(),
+            cred: r.cred,
+            at_ms: r.at_ms + 1,
+        }
+    }
+
+    const APP: &str = "app_00000000000000000000000001";
+
+    fn journal_with_one_registration(name: &str) -> (std::path::PathBuf, SqliteJournal, RepoRec) {
+        let (dir, db) = temp_db(name);
+        drop(db);
+        let (mut j, _) = SqliteJournal::open(&dir).unwrap();
+        let r = repo("shop", APP, 5);
+        j.git(&GitRecord::Repo(Box::new(r.clone()))).unwrap();
+        (dir, j, r)
+    }
+
+    fn schemas(db: &Db) -> Vec<String> {
+        strings_of(db, "SELECT version FROM schema_migrations ORDER BY version").unwrap()
+    }
+
+    #[test]
+    fn the_first_removal_stamps_schema_2_in_the_same_transaction_and_later_ones_do_not() {
+        let (dir, mut j, r) = journal_with_one_registration("stamp");
+        assert_eq!(
+            (j.declared_schema(), schemas(&j.db)),
+            (1, vec!["1".to_string()])
+        );
+        assert!(
+            j.remove_registration(&removal(&r)).unwrap(),
+            "the first removal stamps"
+        );
+        assert_eq!(
+            (j.declared_schema(), schemas(&j.db)),
+            (2, vec!["1".to_string(), "2".to_string()])
+        );
+        let rows = j.record_rows().unwrap();
+        assert!(rows.last().unwrap().contains("gitdrop"), "{rows:?}");
+        // a second removal (after the name is registered again) only appends
+        let again = repo("shop", APP, 50);
+        j.git(&GitRecord::Repo(Box::new(again.clone()))).unwrap();
+        assert!(!j.remove_registration(&removal(&again)).unwrap());
+        assert_eq!(
+            schemas(&j.db),
+            vec!["1".to_string(), "2".to_string()],
+            "no second stamp row"
+        );
+        assert_eq!(
+            j.record_rows()
+                .unwrap()
+                .iter()
+                .filter(|b| b.contains("gitdrop"))
+                .count(),
+            2
+        );
+        drop(j);
+        // and the journal replays, with both removals
+        assert_eq!(SqliteJournal::read_only(&dir).unwrap().git.retired.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_removal_that_fails_leaves_neither_the_record_nor_the_stamp() {
+        let (dir, mut j, r) = journal_with_one_registration("atomic");
+        // make the SECOND statement of the transaction (the record insert) fail, after the stamp statement ran
+        j.db.exec("CREATE TRIGGER refuse_removal BEFORE INSERT ON records WHEN NEW.body LIKE '%gitdrop%' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        let before = j.record_rows().unwrap();
+        let err = j.remove_registration(&removal(&r)).unwrap_err();
+        assert!(format!("{err:?}").contains("refused"), "{err:?}");
+        assert_eq!(
+            j.declared_schema(),
+            1,
+            "the stamp was rolled back with the record"
+        );
+        assert_eq!(schemas(&j.db), vec!["1".to_string()]);
+        assert_eq!(j.record_rows().unwrap(), before);
+        // the connection is usable afterwards (the failed transaction was rolled back, not left open)
+        j.db.exec("DROP TRIGGER refuse_removal").unwrap();
+        assert!(j.remove_registration(&removal(&r)).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_is_a_faithful_readable_copy_and_never_overwrites() {
+        let (dir, j, _r) = journal_with_one_registration("backup");
+        let backup = dir.join("backup.sqlite3");
+        j.backup_into(&backup).unwrap();
+        let facts = inspect_file(&backup).unwrap();
+        assert_eq!(facts.integrity, "ok");
+        assert_eq!(facts.schema, 1);
+        assert_eq!(
+            facts.rows,
+            j.record_rows().unwrap(),
+            "record for record the same"
+        );
+        assert_eq!(
+            replay_file(&backup).unwrap(),
+            restore(&j.db).unwrap(),
+            "and it replays to the same state"
+        );
+        // an existing backup is not overwritten
+        let before = std::fs::read(&backup).unwrap();
+        assert!(j.backup_into(&backup).is_err());
+        assert_eq!(std::fs::read(&backup).unwrap(), before);
+        // a directory that does not exist is an error, not a silent skip
+        assert!(j
+            .backup_into(&dir.join("missing").join("b.sqlite3"))
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_the_backup_returns_the_state_from_before_the_removal() {
+        let (dir, mut j, r) = journal_with_one_registration("restore");
+        let backup = dir.join("pre-schema2.sqlite3");
+        j.backup_into(&backup).unwrap();
+        let before = restore(&j.db).unwrap();
+        assert!(j.remove_registration(&removal(&r)).unwrap());
+        drop(j); // the writer is gone: the recovery is offline
+        let live = dir.join(SQLITE_FILE);
+        assert_eq!(SqliteJournal::read_only(&dir).unwrap().git.retired.len(), 1);
+        std::fs::copy(&backup, &live).unwrap();
+        let restored = SqliteJournal::read_only(&dir).unwrap();
+        assert_eq!(restored, before, "exactly the pre-removal state");
+        assert!(restored.git.retired.is_empty() && restored.git.repos.contains_key("shop"));
+        assert_eq!(
+            declared_schema(&Db::open(&live, SQLITE_OPEN_READONLY).unwrap()),
+            1,
+            "and schema 1 again, with nothing edited"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_journal_uses_rollback_journaling_so_recovery_has_no_wal_or_shm_to_handle() {
+        let (dir, j, _r) = journal_with_one_registration("mode");
+        assert_eq!(
+            strings_of(&j.db, "PRAGMA journal_mode").unwrap(),
+            vec!["delete".to_string()]
+        );
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.ends_with("-wal") || n.ends_with("-shm")),
+            "{names:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

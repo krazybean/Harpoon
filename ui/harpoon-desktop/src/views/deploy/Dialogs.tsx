@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -51,6 +51,10 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const CONFIRM_LIVE: LiveConfirmation = { liveChanges: true, cutover: false };
   if (dialog.kind === "create") return c.engine ? <EngineCreateDialog c={c} close={close} /> : <CreateDialog c={c} dialog={dialog} close={close} />;
   if (dialog.kind === "variable") return <VariableDialog c={c} name={dialog.name} close={close} />;
+  if (dialog.kind === "remove-registration") {
+    const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
+    return app && repo ? <RemoveRegistrationDialog c={c} repo={repo} app={app} close={close} /> : null;
+  }
   if (dialog.kind === "edit-registration") {
     const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
     return app && repo ? <EditRegistrationDialog c={c} repo={repo} hasHistory={app.deployments.length > 0} close={close} /> : null;
@@ -424,6 +428,49 @@ function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: 
         <Row icon={<Info size={14} />}>A local folder is checked the way it is when added: it must be a Git repository with that branch.</Row>
         <Row icon={<RocketLaunch size={14} />}>Nothing is built, deployed or restarted</Row>
       </Plan>
+    </Dialog>
+  );
+}
+
+
+/**
+ * Disconnect the repository from its application. Says exactly what goes and what stays, needs the repository's name
+ * typed, and shows the engine's answer, a refusal included, without closing. The application, its history, its running
+ * release, its Docker resources and its stored credentials are not touched; the journal is upgraded one way.
+ */
+function RemoveRegistrationDialog({ c, repo, app, close }: { c: Ctx; repo: EngineRepo; app: AppModel; close: () => void }) {
+  // the registration as it was when the dialog opened: the engine refuses if it changed since
+  const [base] = useState(repo);
+  const [typed, setTyped] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
+  const plan = registrationRemoval(c.state.engine, app, base, typed);
+  const done = outcome?.ok === true;
+  const canRemove = !!plan.op && !c.engine!.busy && !submitting && !done;
+  const submit = async () => {
+    if (!plan.op) return;
+    setSubmitting(true);
+    setOutcome(null);
+    try { setOutcome(registrationOutcome(await c.engine!.run(plan.op))); } finally { setSubmitting(false); }
+  };
+  return (
+    <Dialog wide title={`Remove registration · ${base.name}`} sub="Disconnects this Git repository from the application. It does not delete the application." onClose={close}
+      footer={done
+        ? <button className="btn btn--primary" onClick={close}>Done</button>
+        : <button className="btn btn--destructive" disabled={!canRemove} onClick={() => void submit()}>{submitting ? "Removing…" : "Remove registration"}</button>}>
+      {outcome?.ok === false && <Banner tone="err" title="The registration was not removed">{outcome.message}</Banner>}
+      {outcome?.ok === true && <Banner tone="ok" title="Registration removed. Source disconnected.">
+        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        <div>{base.name} keeps its history and its running release. Register a repository named {base.name} again to connect a source.</div>
+      </Banner>}
+      {plan.blocked && !done && <Banner tone="warn" title="Not available right now">{plan.blocked}</Banner>}
+      <Plan>
+        <Row icon={<Check size={14} />}><b>Stops</b> Harpoon checking this repository for new commits, and disables Deploy, Redeploy and Retry for <b>{base.name}</b> until a repository is registered again.</Row>
+        <Row icon={<Info size={14} />}><b>Keeps</b> the application and its address, every deployment and its recorded source, the running release, and every Docker container, image and volume. Rolling back still works.</Row>
+        <Row icon={<Key size={14} />}><b>Keeps</b> saved credentials. They stay in the macOS Keychain, tied to this repository name and its address; a repository with this name must use the same address to use them.</Row>
+        <Row icon={<Warning size={14} />}><b>One-way upgrade.</b> The first removal permanently upgrades this deployment journal so that older Harpoon versions can no longer open it. Harpoon makes and verifies a backup first, and reports where it is.</Row>
+      </Plan>
+      {!done && <div className="dp-field"><label htmlFor="rmname">Type <b>{base.name}</b> to confirm</label><input id="rmname" className="dp-input" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} disabled={!!plan.blocked} /></div>}
     </Dialog>
   );
 }

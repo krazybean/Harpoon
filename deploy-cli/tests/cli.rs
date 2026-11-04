@@ -96,12 +96,14 @@ const OPEN: Gate = Gate {
     live_deploy_enabled: true,
     live_replacement_enabled: false,
     live_triggered_enabled: true,
+    git_removal_enabled: false,
 };
 /// What the acceptance build opens: every live gate, including trigger-driven execution.
 const ACCEPTANCE: Gate = Gate {
     live_deploy_enabled: true,
     live_replacement_enabled: true,
     live_triggered_enabled: true,
+    git_removal_enabled: true,
 };
 /// Every live gate closed: what the shipping binary was before attended deployment was enabled. Tests that
 /// prove a refusal "at the gate" use this; they do not depend on what `Gate::shipping()` currently opens.
@@ -109,6 +111,7 @@ const CLOSED: Gate = Gate {
     live_deploy_enabled: false,
     live_replacement_enabled: false,
     live_triggered_enabled: false,
+    git_removal_enabled: false,
 };
 /// What the shipping binary and the desktop use: attended deployment and replacement open, triggered closed.
 const SHIPPING: Gate = Gate::shipping();
