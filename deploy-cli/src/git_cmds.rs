@@ -171,6 +171,13 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
     };
     let name = need("name")?.to_string();
     let branch = p.value("branch").unwrap_or("main").to_string();
+    let requested_app: Option<ApplicationId> = p
+        .value("app")
+        .map(|a| {
+            a.parse()
+                .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))
+        })
+        .transpose()?;
     let create_only = p.switch("new");
     if create_only {
         // an early, cheap refusal; the authoritative check is made again under the writer lock below
@@ -181,6 +188,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
     // Replacing a registration that has a saved credential may not move it to another destination. Checked
     // read-only first, so a refusal leaves every byte of the journal as it was, and again under the writer lock.
     if let Some(state) = store::read_restored(&rt)? {
+        guard_application_identity(&state, &name, requested_app.as_ref())?;
         guard_credential_destination(&state, &name, &url)?;
     }
     // A local source is checked before the journal writer is opened, so a refusal leaves every record as it
@@ -203,11 +211,10 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             return Err(already_registered(&name, &r.url));
         }
     }
+    guard_application_identity(&restored, &name, requested_app.as_ref())?;
     guard_credential_destination(&restored, &name, &url)?;
-    let app: ApplicationId = match p.value("app") {
-        Some(a) => a
-            .parse()
-            .map_err(|e| Fail::usage(format!("--app is not an application id: {e}")))?,
+    let app: ApplicationId = match requested_app {
+        Some(a) => a,
         None => match restored.git.repos.get(&name) {
             Some(r) => r.app.clone(),
             None => IdGenerator::new(SystemClock, OsEntropy::new())
@@ -472,6 +479,24 @@ fn guard_credential_destination(
         Some(old) if old.url != new_url && credential_on_record(state, old) => {
             keep_credential_destination(name, credential_label(old), &old.url, new_url)
         }
+        _ => Ok(()),
+    }
+}
+
+/// An application's identity is fixed: a repository registration that exists belongs to its application for good.
+/// `repo-add` may repeat the application it already has (or omit `--app`), never name another. Otherwise a name could
+/// be moved off its application, orphaning it, and another registration could adopt that application and replace
+/// its serving release. There is no override or transfer: another application is another repository.
+fn guard_application_identity(
+    state: &harpoon_deploy_journal::Restored,
+    name: &str,
+    requested: Option<&ApplicationId>,
+) -> Result<(), Fail> {
+    match (state.git.repos.get(name), requested) {
+        (Some(old), Some(app)) if *app != old.app => Err(Fail::refused(format!(
+            "repository {name:?} belongs to application {}, and --app {app} would move it to a different application. An application's identity is fixed. Omit --app to keep it, or add a new repository with another name for the other application. Nothing was changed",
+            old.app
+        ))),
         _ => Ok(()),
     }
 }

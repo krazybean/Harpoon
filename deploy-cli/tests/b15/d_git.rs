@@ -2703,11 +2703,15 @@ impl harpoon_deploy::secrets::SecretStore for ForbiddenStore {
 
 /// A `repo-add` of the registration `shop` with no access to any Keychain.
 fn replace_shop(t: &T, url: &str, extra: &[&str]) -> Outcome {
+    replace_named(t, "shop", url, extra)
+}
+
+fn replace_named(t: &T, name: &str, url: &str, extra: &[&str]) -> Outcome {
     let mut a: Vec<String> = [
         "repo-add",
         "--simulate",
         "--name",
-        "shop",
+        name,
         "--url",
         url,
         "--container-port",
@@ -2947,4 +2951,221 @@ fn a_credentialed_registration_whose_address_cannot_be_read_cannot_be_replaced_b
         &replace_shop(&t, legacy, &["--username", "ci", "--branch", "release/1"]),
         0,
     );
+}
+
+// ------------------------------------------------------------------ an application's identity is fixed
+
+const THIRD_APP: &str = "app_00000000000000000000000003";
+
+/// A serving release of `APP`, its repository `shop` (with or without a saved credential), a recorded source and
+/// a held Git event: everything an identity change could disturb.
+fn deployed_and_registered(t: &T, kc: &MemorySecretStore, credential: bool) -> String {
+    let second = "0123456789abcdef0123456789abcdef01234567".to_string();
+    seed_release(t, true, &[("MODE", "one")]);
+    let shop_url = "https://git.example.com/acme/shop.git".to_string();
+    if credential {
+        credentialed(t, kc, &shop_url);
+    } else {
+        assert_exit(&add_repo(t, kc, "shop", &shop_url, APP, &[]), 0);
+    }
+    {
+        let _h = holding();
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.git(&harpoon_deploy::git::GitRecord::Source(
+            harpoon_deploy::git::SourceRec {
+                deployment: PREV.parse().unwrap(),
+                repo: "shop".into(),
+                url: shop_url.clone(),
+                selector: harpoon_deploy::git::SelectorKind::Branch,
+                requested: "main".into(),
+                commit: second.clone(),
+                trigger: "manual".into(),
+                delivery: None,
+                at_ms: 104,
+            },
+        ))
+        .unwrap();
+    }
+    assert_exit(
+        &sim(
+            t,
+            kc,
+            &[
+                "git-trigger",
+                "--simulate",
+                "--repo",
+                "shop",
+                "--delivery",
+                "d1",
+                "--revision",
+                &second,
+            ],
+        ),
+        0,
+    );
+    shop_url
+}
+
+fn identity_cannot_change(credential: bool) {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let url = deployed_and_registered(&t, &kc, credential);
+    let app: ApplicationId = APP.parse().unwrap();
+    let before = restored(&t);
+    let serving_before =
+        harpoon_deploy::serving::serving_release(&before.ledger, &before.deployments, &app);
+    assert!(serving_before.is_some(), "the fixture must be serving");
+    assert_eq!(before.control.events.len(), 1, "a held event exists");
+    let (bytes, requests) = (journal_bytes(&t), t.docker_requests());
+    let extra_cred: &[&str] = if credential {
+        &["--username", "ci"]
+    } else {
+        &[]
+    };
+    for other in [SECOND_APP, THIRD_APP] {
+        let mut extra = vec!["--app", other];
+        extra.extend_from_slice(extra_cred);
+        let o = replace_shop(&t, &url, &extra);
+        assert_exit(&o, 6);
+        assert!(o.stderr.contains("identity is fixed"), "{}", o.stderr);
+        assert!(o.stderr.contains("Nothing was changed"), "{}", o.stderr);
+        // also together with a change of branch, which must not slip through either
+        let mut extra = vec!["--app", other, "--branch", "release/1"];
+        extra.extend_from_slice(extra_cred);
+        assert_exit(&replace_shop(&t, &url, &extra), 6);
+        assert_eq!(journal_bytes(&t), bytes, "{other}: the journal changed");
+    }
+    let after = restored(&t);
+    assert_eq!(
+        after, before,
+        "registration, deployments, sources, held events and credential record"
+    );
+    assert_eq!(
+        harpoon_deploy::serving::serving_release(&after.ledger, &after.deployments, &app),
+        serving_before,
+        "the serving release"
+    );
+    assert_eq!(after.ledger, before.ledger, "the Docker ledger");
+    assert_eq!(t.docker_requests(), requests, "Docker was not contacted");
+    if credential {
+        assert_eq!(saved_token(&kc), PLANTED.as_bytes());
+    }
+}
+
+#[test]
+fn an_uncredentialed_registration_cannot_be_moved_to_another_application() {
+    identity_cannot_change(false);
+}
+
+#[test]
+fn a_credentialed_registration_cannot_be_moved_to_another_application() {
+    identity_cannot_change(true);
+}
+
+#[test]
+fn replacing_with_the_same_or_no_application_is_unchanged() {
+    for credential in [false, true] {
+        let t = T::new();
+        let kc = MemorySecretStore::new();
+        let url = deployed_and_registered(&t, &kc, credential);
+        let extra_cred: &[&str] = if credential {
+            &["--username", "ci"]
+        } else {
+            &[]
+        };
+        for (tail, branch) in [(vec!["--app", APP], "release/1"), (vec![], "release/2")] {
+            let mut extra = tail;
+            extra.extend(["--branch", branch]);
+            extra.extend_from_slice(extra_cred);
+            assert_exit(&replace_shop(&t, &url, &extra), 0);
+            let r = restored(&t).git.repos["shop"].clone();
+            assert_eq!(
+                (r.app.to_string().as_str(), r.branch.as_str()),
+                (APP, branch)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_first_registration_may_claim_an_unclaimed_application_that_already_has_history() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    // PREV is a succeeded, serving deployment of APP made without any repository
+    seed_release(&t, true, &[("MODE", "one")]);
+    assert!(restored(&t).git.repos.is_empty());
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            "https://git.example.com/acme/shop.git",
+            APP,
+            &[],
+        ),
+        0,
+    );
+    assert_eq!(restored(&t).git.repos["shop"].app.to_string(), APP);
+    // and a brand-new application id, never seen before, is just as acceptable for a new name
+    assert_exit(
+        &replace_named(
+            &t,
+            "billing",
+            "https://git.example.com/acme/billing.git",
+            &["--app", THIRD_APP],
+        ),
+        0,
+    );
+}
+
+#[test]
+fn the_two_command_identity_transfer_is_refused_at_its_first_step() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            "https://git.example.com/acme/shop.git",
+            APP,
+            &[],
+        ),
+        0,
+    );
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "billing",
+            "https://git.example.com/acme/billing.git",
+            SECOND_APP,
+            &[],
+        ),
+        0,
+    );
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    // step 1 freed billing's application by re-pointing billing to a made-up one
+    let o = replace_named(
+        &t,
+        "billing",
+        "https://git.example.com/acme/billing.git",
+        &["--app", THIRD_APP],
+    );
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("identity is fixed"), "{}", o.stderr);
+    // step 2, adopting billing's application, is refused as before
+    let o = replace_named(
+        &t,
+        "shop",
+        "https://git.example.com/acme/shop.git",
+        &["--app", SECOND_APP],
+    );
+    assert_exit(&o, 6);
+    assert_eq!(journal_bytes(&t), bytes);
+    let after = restored(&t);
+    assert_eq!(after, before);
+    assert_eq!(after.git.repos["billing"].app.to_string(), SECOND_APP);
+    assert_eq!(after.git.repos["shop"].app.to_string(), APP);
 }
