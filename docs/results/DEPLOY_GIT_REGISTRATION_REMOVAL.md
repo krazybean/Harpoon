@@ -144,7 +144,9 @@ The first removal in a journal upgrades it from schema 1 to schema 2. In order:
 6. **in one SQLite transaction** the schema-2 row and the `gitdrop` record are written (`BEGIN IMMEDIATE ... COMMIT`),
    so there is never a `gitdrop` without the stamp, nor a stamp without a removal.
 
-If any step before 6 fails, **nothing is written** and no partial backup is left. Later removals find schema 2 and only
+If any step before 6 fails, **nothing is written** to the journal. No partial backup is left when the backup operation
+returns an error and cleanup completes. A process killed during `VACUUM INTO` may leave an incomplete `pre-schema2-*`
+backup file without its `.sha256` sidecar. Such a backup is unverified and must never be used for recovery. Later removals find schema 2 and only
 append the record.
 
 ### Recovery (offline, explicit, never automatic)
