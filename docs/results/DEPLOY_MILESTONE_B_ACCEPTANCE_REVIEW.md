@@ -512,10 +512,10 @@ overlays and experimental flags out of shipping builds; keep reconciliation, rol
 agreed idle thresholds (load 3.36 against ≤ 2.0, CPU idle 79.4 % against ≥ 85 %, WindowServer at 46 % CPU). No P1 number exists, so no performance claim about
 Harpoon's build path may be made.
 
-**Proposed owner risk decision (not yet taken; it is the owner's to accept or reject in the PR):** accept shipping attended deployment and replacement with P1 deferred.
-Rationale: P1 is a performance ceiling, not a safety property; every other live check (L1–L7 and P2) has passed, and the remaining gaps are listed below as accepted risks. Conditions proposed:
-(1) the release notes and this document say P1 was not measured; (2) P1 is run on an idle host with the runbook's rules (a fresh isolated engine, N=5, verdict rules fixed
-beforehand) and its result is recorded here, whatever it is; (3) a P1 result above 1.2× is a defect to be tracked, not a retroactive pass.
+**Owner decision (2026-11-04): P1 is accepted as NOT RUN and deferred for this release candidate**, because the host failed the agreed idle-host precondition. This is a risk
+acceptance, not a pass: P1 is not marked PASS, the 1.2x target is not claimed to have been met, and no statement about Harpoon's build overhead may be made. Conditions
+that stay attached to the decision: (1) the release notes and this document say P1 was not measured; (2) P1 is run later on an idle host under the runbook's rules (a fresh
+isolated engine, N=5, verdict rules fixed beforehand) and its result is recorded here whatever it is; (3) a result above 1.2x is a defect to track, not a retroactive pass.
 
 **Residual risks carried (owner-accepted on 2026-11-03 unless noted):**
 1. The Nov 2 canary evidence keeps its provenance gaps (section 2): no binary hash, toolchain or Docker request log; run 1 predates #153. The 2026-11-04 session
@@ -531,4 +531,7 @@ beforehand) and its result is recorded here, whatever it is; (3) a P1 result abo
 7. Executing queued Git events (`RunQueue`, `git-run`, `watch`) stays closed in every shipping build. Polling and queueing still work and deploy nothing.
 
 This document does not declare Milestone B unconditionally accepted. L1–L7 and P2 have passing live evidence (L6 from the Nov 2 canary, the rest from the 2026-11-04 session);
-P1 has none.
+P1 has none, and its deferral is the owner's recorded decision above.
+
+**Update (desktop isolation, PR #158 follow-up):** the desktop previously could not drive an isolated engine. A debug-only test namespace now exists, and the desktop confirmation path has an
+exact isolated validation procedure; see `DEPLOY_DESKTOP_ISOLATED_VALIDATION.md` (isolation mechanism, security review, procedure). That procedure has **not** been run; risk 4 above stays open until it is.

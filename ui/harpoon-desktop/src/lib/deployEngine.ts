@@ -65,6 +65,8 @@ export type ExternalInput = { path: string; snapshot: EngineSnapshot | null; err
 
 /** What the views may do with the real engine. They never see `invoke`. */
 export type EngineApi = {
+  /** The isolated test namespace this desktop drives (debug builds only), or null: the usual, production case. */
+  testNamespace?: string | null;
   /** `confirmation` is what the person confirmed in a dialog for THIS operation; it is sent only with it and never remembered. */
   run: (op: Record<string, unknown>, confirmation?: LiveConfirmation) => Promise<OpResult>;
   refresh: () => void;

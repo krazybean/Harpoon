@@ -126,6 +126,7 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
       <div className="dp-sim-note">{SIMULATION_NOTE}</div>
       </> : null}
       <div className="dp-tourbar"><button type="button" className="btn btn--ghost btn--sm" data-tour="replay-tour" onClick={replayTour} title="Take the short tour of this page again. It changes nothing."><Question size={14} /> Replay walkthrough</button></div>
+      {engine?.api.testNamespace && <Banner tone="warn" title="Test namespace">This window drives an isolated Harpoon engine at <span className="mono">{engine.api.testNamespace}</span>, with its own deployment records. Your own Harpoon, Docker contexts and Keychain are not used here.</Banner>}
       {meta?.store === "error" && <Banner tone="err" title="Harpoon cannot read its deployment records">{meta.storeError} Nothing is shown rather than guessing. The records were not modified.</Banner>}
       {meta?.loadError && <Banner tone="warn" title={meta.stale ? "Showing the last data Harpoon could read" : "Harpoon could not read deployment state"}
         actions={<button className="btn btn--secondary" onClick={() => engine?.api.refresh()}>Retry</button>}>{meta.loadError}{meta.stale ? ` Last read ${new Date(meta.generatedMs).toLocaleTimeString()}; what follows may be out of date.` : ""}</Banner>}

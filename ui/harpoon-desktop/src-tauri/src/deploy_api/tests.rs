@@ -750,6 +750,112 @@ mod runtime {
     }
 }
 
+// ---- the test namespace: a debug desktop drives an isolated engine and cannot reach the serving one
+
+mod namespaced {
+    use super::*;
+    use crate::namespace::{resolve, Namespace};
+    use std::os::unix::net::UnixListener;
+
+    struct Iso {
+        home: PathBuf,
+        ns: Namespace,
+        resources: PathBuf,
+        _socks: Vec<UnixListener>,
+    }
+
+    /// A fake home with a production-looking runtime (different pid and socket) and a namespace root with its own.
+    fn iso(name: &str, root_pid: u32) -> Iso {
+        let home = rt(&format!("ns-home-{name}"));
+        let prod = home.join("Library/Application Support/Harpoon");
+        std::fs::create_dir_all(&prod).unwrap();
+        std::fs::create_dir_all(home.join("Library/Application Support/com.harpoon.desktop")).unwrap();
+        std::fs::write(prod.join("runtime.json"), r#"{"socketPath":"/tmp/harpoon-docker.sock","pid":9999}"#).unwrap();
+        std::fs::write(prod.join("runtime.pid"), "9999\n").unwrap();
+        // short root: unix socket paths are limited to about 100 bytes
+        let root = std::env::temp_dir().join(format!("hpns-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ns = resolve(root.to_str(), true, &home).unwrap().unwrap();
+        let socks = vec![UnixListener::bind(ns.docker_socket()).unwrap(), UnixListener::bind(ns.mgmt_socket()).unwrap()];
+        std::fs::write(ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":{root_pid}}}"#, ns.docker_socket().display())).unwrap();
+        std::fs::write(ns.support_dir().join("runtime.pid"), format!("{root_pid}\n")).unwrap();
+        let resources = home.join("resources");
+        std::fs::create_dir_all(resources.join("harpoon/bin")).unwrap();
+        std::fs::write(resources.join("harpoon/bin/docker-buildx"), b"#!/bin/sh\n").unwrap();
+        Iso { home, ns, resources, _socks: socks }
+    }
+
+    #[test]
+    fn without_a_namespace_the_production_locations_are_unchanged() {
+        let home = rt("ns-prod-home");
+        let e = environment_for(None, &home);
+        assert_eq!(e.support, home.join("Library/Application Support/Harpoon"));
+        assert_eq!(e.mgmt_socket, Path::new("/tmp/harpoon-mgmt.sock"));
+        assert!(e.namespace.is_none());
+        if std::env::var(crate::namespace::ENV).is_err() {
+            let live = environment(&home).unwrap();
+            assert_eq!((live.support, live.mgmt_socket, live.namespace), (e.support, e.mgmt_socket, None));
+        }
+    }
+
+    #[test]
+    fn a_namespace_selects_its_own_state_sockets_pid_and_never_reads_the_production_files() {
+        let i = iso("select", 4242);
+        let e = environment_for(Some(i.ns.clone()), &i.home);
+        assert_eq!(e.support, i.ns.root(), "runtime.json and runtime.pid come from the namespace root");
+        assert_eq!(e.mgmt_socket, i.ns.docker_socket().with_file_name("harpoon-mgmt.sock"));
+        let info = discover_runtime(&e.support, &e.mgmt_socket, &i.resources, &|pid| (pid == 4242).then(|| "harpoon".to_string())).unwrap();
+        // Docker socket, management socket, forwarder pid and resource directory are the namespace's / unchanged
+        assert_eq!(info.docker_socket, i.ns.docker_socket());
+        assert_eq!(info.mgmt_socket, i.ns.mgmt_socket());
+        assert_eq!(info.forwarder_pid, 4242, "the isolated engine's pid, not the production runtime's 9999");
+        assert_eq!(info.forwarder_command, "harpoon");
+        assert_eq!(info.resources_dir, i.resources, "the resource directory is chosen by the caller, never by the namespace variable");
+        assert!(confine_to_namespace(info, &i.ns).is_ok());
+        // the production state is still the production state
+        assert!(std::fs::read_to_string(i.home.join("Library/Application Support/Harpoon/runtime.json")).unwrap().contains("9999"));
+    }
+
+    #[test]
+    fn a_state_file_that_points_outside_the_namespace_is_refused_not_followed() {
+        let i = iso("outside", 4242);
+        // runtime.json inside the namespace names another (live) socket: the serving engine's, say
+        let other = std::env::temp_dir().join(format!("hpns-other-{}", std::process::id()));
+        let _ = std::fs::remove_file(&other);
+        let _live = UnixListener::bind(&other).unwrap();
+        std::fs::write(i.ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":4242}}"#, other.display())).unwrap();
+        let info = discover_runtime(&i.ns.support_dir(), &i.ns.mgmt_socket(), &i.resources, &|_| Some("harpoon".into())).unwrap();
+        let err = confine_to_namespace(info, &i.ns).unwrap_err();
+        assert!(err.contains("not the test namespace's"), "{err}");
+        // a runtime process that is not the engine is refused before that
+        std::fs::write(i.ns.support_dir().join("runtime.json"), format!(r#"{{"socketPath":"{}","pid":4242}}"#, i.ns.docker_socket().display())).unwrap();
+        assert!(discover_runtime(&i.ns.support_dir(), &i.ns.mgmt_socket(), &i.resources, &|_| Some("bash".into())).unwrap_err().contains("not the Harpoon runtime"));
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn a_namespaced_desktop_never_uses_the_real_keychain_store_or_user_setup() {
+        let src = include_str!("../deploy_api.rs");
+        // the Keychain is constructed only in the production branch of deploy_op; the namespace gets an in-memory store
+        let op = src.split("pub async fn deploy_op(").nth(1).unwrap().split("host listeners").next().unwrap();
+        let ns_branch = op.split("if env.namespace.is_some() {").nth(1).unwrap().split("} else {").next().unwrap();
+        assert!(ns_branch.contains("MemorySecretStore") && !ns_branch.contains("Keychain::new"), "{ns_branch}");
+        assert_eq!(src.matches("Keychain::new()").count(), 1, "the real Keychain is built in exactly one place");
+        // the desktop's own deployment store and attached-runtime references follow the namespace
+        assert!(src.contains("if let Some(ns) = crate::namespace::active()? {\n        return Ok(ns.data_dir());"));
+        // main.rs: Docker calls are translated, setup skips the CLI installer, and user-setup features refuse
+        let main = include_str!("../main.rs");
+        let dc = main.split("fn docker_command(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(dc.contains("ns.docker_args(args)?") && dc.contains("ns.confine_docker(&mut cmd)"), "{dc}");
+        assert!(main.contains("if !namespaced {\n                    cli_path::ensure_on_launch"));
+        for feature in ["Setting up the Harpoon Docker context", "Running a command in containers", "A container shell"] {
+            assert!(main.contains(&format!("namespace::refuse_in_namespace(\"{feature}\")?;")), "{feature}");
+        }
+        assert!(include_str!("../context_discovery.rs").contains("refuse_in_namespace(\"Discovering Docker contexts\")"));
+    }
+}
+
 // ---- E.3: an empty journal directory is an uninitialised store; real damage still fails closed
 
 #[test]

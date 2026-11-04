@@ -25,6 +25,9 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const [externalsError, setExternalsError] = useState<string | null>(null);
   const [keychain, setKeychain] = useState<KeychainState>("unlocked");
   const inflight = useRef(false);
+  // set only by a debug build started in a test namespace: this window then drives an isolated engine, not the user's
+  const [testNamespace, setTestNamespace] = useState<string | null>(null);
+  useEffect(() => { invoke<string | null>("test_namespace").then((v) => setTestNamespace(v ?? null)).catch(() => setTestNamespace(null)); }, []);
   // what is actually listening on this Mac (lsof), kept apart from what Docker reports; refreshed only while Deployments is showing
   const [hostListeners, setHostListeners] = useState<HostListeners>(null);
   const activeRef = useRef(active);
@@ -109,7 +112,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals, hostListeners }), [snap, observed, keychain, loadError, stale, externals, hostListeners]);
   // Docker could not be asked although the VM says it is up: do not claim to know the current state.
   const runtime: RuntimeState = realRuntime === "connected" && observed === null && snap != null ? "docker-not-ready" : realRuntime;
-  const api: EngineApi = useMemo(() => ({ run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs }), [run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs]);
+  const api: EngineApi = useMemo(() => ({ testNamespace, run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs }), [testNamespace, run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs]);
   return { state, runtime, api };
 }
 

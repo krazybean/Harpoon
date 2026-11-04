@@ -412,3 +412,13 @@ test("a failed operation's banner uses the plain-language hint", () => {
   assert.match(v, /failureText\(last\)/);
   assert.doesNotMatch(v, /Refused by the shipping gate/);
 });
+
+test("a test namespace is shown, comes only from the backend, and never changes what the front end sends", () => {
+  const hook = read("../hooks/useDeployEngine.ts");
+  assert.match(hook, /invoke<string \| null>\("test_namespace"\)/);
+  const view = read("../views/deploy/DeployView.tsx");
+  assert.match(view, /engine\?\.api\.testNamespace &&/);
+  for (const f of ["../hooks/useDeployEngine.ts", "../lib/deployEngine.ts", "../views/deploy/Dialogs.tsx", "../views/deploy/DeployView.tsx"]) {
+    assert.doesNotMatch(read(f), /HARPOON_TEST_TMPDIR/, `${f}: the front end never reads or sends the namespace variable`);
+  }
+});
