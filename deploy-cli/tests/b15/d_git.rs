@@ -1761,3 +1761,407 @@ fn a_remote_source_is_registered_unverified_without_contacting_it() {
     assert!(o.stdout.contains("not verified yet"), "{}", o.stdout);
     assert!(!o.stdout.contains("verified: "), "{}", o.stdout);
 }
+
+// ------------------------------------------------------------------ editing a registration
+
+fn update(t: &T, kc: &MemorySecretStore, name: &str, expect: u64, extra: &[&str]) -> Outcome {
+    let e = expect.to_string();
+    let mut a = vec![
+        "repo-update",
+        "--simulate",
+        "--name",
+        name,
+        "--expect-registered-ms",
+        &e,
+    ];
+    a.extend(extra);
+    sim(t, kc, &a)
+}
+
+fn registered_ms(t: &T, name: &str) -> u64 {
+    restored(t).git.repos[name].at_ms
+}
+
+/// A finished deployment of `APP` with a recorded Git source, so the application has history.
+fn seed_history(t: &T, repo_name: &str, url: &str) -> (Deployment, harpoon_deploy::git::SourceRec) {
+    let app: ApplicationId = APP.parse().unwrap();
+    let dep: DeploymentId = "dep_00000000000000000000000009".parse().unwrap();
+    let mut d = Deployment::new(dep.clone(), app, Trigger::Cli, 50);
+    d.transition(DeploymentStatus::Queued, 51).unwrap();
+    d.transition(DeploymentStatus::Running, 52).unwrap();
+    d.transition(DeploymentStatus::Failed, 53).unwrap();
+    let src = harpoon_deploy::git::SourceRec {
+        deployment: dep,
+        repo: repo_name.into(),
+        url: url.into(),
+        selector: harpoon_deploy::git::SelectorKind::Branch,
+        requested: "main".into(),
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        trigger: "manual".into(),
+        delivery: None,
+        at_ms: 54,
+    };
+    let _h = holding();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    j.persist(&d).unwrap();
+    j.git(&harpoon_deploy::git::GitRecord::Source(src.clone()))
+        .unwrap();
+    (d, src)
+}
+
+#[test]
+fn an_edit_appends_a_registration_and_leaves_identity_and_history_alone() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &url(&repo),
+            APP,
+            &["--dockerfile", "Dockerfile"],
+        ),
+        0,
+    );
+    let (dep, src) = seed_history(&t, "shop", &url(&repo));
+    let before = restored(&t);
+    let old = before.git.repos["shop"].clone();
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        old.at_ms,
+        &[
+            "--branch",
+            "release/1",
+            "--dockerfile",
+            "Dockerfile.prod",
+            "--container-port",
+            "9090",
+            "--health-path",
+            "/healthz",
+            "--confirm-change",
+        ],
+    );
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("Nothing was deployed, rebuilt, restarted or replaced"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("verified: the Git repository exists and branch release/1"),
+        "{}",
+        o.stdout
+    );
+    let after = restored(&t);
+    let new = &after.git.repos["shop"];
+    assert_eq!(
+        (
+            new.name.as_str(),
+            &new.app,
+            new.branch.as_str(),
+            new.dockerfile.as_deref(),
+            new.container_port,
+            new.health_path.as_deref()
+        ),
+        (
+            "shop",
+            &old.app,
+            "release/1",
+            Some("Dockerfile.prod"),
+            9090,
+            Some("/healthz")
+        )
+    );
+    assert!(
+        new.at_ms > old.at_ms,
+        "a new version, so a concurrent editor is detected"
+    );
+    // what the edit must not touch
+    assert_eq!(
+        (new.url.as_str(), new.cred, &new.username, &new.filters),
+        (old.url.as_str(), old.cred, &old.username, &old.filters)
+    );
+    assert_eq!(
+        after.git.sources,
+        vec![src],
+        "the deployment keeps the source it was built from"
+    );
+    assert_eq!(after.deployments, vec![dep]);
+    assert_eq!(after.control, before.control);
+    assert_eq!(t.docker_requests(), 0, "an edit never contacts Docker");
+    assert!(sim(&t, &kc, &["repo-list"])
+        .stdout
+        .contains(&format!("registered-ms {}", new.at_ms)));
+}
+
+#[test]
+fn a_refused_edit_changes_nothing() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    let plain = gt.0.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    seed_history(&t, "shop", &url(&repo));
+    let at = registered_ms(&t, "shop");
+    let before = restored(&t);
+    let bytes = journal_bytes(&t);
+    // (arguments, exit code, words in the reason)
+    let cases: Vec<(Vec<String>, i32, &str)> = vec![
+        (
+            vec![
+                "--branch".into(),
+                "develop".into(),
+                "--confirm-change".into(),
+            ],
+            6,
+            "has no branch",
+        ),
+        (
+            vec!["--url".into(), url(&plain), "--confirm-change".into()],
+            6,
+            "is not a Git repository",
+        ),
+        (
+            vec![
+                "--url".into(),
+                url(&gt.0.join("gone")),
+                "--confirm-change".into(),
+            ],
+            6,
+            "does not exist",
+        ),
+        (
+            vec!["--branch".into(), "main".into(), "--confirm-change".into()],
+            6,
+            "nothing to change",
+        ),
+        (
+            vec![
+                "--dockerfile".into(),
+                String::new(),
+                "--confirm-change".into(),
+            ],
+            2,
+            "cannot be empty",
+        ),
+        (
+            vec![
+                "--container-port".into(),
+                "0".into(),
+                "--confirm-change".into(),
+            ],
+            2,
+            "port",
+        ),
+        (
+            vec!["--branch".into(), "release/1".into()],
+            6,
+            "has deployment history",
+        ),
+    ];
+    for (args, code, want) in cases {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = update(&t, &kc, "shop", at, &refs);
+        assert_exit(&o, code);
+        assert!(o.stderr.contains(want), "{want}: {}", o.stderr);
+        let now = restored(&t);
+        assert_eq!(
+            (&now.git, &now.deployments, &now.control),
+            (&before.git, &before.deployments, &before.control),
+            "{args:?}"
+        );
+    }
+    // a source refused before the writer opens: not a byte of the journal moved
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            at,
+            &["--url", &url(&plain), "--confirm-change"],
+        ),
+        6,
+    );
+    assert_eq!(journal_bytes(&t), bytes);
+    // an unknown name
+    assert_exit(&update(&t, &kc, "nope", at, &["--branch", "main"]), 6);
+    assert!(scratch_clean(&t));
+}
+
+#[test]
+fn an_edit_made_from_a_stale_view_is_refused_and_does_not_overwrite_the_newer_one() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    let seen_by_both = registered_ms(&t, "shop");
+    assert_exit(
+        &update(&t, &kc, "shop", seen_by_both, &["--container-port", "4000"]),
+        0,
+    );
+    let o = update(&t, &kc, "shop", seen_by_both, &["--container-port", "5000"]);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("was changed after you opened it"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(restored(&t).git.repos["shop"].container_port, 4000);
+    // a plain re-registration is also a new version
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &url(&repo),
+            APP,
+            &["--branch", "release/1"],
+        ),
+        0,
+    );
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            registered_ms(&t, "shop") - 1,
+            &["--container-port", "1"],
+        ),
+        6,
+    );
+}
+
+#[test]
+fn a_credentialed_registration_keeps_its_host_so_its_secret_is_never_sent_elsewhere() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            "https://git.example.com/acme/shop.git",
+            APP,
+            &["--username", "ci"],
+        ),
+        0,
+    );
+    let at = registered_ms(&t, "shop");
+    for other in [
+        "https://git.evil.example/acme/shop.git",
+        "https://git.example.com.evil.example/acme/shop.git",
+        "http://127.0.0.1:1/acme/shop.git",
+        "ssh://git@git.example.com/acme/shop.git",
+    ] {
+        let o = update(&t, &kc, "shop", at, &["--url", other]);
+        assert_exit(&o, 6);
+        assert!(!o.stdout.contains("updated"), "{other}: {}", o.stdout);
+    }
+    assert_eq!(
+        restored(&t).git.repos["shop"].url,
+        "https://git.example.com/acme/shop.git"
+    );
+    // the same host, another path, is fine, and the credential settings are untouched
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        at,
+        &["--url", "https://git.example.com/acme/shop2.git"],
+    );
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("not verified yet"), "{}", o.stdout);
+    let r = restored(&t).git.repos["shop"].clone();
+    assert_eq!(
+        (r.url.as_str(), r.cred, r.username.as_deref()),
+        (
+            "https://git.example.com/acme/shop2.git",
+            harpoon_deploy::git::CredKind::Token,
+            Some("ci")
+        )
+    );
+}
+
+#[test]
+fn a_source_change_is_refused_while_events_from_the_old_source_are_held() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, second) = fixture(&gt.0);
+    let gt2 = Tmp::new();
+    let (other, _, _) = fixture(&gt2.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &[
+                "git-trigger",
+                "--simulate",
+                "--repo",
+                "shop",
+                "--delivery",
+                "d1",
+                "--revision",
+                &second,
+            ],
+        ),
+        0,
+    );
+    let at = registered_ms(&t, "shop");
+    let o = update(&t, &kc, "shop", at, &["--url", &url(&other)]);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("held Git events"), "{}", o.stderr);
+    assert_eq!(restored(&t).git.repos["shop"].url, url(&repo));
+    // the branch can still be corrected: it does not change which source the held revisions belong to
+    assert_exit(&update(&t, &kc, "shop", at, &["--branch", "release/1"]), 0);
+}
+
+#[test]
+fn an_edit_starts_a_fresh_polling_baseline_so_a_new_source_is_not_compared_with_the_old_one() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    let poll = || sim(&t, &kc, &["watch", "--simulate", "--once", "--queue-only"]);
+    assert_exit(&poll(), 0);
+    commit(&repo, "VERSION", "three\n");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            registered_ms(&t, "shop"),
+            &["--container-port", "4000"],
+        ),
+        0,
+    );
+    let o = poll();
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("first seen"),
+        "the observation made before the edit is not a baseline: {}",
+        o.stdout
+    );
+    assert_eq!(
+        restored(&t).control.events.len(),
+        0,
+        "nothing is queued from the old observation"
+    );
+    // without an edit, the same movement is noticed as before
+    commit(&repo, "VERSION", "four\n");
+    let o = poll();
+    assert!(o.stdout.contains("queued as"), "{}", o.stdout);
+}

@@ -253,18 +253,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
             _ => format!(" (store it with `repo-secret --name {} --kind credential`)", rec.name),
         }
     );
-    let _ = match &verified {
-        Some(c) => writeln!(
-            out,
-            "verified: the Git repository exists and branch {} is at {}",
-            rec.branch,
-            c.get(..12).unwrap_or(c)
-        ),
-        None => writeln!(
-            out,
-            "not verified yet: this source is first contacted by `watch`/`git-deploy`, so a wrong address or credential shows up there"
-        ),
-    };
+    verification_line(out, &verified, &rec.branch);
     if rec.webhook.is_some() {
         let _ = writeln!(
             out,
@@ -273,6 +262,156 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         );
     }
     Ok(exit::OK)
+}
+
+fn verification_line(out: &mut String, verified: &Option<String>, branch: &str) {
+    let _ = match verified {
+        Some(c) => writeln!(
+            out,
+            "verified: the Git repository exists and branch {branch} is at {}",
+            c.get(..12).unwrap_or(c)
+        ),
+        None => writeln!(
+            out,
+            "not verified yet: this source is first contacted by `watch`/`git-deploy`, so a wrong address or credential shows up there"
+        ),
+    };
+}
+
+/// Change a registration's source, branch, Dockerfile path, container port or health path. It appends one
+/// new `gitrepo` record (the latest wins, as for `repo-add`), so history is never rewritten: every
+/// deployment keeps the `gitsrc` record it was started with. The name, the application and the credential
+/// settings never change here. Nothing is built, deployed, restarted or replaced, and Docker is not contacted.
+pub fn repo_update(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let need = |f: &str| {
+        p.value(f)
+            .ok_or_else(|| Fail::usage(format!("--{f} is required")))
+    };
+    let name = need("name")?.to_string();
+    let expect: u64 = need("expect-registered-ms")?.parse().map_err(|_| {
+        Fail::usage("--expect-registered-ms is the registration time you were shown")
+    })?;
+    let current = repo_named(&state_of(&rt)?, &name)?;
+    if current.at_ms != expect {
+        return Err(changed_meanwhile(&name));
+    }
+    let mut rec = current.clone();
+    let mut changed: Vec<&str> = Vec::new();
+    let mut set = |label: &'static str, differs: bool| {
+        if differs {
+            changed.push(label);
+        }
+    };
+    if let Some(u) = p.value("url") {
+        set("source", u != rec.url);
+        rec.url = u.to_string();
+    }
+    if let Some(b) = p.value("branch") {
+        set("branch", b != rec.branch);
+        rec.branch = b.to_string();
+    }
+    let value = |f: &str| -> Result<Option<String>, Fail> {
+        match p.value(f) {
+            Some("") => Err(Fail::usage(format!("--{f} cannot be empty"))),
+            v => Ok(v.map(str::to_string)),
+        }
+    };
+    if let Some(d) = value("dockerfile")? {
+        set("Dockerfile", Some(&d) != rec.dockerfile.as_ref());
+        rec.dockerfile = Some(d);
+    }
+    if let Some(h) = value("health-path")? {
+        set("health check path", Some(&h) != rec.health_path.as_ref());
+        rec.health_path = Some(h);
+    }
+    if let Some(port) = p.value("container-port") {
+        let port: u16 = port
+            .parse()
+            .ok()
+            .filter(|n| *n != 0)
+            .ok_or_else(|| Fail::usage("--container-port is not a port number"))?;
+        set("container port", port != rec.container_port);
+        rec.container_port = port;
+    }
+    if changed.is_empty() {
+        return Err(Fail::refused(format!(
+            "nothing to change: repository {name:?} already has these values"
+        )));
+    }
+    let kind = rec.validate().map_err(Fail::refused)?;
+    let source_changed = changed.contains(&"source");
+    // A stored token or SSH key belongs to the host it was issued for. Sending it somewhere else would leak it,
+    // so a credentialed registration keeps its host; a different host is a new registration.
+    if current.cred != CredKind::None
+        && policy::url_host(&rec.url) != policy::url_host(&current.url)
+    {
+        return Err(Fail::refused(format!(
+            "the {} stored for repository {name:?} belongs to {}, so its source cannot move to another host. Add a new repository for the other host",
+            if current.cred == CredKind::SshKey { "SSH key" } else { "access token" },
+            policy::url_host(&current.url).unwrap_or_else(|| "its current host".into()),
+        )));
+    }
+    // A local source is checked before the journal writer is opened, as at registration.
+    let verified = if kind == policy::UrlKind::File
+        && (source_changed || changed.contains(&"branch"))
+    {
+        policy::check_ref_name(&rec.branch).map_err(Fail::refused)?;
+        let ws = dg::Workspace::create(&std::env::temp_dir(), &nonce())
+            .map_err(|e| Fail::failed(e.to_string()))?;
+        Some(
+            dg::local::verify_local(&ws, &rec.url, &rec.branch, &settings(p)?, &Redactor::none())
+                .map_err(|e| Fail::refused(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let (mut journal, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
+    // Under the writer lock nothing else changes the journal: this is the authoritative check.
+    if restored.git.repos.get(&name) != Some(&current) {
+        return Err(changed_meanwhile(&name));
+    }
+    if restored
+        .deployments
+        .iter()
+        .any(|d| d.application_id == rec.app)
+        && !p.switch("confirm-change")
+    {
+        return Err(Fail::refused(format!(
+            "application {} has deployment history. Confirm the change (--confirm-change): earlier deployments keep the source they were built from, and the next deployment uses the new values",
+            rec.app
+        )));
+    }
+    if source_changed
+        && (!restored.control.held(&rec.app).is_empty()
+            || restored.control.pending_selection(&rec.app).is_some())
+    {
+        return Err(Fail::refused(format!(
+            "application {} has held Git events from the current source. Resume or dismiss them first: they name revisions of the old source",
+            rec.app
+        )));
+    }
+    rec.at_ms = now_ms().max(current.at_ms + 1);
+    let r = GitRecord::Repo(Box::new(rec.clone()));
+    let mut st = restored.git.clone();
+    st.apply(&r).map_err(Fail::refused)?;
+    journal
+        .git(&r)
+        .map_err(|e| Fail::journal(format!("cannot record the repository: {e:?}")))?;
+    let _ = writeln!(
+        out,
+        "updated registration of repository {name} (application {}): {} changed. Nothing was deployed, rebuilt, restarted or replaced; earlier deployments keep the source they were built from",
+        rec.app,
+        changed.join(", ")
+    );
+    verification_line(out, &verified, &rec.branch);
+    Ok(exit::OK)
+}
+
+fn changed_meanwhile(name: &str) -> Fail {
+    Fail::refused(format!(
+        "repository {name:?} was changed after you opened it (another edit or a re-registration). Nothing was changed; reload and try again"
+    ))
 }
 
 fn read_repos(rt: &Runtime) -> Result<std::collections::BTreeMap<String, RepoRec>, Fail> {
@@ -371,7 +510,7 @@ pub fn repo_list(p: &Parsed, out: &mut String) -> R {
     for r in state.git.repos.values() {
         let _ = writeln!(
             out,
-            "{}  {}  app {}  branch {}{}  credential {}{}",
+            "{}  {}  app {}  branch {}{}  credential {}{}  registered-ms {}",
             r.name,
             r.url,
             r.app,
@@ -384,7 +523,8 @@ pub fn repo_list(p: &Parsed, out: &mut String) -> R {
             r.cred.as_str(),
             r.webhook
                 .map(|w| format!("  webhook {}", w.as_str()))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            r.at_ms
         );
         for ((repo, rf), s) in &state.git.seen {
             if repo == &r.name {
@@ -844,6 +984,12 @@ fn poll_repo(
     .map_err(|e| Fail::failed(format!("polling {}: {e}", repo.name)))?;
     drop(ws);
     let (mut j, restored) = store::open_writer(rt, kind_of(rt, p)?)?;
+    // What was just read came from the registration this pass started with. If it has been edited since,
+    // the result belongs to the old source and must not become a baseline for the new one.
+    if restored.git.repos.get(&repo.name) != Some(repo) {
+        let _ = writeln!(out, "{}: its registration changed while it was being polled; this result was discarded and the next pass starts from the new one", repo.name);
+        return Ok(0);
+    }
     let mut ctl = restored.control.clone();
     let mut queued = 0;
     for (branch, sha) in dg::branch_heads(&refs) {
@@ -852,7 +998,13 @@ fn poll_repo(
         }
         let ref_name = format!("refs/heads/{branch}");
         let key = (repo.name.clone(), ref_name.clone());
-        let previous = restored.git.seen.get(&key).map(|s| s.commit.clone());
+        // an observation made under an earlier registration (before an edit) is not a baseline for this one
+        let previous = restored
+            .git
+            .seen
+            .get(&key)
+            .filter(|s| s.at_ms >= repo.at_ms)
+            .map(|s| s.commit.clone());
         if previous.as_deref() == Some(sha.as_str()) {
             continue;
         }
@@ -1053,7 +1205,13 @@ pub fn watch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R
     let mut i: u64 = 0;
     let mut code = exit::OK;
     loop {
+        // an edit made while this process runs takes effect on the next pass
+        let latest = store::read_restored(&rt).ok().flatten();
         for r in &repos {
+            let r = latest
+                .as_ref()
+                .and_then(|s| s.git.repos.get(&r.name))
+                .unwrap_or(r);
             match poll_repo(p, svc, &rt, r, i == 0, out) {
                 Ok(_) => {}
                 Err(f) => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { deploymentOf, liveBlock, logLines, observedFrom, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { deploymentOf, liveBlock, logLines, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -465,4 +465,69 @@ test("the Add repository dialog waits for the engine, keeps its input on failure
   // the form state is only cleared for the token, and only after a successful registration
   assert.match(dialog, /if \(r\.ok\) setToken\(""\)/);
   assert.doesNotMatch(dialog, /setName\(""\)|setLocation\(""\)/);
+});
+
+// ------------------------------------------------------------------ Edit registration
+
+const REPO = { name: "shop", url: "file:///Users/me/Harpoon%20Hello", app: "app_1", project: null, branch: "main", containerPort: 3000, dockerfile: null, healthPath: null, credential: "none", registeredMs: 1234, seen: [] };
+
+test("the edit form starts from the registration, shows a folder as its path and invents no default", () => {
+  assert.deepEqual(registrationFormOf(REPO), { kind: "folder", location: "/Users/me/Harpoon Hello", branch: "main", dockerfile: "", port: "3000", health: "" });
+  assert.equal(registrationFormOf({ ...REPO, url: "https://git.example.com/a/b.git" }).kind, "git");
+});
+
+test("an unchanged form asks for nothing, and a changed one sends only what differs plus the version it was based on", () => {
+  const form = registrationFormOf(REPO);
+  assert.deepEqual(registrationEdit(REPO, form, false), { op: null, changed: [], problem: null });
+  const e = registrationEdit(REPO, { ...form, location: "/Users/me/Other Folder", branch: "develop", dockerfile: "Dockerfile.prod", port: "8080", health: "/healthz" }, true);
+  assert.deepEqual(e.op, { op: "update-repo", name: "shop", expectRegisteredMs: 1234, confirmChange: true, url: "file:///Users/me/Other%20Folder", branch: "develop", dockerfile: "Dockerfile.prod", healthPath: "/healthz", containerPort: 8080 });
+  assert.deepEqual(e.changed, ["source", "branch", "dockerfile path", "health check path", "container port"]);
+  // only the branch changed: nothing else is sent
+  const b = registrationEdit(REPO, { ...form, branch: "develop" }, false).op;
+  assert.deepEqual(Object.keys(b).sort(), ["branch", "confirmChange", "expectRegisteredMs", "name", "op"]);
+});
+
+test("an edit never carries a name, an application, a credential or a runtime, and never asks to deploy", () => {
+  const e = registrationEdit(REPO, { ...registrationFormOf(REPO), branch: "x" }, false).op;
+  for (const k of ["app", "newName", "username", "knownHost", "runtimeDir", "branches", "deploy"]) assert.ok(!(k in e), k);
+  assert.equal(e.op, "update-repo");
+});
+
+test("a form that cannot be sent says why instead of sending something else", () => {
+  const form = registrationFormOf({ ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" });
+  const r = { ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" };
+  assert.match(registrationEdit(r, { ...form, dockerfile: "" }, false).problem, /Dockerfile path cannot be cleared/);
+  assert.match(registrationEdit(r, { ...form, health: " " }, false).problem, /Health check path cannot be cleared/);
+  assert.match(registrationEdit(r, { ...form, location: "relative/dir" }, false).problem, /absolute folder path/);
+  assert.match(registrationEdit(r, { ...form, branch: " " }, false).problem, /branch is required/);
+  for (const port of ["", "0", "70000"]) assert.match(registrationEdit(r, { ...form, port }, false).problem, /container port/);
+  assert.match(registrationEdit({ ...r, url: "https://x/y.git" }, { ...registrationFormOf({ ...r, url: "https://x/y.git" }), location: " " }, false).problem, /repository URL/);
+});
+
+test("a successful edit is reported as an update, never as a deployment", () => {
+  const o = registrationOutcome(op({ detail: "updated registration of repository shop (application app_1): branch changed. Nothing was deployed, rebuilt, restarted or replaced; earlier deployments keep the source they were built from\nnot verified yet: this source is first contacted by `watch`/`git-deploy`\n" }));
+  assert.equal(o.ok, true);
+  assert.match(o.lines[0], /^updated registration/);
+  assert.match(o.lines[0], /Nothing was deployed/);
+});
+
+test("the Edit registration dialog only edits: version captured at open, history needs an acknowledgement, no Docker operation", () => {
+  const d = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const start = d.indexOf("function EditRegistrationDialog");
+  const dialog = d.slice(start);
+  assert.match(dialog, /const \[base\] = useState\(repo\)/, "the engine is told which version the person was looking at");
+  assert.match(dialog, /registrationEdit\(base, form, ack\)/);
+  assert.match(dialog, /const canSave = !!edit\.op && \(!hasHistory \|\| ack\)/);
+  assert.match(dialog, /c\.engine!\.run\(edit\.op\)/);
+  assert.doesNotMatch(dialog, /op: "(deploy|rollback|restore|add-repo|repo-secret)"|liveChanges|CONFIRM_LIVE|setRoute/, "an edit starts nothing and does not navigate");
+  assert.match(dialog, /Nothing was deployed/);
+  // a failed save keeps the form open with the reason; only Done/Cancel close it
+  assert.match(dialog, /outcome\?\.ok === false &&/);
+  assert.doesNotMatch(dialog, /void submit\(\);\s*close\(\)/);
+  // the dialog is mutating, so a read-only attached runtime can never open it
+  const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
+  assert.match(ctx, /MUTATING_DIALOGS[^\n]*"edit-registration"/);
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit registration/);
+  assert.doesNotMatch(screens, /register the repository again/);
 });

@@ -12,7 +12,7 @@
 import { exposureOf, parseDockerPorts, type HostListeners, type PortMapping } from "./portExposure.ts";
 import type {
   AppAddress, AppModel, Automation, ConfigFact, ConfigFacts, Deployment, DeployState, Observation, ObservationCheck, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
-  Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
+  EngineRepo, Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
 } from "./deployTypes.ts";
 
 export type SnapStep = { name: string; status: string; startedMs: number | null; finishedMs: number | null; note: string; log: boolean };
@@ -39,7 +39,7 @@ export type SnapApp = {
 };
 export type SnapRepo = {
   name: string; url: string; app: string; project: string | null; environment: string | null; branch: string; filters: string[]; credential: string; webhook: string | null;
-  containerPort: number; dockerfile: string | null; context: string | null; target: string | null; healthPath: string | null; seen: { refName: string; commit: string; atMs: number }[];
+  containerPort: number; dockerfile: string | null; context: string | null; target: string | null; healthPath: string | null; registeredMs: number; seen: { refName: string; commit: string; atMs: number }[];
 };
 export type SnapDefinition = { scope: string; name: string; kind: string; build: boolean; runtime: boolean; value: string | null; secretId: string | null; version: number | null; atMs: number };
 export type SnapSource = { kind: "own" | "external"; path: string; journalFormat: "sqlite" | "legacy" | "none"; readOnly: boolean };
@@ -185,7 +185,7 @@ export function engineMeta(snap: EngineSnapshot | null, loadError: string | null
   return {
     generatedMs: snap?.generatedMs ?? 0, store: snap?.store ?? "missing", storeError: snap?.storeError ?? null, writerHeld: snap?.writerHeld ?? false,
     gate: snap?.gate ?? { liveDeploy: false, liveReplacement: false, reason: "The deployment engine has not answered yet." },
-    repos: (snap?.repos ?? []).map((r) => ({ name: r.name, url: r.url, app: r.app, project: r.project, branch: r.branch, containerPort: r.containerPort, dockerfile: r.dockerfile, healthPath: r.healthPath, seen: r.seen })),
+    repos: (snap?.repos ?? []).map((r) => ({ name: r.name, url: r.url, app: r.app, project: r.project, branch: r.branch, containerPort: r.containerPort, dockerfile: r.dockerfile, healthPath: r.healthPath, credential: r.credential, registeredMs: r.registeredMs, seen: r.seen })),
     loadError, stale,
     externals: externals.map((x, i) => ({ id: `ext${i}`, path: x.path, format: x.snapshot?.source.journalFormat ?? "none", store: x.snapshot?.store ?? "missing", error: x.error ?? x.snapshot?.storeError ?? null })),
   };
@@ -551,11 +551,47 @@ export type RegistrationOutcome =
 
 export function registrationOutcome(r: OpResult, token?: OpResult | null): RegistrationOutcome {
   if (!r.ok) return { ok: false, message: failureText(r) };
-  const lines = (r.detail ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(registered|verified|not verified)/.test(l));
+  const lines = (r.detail ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(registered|updated|verified|not verified)/.test(l));
   return {
     ok: true,
     lines: lines.length ? lines : [r.summary || "The repository was registered."],
     verified: lines.some((l) => l.startsWith("verified")),
     tokenProblem: token && !token.ok ? failureText(token) : null,
   };
+}
+
+// ------------------------------------------------------------------ editing a registration
+
+export type RegistrationForm = { kind: "git" | "folder"; location: string; branch: string; dockerfile: string; port: string; health: string };
+export type RegistrationEdit = { op: Record<string, unknown> | null; changed: string[]; problem: string | null };
+
+/** The form as the registration stands: a local folder is shown as its path, and an unset value stays empty (never a made-up default). */
+export function registrationFormOf(r: EngineRepo): RegistrationForm {
+  return { kind: r.url.startsWith("file://") ? "folder" : "git", location: displayUrl(r.url), branch: r.branch, dockerfile: r.dockerfile ?? "", port: String(r.containerPort), health: r.healthPath ?? "" };
+}
+
+/**
+ * What an edit asks the engine for: only the fields that differ from the registration the person opened, plus the
+ * version of that registration so the engine can refuse if it changed meanwhile. `confirm` is the person's
+ * acknowledgement for an application that already has deployments. The name, application and credential are not
+ * part of an edit. Nothing here deploys anything.
+ */
+export function registrationEdit(r: EngineRepo, f: RegistrationForm, confirm: boolean): RegistrationEdit {
+  const changed: string[] = [];
+  const op: Record<string, unknown> = { op: "update-repo", name: r.name, expectRegisteredMs: r.registeredMs, confirmChange: confirm };
+  const fail = (problem: string): RegistrationEdit => ({ op: null, changed: [], problem });
+  const url = f.kind === "folder" ? fileUrlFor(f.location.trim()) : f.location.trim();
+  if (!url) return fail(f.kind === "folder" ? "Enter an absolute folder path (starting with /, without . or .. parts)." : "Enter the repository URL.");
+  if (url !== r.url) { op.url = url; changed.push("source"); }
+  const branch = f.branch.trim();
+  if (!branch) return fail("A branch is required.");
+  if (branch !== r.branch) { op.branch = branch; changed.push("branch"); }
+  for (const [label, key, now, was] of [["Dockerfile path", "dockerfile", f.dockerfile.trim(), r.dockerfile ?? ""], ["Health check path", "healthPath", f.health.trim(), r.healthPath ?? ""]] as const) {
+    if (!now && was) return fail(`${label} cannot be cleared; enter the path to use.`);
+    if (now && now !== was) { op[key] = now; changed.push(label.toLowerCase()); }
+  }
+  const port = Number(f.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return fail("The container port must be a number from 1 to 65535.");
+  if (port !== r.containerPort) { op.containerPort = port; changed.push("container port"); }
+  return changed.length ? { op, changed, problem: null } : { op: null, changed: [], problem: null };
 }

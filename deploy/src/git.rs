@@ -157,6 +157,30 @@ pub fn ssh_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// The host a URL talks to, lower-cased, without credentials or port; `None` for a `file://` URL. A stored
+/// credential belongs to this host (see `repo-update`).
+pub fn url_host(url: &str) -> Option<String> {
+    if url.starts_with("file://") {
+        return None;
+    }
+    if url.starts_with("ssh://") || !url.contains("://") {
+        return ssh_host(url).map(|h| h.to_ascii_lowercase());
+    }
+    let authority = url.split_once("://")?.1.split('/').next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host
+        .rsplit_once(':')
+        .map(|(h, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                host
+            }
+        })
+        .unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 /// `*` matches any run of characters, `?` one character. Used for branch filters.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
@@ -823,5 +847,26 @@ mod tests {
         let body = bad_commit.split_once('\t').unwrap().1.to_string();
         let f: Vec<&str> = body.split('\t').collect();
         assert!(decode(&f).is_err());
+    }
+
+    #[test]
+    fn the_host_of_a_url_ignores_credentials_port_and_case() {
+        for (url, host) in [
+            ("https://GitHub.com/acme/shop.git", Some("github.com")),
+            (
+                "https://x-access-token@github.com:443/acme/shop.git",
+                Some("github.com"),
+            ),
+            ("http://127.0.0.1:8080/r.git", Some("127.0.0.1")),
+            ("ssh://git@Example.com:2222/acme/shop.git", Some("example.com")),
+            ("git@example.com:acme/shop.git", Some("example.com")),
+            ("file:///Users/x/shop", None),
+        ] {
+            assert_eq!(url_host(url).as_deref(), host, "{url}");
+        }
+        assert_ne!(
+            url_host("https://github.com/a/b"),
+            url_host("https://github.com.evil.example/a/b")
+        );
     }
 }
