@@ -125,5 +125,22 @@ fn main() {
     }
   }
 
+  // A build with debug assertions reads the staged resources straight from $CARGO_MANIFEST_DIR/bundle-resources
+  // (deploy_api::bundled_resources, which is gated on the same cfg), so the copy tauri-build makes next to the
+  // executable (target/debug/harpoon) is never read. It is also costly: the guest root image is sparse (about
+  // 0.23 GiB allocated of 2 GiB) and tauri-build's plain copy turns it into a dense 2 GiB file. Declare no
+  // resources to tauri-build for such builds, through its documented TAURI_CONFIG merge patch.
+  //
+  // tauri.conf.json is untouched, so a build without debug assertions (release, the packaged app) copies and
+  // bundles exactly what it did, and the bundler reads that file itself. An explicit TAURI_CONFIG (the Tauri
+  // CLI's `--config`) is left alone, and HARPOON_COPY_DEBUG_RESOURCES=1 restores the copy.
+  println!("cargo:rerun-if-env-changed=HARPOON_COPY_DEBUG_RESOURCES");
+  if env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
+    && env::var_os("TAURI_CONFIG").is_none()
+    && env::var_os("HARPOON_COPY_DEBUG_RESOURCES").is_none()
+  {
+    env::set_var("TAURI_CONFIG", r#"{"bundle":{"resources":[]}}"#);
+  }
+
   tauri_build::build()
 }

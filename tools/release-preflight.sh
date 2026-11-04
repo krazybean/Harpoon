@@ -67,4 +67,25 @@ grep -q 'harpoon-root.img' "$ROOT/assets/guest/.bootstrap/README.md" || {
   exit 1
 }
 
+say "Verify the packaged resources are still declared, and the debug-only copy skip stays gated"
+# build.rs asks tauri-build to copy no resources, but only in a build with debug assertions and only through
+# TAURI_CONFIG. The packaged app must keep declaring the whole resource tree in tauri.conf.json.
+node -e '
+  const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  const r = c.bundle && c.bundle.resources;
+  if (!r || Array.isArray(r) || r["bundle-resources/harpoon"] !== "harpoon") {
+    console.error("ERROR: tauri.conf.json no longer maps bundle-resources/harpoon to harpoon");
+    process.exit(1);
+  }
+' "$UI_DIR/src-tauri/tauri.conf.json"
+grep -q 'CARGO_CFG_DEBUG_ASSERTIONS' "$UI_DIR/src-tauri/build.rs" || {
+  echo "ERROR: build.rs no longer gates its resource-copy skip on debug assertions" >&2
+  exit 1
+}
+# the one place build.rs sets TAURI_CONFIG; a second would be a skip nobody reviewed
+[ "$(grep -c 'set_var("TAURI_CONFIG"' "$UI_DIR/src-tauri/build.rs")" = 1 ] || {
+  echo "ERROR: build.rs must set TAURI_CONFIG exactly once, inside the debug-assertions guard" >&2
+  exit 1
+}
+
 printf '\nHARPOON_RELEASE_PREFLIGHT_PASS\n'
