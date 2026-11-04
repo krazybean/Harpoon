@@ -160,6 +160,8 @@ pub struct RepoDto {
     pub context: Option<String>,
     pub target: Option<String>,
     pub health_path: Option<String>,
+    /// The version of this registration (when it was last recorded). An edit names the one it was based on.
+    pub registered_ms: u64,
     pub seen: Vec<SeenDto>,
 }
 
@@ -613,6 +615,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
             context: repo.context.clone(),
             target: repo.target.clone(),
             health_path: repo.health_path.clone(),
+            registered_ms: repo.at_ms,
             seen: r
                 .git
                 .seen
@@ -1052,6 +1055,20 @@ pub enum DeployOp {
         known_host: Option<String>,
         webhook: Option<String>,
     },
+    /// Change an existing registration. Only the fields given are changed; the name, application and credential
+    /// settings never are. `expect_registered_ms` is the version the person was looking at.
+    #[serde(rename_all = "camelCase")]
+    UpdateRepo {
+        name: String,
+        expect_registered_ms: u64,
+        url: Option<String>,
+        branch: Option<String>,
+        dockerfile: Option<String>,
+        container_port: Option<u16>,
+        health_path: Option<String>,
+        #[serde(default)]
+        confirm_change: bool,
+    },
     #[serde(rename_all = "camelCase")]
     RepoSecret {
         name: String,
@@ -1201,6 +1218,36 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "webhook", webhook);
             // the desktop only ever creates: an existing name is refused, never silently replaced
             a.push("--new".into());
+            (a, vec![])
+        }
+        DeployOp::UpdateRepo {
+            name,
+            expect_registered_ms,
+            url,
+            branch,
+            dockerfile,
+            container_port,
+            health_path,
+            confirm_change,
+        } => {
+            let mut a = s(&[
+                "repo-update",
+                "--name",
+                name,
+                "--expect-registered-ms",
+                &expect_registered_ms.to_string(),
+            ]);
+            opt(&mut a, "url", url);
+            opt(&mut a, "branch", branch);
+            opt(&mut a, "dockerfile", dockerfile);
+            opt(&mut a, "health-path", health_path);
+            if let Some(p) = container_port {
+                a.push("--container-port".into());
+                a.push(p.to_string());
+            }
+            if *confirm_change {
+                a.push("--confirm-change".into());
+            }
             (a, vec![])
         }
         DeployOp::RepoSecret { name, kind, value } => (

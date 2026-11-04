@@ -164,10 +164,36 @@ pub fn fixture(root: &Path) -> (PathBuf, String, String) {
 
 /// `git http-backend` behind a server that demands `Authorization: Basic base64(user:token)`.
 pub struct HttpGit {
+    latch: Arc<Latch>,
     pub port: u16,
     pub token: Arc<Mutex<String>>,
     pub seen_auth: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
+}
+
+/// A one-shot pause in the server: after `hold_next_request`, the next request is read and then waits, without
+/// answering, until `release`. It lets a test run something else while a client is mid-request, in a fixed order.
+#[derive(Default)]
+struct Latch {
+    state: Mutex<(bool, bool, bool)>, // (armed, held, open)
+    cv: std::sync::Condvar,
+}
+
+impl Latch {
+    fn pause_if_armed(&self) {
+        let mut s = self.state.lock().unwrap();
+        if !s.0 {
+            return;
+        }
+        s.0 = false;
+        s.1 = true;
+        self.cv.notify_all();
+        let end = std::time::Instant::now() + Duration::from_secs(60);
+        while !s.2 && std::time::Instant::now() < end {
+            s = self.cv.wait_timeout(s, Duration::from_millis(100)).unwrap().0;
+        }
+        s.1 = false;
+    }
 }
 
 pub fn b64(s: &str) -> String {
@@ -199,6 +225,8 @@ impl HttpGit {
             Arc::new(AtomicBool::new(false)),
         );
         let (seen2, stop2) = (seen.clone(), stop.clone());
+        let latch = Arc::new(Latch::default());
+        let latch2 = latch.clone();
         std::thread::spawn(move || {
             while !stop2.load(Ordering::SeqCst) {
                 let Ok((mut c, _)) = l.accept() else {
@@ -232,6 +260,7 @@ impl HttpGit {
                             .map(|(_, v)| v.trim().to_string())
                     })
                 };
+                latch2.pause_if_armed();
                 let want = format!("Basic {}", b64(&format!("{user}:{}", tk.lock().unwrap())));
                 let got = hdr("Authorization");
                 seen2.lock().unwrap().push(got.clone().unwrap_or_default());
@@ -294,6 +323,7 @@ impl HttpGit {
             }
         });
         HttpGit {
+            latch,
             port,
             token,
             seen_auth: seen,
@@ -302,6 +332,23 @@ impl HttpGit {
     }
     pub fn url(&self, repo: &str) -> String {
         format!("http://127.0.0.1:{}/{repo}", self.port)
+    }
+    /// The next request is read and then held, unanswered, until `release`.
+    pub fn hold_next_request(&self) {
+        *self.latch.state.lock().unwrap() = (true, false, false);
+    }
+    /// Whether a request is being held now, waiting up to `timeout` for one.
+    pub fn wait_until_held(&self, timeout: Duration) -> bool {
+        let end = std::time::Instant::now() + timeout;
+        let mut s = self.latch.state.lock().unwrap();
+        while !s.1 && std::time::Instant::now() < end {
+            s = self.latch.cv.wait_timeout(s, Duration::from_millis(50)).unwrap().0;
+        }
+        s.1
+    }
+    pub fn release(&self) {
+        self.latch.state.lock().unwrap().2 = true;
+        self.latch.cv.notify_all();
     }
 }
 

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
 import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
@@ -593,11 +593,12 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
           {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}{fact("Health check", "healthCheck")}{fact("Replacement", "replacement")}</div></section>
         <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Source</h2></div><div className="dp-panel__body dp-col">
           {fact("Source", "source")}{fact("Branch", "branch")}
+          {app.external || !c.state.engine?.repos.some((r) => r.app === app.id) ? null : <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit registration…</button></div>}
           {app.external ? null : <div className="dp-evidence"><Warning size={12} />New commits are found only when you press Check for new commits. Unattended deployment is not offered.</div>}</div></section>
         {app.external ? null : <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
           <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>
           <div><button className="btn btn--destructive" disabled title="Removing applications is not part of this build."><Trash size={14} /> Remove application…</button></div></div></section>}
-        <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>{app.external ? "Read-only. These are the values that the external journal (and Docker, where marked) shows; nothing here can be changed from Harpoon." : "Read-only. These are the values the repository registration and the journal recorded. To change a registration, register the repository again with the new values."}</p>
+        <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>{app.external ? "Read-only. These are the values that the external journal (and Docker, where marked) shows; nothing here can be changed from Harpoon." : "Read-only. These are the values the repository registration and the journal recorded. Use Edit registration to change the source, branch, Dockerfile path, container port or health check path; it records a new version and deploys nothing."}</p>
       </div>
     );
   }

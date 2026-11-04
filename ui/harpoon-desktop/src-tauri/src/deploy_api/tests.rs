@@ -1973,3 +1973,66 @@ fn the_hostname_and_route_come_from_the_records_and_survive_a_restart_without_wr
     std::fs::write(bj.join(harpoon_deploy_journal::SQLITE_FILE), b"not a database").unwrap();
     assert!(route_table(&bad).is_err());
 }
+
+fn update_op(expect: u64, f: impl FnOnce(&mut serde_json::Value)) -> DeployOp {
+    let mut v = serde_json::json!({ "op": "update-repo", "name": "shop", "expectRegisteredMs": expect });
+    f(&mut v);
+    serde_json::from_value(v).expect("the front end's request shape")
+}
+
+#[test]
+fn editing_a_registration_changes_only_what_was_asked_and_works_with_every_gate_closed() {
+    let dir = rt("edit");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let before = snapshot(&dir, 1);
+    let v = before.repos[0].registered_ms;
+    assert!(v > 0);
+    // an edit is not a Docker operation: it needs no runtime and no authorization, even with the gate closed
+    let r = run_op_closed(
+        &dir,
+        &update_op(v, |o| {
+            o["branch"] = "release".into();
+            o["containerPort"] = 8080.into();
+            o["healthPath"] = "/healthz".into();
+        }),
+        &kc,
+    );
+    assert!(r.ok, "{}", r.detail);
+    assert!(r.summary.contains("Nothing was deployed"), "{}", r.summary);
+    let after = snapshot(&dir, 2);
+    let (a, b) = (&before.repos[0], &after.repos[0]);
+    assert_eq!((b.branch.as_str(), b.container_port, b.health_path.as_deref()), ("release", 8080, Some("/healthz")));
+    assert_eq!((&b.name, &b.app, &b.url, &b.credential), (&a.name, &a.app, &a.url, &a.credential));
+    assert!(b.registered_ms > a.registered_ms);
+    assert_eq!(after.apps.len(), 1, "the application keeps its identity");
+    assert!(after.apps[0].deployments.is_empty() && after.apps[0].serving.is_none(), "an edit deploys nothing");
+}
+
+#[test]
+fn a_stale_or_empty_edit_is_refused_with_a_reason_and_leaves_the_registration_as_it_was() {
+    let dir = rt("edit-refused");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let v = snapshot(&dir, 1).repos[0].registered_ms;
+    assert!(run_op(&dir, &update_op(v, |o| o["containerPort"] = 4000.into()), &kc).ok);
+    let stale = run_op(&dir, &update_op(v, |o| o["containerPort"] = 5000.into()), &kc);
+    assert!(!stale.ok && stale.summary.contains("was changed after you opened it"), "{}", stale.summary);
+    assert!(stale.hint.unwrap_or_default().contains("refused this before changing anything"));
+    let now = snapshot(&dir, 2).repos[0].clone();
+    assert_eq!(now.container_port, 4000);
+    let same = run_op(&dir, &update_op(now.registered_ms, |o| o["containerPort"] = 4000.into()), &kc);
+    assert!(!same.ok && same.summary.contains("nothing to change"), "{}", same.summary);
+    let gone = run_op(&dir, &update_op(1, |o| { o["name"] = "nope".into(); o["branch"] = "x".into(); }), &kc);
+    assert!(!gone.ok && gone.summary.contains("is not registered"), "{}", gone.summary);
+}
+
+#[test]
+fn an_edit_request_cannot_name_a_runtime_an_application_or_a_new_name() {
+    for field in ["app", "newName", "runtimeDir", "username", "knownHost"] {
+        let v = serde_json::json!({ "op": "update-repo", "name": "shop", "expectRegisteredMs": 1, field: "x" });
+        assert!(serde_json::from_value::<DeployOp>(v).is_err(), "{field} must not be accepted");
+    }
+    // the version is required: there is no blind overwrite
+    assert!(serde_json::from_value::<DeployOp>(serde_json::json!({ "op": "update-repo", "name": "shop", "branch": "x" })).is_err());
+}

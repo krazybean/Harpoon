@@ -105,7 +105,9 @@ fn io_text(e: &std::io::Error) -> String {
     }
 }
 
-fn plain_relative(name: &str) -> bool {
+/// A Dockerfile name that stays inside the context by its spelling alone: not empty, no NUL, not absolute, only
+/// plain components (no `..`, no `.`). `confine` also checks the real path once the tree exists.
+pub fn plain_relative(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('\0')
         && !Path::new(name).is_absolute()

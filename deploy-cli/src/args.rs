@@ -137,6 +137,21 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "new"],
     },
     Spec {
+        command: "repo-update",
+        values: &[
+            "runtime-dir",
+            "name",
+            "expect-registered-ms",
+            "url",
+            "branch",
+            "container-port",
+            "dockerfile",
+            "health-path",
+            "git-timeout-secs",
+        ],
+        switches: &["simulate", "confirm-change"],
+    },
+    Spec {
         command: "repo-secret",
         values: &["runtime-dir", "name", "kind"],
         switches: &["simulate"],
@@ -434,6 +449,8 @@ COMMANDS
   repo-add        register a Git repository for an application (--name N --url U --app A --container-port P [--branch B] [--filter PATTERN]... [--webhook github|gitlab]
                   [--known-host LINE, required for SSH: there is no trust on first use] [--new: refuse a name that is already registered]
                   a file:// source is checked first: it must be a Git repository with that branch; other sources are first contacted by watch/git-deploy)
+  repo-update     change a registration's source, branch, Dockerfile path, container port or health path (--name N --expect-registered-ms T, from repo-list; [--url U] [--branch B] [--dockerfile F] [--container-port P] [--health-path /P]);
+                  appends a record, deploys nothing, keeps the name, application and credential; needs --confirm-change once the application has deployments; a credentialed repository keeps its host
   repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
   repo-list       registered repositories, what was last observed, and the last deployment from each
   git-deploy      check out a branch, tag or exact commit into a bounded private workspace and deploy it; the immutable commit is recorded

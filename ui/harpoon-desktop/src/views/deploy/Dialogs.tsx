@@ -2,9 +2,9 @@ import { useRef, useState } from "react";
 import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
-import type { AppModel, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
+import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationOutcome, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -51,6 +51,10 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const CONFIRM_LIVE: LiveConfirmation = { liveChanges: true, cutover: false };
   if (dialog.kind === "create") return c.engine ? <EngineCreateDialog c={c} close={close} /> : <CreateDialog c={c} dialog={dialog} close={close} />;
   if (dialog.kind === "variable") return <VariableDialog c={c} name={dialog.name} close={close} />;
+  if (dialog.kind === "edit-registration") {
+    const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
+    return app && repo ? <EditRegistrationDialog c={c} repo={repo} hasHistory={app.deployments.length > 0} close={close} /> : null;
+  }
   if (!app) return null;
 
   if (dialog.kind === "deploy" || dialog.kind === "redeploy" || dialog.kind === "retry" || dialog.kind === "promote") {
@@ -363,6 +367,62 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
         <Row icon={<Check size={14} />}>Record <b>{name || "the repository"}</b> ({kind === "git" ? "Git" : "local"}) tracking <span className="mono">{branch || "its default branch"}</span></Row>
         <Row icon={<Info size={14} />}>Harpoon does not poll in the background: it looks for new commits only when you press <b>Check for new commits</b>, and records what it finds as held events.</Row>
         <Row icon={<RocketLaunch size={14} />}>Nothing deploys until you choose <b>Deploy</b></Row>
+      </Plan>
+    </Dialog>
+  );
+}
+
+
+/**
+ * Edit where and how future deployments are built. It records a new version of the registration and nothing else:
+ * no build, deploy, restart or replacement, and earlier deployments keep the source they were built from.
+ */
+function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: EngineRepo; hasHistory: boolean; close: () => void }) {
+  // the registration as it was when the dialog opened: the engine refuses if it has changed since
+  const [base] = useState(repo);
+  const [form, setForm] = useState<RegistrationForm>(() => registrationFormOf(repo));
+  const [ack, setAck] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
+  const [picking, setPicking] = useState(false);
+  const set = (patch: Partial<RegistrationForm>) => setForm((f) => ({ ...f, ...patch }));
+  const edit = registrationEdit(base, form, ack);
+  const saved = outcome?.ok === true;
+  const canSave = !!edit.op && (!hasHistory || ack) && !c.engine!.busy && !submitting;
+  const submit = async () => {
+    if (!edit.op) return;
+    setSubmitting(true);
+    setOutcome(null);
+    try { setOutcome(registrationOutcome(await c.engine!.run(edit.op))); } finally { setSubmitting(false); }
+  };
+  return (
+    <Dialog wide title={`Edit registration · ${base.name}`} sub="Changes where and how future deployments are built. This does not deploy, rebuild, restart or replace anything." onClose={close}
+      footer={saved
+        ? <button className="btn btn--primary" onClick={close}>Done</button>
+        : <button className="btn btn--primary" disabled={!canSave} onClick={() => void submit()}>{submitting ? "Saving…" : "Save registration"}</button>}>
+      {outcome?.ok === false && <Banner tone="err" title="The registration was not changed">{outcome.message}</Banner>}
+      {outcome?.ok === true && <Banner tone={outcome.verified ? "ok" : "warn"} title="Registration updated. Nothing was deployed.">
+        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        <div>The running application, if any, is unchanged. Choose Deploy when you want a release from the new values.</div>
+      </Banner>}
+      <div className="dp-field"><label>Source</label><div className="dp-seg"><button aria-pressed={form.kind === "git"} disabled={saved} onClick={() => set({ kind: "git" })}>Git repository</button><button aria-pressed={form.kind === "folder"} disabled={saved} onClick={() => set({ kind: "folder" })}>Local folder (a Git repository on this Mac)</button></div></div>
+      <div className="dp-grid dp-grid--2">
+        <div className="dp-field"><label>Name</label><input className="dp-input" value={base.name} readOnly aria-readonly="true" /><small>The name and application identity do not change.</small></div>
+        <div className="dp-field"><label htmlFor="eloc">{form.kind === "git" ? "Repository URL" : "Absolute path"}</label>
+          <div className="dp-row"><input id="eloc" className="dp-input" style={{ flex: 1 }} value={form.location} readOnly={saved} onChange={(e) => set({ location: e.target.value })} />
+            {form.kind === "folder" ? <button type="button" className="btn btn--secondary" disabled={picking || saved} onClick={() => { setPicking(true); c.engine!.pickFolder().then((p) => { if (p) set({ location: p }); }, () => {}).finally(() => setPicking(false)); }}><FolderSimple size={14} /> Choose…</button> : null}</div></div>
+        <div className="dp-field"><label htmlFor="ebr">Branch</label><input id="ebr" className="dp-input" value={form.branch} readOnly={saved} onChange={(e) => set({ branch: e.target.value })} /></div>
+        <div className="dp-field"><label htmlFor="epo">Container port</label><input id="epo" className="dp-input" inputMode="numeric" value={form.port} readOnly={saved} onChange={(e) => set({ port: e.target.value.replace(/\D/g, "") })} /></div>
+        <div className="dp-field"><label htmlFor="edf">Dockerfile</label><input id="edf" className="dp-input" value={form.dockerfile} placeholder="Dockerfile" readOnly={saved} onChange={(e) => set({ dockerfile: e.target.value })} /></div>
+        <div className="dp-field"><label htmlFor="ehp">Health check path</label><input id="ehp" className="dp-input" value={form.health} placeholder="/" readOnly={saved} onChange={(e) => set({ health: e.target.value })} /></div>
+      </div>
+      {edit.problem && !saved ? <small style={{ color: "var(--error-fg)" }}>{edit.problem}</small> : null}
+      {base.credential !== "none" && <Banner tone="info" icon={<Key size={18} />} title="This repository has a saved credential">It stays with this repository's destination: the same host, port and protocol (https, http or ssh). The path can change, but not where requests go. To use another destination, add a new repository.</Banner>}
+      {hasHistory && !saved && <label className="dp-row" style={{ gap: 8, alignItems: "flex-start" }}><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /><span>This application already has deployments. They keep the source they were built from; the next deployment will use these values.</span></label>}
+      <Plan>
+        <Row icon={<Check size={14} />}>{edit.changed.length ? <>Record a new version of <b>{base.name}</b>: {edit.changed.join(", ")}</> : "Nothing changed yet"}</Row>
+        <Row icon={<Info size={14} />}>A local folder is checked the way it is when added: it must be a Git repository with that branch.</Row>
+        <Row icon={<RocketLaunch size={14} />}>Nothing is built, deployed or restarted</Row>
       </Plan>
     </Dialog>
   );
