@@ -1097,6 +1097,15 @@ pub enum DeployOp {
         #[serde(default)]
         confirm_removal: bool,
     },
+    /// Take a never-deployed application off the active list (`app-remove`; the engine refuses unless the build and the
+    /// runtime are authorized, and unless the application owns nothing). The version is the one the person was shown.
+    #[serde(rename_all = "camelCase")]
+    RemoveApp {
+        name: String,
+        expect_registered_ms: u64,
+        #[serde(default)]
+        confirm_application_removal: bool,
+    },
     /// Change an existing registration. Only the fields given are changed; the name, application and credential
     /// settings never are. `expect_registered_ms` is the version the person was looking at.
     #[serde(rename_all = "camelCase")]
@@ -1306,6 +1315,23 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             ]);
             if *confirm_removal {
                 a.push("--confirm-removal".into());
+            }
+            (a, vec![])
+        }
+        DeployOp::RemoveApp {
+            name,
+            expect_registered_ms,
+            confirm_application_removal,
+        } => {
+            let mut a = s(&[
+                "app-remove",
+                "--name",
+                name,
+                "--expect-registered-ms",
+                &expect_registered_ms.to_string(),
+            ]);
+            if *confirm_application_removal {
+                a.push("--confirm-application-removal".into());
             }
             (a, vec![])
         }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { EXACT_TEXT_INPUT, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -636,13 +636,12 @@ test("the Remove registration dialog needs the typed name, sends only the planne
   for (const phrase of [/Keeps<\/b> the application and its address/, /saved credentials/, /One-way upgrade/, /older Harpoon versions can no longer open it/, /Rolling back still works/]) assert.match(dialog, phrase);
 });
 
-test("the Settings screen offers Remove registration separately from Remove application, which is unchanged and disabled", () => {
+test("the Settings screen offers Remove registration separately from Remove application", () => {
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
   assert.match(screens, /disabled=\{!!c\.engine\?\.busy \|\| !c\.state\.engine\?\.gate\.gitRemoval\}/, "disabled unless this build allows it");
   assert.match(screens, /title=\{c\.state\.engine\?\.gate\.gitRemoval \? [^}]*: REMOVAL_CLOSED_REASON\}/);
   assert.match(screens, /c\.open\(\{ kind: "remove-registration" \}\)\}><Trash size=\{14\} \/> Remove registration\u2026/);
-  // the application button is exactly what it was: disabled, with the same reason, in both places
-  assert.equal((screens.match(/disabled title="Removing applications is not part of this build\."><Trash size=\{14\} \/> Remove application\u2026/g) ?? []).length, 1);
+  // the mock's application button is unchanged: disabled, with the same reason
   assert.equal((screens.match(/disabled title="Not part of this mock"><Trash size=\{14\} \/> Remove application\u2026/g) ?? []).length, 1);
   const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
   assert.match(ctx, /MUTATING_DIALOGS[^\n]*"remove-registration"/, "an attached read-only runtime can never open it");
@@ -656,4 +655,60 @@ test("the exact-name confirmation input is never autocorrected or capitalised", 
   assert.deepEqual(EXACT_TEXT_INPUT, { autoComplete: "off", autoCorrect: "off", autoCapitalize: "off", spellCheck: false });
   const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
   assert.match(dialogs.match(/<input id="rmname"[^>]*>/)[0], /\{\.\.\.EXACT_TEXT_INPUT\}/);
+});
+
+const neverDeployed = (gate, opts = {}) => {
+  const state = st(snap([app([], opts)], { gate }));
+  return { engine: state.engine, app: state.apps.app_1, repo: state.engine.repos[0] };
+};
+
+test("an application is removable only when the build allows it and it owns nothing; otherwise the reason is actionable", () => {
+  let f = neverDeployed(GATE);
+  assert.equal(applicationRemovalBlock(f.engine, f.app), APP_REMOVAL_CLOSED_REASON, "shipping build: closed");
+  assert.deepEqual(applicationRemoval(f.engine, f.app, f.repo, "shop"), { op: null, blocked: APP_REMOVAL_CLOSED_REASON });
+  f = neverDeployed(openGate);
+  assert.equal(applicationRemovalBlock(f.engine, f.app), null);
+  // a deployed application is never offered, and is pointed to Remove registration
+  const deployed = removalFixture(openGate);
+  assert.match(applicationRemovalBlock(deployed.engine, deployed.app), /1 deployment\..*never deployed.*Remove registration/);
+  assert.equal(applicationRemoval(deployed.engine, deployed.app, deployed.repo, "shop").op, null);
+  // a waiting event keeps it
+  f = neverDeployed(openGate, { events: [heldEvent] });
+  assert.match(applicationRemovalBlock(f.engine, f.app), /held or selected Git event is still waiting/);
+  // an application with no registration cannot be removed by name
+  const noRepo = { ...f.engine, repos: [] };
+  assert.match(applicationRemovalBlock(noRepo, { ...f.app, automation: { ...f.app.automation, held: [] } }), /no registered repository/);
+});
+
+test("application removal needs the exact name and sends only the planned request, with the version shown", () => {
+  const { engine, app: a, repo } = neverDeployed(openGate);
+  for (const typed of ["", "Shop", "shop-2", "sho"]) assert.deepEqual(applicationRemoval(engine, a, repo, typed), { op: null, blocked: null }, JSON.stringify(typed));
+  assert.deepEqual(applicationRemoval(engine, a, repo, " shop ").op, { op: "remove-app", name: "shop", expectRegisteredMs: repo.registeredMs, confirmApplicationRemoval: true });
+});
+
+test("the Remove application control and dialog are distinct from Remove registration and cannot bypass the engine", () => {
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  const d = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
+  assert.match(screens, /disabled=\{!!c\.engine\?\.busy \|\| !!appRemovalBlock\}[^>]*onClick=\{\(\) => c\.open\(\{ kind: "remove-application" \}\)\}><Trash size=\{14\} \/> Remove application\u2026/);
+  assert.match(screens, /appRemovalBlock && <div className="dp-evidence">/, "an ineligible application shows why, in the page");
+  assert.match(screens, /retires it from Harpoon's active list\. It does not purge historical journal records or stored credentials, and no container, image or volume is deleted/, "the Danger zone no longer claims containers and images are deleted");
+  assert.match(ctx, /MUTATING_DIALOGS[^\n]*"remove-application"/, "an attached read-only runtime can never open it");
+  const at = d.indexOf("function RemoveApplicationDialog");
+  const dialog = d.slice(at, d.indexOf("\n/**", at));
+  assert.match(dialog, /const \[base\] = useState\(repo\)/);
+  assert.match(dialog, /applicationRemoval\(c\.state\.engine, app, base, typed\)/);
+  assert.match(dialog, /const canRemove = !!plan\.op &&/);
+  assert.match(dialog, /c\.engine!\.run\(plan\.op\)/);
+  assert.match(dialog, /\.\.\.EXACT_TEXT_INPUT/, "no autocorrect or capitalisation on the confirmation");
+  assert.doesNotMatch(dialog, /op: "(deploy|rollback|restore|add-repo|update-repo|repo-secret|remove-repo)"|liveChanges|CONFIRM_LIVE|confirmApplicationRemoval: true/);
+  assert.match(dialog, /outcome\?\.ok === false &&/, "a refusal is shown and the dialog stays open");
+  assert.match(dialog, /const finish = \(\) => \{ close\(\); c\.setRoute\(\{ screen: "home" \}\); \}/, "success returns to the project list");
+  assert.match(dialog, /onClose=\{done \? finish : close\}/);
+  for (const phrase of [/Does not delete<\/b> any Docker container, image or volume/, /historical journal records/, /Keeps<\/b> saved credentials/, /Remove registration<\/b> instead/]) assert.match(dialog, phrase);
+  assert.doesNotMatch(dialog, /Rolling back still works/, "its message is not the registration's");
+  // success keeps the dialog's own application, which has left the list
+  assert.match(d, /removalContext\.current = \{ app, repo \}/);
+  // the front end never names the open value of the capability
+  assert.doesNotMatch(d + screens, /gitRemoval: true/);
 });
