@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { applicationRemoval, configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -38,6 +38,7 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const close = () => c.open(null);
   // The cutover acknowledgement belongs to ONE dialog on ONE application: it is never carried to another dialog or reopened pre-ticked.
   const [ack, setAck] = useState<string | null>(null);
+  const removalContext = useRef<{ app: AppModel; repo: EngineRepo } | null>(null);
   const app: AppModel | undefined = c.state.apps[c.route.appId] ?? Object.values(c.state.apps)[0];
   const locked = c.state.keychain === "locked";
   const st = app ? appStatus(app, c.runtime) : null;
@@ -51,6 +52,14 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const CONFIRM_LIVE: LiveConfirmation = { liveChanges: true, cutover: false };
   if (dialog.kind === "create") return c.engine ? <EngineCreateDialog c={c} close={close} /> : <CreateDialog c={c} dialog={dialog} close={close} />;
   if (dialog.kind === "variable") return <VariableDialog c={c} name={dialog.name} close={close} />;
+  if (dialog.kind !== "remove-application") removalContext.current = null;
+  if (dialog.kind === "remove-application") {
+    // once the removal succeeds the application leaves the list; the dialog keeps what it was opened with to say so
+    const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
+    if (app && repo && !removalContext.current) removalContext.current = { app, repo };
+    const kept = removalContext.current;
+    return kept ? <RemoveApplicationDialog c={c} repo={kept.repo} app={kept.app} close={close} /> : null;
+  }
   if (dialog.kind === "remove-registration") {
     const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
     return app && repo ? <RemoveRegistrationDialog c={c} repo={repo} app={app} close={close} /> : null;
@@ -376,6 +385,51 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   );
 }
 
+
+/**
+ * Retire a never-deployed application from Harpoon's active list. Distinct from Remove registration: it takes the
+ * application itself off the list (it has nothing to keep serving), and says so. Needs the name typed, shows the
+ * engine's answer, a refusal included, without closing, and on success returns to the project list. No journal record,
+ * stored credential, container or image is deleted; the engine decides eligibility again under its own lock.
+ */
+function RemoveApplicationDialog({ c, repo, app, close }: { c: Ctx; repo: EngineRepo; app: AppModel; close: () => void }) {
+  const [base] = useState(repo);
+  const [typed, setTyped] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
+  const done = outcome?.ok === true;
+  // after success the application is gone from the list and its eligibility no longer matters
+  const plan = applicationRemoval(c.state.engine, app, base, typed);
+  const canRemove = !!plan.op && !c.engine!.busy && !submitting && !done;
+  const finish = () => { close(); c.setRoute({ screen: "home" }); };
+  const submit = async () => {
+    if (!plan.op) return;
+    setSubmitting(true);
+    setOutcome(null);
+    try { setOutcome(registrationOutcome(await c.engine!.run(plan.op))); } finally { setSubmitting(false); }
+  };
+  return (
+    <Dialog wide title={`Remove application · ${base.name}`} sub="Retires this never-deployed application from Harpoon's active list." onClose={done ? finish : close}
+      footer={done
+        ? <button className="btn btn--primary" onClick={finish}>Back to projects</button>
+        : <button className="btn btn--destructive" disabled={!canRemove} onClick={() => void submit()}>{submitting ? "Removing…" : "Remove application"}</button>}>
+      {outcome?.ok === false && <Banner tone="err" title="The application was not removed">{outcome.message}</Banner>}
+      {outcome?.ok === true && <Banner tone="ok" title="Application removed from the active list.">
+        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        <div>{base.name} no longer appears in Harpoon. Its journal records and stored credentials were kept.</div>
+      </Banner>}
+      {plan.blocked && !done && <Banner tone="warn" title="Not available right now">{plan.blocked}</Banner>}
+      <Plan>
+        <Row icon={<Check size={14} />}><b>Retires</b> <b>{base.name}</b> from Harpoon's active list, and stops Harpoon checking its repository. It was never deployed, so nothing is serving.</Row>
+        <Row icon={<Info size={14} />}><b>Does not delete</b> any Docker container, image or volume, and does not purge historical journal records.</Row>
+        <Row icon={<Key size={14} />}><b>Keeps</b> saved credentials in the macOS Keychain. A new repository with the same name gets a new application; it does not inherit this one.</Row>
+        <Row icon={<Warning size={14} />}><b>One-way upgrade.</b> The first removal permanently upgrades this deployment journal so that older Harpoon versions can no longer open it. Harpoon makes and verifies a backup first, and reports where it is.</Row>
+        <Row icon={<Info size={14} />}>To disconnect only the source of an application that has been deployed, use <b>Remove registration</b> instead.</Row>
+      </Plan>
+      {!done && <div className="dp-field"><label htmlFor="rmapp">Type <b>{base.name}</b> to confirm</label><input id="rmapp" className="dp-input" {...EXACT_TEXT_INPUT} value={typed} onChange={(e) => setTyped(e.target.value)} disabled={!!plan.blocked} /></div>}
+    </Dialog>
+  );
+}
 
 /**
  * Edit where and how future deployments are built. It records a new version of the registration and nothing else:

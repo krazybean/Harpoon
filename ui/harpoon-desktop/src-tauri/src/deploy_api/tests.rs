@@ -2091,8 +2091,8 @@ fn an_application_whose_registration_was_removed_is_listed_as_disconnected_with_
 }
 
 #[test]
-fn the_desktop_has_no_operation_that_removes_a_registration_but_remove_repo() {
-    for op in ["repo-remove", "remove-registration", "drop-repo", "retire-repo", "remove-app", "delete-repo"] {
+fn the_desktop_has_no_operation_that_removes_a_registration_or_application_but_remove_repo_and_remove_app() {
+    for op in ["repo-remove", "app-remove", "remove-registration", "remove-application", "drop-repo", "retire-repo", "delete-repo", "delete-app", "teardown"] {
         let v = serde_json::json!({ "op": op, "name": "shop", "expectRegisteredMs": 1 });
         assert!(serde_json::from_value::<DeployOp>(v).is_err(), "{op} must not exist in this build");
     }
@@ -2162,4 +2162,98 @@ fn a_removal_request_cannot_carry_anything_but_the_name_the_version_and_the_conf
     }
     // the version is required: there is no blind removal
     assert!(serde_json::from_value::<DeployOp>(serde_json::json!({ "op": "remove-repo", "name": "shop" })).is_err());
+}
+
+// ------------------------------------------------------------------ removing a never-deployed application through the desktop
+
+fn remove_app_op(expect: u64, confirm: bool) -> DeployOp {
+    serde_json::from_value(serde_json::json!({
+        "op": "remove-app", "name": "shop", "expectRegisteredMs": expect, "confirmApplicationRemoval": confirm
+    }))
+    .expect("the front end's request shape")
+}
+
+/// What the person authorizing removal for a disposable runtime does by hand; the product never writes this file.
+fn authorize_by_hand(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let canon = std::fs::canonicalize(dir).unwrap();
+    let marker = canon.join("git-removal.enabled");
+    std::fs::write(&marker, format!("harpoon-git-removal 1\nruntime={}\n", canon.display())).unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn journal_bytes_of(dir: &Path) -> Vec<u8> {
+    std::fs::read(journal_dir(dir).join(harpoon_deploy_journal::SQLITE_FILE)).unwrap()
+}
+
+#[test]
+fn application_removal_is_closed_in_the_shipping_gate_and_sends_exactly_the_request() {
+    let dir = rt("app-removal-gate");
+    let kc = MemorySecretStore::new();
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let v = snapshot(&dir, 1).repos[0].registered_ms;
+    authorize_by_hand(&dir); // even a marker cannot open a build that is closed
+    let bytes = journal_bytes_of(&dir);
+    let r = run_op(&dir, &remove_app_op(v, true), &kc);
+    assert!(!r.ok && r.refused_by_gate && r.summary.contains("not enabled in this build"), "{}", r.summary);
+    assert_eq!(journal_bytes_of(&dir), bytes, "the journal is untouched");
+    assert_eq!(snapshot(&dir, 2).repos.len(), 1);
+    assert!(kc.accounts().is_empty(), "no Keychain access");
+
+    let (args, input) = plan(&remove_app_op(42, true));
+    assert_eq!(args, ["app-remove", "--name", "shop", "--expect-registered-ms", "42", "--confirm-application-removal"]);
+    assert!(input.is_empty());
+    let (args, _) = plan(&remove_app_op(42, false));
+    assert!(!args.contains(&"--confirm-application-removal".to_string()), "an unconfirmed request is not sent as confirmed");
+    // and it is a different command from removing a registration
+    assert_ne!(plan(&remove_app_op(42, true)).0[0], plan(&remove_op(42, true)).0[0]);
+}
+
+#[test]
+fn an_authorized_runtime_removes_a_never_deployed_application_and_the_engine_decides_eligibility_itself() {
+    // a capable build, simulated by assignment (the packaging test forbids a source that writes the open gate)
+    let mut gate = Gate::shipping();
+    gate.git_removal_enabled = !gate.git_removal_enabled;
+    let go = |dir: &Path, op: &DeployOp, kc: &MemorySecretStore| run_op_with(dir, op, &Confirmation::default(), kc, &gate, &|| Err("no runtime".into()));
+    let kc = MemorySecretStore::new();
+
+    // no marker: refused by the runtime, whatever the front end believes
+    let dir = rt("app-removal-marker");
+    assert!(run_op(&dir, &add_named("shop", "https://example.com/acme/shop.git"), &kc).ok);
+    let v = snapshot(&dir, 1).repos[0].registered_ms;
+    let bytes = journal_bytes_of(&dir);
+    let r = go(&dir, &remove_app_op(v, true), &kc);
+    assert!(!r.ok && r.summary.contains("marker") && r.summary.contains("missing"), "{}", r.summary);
+    assert_eq!(journal_bytes_of(&dir), bytes);
+
+    // authorized, but the version is stale or the request is unconfirmed: refused, nothing changes
+    authorize_by_hand(&dir);
+    let r = go(&dir, &remove_app_op(v + 1, true), &kc);
+    assert!(!r.ok, "a stale version is refused");
+    let r = go(&dir, &remove_app_op(v, false), &kc);
+    assert!(!r.ok && r.summary.contains("--confirm-application-removal"), "{}", r.summary);
+    assert_eq!(journal_bytes_of(&dir), bytes);
+    assert_eq!(snapshot(&dir, 2).repos.len(), 1);
+
+    // the front end cannot make a deployed application eligible: the engine counts its deployments
+    let deployed = rt("app-removal-deployed");
+    seed(&deployed, &[dep(D1, Some(DeploymentStatus::Succeeded))]);
+    let mut add = add_named("shop", "https://example.com/acme/shop.git");
+    if let DeployOp::AddRepo { app, .. } = &mut add {
+        *app = Some(APP.into());
+    }
+    assert!(run_op(&deployed, &add, &kc).ok);
+    authorize_by_hand(&deployed);
+    let dv = snapshot(&deployed, 1).repos[0].registered_ms;
+    let before = journal_bytes_of(&deployed);
+    let r = go(&deployed, &remove_app_op(dv, true), &kc);
+    assert!(!r.ok && r.summary.contains("deployment record"), "{}", r.summary);
+    assert_eq!(journal_bytes_of(&deployed), before);
+
+    // the eligible one is removed: one record, a backup, and it leaves the list
+    let r = go(&dir, &remove_app_op(v, true), &kc);
+    assert!(r.ok, "{}", r.summary);
+    let after = snapshot(&dir, 3);
+    assert!(after.repos.is_empty() && after.apps.is_empty(), "a never-deployed application disappears from the list");
+    assert!(kc.accounts().is_empty(), "no Keychain access");
 }

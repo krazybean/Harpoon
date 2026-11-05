@@ -641,3 +641,32 @@ export function registrationRemoval(engine: EngineMeta | undefined, app: AppMode
   if (typedName.trim() !== repo.name) return { op: null, blocked: null };
   return { op: { op: "remove-repo", name: repo.name, expectRegisteredMs: repo.registeredMs, confirmRemoval: true }, blocked: null };
 }
+
+// ------------------------------------------------------------------ removing a never-deployed application
+
+export const APP_REMOVAL_CLOSED_REASON = "Removing an application is not enabled in this build. It permanently upgrades the deployment journal so that older Harpoon versions can no longer open it, so it is available only in an isolated test runtime that was authorized for it.";
+
+/**
+ * Why this application cannot be removed from Harpoon's active list, or null when it can. Only an application that was
+ * never deployed and owns nothing qualifies: removing a deployed one would need a teardown that does not exist. The
+ * engine checks all of this again under its own lock (and also for Docker resources, which the front end cannot see),
+ * so this only says so early; it is never what protects anything.
+ */
+export function applicationRemovalBlock(engine: EngineMeta | undefined, app: AppModel): string | null {
+  if (!engine?.gate.gitRemoval) return APP_REMOVAL_CLOSED_REASON;
+  if (!engine.repos.some((r) => r.app === app.id)) return "This application has no registered repository to remove it by. If it was deployed before, its history stays; there is nothing further to remove here.";
+  const n = app.deployments.length;
+  if (n > 0) return `This application has ${n} deployment${n === 1 ? "" : "s"}. Harpoon removes only an application that was never deployed, because removing a deployed one would have to stop and delete its containers and images, which Harpoon does not do yet. Use Remove registration to disconnect its source instead.`;
+  const waiting = app.automation.held.length + (app.automation.selected?.length ?? 0);
+  if (waiting > 0) return `${waiting} held or selected Git event${waiting === 1 ? " is" : "s are"} still waiting. Review ${waiting === 1 ? "it" : "them"} first: removing an application never dismisses or replays events.`;
+  if (app.automation.state === "paused") return "Automatic triggers for this application are paused. Resume or dismiss the pause first.";
+  return null;
+}
+
+/** As `registrationRemoval`, for the application: the typed name is the repository's name, the same name the person sees for it. */
+export function applicationRemoval(engine: EngineMeta | undefined, app: AppModel, repo: EngineRepo, typedName: string): RemovalPlan {
+  const blocked = applicationRemovalBlock(engine, app);
+  if (blocked) return { op: null, blocked };
+  if (typedName.trim() !== repo.name) return { op: null, blocked: null };
+  return { op: { op: "remove-app", name: repo.name, expectRegisteredMs: repo.registeredMs, confirmApplicationRemoval: true }, blocked: null };
+}
