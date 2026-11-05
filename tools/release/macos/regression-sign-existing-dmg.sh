@@ -66,13 +66,14 @@ IN="$TMP/in/Harpoon-test.dmg"; IN_SHA="$(sha "$IN")"
 
 # ---- stand-ins -----------------------------------------------------------------------------------------------------
 GOOD_SIGNER_CALLS=0
-app_signer() { # ad-hoc re-sign the four code files and update the seal, as the real signer changes exactly those
+base_signer() { # ad-hoc re-sign the four code files and update the seal, as the real signer changes exactly those
   local a="$1" f
   for f in MacOS/harpoon-desktop Resources/harpoon/bin/harpoon Resources/harpoon/bin/docker Resources/harpoon/bin/docker-buildx; do
     codesign --force --sign - "$a/Contents/$f" >/dev/null 2>&1
   done
   echo "seal v2" > "$a/Contents/_CodeSignature/CodeResources"
 }
+app_signer() { base_signer "$@"; }
 app_verifier() { codesign --verify --ignore-resources "$1/Contents/MacOS/harpoon-desktop" >/dev/null 2>&1; } # the stand-in app has a fake seal in the default-stage scenarios
 free_kib() { echo 999999999; } # plenty, unless a test lowers it
 
@@ -132,7 +133,7 @@ echo "ok: signer failure cleaned up"
 
 scenario "6. a signer that changes a file that is not code is caught after conversion, and the output is removed"
 # 6. a signer that changes a file that is not code is caught after conversion, and the output is removed
-app_signer() { echo tampered > "$1/Contents/Resources/harpoon/lib/Image-virt"; echo "seal v2" > "$1/Contents/_CodeSignature/CodeResources"; }
+app_signer() { base_signer "$1"; echo tampered > "$1/Contents/Resources/harpoon/lib/Image-virt"; } # a correct signing that also changes a resource
 run "$TMP/out" "$IN_SHA" sign && fail "a change to a resource was accepted"
 eval "$good_signer"
 grep -q "signing changed a file that is not code" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message for a changed resource"; }
@@ -161,23 +162,23 @@ grep -q "HARPOON_SIGN_IDENTITY is not set" "$TMP/err" || fail "wrong message wit
 echo "ok: command line"
 
 scenario "10. the watchdog: a command that blocks is ended after its limit, with its own process only"
-( run_bounded 2 sleep 30 ) 2>"$TMP/err" && fail "a blocked command was not ended"
+( run_bounded 2 sleep 3217 ) 2>"$TMP/err" && fail "a blocked command was not ended"
 [ "$?" = 0 ] || true
-grep -q "TIMEOUT after 2s: sleep 30" "$TMP/err" || { cat "$TMP/err" >&2; fail "the timeout was not reported with the command"; }
-[ -z "$(pgrep -fx 'sleep 30' || true)" ] || fail "the blocked command is still running"
+grep -q "TIMEOUT after 2s: sleep 3217" "$TMP/err" || { cat "$TMP/err" >&2; fail "the timeout was not reported with the command"; }
+[ -z "$(pgrep -fx 'sleep 3217' || true)" ] || fail "the blocked command is still running"
 rc=0; ( run_bounded 5 true ) 2>/dev/null || rc=$?; [ "$rc" = 0 ] || fail "a quick command was reported as failed"
 rc=0; ( run_bounded 5 sh -c 'exit 3' ) 2>/dev/null || rc=$?; [ "$rc" = 3 ] || fail "a failing command's status was lost ($rc)"
 echo "ok: watchdog"
 
 scenario "11. a hung disk-image command fails the run with a message, and nothing is left mounted or running"
 real_hdiutil="$(command -v hdiutil)"
-hdiutil() { if [ "$1" = attach ]; then sleep 120; else "$real_hdiutil" "$@"; fi; } # attach never returns
+hdiutil() { if [ "$1" = attach ]; then sleep 7123; else "$real_hdiutil" "$@"; fi; } # attach never returns (unusual sleep lengths, so another process on the machine cannot match the checks)
 HDIUTIL_TIMEOUT=20; started="$(date +%s)" # long enough for the real verify that precedes the attach
 run "$TMP/out" "$IN_SHA" sign && fail "a hung attach succeeded"
 elapsed=$(( $(date +%s) - started )); unset -f hdiutil; HDIUTIL_TIMEOUT=120
 [ "$elapsed" -lt 100 ] || fail "the hung attach took ${elapsed}s to fail"
 grep -q "TIMEOUT after 20s: hdiutil attach" "$TMP/err" || { cat "$TMP/err" >&2; fail "the hung attach was not named in the failure"; }
-[ -z "$(pgrep -fx 'sleep 120' || true)" ] || fail "the stub that blocked the attach is still running"
+[ -z "$(pgrep -fx 'sleep 7123' || true)" ] || fail "the stub that blocked the attach is still running"
 assert_clean "hung attach"; [ ! -e "$OUT" ] || fail "an output exists after a hung attach"
 echo "ok: hung attach is bounded"
 
