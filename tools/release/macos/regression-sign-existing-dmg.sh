@@ -53,6 +53,9 @@ for f in MacOS/harpoon-desktop Resources/harpoon/bin/harpoon Resources/harpoon/b
   cp /usr/bin/true "$APP/$f"; chmod u+w "$APP/$f"
 done
 echo "seal v1" > "$APP/_CodeSignature/CodeResources"
+cat > "$APP/Info.plist" <<'P'
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>harpoon-desktop</string><key>CFBundleIdentifier</key><string>com.example.stand-in</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>
+P
 head -c 4194304 /dev/urandom > "$APP/Resources/harpoon/lib/Image-virt"
 dd if=/dev/zero of="$APP/Resources/harpoon/lib/harpoon-root.img" bs=1m count=16 2>/dev/null
 ln -s /Applications "$SRC/Applications"
@@ -70,7 +73,7 @@ app_signer() { # ad-hoc re-sign the four code files and update the seal, as the 
   done
   echo "seal v2" > "$a/Contents/_CodeSignature/CodeResources"
 }
-app_verifier() { codesign --verify "$1/Contents/MacOS/harpoon-desktop" >/dev/null 2>&1; }
+app_verifier() { codesign --verify --ignore-resources "$1/Contents/MacOS/harpoon-desktop" >/dev/null 2>&1; } # the stand-in app has a fake seal in the default-stage scenarios
 free_kib() { echo 999999999; } # plenty, unless a test lowers it
 
 run() { # run OUT_DIR EXPECT STAGE : in a subshell, with the real cleanup trap; prints the failure message
@@ -191,5 +194,145 @@ echo "$out12" | grep -qx "./Applications" || fail "a changed link target was not
 mkdir "$TMP/tb/extra"; rc=0; run_bounded 60 tree_differences "$TMP/ta" "$TMP/tb" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "a different set of paths was not refused (status $rc)"
 echo "ok: symlinks are not followed"
+
+# =====================================================================================================================
+# --resume-from-signed: stand-ins signed ad-hoc with the hardened runtime, the runtime-only entitlement, and the checks'
+# expectations switched to match (plain variables, as the script documents). Apple and Gatekeeper are stand-ins.
+# =====================================================================================================================
+REQUIRED_AUTHORITY="Signature=adhoc"; RELEASE_GRADE=0; REQUIRED_ARCHS="$(lipo -archs /usr/bin/true)"
+cat > "$TMP/virt.plist" <<'P'
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>
+P
+release_signer() { # what the real signer produces, ad hoc: hardened runtime everywhere, the virtualization entitlement on the runtime only
+  local a="$1" f
+  codesign --force --sign - --options runtime --entitlements "$TMP/virt.plist" "$a/Contents/Resources/harpoon/bin/harpoon" >/dev/null 2>&1
+  for f in MacOS/harpoon-desktop Resources/harpoon/bin/docker Resources/harpoon/bin/docker-buildx; do codesign --force --sign - --options runtime "$a/Contents/$f" >/dev/null 2>&1; done
+  codesign --force --sign - --options runtime "$a" >/dev/null 2>&1   # the bundle last, which writes a real CodeResources
+}
+scenario "13. set-up: a signed intermediate, made by the default stage with the stand-in release signer"
+mkdir -p "$TMP/rs-in" "$TMP/rw"
+app_signer() { release_signer "$1"; }
+run "$TMP/rs-in" "$IN_SHA" sign || { cat "$TMP/err" >&2; fail "could not make the signed intermediate"; }
+SIGNED="$TMP/rs-in/Harpoon-test-signed.dmg"; SIGNED_SHA="$(sha "$SIGNED")"
+[ -f "$SIGNED" ] || fail "no signed intermediate"
+echo "ok: signed intermediate"
+
+# from here on the application signer must never be called, and nothing may be mounted writable
+app_signer() { : > "$TMP/app-signer-called"; return 1; }
+real_hdiutil="$(command -v hdiutil)"
+hdiutil() { echo "$*" >> "$TMP/hdiutil.calls"; "$real_hdiutil" "$@"; }
+dmg_signer() { codesign --force --sign - "$1" >/dev/null 2>&1; }
+gatekeeper_assess() { return 0; }
+notary_submit() { local n; n="$(cat "$TMP/submits" 2>/dev/null || echo 0)"; echo $(( n + 1 )) > "$TMP/submits"; echo "SUB-$(( n + 1 ))"; }
+notary_status() { cat "$TMP/notary-status"; }
+notary_log() { echo '{"issues":["stand-in rejection"]}'; }
+notary_staple() { : > "$1.stapled"; echo x >> "$TMP/staples"; }
+staple_validate() { [ -e "$1.stapled" ]; }
+submits() { cat "$TMP/submits" 2>/dev/null || echo 0; }
+resume() { # resume OUT_DIR EXPECT STAGE [INPUT]
+  mkdir -p "$1"; ( trap cleanup EXIT; resume_run "${4:-$SIGNED}" "$1" "$TMP/rw" "$2" "$3" ) 2>"$TMP/err" && return 0 || return 1
+}
+assert_resume_clean() { # nothing mounted, no temp directory, the signed input unchanged, the app signer never called, nothing writable
+  [ "$(mounts)" = 0 ] || fail "$1: a volume is still mounted"
+  [ -z "$(ls -d "$TMP/rw"/resume-dmg.* 2>/dev/null)" ] || fail "$1: a temp directory is left"
+  [ "$(sha "$SIGNED")" = "$SIGNED_SHA" ] || fail "$1: the signed input changed"
+  [ ! -e "$TMP/app-signer-called" ] || fail "$1: the application signer was called"
+  ! grep -qE -- "-shadow|convert" "$TMP/hdiutil.calls" 2>/dev/null || fail "$1: a writable shadow or a conversion was used"
+}
+DIST="$TMP/rs-dist"
+
+scenario "14. resume, verify only: the signed input is checked completely and nothing is written"
+resume "$DIST" "$SIGNED_SHA" verify || { cat "$TMP/err" >&2; fail "verification of a good signed input failed"; }
+grep -q "verification only" "$TMP/err" || fail "no verification message"; [ -z "$(ls -A "$DIST")" ] || fail "verification wrote files"
+assert_resume_clean "verify only"; echo "ok: verify only"
+
+scenario "15. resume, sign the image: a separate distribution image, the signed input byte-identical, no application signing"
+resume "$DIST" "$SIGNED_SHA" dmg || { cat "$TMP/err" >&2; fail "creating the distribution image failed"; }
+OUT="$DIST/Harpoon-test.dmg"; [ -f "$OUT" ] && [ "$OUT" != "$SIGNED" ] || fail "no separate distribution image"
+[ "$(dmg_signature_state "$OUT")" = signed ] || fail "the distribution image is not signed"
+[ "$(dmg_signature_state "$SIGNED")" = unsigned ] || fail "the signed input's image was signed"
+[ "$(state_get "$OUT.state" stage)" = dmg-signed ] && [ "$(state_get "$OUT.state" input_sha256)" = "$SIGNED_SHA" ] || fail "the state does not record the stage and input"
+assert_resume_clean "sign image"; echo "ok: distribution image"
+OUT_SHA="$(sha "$OUT")"; resume "$DIST" "$SIGNED_SHA" dmg || { cat "$TMP/err" >&2; fail "an identical rerun failed"; }
+[ "$(sha "$OUT")" = "$OUT_SHA" ] || fail "an identical rerun changed the output"; assert_resume_clean "idempotent rerun"; echo "ok: rerun is idempotent"
+
+scenario "16. a wrong or missing checksum is refused before anything is written"
+resume "$TMP/rs-w" "0000000000000000000000000000000000000000000000000000000000000000" dmg && fail "accepted a wrong checksum"
+grep -q "does not equal the expected" "$TMP/err" || fail "wrong message for a wrong checksum"; [ -z "$(ls -A "$TMP/rs-w")" ] || fail "files were written"
+resume "$TMP/rs-w" "" dmg && fail "accepted a missing checksum"; grep -q "needs --expect-sha256" "$TMP/err" || fail "wrong message for a missing checksum"
+assert_resume_clean "checksum"; echo "ok: checksum required and checked"
+
+scenario "17. an unsigned app and an invalid signature are refused"
+resume "$TMP/rs-u" "$IN_SHA" dmg "$IN" && fail "resumed from an image whose app is unsigned"
+grep -q "unsigned, or its signature is invalid" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message for an unsigned app"; }; [ -z "$(ls -A "$TMP/rs-u")" ] || fail "files written for an unsigned app"
+mkdir -p "$TMP/bad-m" "$TMP/bad-src"; "$real_hdiutil" attach -readonly -nobrowse -noverify -mountpoint "$TMP/bad-m" "$SIGNED" >/dev/null 2>&1
+cp -R "$TMP/bad-m/Harpoon.app" "$TMP/bad-src/" ; ln -s /Applications "$TMP/bad-src/Applications"; "$real_hdiutil" detach "$TMP/bad-m" >/dev/null 2>&1
+chmod -R u+w "$TMP/bad-src"; printf 'X' | dd of="$TMP/bad-src/Harpoon.app/Contents/Resources/harpoon/bin/docker" bs=1 seek=200 conv=notrunc 2>/dev/null
+"$real_hdiutil" create -size 96m -fs HFS+ -volname Harpoon -srcfolder "$TMP/bad-src" -ov -format UDZO "$TMP/bad-signature.dmg" >/dev/null 2>&1
+resume "$TMP/rs-i" "$(sha "$TMP/bad-signature.dmg")" dmg "$TMP/bad-signature.dmg" && fail "resumed from an image with an invalid signature"
+grep -q "unsigned, or its signature is invalid" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message for an invalid signature"; }; [ -z "$(ls -A "$TMP/rs-i")" ] || fail "files written for an invalid signature"
+assert_resume_clean "bad signatures"; echo "ok: unsigned and invalid signatures refused"
+
+scenario "18. an image that is already signed is not a resume point"
+cp -c "$SIGNED" "$TMP/already.dmg" 2>/dev/null || cp "$SIGNED" "$TMP/already.dmg"; codesign --force --sign - "$TMP/already.dmg" >/dev/null 2>&1
+resume "$TMP/rs-a" "$(sha "$TMP/already.dmg")" dmg "$TMP/already.dmg" && fail "resumed from an already signed image"
+grep -q "already signed or notarized" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message for an already signed image"; }; [ -z "$(ls -A "$TMP/rs-a")" ] || fail "files written"
+assert_resume_clean "already signed"; echo "ok: already signed refused"
+
+scenario "19. an existing output is never overwritten unless its state shows it came from this input"
+mkdir -p "$TMP/rs-e"; echo "someone else's file" > "$TMP/rs-e/Harpoon-test.dmg"; before="$(sha "$TMP/rs-e/Harpoon-test.dmg")"
+resume "$TMP/rs-e" "$SIGNED_SHA" dmg && fail "overwrote a foreign output"; grep -q "must both exist or both be absent" "$TMP/err" || fail "wrong message for a foreign output"
+echo "input_sha256=$IN_SHA" > "$TMP/rs-e/Harpoon-test.dmg.state"
+resume "$TMP/rs-e" "$SIGNED_SHA" dmg && fail "overwrote an output made from another input"; grep -q "never overwritten" "$TMP/err" || fail "wrong message for another input's output"
+[ "$(sha "$TMP/rs-e/Harpoon-test.dmg")" = "$before" ] || fail "the foreign output changed"; assert_resume_clean "existing output"; echo "ok: existing output protected"
+
+scenario "20. symlinks and paths: a symlinked input, output directory, output or state file is refused"
+ln -s "$SIGNED" "$TMP/link-in.dmg"; resume "$TMP/rs-s1" "$SIGNED_SHA" dmg "$TMP/link-in.dmg" && fail "accepted a symlinked input"
+grep -q "regular file, not a symlink" "$TMP/err" || fail "wrong message for a symlinked input"
+mkdir -p "$TMP/real-out"; ln -s "$TMP/real-out" "$TMP/link-out"; resume "$TMP/link-out" "$SIGNED_SHA" dmg && fail "accepted a symlinked output directory"
+grep -q "real directory, not a symlink" "$TMP/err" || fail "wrong message for a symlinked output directory"; [ -z "$(ls -A "$TMP/real-out")" ] || fail "wrote through a symlink"
+mkdir -p "$TMP/rs-s2"; ln -s "$TMP/elsewhere" "$TMP/rs-s2/Harpoon-test.dmg.state"; resume "$TMP/rs-s2" "$SIGNED_SHA" dmg && fail "accepted a symlinked state file"
+grep -q "is a symlink: refusing" "$TMP/err" || fail "wrong message for a symlinked state file"; [ ! -e "$TMP/elsewhere" ] || fail "wrote through a symlinked state file"
+assert_resume_clean "symlinks"; echo "ok: symlink and path safeguards"
+
+scenario "21. a failing signer leaves no output, no state, no mount, and the input intact"
+dmg_signer() { return 1; }; resume "$TMP/rs-f" "$SIGNED_SHA" dmg && fail "a failing signer succeeded"
+dmg_signer() { codesign --force --sign - "$1" >/dev/null 2>&1; }
+[ -z "$(ls -A "$TMP/rs-f")" ] || fail "files left after a failed signing: $(ls -A "$TMP/rs-f")"; assert_resume_clean "failing signer"; echo "ok: failure cleaned up"
+
+scenario "22. interrupted notarization: the recorded submission is polled, never resubmitted; then it completes"
+NOTARY_WAIT_SECONDS=2; NOTARY_POLL_SECONDS=1; rm -f "$TMP/submits" "$TMP/staples"; echo "In Progress" > "$TMP/notary-status"
+resume "$TMP/rs-n" "$SIGNED_SHA" apple && fail "completed while Apple was still working"
+grep -q "still 'In Progress'" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message while in progress"; }
+N="$TMP/rs-n/Harpoon-test.dmg"; [ "$(state_get "$N.state" submission_id)" = "SUB-1" ] && [ "$(state_get "$N.state" stage)" = submitted ] || fail "the submission was not recorded"
+[ ! -e "$TMP/rs-n/SHA256SUMS" ] && [ ! -e "$TMP/rs-n/SIGNING-PROVENANCE.txt" ] || fail "checksums were written before notarization finished"
+echo "Accepted" > "$TMP/notary-status"; resume "$TMP/rs-n" "$SIGNED_SHA" apple || { cat "$TMP/err" >&2; fail "the resumed notarization failed"; }
+[ "$(submits)" = 1 ] || fail "the image was submitted again ($(submits) submissions)"; [ "$(wc -l < "$TMP/staples" | tr -d ' ')" = 1 ] || fail "stapled more or less than once"
+FINAL="$(sha "$N")"; grep -qx "$FINAL  Harpoon-test.dmg" "$TMP/rs-n/SHA256SUMS" || fail "SHA256SUMS does not describe the final image"
+grep -q "signed input      Harpoon-test-signed.dmg sha256 $SIGNED_SHA" "$TMP/rs-n/SIGNING-PROVENANCE.txt" && grep -q "final artifact    Harpoon-test.dmg sha256 $FINAL" "$TMP/rs-n/SIGNING-PROVENANCE.txt" || fail "provenance lacks the input and final hashes"
+[ "$FINAL" != "$SIGNED_SHA" ] || fail "the final hash equals the input hash"; [ "$(state_get "$N.state" stage)" = finalized ] || fail "not finalized"
+sums_before="$(sha "$TMP/rs-n/SHA256SUMS")"; prov_before="$(sha "$TMP/rs-n/SIGNING-PROVENANCE.txt")"
+resume "$TMP/rs-n" "$SIGNED_SHA" apple || { cat "$TMP/err" >&2; fail "rerunning a finished notarization failed"; }
+[ "$(sha "$N")" = "$FINAL" ] && [ "$(sha "$TMP/rs-n/SHA256SUMS")" = "$sums_before" ] && [ "$(sha "$TMP/rs-n/SIGNING-PROVENANCE.txt")" = "$prov_before" ] && [ "$(submits)" = 1 ] || fail "a rerun of a finished notarization changed something"
+assert_resume_clean "notarization"; echo "ok: interrupted notarization recovered"
+
+scenario "23. a rejected notarization is reported, kept, and never retried automatically"
+rm -f "$TMP/submits"; echo "Invalid" > "$TMP/notary-status"
+resume "$TMP/rs-r" "$SIGNED_SHA" apple && fail "completed despite a rejection"
+grep -q "Apple rejected submission SUB-1" "$TMP/err" || { cat "$TMP/err" >&2; fail "wrong message for a rejection"; }
+[ -s "$TMP/rs-r/notary-SUB-1.log" ] || fail "the rejection log was not saved"; [ ! -e "$TMP/rs-r/SHA256SUMS" ] || fail "checksums written for a rejected image"
+[ "$(state_get "$TMP/rs-r/Harpoon-test.dmg.state" stage)" = rejected ] || fail "the rejection was not recorded"
+resume "$TMP/rs-r" "$SIGNED_SHA" apple && fail "retried a rejected notarization"; [ "$(submits)" = 1 ] || fail "resubmitted after a rejection"
+grep -q "Nothing is resubmitted automatically" "$TMP/err" || fail "wrong message on the rerun"; [ -f "$TMP/rs-r/Harpoon-test.dmg" ] || fail "the rejected image was removed"
+assert_resume_clean "rejection"; echo "ok: rejection handled"
+
+scenario "24. through the command line: resuming needs an explicit stage"
+mkdir -p "$TMP/rs-c"
+env -u HARPOON_SIGN_IDENTITY bash "$SCRIPT_DIR/sign-existing-dmg.sh" --resume-from-signed "$SIGNED" --expect-sha256 "$SIGNED_SHA" --out-dir "$TMP/rs-c" 2>"$TMP/err" && fail "resumed without a stage"
+grep -q "needs one stage" "$TMP/err" || fail "wrong message without a stage"
+env -u HARPOON_SIGN_IDENTITY bash "$SCRIPT_DIR/sign-existing-dmg.sh" --resume-from-signed "$SIGNED" --expect-sha256 "$SIGNED_SHA" --out-dir "$TMP/rs-c" --work-dir "$TMP/rw" --dry-run 2>"$TMP/err" && fail "the real checks accepted an ad-hoc stand-in" || true
+grep -q "not signed by the required authority" "$TMP/err" || { cat "$TMP/err" >&2; fail "the real (Developer ID) check did not run by default"; }
+echo "ok: command line"
+
 
 echo "sign-existing-dmg regression PASS"
