@@ -41,5 +41,14 @@ export type Ctx = {
 const PRODUCTION_ONLY: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume"];
 /** Dialogs that change something. None may open for an application from a runtime attached read-only. */
 export const MUTATING_DIALOGS: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume", "variable", "edit-registration", "remove-registration", "remove-application"];
+/** Dialogs that report the removal of the very application they are about, which is why it is no longer listed while they are open. */
+export const REMOVAL_DIALOGS: DialogState["kind"][] = ["remove-registration", "remove-application"];
+/**
+ * What a change of the application list does to an open dialog. Nothing: a poll, a registration elsewhere or a new
+ * application must not dismiss what the person is doing. Only when the application the screen is about has gone does
+ * a dialog close (it would act on nothing, or on whichever application the list falls back to), except a removal
+ * dialog, which keeps its own copy of the application and shows the outcome.
+ */
+export const dialogKeptOnListChange = (kind: DialogState["kind"], routeAppGone: boolean): boolean => !routeAppGone || REMOVAL_DIALOGS.includes(kind);
 export const dialogAllowedFor = (d: DialogState, env: Env, app?: AppModel): boolean => dialogAllowed(d, env) && !(app?.external && MUTATING_DIALOGS.includes(d.kind));
 export const dialogAllowed = (d: DialogState, env: Env): boolean => env === "production" || !PRODUCTION_ONLY.includes(d.kind);

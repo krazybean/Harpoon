@@ -670,3 +670,14 @@ export function applicationRemoval(engine: EngineMeta | undefined, app: AppModel
   if (typedName.trim() !== repo.name) return { op: null, blocked: null };
   return { op: { op: "remove-app", name: repo.name, expectRegisteredMs: repo.registeredMs, confirmApplicationRemoval: true }, blocked: null };
 }
+
+// ------------------------------------------------------------------ what a removal reports about its backup
+
+export const NO_NEW_BACKUP_NOTE = "The journal was already upgraded by an earlier removal, and the only backup is the one taken then; it does not include this removal.";
+
+/** The backup the engine reported for the journal's first removal, or null when this removal made none. */
+export function removalBackup(lines: string[]): { path: string; digest: string } | null {
+  const value = (key: string) => lines.map((l) => l.trim()).find((l) => l.startsWith(key))?.slice(key.length).trim() ?? "";
+  const path = value("backup:");
+  return path ? { path, digest: value("sha256:") } : null;
+}
