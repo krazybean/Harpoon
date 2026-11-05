@@ -66,7 +66,7 @@
 .dp-banner--ok { background: var(--success-bg); border-color: #14532D; } .dp-banner--ok > svg { color: var(--success); }
 .dp-banner__actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-self: center; }
 .dp-evidence { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text-tertiary); border: 1px dashed var(--border-strong); border-radius: 6px; padding: 3px 8px; }
-.dp-evidence svg { width: 12px; height: 12px; }
+.dp-evidence svg { width: 12px; height: 12px; flex: none; }
 
 /* ---- project / app cards ---------------------------------------------------------------- */
 .dp-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px; text-align: left; color: inherit; display: flex; flex-direction: column; gap: 10px; transition: border-color 120ms, transform 120ms; }

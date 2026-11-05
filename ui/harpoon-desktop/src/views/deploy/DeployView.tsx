@@ -8,7 +8,7 @@ import { SIMULATION_NOTE } from "../../lib/deployPresentation.ts";
 import { failureText, summarizePoll } from "../../lib/deployEngine.ts";
 import { SCENARIOS, type DeployPreview } from "../../lib/deployPreview.ts";
 import { Banner } from "./parts.tsx";
-import { dialogAllowedFor, type Ctx, type DialogState, type Route } from "./context.ts";
+import { dialogAllowedFor, dialogKeptOnListChange, type Ctx, type DialogState, type Route } from "./context.ts";
 import { AppScreen, DeploymentScreen, HomeScreen } from "./Screens.tsx";
 import { DeployDialogs } from "./Dialogs.tsx";
 import { GitBranch, Play, Question } from "@phosphor-icons/react";
@@ -63,13 +63,20 @@ export function DeployView({ sim, engine, realRuntime, onStartHarpoon, onOpenCon
     setRouteState((r) => ({ ...r, screen: "home", depId: null, tab: "overview" }));
   }, [homeSignal]);
 
-  // A scenario change must never strand the user on a screen for something that no longer exists.
+  // A scenario change closes whatever is open: it is about a world that no longer exists.
+  useEffect(() => { setDialog(null); }, [state.scenario]);
+
+  // A change of the application list must never strand the user on a screen for something that no longer exists, and
+  // must not dismiss a dialog the person is using, unless that dialog is about the application that went.
   useEffect(() => {
-    setDialog(null);
-    if (route.screen !== "home" && !state.apps[route.appId]) setRouteState((r) => ({ ...r, screen: "home" }));
+    const gone = route.screen !== "home" && !state.apps[route.appId];
+    if (gone) {
+      setDialog((d) => (d && dialogKeptOnListChange(d.kind, true) ? d : null));
+      setRouteState((r) => ({ ...r, screen: "home" }));
+    }
     if (route.screen === "dep" && state.apps[route.appId] && !state.apps[route.appId].deployments.some((d) => d.id === route.depId)) setRouteState((r) => ({ ...r, depId: state.apps[route.appId].deployments[0]?.id ?? null }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.scenario, engine ? Object.keys(state.apps).join(",") : ""]);
+  }, [engine ? Object.keys(state.apps).join(",") : ""]);
 
   // Deep-link state for review builds only.
   useEffect(() => {

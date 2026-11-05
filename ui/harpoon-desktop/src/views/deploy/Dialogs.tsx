@@ -4,7 +4,8 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { applicationRemoval, configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { REMOVAL_DIALOGS } from "./context.ts";
+import { applicationRemoval, removalBackup, NO_NEW_BACKUP_NOTE, configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -52,17 +53,16 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
   const CONFIRM_LIVE: LiveConfirmation = { liveChanges: true, cutover: false };
   if (dialog.kind === "create") return c.engine ? <EngineCreateDialog c={c} close={close} /> : <CreateDialog c={c} dialog={dialog} close={close} />;
   if (dialog.kind === "variable") return <VariableDialog c={c} name={dialog.name} close={close} />;
-  if (dialog.kind !== "remove-application") removalContext.current = null;
-  if (dialog.kind === "remove-application") {
-    // once the removal succeeds the application leaves the list; the dialog keeps what it was opened with to say so
+  if (!REMOVAL_DIALOGS.includes(dialog.kind)) removalContext.current = null;
+  if (dialog.kind === "remove-application" || dialog.kind === "remove-registration") {
+    // once the removal succeeds the application may leave the list; the dialog keeps what it was opened with to say so
     const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
     if (app && repo && !removalContext.current) removalContext.current = { app, repo };
     const kept = removalContext.current;
-    return kept ? <RemoveApplicationDialog c={c} repo={kept.repo} app={kept.app} close={close} /> : null;
-  }
-  if (dialog.kind === "remove-registration") {
-    const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
-    return app && repo ? <RemoveRegistrationDialog c={c} repo={repo} app={app} close={close} /> : null;
+    if (!kept) return null;
+    return dialog.kind === "remove-application"
+      ? <RemoveApplicationDialog c={c} repo={kept.repo} app={kept.app} close={close} />
+      : <RemoveRegistrationDialog c={c} repo={kept.repo} app={kept.app} close={close} />;
   }
   if (dialog.kind === "edit-registration") {
     const repo = c.state.engine?.repos.find((r) => r.app === app?.id);
@@ -386,6 +386,19 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
 }
 
 
+/** What a removal reported: every line the engine gave, and, when the journal was upgraded, where its backup is; otherwise that none was made. */
+function RemovalResult({ lines }: { lines: string[] }) {
+  const backup = removalBackup(lines);
+  return (
+    <>
+      {lines.map((l) => <div key={l}>{l}</div>)}
+      {backup
+        ? <div><b>Backup of the journal before the upgrade.</b> Keep it. <span className="mono">{backup.path}</span>{backup.digest && <> · sha256 <span className="mono">{backup.digest}</span></>}</div>
+        : <div><b>No new backup was made.</b> {NO_NEW_BACKUP_NOTE}</div>}
+    </>
+  );
+}
+
 /**
  * Retire a never-deployed application from Harpoon's active list. Distinct from Remove registration: it takes the
  * application itself off the list (it has nothing to keep serving), and says so. Needs the name typed, shows the
@@ -415,7 +428,7 @@ function RemoveApplicationDialog({ c, repo, app, close }: { c: Ctx; repo: Engine
         : <button className="btn btn--destructive" disabled={!canRemove} onClick={() => void submit()}>{submitting ? "Removing…" : "Remove application"}</button>}>
       {outcome?.ok === false && <Banner tone="err" title="The application was not removed">{outcome.message}</Banner>}
       {outcome?.ok === true && <Banner tone="ok" title="Application removed from the active list.">
-        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        <RemovalResult lines={outcome.lines} />
         <div>{base.name} no longer appears in Harpoon. Its journal records and stored credentials were kept.</div>
       </Banner>}
       {plan.blocked && !done && <Banner tone="warn" title="Not available right now">{plan.blocked}</Banner>}
@@ -514,7 +527,7 @@ function RemoveRegistrationDialog({ c, repo, app, close }: { c: Ctx; repo: Engin
         : <button className="btn btn--destructive" disabled={!canRemove} onClick={() => void submit()}>{submitting ? "Removing…" : "Remove registration"}</button>}>
       {outcome?.ok === false && <Banner tone="err" title="The registration was not removed">{outcome.message}</Banner>}
       {outcome?.ok === true && <Banner tone="ok" title="Registration removed. Source disconnected.">
-        {outcome.lines.map((l) => <div key={l}>{l}</div>)}
+        <RemovalResult lines={outcome.lines} />
         <div>{base.name} keeps its history and its running release. Register a repository named {base.name} again to connect a source.</div>
       </Banner>}
       {plan.blocked && !done && <Banner tone="warn" title="Not available right now">{plan.blocked}</Banner>}

@@ -604,16 +604,16 @@ fn removal_location_problem(canon: &Path, temp_roots: &[PathBuf]) -> Option<Stri
 
 /// Everything that must hold before a removal may even look at the journal. Order matters: the build's gate, then
 /// where the runtime lives, then the marker. None of it opens a journal.
-fn check_removal_capability(gate: &Gate, rt: &Runtime) -> Result<(), Fail> {
+fn check_removal_capability(gate: &Gate, rt: &Runtime, what: &str) -> Result<(), Fail> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     if !gate.git_removal_enabled {
-        return Err(Fail::refused(
-            "removing a Git registration is not enabled in this build: it is a one-way upgrade of the deployment journal that older Harpoon builds cannot read. Nothing was read or changed",
-        ));
+        return Err(Fail::refused(format!(
+            "removing {what} is not enabled in this build: it is a one-way upgrade of the deployment journal that older Harpoon builds cannot read. Nothing was read or changed"
+        )));
     }
     let refuse = |why: String| {
         Fail::refused(format!(
-            "removing a Git registration is not authorized for this runtime directory: {why}. Nothing was read or changed"
+            "removing {what} is not authorized for this runtime directory: {why}. Nothing was read or changed"
         ))
     };
     let canon = std::fs::canonicalize(&rt.dir)
@@ -686,7 +686,15 @@ pub fn app_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 fn remove(p: &Parsed, gate: &Gate, out: &mut String, application: bool) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     // capability first: nothing below runs, and no journal is opened, in a build or runtime that is not authorized
-    check_removal_capability(gate, &rt)?;
+    check_removal_capability(
+        gate,
+        &rt,
+        if application {
+            "an application"
+        } else {
+            "a Git registration"
+        },
+    )?;
     let need = |f: &str| {
         p.value(f)
             .ok_or_else(|| Fail::usage(format!("--{f} is required")))

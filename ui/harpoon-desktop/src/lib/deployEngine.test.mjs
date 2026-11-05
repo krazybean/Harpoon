@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { dialogKeptOnListChange } from "../views/deploy/context.ts";
+import { removalBackup, NO_NEW_BACKUP_NOTE, EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -715,8 +716,45 @@ test("the Remove application control and dialog are distinct from Remove registr
 
 test("a removed application cannot leave its detail page on screen, and the mock copy no longer claims deletion", () => {
   const view = readFileSync(new URL("../views/deploy/DeployView.tsx", import.meta.url), "utf8");
-  assert.match(view, /if \(route\.screen !== "home" && !state\.apps\[route\.appId\]\) setRouteState\(\(r\) => \(\{ \.\.\.r, screen: "home" \}\)\)/, "an application that left the list sends the page home");
+  assert.match(view, /const gone = route\.screen !== "home" && !state\.apps\[route\.appId\];\n\s+if \(gone\) \{[\s\S]*?setRouteState\(\(r\) => \(\{ \.\.\.r, screen: "home" \}\)\)/, "an application that left the list sends the page home");
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(screens, /Removing the application deletes|labelled containers\/images/);
   assert.equal((screens.match(/no container, image or volume is deleted/g) ?? []).length, 2, "engine and mock panels both say nothing is deleted");
+});
+
+test("a change of the application list dismisses a dialog only when the application it is about has gone, and a removal dialog survives even then", () => {
+  const kinds = ["deploy", "redeploy", "rollback", "resume", "variable", "edit-registration", "remove-registration", "remove-application", "create", "result"];
+  for (const k of kinds) assert.equal(dialogKeptOnListChange(k, false), true, `${k}: a poll, a new application or a registration elsewhere does not dismiss it`);
+  for (const k of kinds) assert.equal(dialogKeptOnListChange(k, true), k.startsWith("remove-"), `${k}: when the application went`);
+  const view = readFileSync(new URL("../views/deploy/DeployView.tsx", import.meta.url), "utf8");
+  const effect = view.slice(view.indexOf("// A change of the application list"), view.indexOf("// Deep-link state"));
+  assert.match(effect, /setDialog\(\(d\) => \(d && dialogKeptOnListChange\(d\.kind, true\) \? d : null\)\)/);
+  assert.doesNotMatch(effect.replace(/setDialog\(\(d\)[^\n]*\n/, ""), /setDialog\(null\)/, "the list effect never closes a dialog unconditionally");
+  assert.match(view, /useEffect\(\(\) => \{ setDialog\(null\); \}, \[state\.scenario\]\)/, "a scenario change still closes it");
+  assert.match(effect, /screen: "home"/, "a removed application's detail page is left");
+  assert.match(view, /homeSignal[\s\S]{0,200}setDialog\(null\)/, "navigating home still cancels");
+});
+
+test("a removal reports its backup, or says that none was made", () => {
+  const first = ["removed application app_X (repository shop) from the active list. It had no deployments", "first removal in this journal: it is now schema 2 and older Harpoon builds cannot open it. A verified backup of the schema-1 journal (29 records, 28672 bytes) was made first:", "backup: /data/deploy/deploy-journal/backups/pre-schema2-1.sqlite3", "sha256: 84343ebf27c8e086", "restoring it is offline and loses every journal change made after it was taken (docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md)"];
+  assert.deepEqual(removalBackup(first), { path: "/data/deploy/deploy-journal/backups/pre-schema2-1.sqlite3", digest: "84343ebf27c8e086" });
+  assert.equal(removalBackup(first.slice(0, 1)), null, "a later removal made no backup");
+  assert.match(NO_NEW_BACKUP_NOTE, /already upgraded.*does not include this removal/);
+  // the same lines survive the outcome filter the dialogs use, so the dialog has them to show
+  const out = (detail) => registrationOutcome({ ok: true, summary: "", detail }, null);
+  const detail = ["*** ACCEPTANCE ***", first[0], first[1], "  " + first[2], "  " + first[3], first[4]].join("\n");
+  assert.deepEqual(removalBackup(out(detail).lines)?.digest, "84343ebf27c8e086");
+  assert.equal(removalBackup(out(first[0]).lines), null);
+  // both removal dialogs show it, and the success state is not dismissed by the page
+  const d = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  assert.equal((d.match(/<RemovalResult lines=\{outcome\.lines\} \/>/g) ?? []).length, 2);
+  assert.match(d, /No new backup was made\.<\/b> \{NO_NEW_BACKUP_NOTE\}/);
+  assert.match(d, /Backup of the journal before the upgrade\.<\/b> Keep it\./);
+  assert.match(d, /if \(!REMOVAL_DIALOGS\.includes\(dialog\.kind\)\) removalContext\.current = null;/);
+  assert.match(d, /<RemoveRegistrationDialog c=\{c\} repo=\{kept\.repo\}/, "the registration dialog also keeps its own copy once its application leaves the list");
+});
+
+test("the information line in the Danger zone keeps its icon at full size", () => {
+  const css = readFileSync(new URL("../views/deploy/deploy.css", import.meta.url), "utf8");
+  assert.match(css, /\.dp-evidence svg \{[^}]*flex: none;/);
 });

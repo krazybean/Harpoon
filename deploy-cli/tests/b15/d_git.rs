@@ -4941,3 +4941,29 @@ fn a_plain_deploy_cannot_bring_back_a_removed_never_deployed_application() {
     );
     assert!(!o.stderr.contains("will not bring it back"), "{}", o.stderr);
 }
+
+#[test]
+fn capability_refusals_name_the_operation_that_was_refused() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    // the shipping gate, then a capable build whose runtime has no marker
+    for gate in [&SHIPPING, &ACCEPTANCE] {
+        let reg = remove_with(&t, gate, "shop", at, &["--confirm-removal"]);
+        let app = remove_app_with(&t, gate, "shop", at, &["--confirm-application-removal"]);
+        for (o, what, other) in [
+            (&reg, "a Git registration", "an application"),
+            (&app, "an application", "a Git registration"),
+        ] {
+            assert_exit(o, 6);
+            assert!(
+                o.stderr.contains(&format!("removing {what} is not ")) && !o.stderr.contains(other),
+                "{}",
+                o.stderr
+            );
+        }
+    }
+    assert_untouched(&t, &bytes, &before, "refusals");
+}
