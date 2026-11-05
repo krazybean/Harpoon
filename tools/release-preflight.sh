@@ -37,10 +37,12 @@ bash -n "$ROOT/harpoon/build.sh"
 bash -n "$ROOT/tools/check-journal-readers.sh"
 bash -n "$ROOT/tools/check-release-bundle-capabilities.sh"
 bash -n "$ROOT/tools/release/macos/verify-release-assets.sh"
+bash -n "$ROOT/tools/release/macos/sign-existing-dmg.sh"
 
 say "Check the release verification tooling on synthetic bundles and a mocked GitHub (nothing is built or published)"
 sh "$ROOT/tools/regression-release-capabilities.sh"
 bash "$ROOT/tools/release/macos/regression-release-assets.sh"
+bash "$ROOT/tools/release/macos/regression-sign-existing-dmg.sh"
 
 say "Verify release entrypoints and tracked inputs"
 for path in \
