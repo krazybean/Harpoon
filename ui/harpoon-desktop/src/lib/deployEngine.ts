@@ -624,6 +624,9 @@ export type RemovalPlan = {
   blocked: string | null;
 };
 
+/** Attributes for an input whose text must reach the engine exactly as typed (typed-name confirmations): macOS would otherwise autocorrect or capitalise it, even on Return. */
+export const EXACT_TEXT_INPUT = { autoComplete: "off", autoCorrect: "off", autoCapitalize: "off", spellCheck: false } as const;
+
 /**
  * What a removal needs before it is sent: the build must allow it, no Git event of the application may be waiting (the
  * engine refuses too; this says so before the person types anything), and the person must type the repository's name.

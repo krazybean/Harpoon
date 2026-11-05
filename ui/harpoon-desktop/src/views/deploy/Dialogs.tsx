@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
-import { configValueProblem, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -470,7 +470,7 @@ function RemoveRegistrationDialog({ c, repo, app, close }: { c: Ctx; repo: Engin
         <Row icon={<Key size={14} />}><b>Keeps</b> saved credentials. They stay in the macOS Keychain, tied to this repository name and its address; a repository with this name must use the same address to use them.</Row>
         <Row icon={<Warning size={14} />}><b>One-way upgrade.</b> The first removal permanently upgrades this deployment journal so that older Harpoon versions can no longer open it. Harpoon makes and verifies a backup first, and reports where it is.</Row>
       </Plan>
-      {!done && <div className="dp-field"><label htmlFor="rmname">Type <b>{base.name}</b> to confirm</label><input id="rmname" className="dp-input" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} disabled={!!plan.blocked} /></div>}
+      {!done && <div className="dp-field"><label htmlFor="rmname">Type <b>{base.name}</b> to confirm</label><input id="rmname" className="dp-input" {...EXACT_TEXT_INPUT} value={typed} onChange={(e) => setTyped(e.target.value)} disabled={!!plan.blocked} /></div>}
     </Dialog>
   );
 }
