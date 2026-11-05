@@ -5010,11 +5010,14 @@ fn a_journal_of_schema_1_and_2_is_read_without_a_write_and_a_newer_schema_is_ref
 
     // schema 3 (a journal from a newer Harpoon): refused by name, nothing repaired or discarded
     let db = t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE);
-    let done = std::process::Command::new("sqlite3")
-        .arg(&db)
-        .arg("INSERT INTO schema_migrations(version) VALUES (3)")
-        .status()
-        .expect("the sqlite3 command-line tool is needed to make a schema-3 journal");
+    // a forked child inherits the journal locks other tests hold until it execs, so it is spawned inside the fork gate
+    let done = crate::spawning(|| {
+        std::process::Command::new("sqlite3")
+            .arg(&db)
+            .arg("INSERT INTO schema_migrations(version) VALUES (3)")
+            .status()
+    })
+    .expect("the sqlite3 command-line tool is needed to make a schema-3 journal");
     assert!(done.success());
     let bytes = journal_bytes(&t);
     for c in ["repo-list", "status"] {
