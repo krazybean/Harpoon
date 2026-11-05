@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
-import { deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
+import { EXACT_TEXT_INPUT, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
 const NOW = 10_000_000;
 const GATE = { liveDeploy: false, liveReplacement: false, reason: "closed in this build" };
@@ -650,4 +650,10 @@ test("the Settings screen offers Remove registration separately from Remove appl
   const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
   const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(engine + screens + dialogs, /gitRemoval: true/);
+});
+
+test("the exact-name confirmation input is never autocorrected or capitalised", () => {
+  assert.deepEqual(EXACT_TEXT_INPUT, { autoComplete: "off", autoCorrect: "off", autoCapitalize: "off", spellCheck: false });
+  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  assert.match(dialogs.match(/<input id="rmname"[^>]*>/)[0], /\{\.\.\.EXACT_TEXT_INPUT\}/);
 });
