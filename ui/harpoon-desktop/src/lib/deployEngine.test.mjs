@@ -712,3 +712,11 @@ test("the Remove application control and dialog are distinct from Remove registr
   // the front end never names the open value of the capability
   assert.doesNotMatch(d + screens, /gitRemoval: true/);
 });
+
+test("a removed application cannot leave its detail page on screen, and the mock copy no longer claims deletion", () => {
+  const view = readFileSync(new URL("../views/deploy/DeployView.tsx", import.meta.url), "utf8");
+  assert.match(view, /if \(route\.screen !== "home" && !state\.apps\[route\.appId\]\) setRouteState\(\(r\) => \(\{ \.\.\.r, screen: "home" \}\)\)/, "an application that left the list sends the page home");
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(screens, /Removing the application deletes|labelled containers\/images/);
+  assert.equal((screens.match(/no container, image or volume is deleted/g) ?? []).length, 2, "engine and mock panels both say nothing is deleted");
+});

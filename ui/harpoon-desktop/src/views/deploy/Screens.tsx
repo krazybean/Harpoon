@@ -621,7 +621,7 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
         {f("Source", `${app.source.label}`, "Read-only deploy key · host key pinned")}{f("Production branch", s.productionBranch)}{f("Poll interval", `${s.pollSeconds} s`)}
         <div className="dp-evidence"><Warning size={12} />Automatic = while Harpoon is running. Unattended deployment is not offered yet.</div></div></section>
       <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
-        <p className="dp-muted" style={{ margin: 0 }}>Removing the application deletes its records and labelled containers/images. Volumes and unlabelled resources are never deleted.</p>
+        <p className="dp-muted" style={{ margin: 0 }}>Removing a never-deployed application retires it from the active list. It does not purge historical records or stored credentials, and no container, image or volume is deleted.</p>
         <div><button className="btn btn--destructive" disabled title="Not part of this mock"><Trash size={14} /> Remove application…</button></div></div></section>
       <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>These fields are read-only in the mock; editing settings is part of the real feature.</p>
     </div>
