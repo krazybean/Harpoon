@@ -671,6 +671,19 @@ fn check_removal_capability(gate: &Gate, rt: &Runtime) -> Result<(), Fail> {
 /// touched, and neither is the Keychain. The first removal also upgrades the journal to schema 2, after a verified
 /// backup (see `journal_upgrade`).
 pub fn repo_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    remove(p, gate, out, false)
+}
+
+/// Remove a never-deployed application from Harpoon's active list (`app-remove`). It is the same single `gitdrop`
+/// record, the same capability gate and the same verified backup as `repo-remove`, but only for an application that
+/// owns nothing: no deployment in any state, no Docker ledger entry, no held or selected Git event, no active pause.
+/// It purges no history and deletes no Docker resource or Keychain secret; an application that owns any of those is
+/// refused, because removing it would need a teardown that does not exist yet.
+pub fn app_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
+    remove(p, gate, out, true)
+}
+
+fn remove(p: &Parsed, gate: &Gate, out: &mut String, application: bool) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     // capability first: nothing below runs, and no journal is opened, in a build or runtime that is not authorized
     check_removal_capability(gate, &rt)?;
@@ -682,7 +695,12 @@ pub fn repo_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     let expect: u64 = need("expect-registered-ms")?.parse().map_err(|_| {
         Fail::usage("--expect-registered-ms is the registration time you were shown (`repo-list`)")
     })?;
-    if !p.switch("confirm-removal") {
+    if application && !p.switch("confirm-application-removal") {
+        return Err(Fail::refused(format!(
+            "removing the application of repository {name:?} takes it off the active list; confirm with --confirm-application-removal. Journal history and stored credentials are not purged, and no container or image is deleted. Nothing was changed"
+        )));
+    }
+    if !application && !p.switch("confirm-removal") {
         return Err(Fail::refused(format!(
             "removing repository {name:?} disconnects it from its application; confirm with --confirm-removal. The application, its history, its serving release, its Docker resources and its stored credentials are not removed. Nothing was changed"
         )));
@@ -690,11 +708,11 @@ pub fn repo_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
 
     // read-only preflight: every refusal here leaves the journal exactly as it was
     let state = state_of(&rt)?;
-    let repo = removable(&state, &name, expect)?;
+    let repo = removable(&state, &name, expect, application)?;
 
     // the writer lock, then everything again under it
     let (mut journal, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
-    let now = removable(&restored, &name, expect)?;
+    let now = removable(&restored, &name, expect, application)?;
     if now != repo {
         return Err(changed_meanwhile(&name));
     }
@@ -724,11 +742,19 @@ pub fn repo_remove(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     journal
         .remove_registration(&rec)
         .map_err(|e| Fail::journal(format!("cannot record the removal: {e:?}")))?;
-    let _ = writeln!(
-        out,
-        "removed the registration of repository {name} (application {}). Its source is disconnected; the application, its deployment history, its serving release, its Docker resources and its stored credentials are unchanged. Nothing was built, deployed, stopped or restarted",
-        rec.app
-    );
+    if application {
+        let _ = writeln!(
+            out,
+            "removed application {} (repository {name}) from the active list. It had no deployments, Docker resources or held events; its journal records and stored credentials were not purged, and nothing was built, deployed, stopped or restarted",
+            rec.app
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "removed the registration of repository {name} (application {}). Its source is disconnected; the application, its deployment history, its serving release, its Docker resources and its stored credentials are unchanged. Nothing was built, deployed, stopped or restarted",
+            rec.app
+        );
+    }
     if let Some(b) = report {
         let _ = writeln!(
             out,
@@ -749,6 +775,7 @@ fn removable(
     state: &harpoon_deploy_journal::Restored,
     name: &str,
     expect: u64,
+    application: bool,
 ) -> Result<RepoRec, Fail> {
     let Some(repo) = state.git.repos.get(name) else {
         return Err(match state.git.retired_name(name) {
@@ -772,7 +799,46 @@ fn removable(
             repo.app
         )));
     }
+    if application {
+        unused_application(state, &repo.app, name)?;
+    }
     Ok(repo.clone())
+}
+
+/// An application that owns nothing, or the refusal that says what it owns. Full teardown of a deployed
+/// application is out of scope, so anything it owns (a deployment in any state, a Docker ledger entry, a pause)
+/// keeps it on the list.
+fn unused_application(
+    state: &harpoon_deploy_journal::Restored,
+    app: &ApplicationId,
+    name: &str,
+) -> Result<(), Fail> {
+    let refuse = |what: String| {
+        Err(Fail::refused(format!(
+            "application {app} (repository {name:?}) cannot be removed: it {what}. Only an application that was never deployed and owns no Docker resources can be removed; use `repo-remove` to disconnect its source instead. Nothing was changed"
+        )))
+    };
+    let deployments = state
+        .deployments
+        .iter()
+        .filter(|d| d.application_id == *app)
+        .count();
+    if deployments > 0 {
+        return refuse(format!("has {deployments} deployment record(s)"));
+    }
+    let entries = state
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.app == *app)
+        .count();
+    if entries > 0 {
+        return refuse(format!("has {entries} Docker ledger entr(ies)"));
+    }
+    if harpoon_deploy::control::is_paused(app, &state.deployments, &state.control) {
+        return refuse("has an active pause".into());
+    }
+    Ok(())
 }
 
 fn read_repos(rt: &Runtime) -> Result<std::collections::BTreeMap<String, RepoRec>, Fail> {

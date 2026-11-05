@@ -3666,7 +3666,11 @@ fn authorize_removal(t: &T) {
 }
 
 fn run_removal(t: &T, gate: &Gate, args: &[&str]) -> Outcome {
-    let mut a: Vec<String> = ["repo-remove", "--simulate"]
+    run_removal_as("repo-remove", t, gate, args)
+}
+
+fn run_removal_as(command: &str, t: &T, gate: &Gate, args: &[&str]) -> Outcome {
+    let mut a: Vec<String> = [command, "--simulate"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -4636,4 +4640,304 @@ fn a_fresh_registration_of_a_removed_name_inherits_no_event_identity_polling_sta
         6,
     );
     assert_eq!(restored(&t).git.retired.len(), 2);
+}
+
+// ------------------------------------------------------------------ app-remove
+
+/// `app-remove` as a person runs it.
+fn remove_app_with(t: &T, gate: &Gate, name: &str, expect: u64, extra: &[&str]) -> Outcome {
+    let e = expect.to_string();
+    let mut args = vec!["--name", name, "--expect-registered-ms", &e];
+    args.extend_from_slice(extra);
+    let _h = holding();
+    run_removal_as("app-remove", t, gate, &args)
+}
+
+fn remove_app(t: &T) -> Outcome {
+    remove_app_with(
+        t,
+        &ACCEPTANCE,
+        "shop",
+        registered_ms(t, "shop"),
+        &["--confirm-application-removal"],
+    )
+}
+
+const SHOP_URL: &str = "https://git.example.com/acme/shop.git";
+
+#[test]
+fn a_never_deployed_application_is_removed_with_one_record_a_backup_and_nothing_purged() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                &format!("app:{APP}"),
+                "--name",
+                "MODE",
+                "--value",
+                "one",
+            ],
+        ),
+        0,
+    );
+    authorize_removal(&t);
+    let before = restored(&t);
+    assert_eq!(schema_of(&t), 1);
+
+    let o = remove_app(&t);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("removed application") && o.stdout.contains("not purged"),
+        "{}",
+        o.stdout
+    );
+    let after = restored(&t);
+    assert_eq!(schema_of(&t), 2);
+    assert_eq!(backup_files(&t).len(), 2, "the backup and its digest");
+    assert_eq!(after.git.retired.len(), 1);
+    assert_eq!(after.git.retired_owner(&APP.parse().unwrap()), Some("shop"));
+    assert!(after.git.repos.is_empty());
+    // only the registration changed: configuration, ledger and control history are as they were
+    assert_eq!(after.config, before.config);
+    assert_eq!(after.ledger, before.ledger);
+    assert_eq!(after.control, before.control);
+    assert_eq!(after.deployments, before.deployments);
+    assert_eq!(t.docker_requests(), 0);
+
+    // it is gone for good: removing again says so and writes nothing
+    let (bytes, state) = (journal_bytes(&t), restored(&t));
+    let again = remove_app_with(
+        &t,
+        &ACCEPTANCE,
+        "shop",
+        1,
+        &["--confirm-application-removal"],
+    );
+    assert_exit(&again, 6);
+    assert!(again.stderr.contains("already removed"), "{}", again.stderr);
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), state);
+}
+
+#[test]
+fn application_removal_refuses_whatever_it_cannot_leave_behind_and_changes_nothing() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    // a deployed application with a serving release, a recorded source and a held event
+    deployed_registered(&t, &kc, false, true);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+
+    // unconfirmed, and with the shipping gate: refused before the journal is consulted
+    let o = remove_app_with(&t, &ACCEPTANCE, "shop", at, &[]);
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("--confirm-application-removal"),
+        "{}",
+        o.stderr
+    );
+    let o = remove_app_with(
+        &t,
+        &SHIPPING,
+        "shop",
+        at,
+        &["--confirm-application-removal"],
+    );
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("not enabled in this build"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "gate and confirmation");
+
+    // the held event is reported first (shared with `repo-remove`); once it is gone the deployment still refuses
+    let o = remove_app_with(
+        &t,
+        &ACCEPTANCE,
+        "shop",
+        at,
+        &["--confirm-application-removal"],
+    );
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("held or selected"), "{}", o.stderr);
+    assert_untouched(&t, &bytes, &before, "held event");
+
+    let t = T::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    let o = remove_app_with(
+        &t,
+        &ACCEPTANCE,
+        "shop",
+        at,
+        &["--confirm-application-removal"],
+    );
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("deployment record(s)") && o.stderr.contains("repo-remove"),
+        "{}",
+        o.stderr
+    );
+    assert_untouched(&t, &bytes, &before, "deployed application");
+    assert_eq!(t.docker_requests(), 0);
+    // the registration-only operation is still available for it, with its own confirmation
+    assert_exit(&remove_shop(&t), 0);
+}
+
+#[test]
+fn a_stale_view_cannot_remove_an_application() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    authorize_removal(&t);
+    let at = registered_ms(&t, "shop");
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    let o = remove_app_with(
+        &t,
+        &ACCEPTANCE,
+        "shop",
+        at + 1,
+        &["--confirm-application-removal"],
+    );
+    assert_exit(&o, 6);
+    assert_untouched(&t, &bytes, &before, "stale version");
+}
+
+#[test]
+fn a_fresh_registration_of_the_same_name_inherits_nothing_from_a_removed_application() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                &format!("app:{APP}"),
+                "--name",
+                "OLD_ONLY",
+                "--value",
+                "x",
+            ],
+        ),
+        0,
+    );
+    authorize_removal(&t);
+    assert_exit(&remove_app(&t), 0);
+
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &[
+                "repo-add",
+                "--simulate",
+                "--name",
+                "shop",
+                "--url",
+                SHOP_URL,
+                "--container-port",
+                "8080",
+            ],
+        ),
+        0,
+    );
+    let after = restored(&t);
+    let fresh = after.git.repos["shop"].app.clone();
+    assert_ne!(
+        fresh.to_string(),
+        APP,
+        "a fresh application, not the removed one"
+    );
+    assert_eq!(after.git.incarnation(&fresh), 0);
+    assert!(
+        after.git.sources.iter().all(|s| after
+            .deployments
+            .iter()
+            .any(|d| d.id == s.deployment && d.application_id != fresh))
+            || after.git.sources.is_empty()
+    );
+    assert!(after.control.events_of(&fresh).next().is_none());
+    assert!(!after.deployments.iter().any(|d| d.application_id == fresh));
+    let shown = sim(&t, &kc, &["config-show", "--app", &fresh.to_string()]);
+    assert!(!shown.stdout.contains("OLD_ONLY"), "{}", shown.stdout);
+    // the removed application keeps its name and is not claimable without the explicit, confirmed reclaim
+    let o = add_repo(&t, &kc, "shop", SHOP_URL, APP, &["--new"]);
+    assert_exit(&o, 6);
+    assert_eq!(after.git.retired_owner(&APP.parse().unwrap()), Some("shop"));
+}
+
+fn project_folder(t: &T) -> String {
+    let dir = t.rt.join("project");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Dockerfile"), "FROM scratch\n").unwrap();
+    dir.display().to_string()
+}
+
+#[test]
+fn a_plain_deploy_cannot_bring_back_a_removed_never_deployed_application() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    authorize_removal(&t);
+    assert_exit(&remove_app(&t), 0);
+    let (bytes, before) = (journal_bytes(&t), restored(&t));
+    let ctx = project_folder(&t);
+    let o = sim(
+        &t,
+        &kc,
+        &[
+            "deploy",
+            "--simulate",
+            "--app",
+            APP,
+            "--project-dir",
+            &ctx,
+            "--container-port",
+            "8080",
+        ],
+    );
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("will not bring it back") && o.stderr.contains("--confirm-reclaim"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(journal_bytes(&t), bytes);
+    assert_eq!(restored(&t), before);
+    assert_eq!(t.docker_requests(), 0);
+
+    // an application that was deployed before its registration was removed is not retired by that
+    let t = T::new();
+    deployed_registered(&t, &kc, false, false);
+    authorize_removal(&t);
+    assert_exit(&remove_shop(&t), 0);
+    let ctx = project_folder(&t);
+    let o = sim(
+        &t,
+        &kc,
+        &[
+            "deploy",
+            "--simulate",
+            "--app",
+            APP,
+            "--project-dir",
+            &ctx,
+            "--container-port",
+            "8080",
+        ],
+    );
+    assert!(!o.stderr.contains("will not bring it back"), "{}", o.stderr);
 }

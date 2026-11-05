@@ -37,6 +37,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "repo-add" => git_cmds::repo_add(p, out),
         "repo-update" => git_cmds::repo_update(p, out),
         "repo-remove" => git_cmds::repo_remove(p, gate, out),
+        "app-remove" => git_cmds::app_remove(p, gate, out),
         "repo-secret" => git_cmds::repo_secret(p, svc, out),
         "repo-list" => git_cmds::repo_list(p, out),
         "git-deploy" => git_cmds::git_deploy(p, gate, svc, out),
@@ -1682,6 +1683,15 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
             .map_err(|e| Fail::failed(format!("cannot generate an id: {e}")))?,
     };
     blockers.extend(existing_release_blocker(&restored.ledger, app.as_str()));
+    // a removed, never-deployed application is retired: a plain deploy must not silently bring it back
+    if let Some(gone) = restored.git.disconnected(&app) {
+        if !deps.iter().any(|d| d.application_id == app) {
+            return Err(Fail::refused(format!(
+                "application {app} was removed with repository {:?} and never deployed, so `deploy --app` will not bring it back. Omit --app for a new application, or reclaim it with `repo-add --name {} --app {app} --confirm-reclaim`. Nothing was built or started",
+                gone.name, gone.name
+            )));
+        }
+    }
     if !blockers.is_empty() {
         let mut m = String::from(
             "deploy refused: unresolved ownership or journal state makes execution unsafe:\n",

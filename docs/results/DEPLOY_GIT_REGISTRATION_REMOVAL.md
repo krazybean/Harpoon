@@ -212,3 +212,25 @@ is "refuse to open", not "refuse to write", and that limit is accepted only know
 * Deleting saved credentials. They stay in the Keychain (a global service, shared by runtimes), bound to the name and
   to the removed registration's destination. A credential lifecycle is a separate design.
 * Deleting an application.
+
+## Removing a never-deployed application: `app-remove`
+
+`app-remove --name N --expect-registered-ms T --confirm-application-removal` takes an application that was registered
+but never deployed off the active list. It is **not** a teardown and not a purge. It appends the same single `gitdrop`
+record as `repo-remove`, behind the same build gate, runtime marker and verified schema-2 backup, and it is closed in
+every shipping build for the same reasons.
+
+It is refused, with the reason and nothing changed, unless the application owns nothing. Checked read-only first and
+again under the journal writer lock: the registration exists in the version shown; no deployment record in any state;
+no Docker ledger entry; no held or selected Git event; no active pause. An application that owns any of these keeps its
+place: use `repo-remove` to disconnect its source.
+
+What it keeps: every journal record (including the registration and its app-scoped configuration), stored
+credentials and the Keychain, and Docker (it never contacts it). A fresh `repo-add` of the same name gets a fresh
+application and inherits none of the removed application's identity, configuration, credentials' destination, control
+history or sources; the removed application stays the original name's and returns only through the explicit
+`repo-add --app ... --confirm-reclaim`.
+
+Because the application then has no deployment and no registration it leaves the application list. To keep it from
+returning by accident, `deploy --app <id>` refuses an application that was removed and never deployed, pointing to the
+reclaim command; an application that was deployed before its registration was removed is unaffected.

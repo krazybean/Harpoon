@@ -157,6 +157,11 @@ const SPECS: &[Spec] = &[
         switches: &["simulate", "confirm-removal"],
     },
     Spec {
+        command: "app-remove",
+        values: &["runtime-dir", "name", "expect-registered-ms"],
+        switches: &["simulate", "confirm-application-removal"],
+    },
+    Spec {
         command: "repo-secret",
         values: &["runtime-dir", "name", "kind"],
         switches: &["simulate"],
@@ -457,6 +462,7 @@ COMMANDS
   repo-update     change a registration's source, branch, Dockerfile path, container port or health path (--name N --expect-registered-ms T, from repo-list; [--url U] [--branch B] [--dockerfile F] [--container-port P] [--health-path /P]);
                   appends a record, deploys nothing, keeps the name, application and credential; needs --confirm-change once the application has deployments; a credentialed repository keeps its host
   repo-remove     disconnect a repository from its application (--name N --expect-registered-ms T, from repo-list; --confirm-removal): appends a removal record; the application, history, serving release, Docker resources and
+  app-remove      take a NEVER-DEPLOYED application off the active list (--name N --expect-registered-ms T, from repo-list; --confirm-application-removal): the same single removal record and gate as repo-remove, refused if the application has any deployment, Docker resource, held event or pause; nothing is purged or deleted
                   credentials are untouched; refused while held or selected Git events exist. A ONE-WAY journal upgrade (the first removal makes a verified backup, then stamps schema 2); disabled unless the build and an isolated runtime are authorized
   repo-secret     save the repository's deploy credential or webhook secret in the Keychain: --name N --kind credential|webhook; the value is read from standard input only
   repo-list       registered repositories, what was last observed, and the last deployment from each
