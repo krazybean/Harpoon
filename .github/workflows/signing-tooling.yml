@@ -1,0 +1,77 @@
+name: Signing tooling
+
+# Runs the synthetic regression for tools/release/macos/sign-existing-dmg.sh on a hosted macOS runner. It needs hdiutil and
+# codesign (ad-hoc only): no Developer ID, no Keychain credential, no secret and no Apple notarization is involved, and
+# nothing is built or published. It is its own check so that a blocking disk-image operation cannot stall ordinary
+# validation, and it is bounded: the job allows 10 minutes, the regression has its own watchdogs and prints which scenario
+# and command was running if it stops.
+#
+# The workflow always reports (so the `signing-tooling` check can be required for every pull request); the macOS job runs
+# only when a pull request touches the signing tooling, and a skipped job counts as passing for a required check.
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      signing: ${{ steps.decide.outputs.signing }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Does this change touch the signing tooling?
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"; echo "manual run: the regression runs"; exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(\.github/workflows/signing-tooling\.yml|tools/release/macos/(sign-existing-dmg|regression-sign-existing-dmg|sign-app|verify-signatures|notarize)\.sh|tools/verify-bundle\.sh|tools/check-release-bundle-capabilities\.sh|harpoon/entitlements\.plist)$'; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"; echo "signing tooling changed: the regression runs"
+          else
+            echo "signing=false" >> "$GITHUB_OUTPUT"; echo "signing tooling unchanged: nothing to run"
+          fi
+
+  signing-tooling:
+    needs: changes
+    if: needs.changes.outputs.signing == 'true'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Synthetic signing regression (ad-hoc signer only)
+        timeout-minutes: 9
+        run: bash tools/release/macos/regression-sign-existing-dmg.sh
+
+      # Evidence for a hang or failure: what the disk-image machinery was doing. Read-only; every command is bounded.
+      - name: Disk-image diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: |
+          bounded() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          date -u; sw_vers; df -h / /private/tmp
+          echo "--- mounts"; mount | head -40
+          echo "--- hdiutil info"; bounded 20 hdiutil info || echo "(hdiutil info did not finish in 20s)"
+          echo "--- processes"; ps -axo pid,ppid,etime,stat,command | grep -E "hdiutil|diskimage|mdutil|codesign|diskarbitration" | grep -v grep || true
+          echo "--- system log (disk images, last 15 minutes)"
+          bounded 40 log show --last 15m --style compact --predicate 'process == "diskimages-helper" OR process == "hdiutil" OR process == "diskarbitrationd" OR process == "diskimagesiod"' 2>&1 | tail -80 || true

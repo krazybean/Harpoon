@@ -31,6 +31,13 @@ Apple); `--dry-run` checks and plans only; `--sign-dmg` also signs the image; `-
 work volume must stay above 16 GiB (absolute floor 15 GiB) before each major step. The **final** SHA-256 is that of the
 signed, notarized, stapled file; the SHA-256 of the unsigned CI image is recorded only as the build input.
 
+The regression (`regression-sign-existing-dmg.sh`) is its own CI check, **`signing-tooling`** (`.github/workflows/signing-tooling.yml`),
+not part of `validate`: it needs `hdiutil`, runs under a 10-minute job limit with its own watchdogs, prints which scenario and
+command is running, and on failure prints the disk-image state of the runner. Every disk-image command in the script runs under a
+watchdog (`run_bounded`), so a hang fails with the command named. Image contents are compared **without following symlinks**:
+an earlier `diff -r` followed the image's `Applications -> /Applications` link into the host's real applications, which is slow
+and endless on a runner full of apps.
+
 Measured on a synthetic image (`regression-sign-existing-dmg.sh`): a shadow holds only the changed blocks (3.2 MB for a
 32 MB image whose code and seal changed), the conversion output is about the input's size, and `hdiutil` neither detects
 a shadow from a different image nor reuses a half-finished one safely, so the script refuses an existing shadow and

@@ -38,8 +38,28 @@ CODE_FILES=(
 # Metadata a writable mount may create, ignored when comparing and removed before the image is closed.
 VOLUME_JUNK=(.fseventsd .Trashes .Spotlight-V100 .TemporaryItems)
 
-say() { echo "[sign-dmg] $*" >&2; }
+say() { echo "[sign-dmg $(date -u +%H:%M:%S)] $*" >&2; }
 die() { say "FAIL: $*"; exit 1; }
+
+# Every command that can block on the disk-image machinery runs under a watchdog, so a hang is a failure with a message that
+# names the command and how long it was given, instead of a job that silently runs out its timeout. Only the command's own
+# process is terminated. Plain shell variables (not environment switches): a longer limit for a real 5 GB image, a short one in tests.
+HDIUTIL_TIMEOUT="${HDIUTIL_TIMEOUT:-1800}"
+run_bounded() { # run_bounded SECONDS COMMAND... : returns the command's status, or 124 after SECONDS
+  local secs="$1" start rc=0 pid watchdog flag; shift
+  start="$(date +%s)"; flag="$(mktemp "${TMPDIR:-/tmp}/bounded.XXXXXX")"; rm -f "$flag"
+  say "RUN (limit ${secs}s): $*"
+  "$@" & pid=$!
+  # the watchdog ends its own sleep when told to stop, so nothing lingers and the flag is only written on a real timeout
+  ( sp=""; trap 'kill "$sp" 2>/dev/null; exit 0' TERM; sleep "$secs" & sp=$!; wait "$sp"
+    : > "$flag"; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 3
+    pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & watchdog=$!
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true; wait "$watchdog" 2>/dev/null || true
+  if [ -e "$flag" ]; then rm -f "$flag"; say "TIMEOUT after ${secs}s: $*"; return 124; fi
+  say "done rc=$rc in $(( $(date +%s) - start ))s: $1 ${2:-}"
+  return "$rc"
+}
 
 # ---- the pieces the regression test replaces (shell functions, not environment switches) --------------------------
 free_kib() { df -k "$1" | awk 'NR==2{print $4}'; }
@@ -73,7 +93,7 @@ cleanup() {
   for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
     # `mount` prints the physical path (/private/tmp for /tmp), so compare against the resolved one
     local real; real="$(cd "$m" 2>/dev/null && pwd -P || echo "$m")"
-    if mount | grep -qF " on $real "; then hdiutil detach "$m" >/dev/null 2>&1 || hdiutil detach -force "$m" >/dev/null 2>&1 || say "WARNING: could not detach $m"; fi
+    if mount | grep -qF " on $real "; then run_bounded 120 hdiutil detach "$m" >/dev/null 2>&1 || run_bounded 120 hdiutil detach -force "$m" >/dev/null 2>&1 || say "WARNING: could not detach $m"; fi
   done
   for f in ${TEMP_FILES[@]+"${TEMP_FILES[@]}"}; do rm -f -- "$f"; done
   for f in ${PARTIAL_FILES[@]+"${PARTIAL_FILES[@]}"}; do rm -f -- "$f"; done
@@ -84,20 +104,38 @@ cleanup() {
 sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 bytes() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1"; }
 
+# Compare two mounted trees WITHOUT following symlinks (the image has `Applications -> /Applications`; `diff -r` walks into
+# the host's real /Applications, which is slow, wrong and, on a runner full of apps, endless). Prints the relative paths whose
+# content, type or link target differ; returns 2 when the two trees do not list the same paths.
+list_tree() { ( cd "$1" && find . -mindepth 1 \( -name .fseventsd -o -name .Trashes -o -name .Spotlight-V100 -o -name .TemporaryItems \) -prune -o -print | LC_ALL=C sort ); }
+tree_differences() {
+  local a="$1" b="$2" la lb rel
+  la="$(list_tree "$a")"; lb="$(list_tree "$b")"
+  if [ "$la" != "$lb" ]; then say "the two images do not list the same paths: $(diff <(echo "$la") <(echo "$lb") | head -5 | tr '\n' ' ')"; return 2; fi
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    if [ -L "$a/$rel" ] || [ -L "$b/$rel" ]; then
+      if [ -L "$a/$rel" ] && [ -L "$b/$rel" ] && [ "$(readlink "$a/$rel")" = "$(readlink "$b/$rel")" ]; then :; else echo "$rel"; fi
+    elif [ -f "$a/$rel" ] && [ -f "$b/$rel" ]; then cmp -s "$a/$rel" "$b/$rel" || echo "$rel"
+    elif [ -d "$a/$rel" ] && [ -d "$b/$rel" ]; then :
+    else echo "$rel"; fi
+  done <<<"$la"
+}
+
 attach() { # attach MODE(shadow|readonly) IMAGE MOUNTPOINT [SHADOW]
   local mode="$1" image="$2" mp="$3" shadow="${4:-}"
   mkdir -p "$mp" || die "cannot create $mp"; OWN_DIRS+=("$mp")
   if [ "$mode" = shadow ]; then
     [ ! -e "$shadow" ] || die "the shadow file $shadow already exists; a shadow is never reused (it is not checked against its image)"
     TEMP_FILES+=("$shadow")
-    hdiutil attach -shadow "$shadow" -nobrowse -noautoopen -noverify -mountpoint "$mp" "$image" >/dev/null || die "could not mount $image writable through a shadow"
+    run_bounded "$HDIUTIL_TIMEOUT" hdiutil attach -shadow "$shadow" -nobrowse -noautoopen -noverify -mountpoint "$mp" "$image" >/dev/null || die "could not mount $image writable through a shadow"
   else
-    hdiutil attach -readonly -nobrowse -noautoopen -noverify -mountpoint "$mp" "$image" >/dev/null || die "could not mount $image read-only"
+    run_bounded "$HDIUTIL_TIMEOUT" hdiutil attach -readonly -nobrowse -noautoopen -noverify -mountpoint "$mp" "$image" >/dev/null || die "could not mount $image read-only"
   fi
   MOUNTS+=("$mp")
 }
 detach() { # detach MOUNTPOINT : plain detach, never forced here (a busy volume is a failure to look at)
-  hdiutil detach "$1" >/dev/null || die "could not detach $1 (something is using it)"
+  run_bounded 300 hdiutil detach "$1" >/dev/null || die "could not detach $1 (something is using it)"
 }
 
 # ---- the work ------------------------------------------------------------------------------------------------------
@@ -117,7 +155,7 @@ sign_dmg_run() { # sign_dmg_run INPUT OUT_DIR WORK_DIR EXPECT_SHA256 STAGE(sign|
   else
     say "input sha256 $in_sha (no expected value given: it is recorded, not verified)"
   fi
-  hdiutil verify "$input" >/dev/null 2>&1 || die "the input image does not verify (hdiutil verify)"
+  run_bounded "$HDIUTIL_TIMEOUT" hdiutil verify "$input" >/dev/null 2>&1 || die "the input image does not verify (hdiutil verify)"
 
   require_headroom "$work" $(( SHADOW_ESTIMATE_BYTES + SLACK_BYTES )) "the shadow file"
   require_headroom "$out_dir" $(( in_bytes + SLACK_BYTES )) "the signed image"
@@ -134,12 +172,12 @@ sign_dmg_run() { # sign_dmg_run INPUT OUT_DIR WORK_DIR EXPECT_SHA256 STAGE(sign|
   say "mounting writable through $shadow"
   attach shadow "$input" "$mnt" "$shadow"
   [ -d "$mnt/Harpoon.app" ] || die "no Harpoon.app at the root of the image"
-  mdutil -i off "$mnt" >/dev/null 2>&1 || true
+  run_bounded 60 mdutil -i off "$mnt" >/dev/null 2>&1 || true
   say "signing Harpoon.app inside the image"
   app_signer "$mnt/Harpoon.app" || die "signing the app inside the image failed"
   app_verifier "$mnt/Harpoon.app" || die "the freshly signed app does not verify"
   local j; for j in "${VOLUME_JUNK[@]}"; do rm -rf -- "${mnt:?}/$j"; done
-  sync || true
+  run_bounded 300 sync || true
   detach "$mnt"
   local sh_bytes; sh_bytes="$(bytes "$shadow")"
   say "shadow holds $(( sh_bytes / 1048576 )) MiB of changed blocks"
@@ -147,19 +185,21 @@ sign_dmg_run() { # sign_dmg_run INPUT OUT_DIR WORK_DIR EXPECT_SHA256 STAGE(sign|
   [ "$(sha256 "$input")" = "$in_sha" ] || die "the input image changed while it was being signed"
   require_headroom "$out_dir" $(( in_bytes + SLACK_BYTES )) "converting the signed image"
   PARTIAL_FILES+=("$out")
-  hdiutil convert "$input" -format UDZO -shadow "$shadow" -o "$out" >/dev/null || die "hdiutil convert failed"
-  hdiutil verify "$out" >/dev/null 2>&1 || die "the signed image does not verify (hdiutil verify)"
+  run_bounded "$HDIUTIL_TIMEOUT" hdiutil convert "$input" -format UDZO -shadow "$shadow" -o "$out" >/dev/null || die "hdiutil convert failed"
+  run_bounded "$HDIUTIL_TIMEOUT" hdiutil verify "$out" >/dev/null 2>&1 || die "the signed image does not verify (hdiutil verify)"
   [ "$(sha256 "$input")" = "$in_sha" ] || die "the input image changed during conversion"
 
   say "comparing the signed image with the input: only code signatures may differ"
-  local a="$tmp/in" b="$tmp/out" line rel allowed d ok
+  local a="$tmp/in" b="$tmp/out" line rel allowed ok
   attach readonly "$input" "$a"; attach readonly "$out" "$b"
-  local diffs; diffs="$(diff -rq "$a" "$b" -x .fseventsd -x .Trashes -x .Spotlight-V100 -x .TemporaryItems || true)"
+  local diffs rc=0
+  diffs="$(run_bounded "$HDIUTIL_TIMEOUT" tree_differences "$a" "$b")" || rc=$?
+  [ "$rc" = 0 ] || die "comparing the images failed, found different contents, or timed out (status $rc)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      "Files $a/Harpoon.app/"*" and "*" differ") rel="${line#Files $a/Harpoon.app/}"; rel="${rel%% and *}" ;;
-      *) die "unexpected difference after signing: $line" ;;
+      ./Harpoon.app/*) rel="${line#./Harpoon.app/}" ;;
+      *) die "signing changed a path outside Harpoon.app: $line" ;;
     esac
     ok=0; for allowed in "${CODE_FILES[@]}"; do [ "$rel" = "$allowed" ] && ok=1; done
     [ "$ok" = 1 ] || die "signing changed a file that is not code: $rel"
