@@ -11,6 +11,8 @@ const tauriPath = path.join(root, 'src-tauri/tauri.conf.json');
 const cargoTomlPath = path.join(root, 'src-tauri/Cargo.toml');
 const cargoLockPath = path.join(root, 'src-tauri/Cargo.lock');
 const pkgLockPath = path.join(root, 'package-lock.json');
+const swiftVersionPath = path.join(root, '../../harpoon/Sources/Version.swift');
+const swiftVersionRe = /^let harpoonVersion = "([^"]*)"/m;
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 function writeJsonAtomic(p, obj) {
@@ -177,6 +179,12 @@ if (cmd === '--check' || cmd === 'check' || args.includes('--check')) {
     console.log(`package-lock.json  ${plVer}`);
     if (plVer !== pkgVer) { ok = false; console.error(`mismatch package-lock.json ${plVer} != ${pkgVer}`); }
   }
+  if (fs.existsSync(swiftVersionPath)) {
+    const m = fs.readFileSync(swiftVersionPath, 'utf8').match(swiftVersionRe);
+    const sVer = m ? m[1] : null;
+    console.log(`Version.swift      ${sVer} (the runtime's \`harpoon version\`)`);
+    if (sVer !== pkgVer) { ok = false; console.error(`mismatch harpoon/Sources/Version.swift ${sVer} != ${pkgVer}`); }
+  } else { ok = false; console.error('harpoon/Sources/Version.swift is missing'); }
   console.log(`\nVersion consistency: ${ok ? 'PASS' : 'FAIL'}`);
   process.exit(ok ? 0 : 1);
 }
@@ -220,5 +228,10 @@ if (fs.existsSync(tauriPath)) {
 updateCargoToml(cargoTomlPath, target);
 updateCargoLock(cargoLockPath, target);
 updatePackageLock(pkgLockPath, target);
+if (fs.existsSync(swiftVersionPath)) {
+  const txt = fs.readFileSync(swiftVersionPath, 'utf8');
+  const out = txt.replace(swiftVersionRe, `let harpoonVersion = "${target}"`);
+  if (out !== txt) { fs.writeFileSync(swiftVersionPath + '.tmp', out); fs.renameSync(swiftVersionPath + '.tmp', swiftVersionPath); }
+}
 
-console.log(`updated package.json, tauri.conf.json (if explicit), Cargo.toml, Cargo.lock, package-lock.json`);
+console.log(`updated package.json, tauri.conf.json (if explicit), Cargo.toml, Cargo.lock, package-lock.json, harpoon/Sources/Version.swift`);

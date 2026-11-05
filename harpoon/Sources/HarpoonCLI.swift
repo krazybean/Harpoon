@@ -22,7 +22,7 @@ func handleDockerEnv() -> Int32 {
 }
 
 func handleVersion() -> Int32 {
-    cliPrint("Harpoon 0.1.0")
+    cliPrint("Harpoon \(harpoonVersion)")
     return 0
 }
 

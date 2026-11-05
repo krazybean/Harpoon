@@ -225,4 +225,7 @@ if [ -n "$GIT_DIRTY" ]; then
   exit 1
 fi
 echo "[release] DONE dist/v$VERSION" >&2
+echo "[release] NEXT (required): after uploading the DMG to the GitHub release, run" >&2
+echo "  tools/release/macos/verify-release-assets.sh v$VERSION $DMG" >&2
+echo "  The release is not distributed until that passes (a release whose notes name a DMG but has no asset is a failed release)." >&2
 ls -lh "$DIST_DIR" >&2

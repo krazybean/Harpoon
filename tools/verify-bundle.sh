@@ -37,6 +37,7 @@ check "Contents/MacOS/harpoon-desktop exists" test -f "$APP/Contents/MacOS/harpo
 check "nested Harpoon runtime exists" test -f "$APP/Contents/Resources/harpoon/bin/harpoon"
 check "bundled Docker CLI exists" test -x "$APP/Contents/Resources/harpoon/bin/docker"
 check "bundled Docker Buildx verified (tools/check-bundled-buildx.sh)" bash "$REPO_ROOT/tools/check-bundled-buildx.sh" "$APP"
+check "release capability boundaries: journal reader present, no acceptance artifacts (tools/check-release-bundle-capabilities.sh)" sh "$REPO_ROOT/tools/check-release-bundle-capabilities.sh" "$APP"
 check "kernel exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/Image-virt"
 check "initramfs exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/harpoon-initramfs.cpio.gz"
 check "guest asset manifest exists" test -f "$APP/Contents/Resources/harpoon/lib/harpoon/guest-assets.manifest"
