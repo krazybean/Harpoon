@@ -2,14 +2,31 @@
 
 Removing a registration disconnects an application from its repository. It does not delete the application, its
 deployments, its serving release, any Docker resource, or any saved credential. It is a different thing from
-deleting an application, which this work does not touch.
+removing a never-deployed application (`app-remove`, below), and from tearing down a deployed one, which does not exist.
+
+## Status: what is implemented, and what a shipping build can do
+
+Implemented (merged, tested, accepted in a disposable desktop) is not the same as available. **In every shipping build
+both removals are closed**: `Gate::shipping()` has `git_removal_enabled: false`, and only the unpackaged acceptance
+binary, or a debug desktop in a test namespace, can open it, and then only for a runtime with its own marker.
+
+| Capability | Implemented | In a shipping build |
+|---|---|---|
+| Read a journal that holds a removal (schema 2), and refuse a newer schema by name | Yes (PR A, #163) | **Yes, always on**: the reader is what a compatibility release ships |
+| Remove registration (`repo-remove`, Settings → Source) | Yes (#164, desktop in #164/#166/#169) | **Closed** |
+| Remove application, never-deployed only (`app-remove`, Settings → Danger zone) | Yes (#167, #168) | **Closed** |
+| Tear down a *deployed* application (stop and delete its containers and images) | **No**, and out of scope for v1 | n/a |
+| Delete saved credentials | **No** | n/a |
+
+Opening either removal for ordinary users is a separate, reviewed change (see Production): an opt-in per-runtime
+authorization, released only after a reader-compatible release has shipped.
 
 This is delivered in two steps because the journal cannot be read by a build that does not know the record:
 
 | Step | Contents | Writes a removal? |
 |---|---|---|
 | PR A (merged) | the `gitdrop` record, replay, snapshots, race protections, identity and credential rules, a journal-schema check | No |
-| **PR B (this change)** | `repo-remove`, the confirmation dialog, the capability gate, the backup and schema stamp, poll incarnations | **Yes, but closed in every shipping build** |
+| PR B (merged) | `repo-remove`, the confirmation dialog, the capability gate, the backup and schema stamp, poll incarnations | **Yes, but closed in every shipping build** |
 
 ## The record
 
@@ -181,7 +198,8 @@ registration still starts from a fresh polling baseline, so nothing already hand
 ### Desktop
 
 **Remove registration…** sits in Settings, Source, next to Edit registration, separately from **Remove application…**
-(still disabled, unchanged). It is disabled with the reason unless the build allows removal. The dialog states what is
+(Settings, Danger zone: see the last section). Both are disabled, with the reason shown, unless the build allows
+removal. The dialog states what is
 removed and what is kept (including that saved credentials stay in the Keychain tied to the name and its address),
 warns that the journal is upgraded one way and backed up first, refuses while events wait, and needs the repository's
 name typed. After removal the application keeps its readable name and shows **Source disconnected**; Deploy, Redeploy
@@ -194,9 +212,12 @@ writers alike, exited 4 ("the journal is not usable: invalid SQLite record: unkn
 byte-identical afterwards. Builds from PR A on read it (and name a newer schema precisely). So an older build fails
 closed and cannot damage the journal, but cannot use it, and there is no downgrade except the backup above.
 
-`tools/check-journal-readers.sh BINARY...` scans binaries for the reader (the `gitdrop` record and the schema message)
-and fails for any that lacks it: run it over the installed `Harpoon.app` executable, any `harpoon-deploy` on the
-`PATH`, the acceptance binary and any development builds before authorizing a removal on a journal they could open.
+`tools/check-journal-readers.sh BINARY...` scans binaries for the reader (the `gitdrop` record, the schema message and
+the schema limit it names) and fails for any that lacks it. Give it the executables that open the journal: the
+`Contents/MacOS/harpoon-desktop` of every installed `Harpoon.app` (the Swift runtime beside it never opens the journal),
+any `harpoon-deploy` on the `PATH`, the acceptance binary and any development desktop, before authorizing a removal on a
+journal they could open. `tools/verify-bundle.sh` runs the same check, plus the absence of acceptance-only files, on
+every bundle the build, DMG and release scripts verify (`tools/check-release-bundle-capabilities.sh`).
 
 ## Production
 
@@ -211,7 +232,8 @@ is "refuse to open", not "refuse to write", and that limit is accepted only know
 
 * Deleting saved credentials. They stay in the Keychain (a global service, shared by runtimes), bound to the name and
   to the removed registration's destination. A credential lifecycle is a separate design.
-* Deleting an application.
+* Tearing down a *deployed* application (stopping and deleting its containers and images). `app-remove` handles only an
+  application that was never deployed and owns nothing; anything else is refused, and no teardown exists.
 
 ## Removing a never-deployed application: `app-remove`
 

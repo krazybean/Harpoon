@@ -4967,3 +4967,70 @@ fn capability_refusals_name_the_operation_that_was_refused() {
     }
     assert_untouched(&t, &bytes, &before, "refusals");
 }
+
+/// What every build that can open a journal must do with each schema, through the command line (the reader the desktop
+/// links is the same code): read schema 1 without writing, read a schema-2 journal that holds a removal, and refuse a
+/// newer schema by name. In each case the journal's bytes are unchanged afterwards. (Older builds meeting schema 2
+/// fail closed; that is measured against an old binary in docs/results/DEPLOY_GIT_REGISTRATION_REMOVAL.md.)
+#[test]
+fn a_journal_of_schema_1_and_2_is_read_without_a_write_and_a_newer_schema_is_refused_by_name() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    assert_exit(&add_repo(&t, &kc, "shop", SHOP_URL, APP, &[]), 0);
+    assert_eq!(schema_of(&t), 1);
+    let reads = |t: &T| -> Vec<Outcome> {
+        ["repo-list", "status", "events"]
+            .iter()
+            .map(|c| sim(t, &kc, &[c]))
+            .collect()
+    };
+    let bytes = journal_bytes(&t);
+    for o in reads(&t) {
+        assert_exit(&o, 0);
+    }
+    assert!(sim(&t, &kc, &["repo-list"]).stdout.contains("shop"));
+    assert_eq!(journal_bytes(&t), bytes, "reading schema 1 wrote nothing");
+
+    // schema 2: the first removal upgrades it, and every later read sees the removal and writes nothing
+    authorize_removal(&t);
+    assert_exit(&remove_shop(&t), 0);
+    assert_eq!(schema_of(&t), 2);
+    let bytes = journal_bytes(&t);
+    for o in reads(&t) {
+        assert_exit(&o, 0);
+    }
+    let listed = sim(&t, &kc, &["repo-list"]);
+    assert!(
+        listed.stdout.contains("removed: source disconnected"),
+        "{}",
+        listed.stdout
+    );
+    assert_eq!(restored(&t).git.retired.len(), 1);
+    assert_eq!(journal_bytes(&t), bytes, "reading schema 2 wrote nothing");
+
+    // schema 3 (a journal from a newer Harpoon): refused by name, nothing repaired or discarded
+    let db = t.journal_dir().join(harpoon_deploy_journal::SQLITE_FILE);
+    let done = std::process::Command::new("sqlite3")
+        .arg(&db)
+        .arg("INSERT INTO schema_migrations(version) VALUES (3)")
+        .status()
+        .expect("the sqlite3 command-line tool is needed to make a schema-3 journal");
+    assert!(done.success());
+    let bytes = journal_bytes(&t);
+    for c in ["repo-list", "status"] {
+        let o = sim(&t, &kc, &[c]);
+        let said = format!("{}{}", o.stdout, o.stderr);
+        assert!(
+            said.contains("written by a newer Harpoon")
+                && said.contains("journal schema 3")
+                && said.contains("reads up to schema 2")
+                && said.contains("Nothing was changed, repaired or discarded"),
+            "{c}: {said}"
+        );
+    }
+    assert_eq!(
+        journal_bytes(&t),
+        bytes,
+        "a refused journal is left byte-identical"
+    );
+}

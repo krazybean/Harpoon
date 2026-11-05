@@ -156,6 +156,15 @@ fn new_release_responder(t: &T, skip: Vec<u16>) -> Serving {
     Serving(stop)
 }
 
+/// The health deadline pinned into a seeded release, which a rollback or a restoration also uses as the budget of
+/// the preliminary step. Short, so a scenario in which nothing answers fails quickly; the step is bounded by the real
+/// clock, so a scenario that is meant to succeed must not use it (see `PATIENT_DEADLINE_MS`).
+const QUICK_FAILURE_DEADLINE_MS: u64 = 300;
+/// For a scenario that is meant to succeed: the target answers at once, so a generous deadline costs nothing, and a
+/// loaded CI machine that delays the step by tens of milliseconds cannot turn a success into a timeout.
+const PATIENT_DEADLINE_MS: u64 = 15_000;
+const _: () = assert!(PATIENT_DEADLINE_MS >= 10_000 && QUICK_FAILURE_DEADLINE_MS <= 1_000);
+
 /// What a real deployment leaves: a container, its image, a pinned configuration (with `env`), the
 /// lease, in a docker-kind runtime and in the fake Docker.
 #[allow(clippy::too_many_arguments)]
@@ -168,6 +177,46 @@ fn seed(
     running: bool,
     n: u64,
     env: &[(&str, &str)],
+) -> (String, String) {
+    seed_with_deadline(
+        t,
+        app,
+        dep,
+        at,
+        port,
+        running,
+        n,
+        env,
+        QUICK_FAILURE_DEADLINE_MS,
+    )
+}
+
+/// As [`seed`], for a release a rollback is meant to bring back successfully.
+#[allow(clippy::too_many_arguments)]
+fn seed_patient(
+    t: &T,
+    app: &str,
+    dep: &str,
+    at: u64,
+    port: u16,
+    running: bool,
+    n: u64,
+    env: &[(&str, &str)],
+) -> (String, String) {
+    seed_with_deadline(t, app, dep, at, port, running, n, env, PATIENT_DEADLINE_MS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_with_deadline(
+    t: &T,
+    app: &str,
+    dep: &str,
+    at: u64,
+    port: u16,
+    running: bool,
+    n: u64,
+    env: &[(&str, &str)],
+    deadline_ms: u64,
 ) -> (String, String) {
     t.docker_runtime();
     let (app, dep): (ApplicationId, DeploymentId) = (app.parse().unwrap(), dep.parse().unwrap());
@@ -184,7 +233,7 @@ fn seed(
     pin.image_id = image.clone();
     pin.image_tag = format!("harpoon/{dep}:1");
     pin.health.interval_ms = 5;
-    pin.health.startup_deadline_ms = 300;
+    pin.health.startup_deadline_ms = deadline_ms;
     pin.env = vars(env);
     let mut d = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, at);
     d.transition(DeploymentStatus::Queued, at + 1).unwrap();
@@ -222,7 +271,7 @@ fn seed(
 }
 
 fn seed_release(t: &T, running: bool, env: &[(&str, &str)]) -> (String, String) {
-    seed(t, APP, PREV, 100, PORT, running, 9001, env)
+    seed_patient(t, APP, PREV, 100, PORT, running, 9001, env)
 }
 
 /// A running container of another application, which no command here may ever change.
@@ -845,7 +894,7 @@ fn a_failed_replacement_after_a_rollback_restores_the_rolled_back_release_from_i
     let rel = format!("rel_{}", &old[4..]);
     let t = T::new();
     let lsof = forwarder_lsof(&t);
-    let (old_image, _) = seed(
+    let (old_image, _) = seed_patient(
         &t,
         APP,
         old,
@@ -1118,7 +1167,7 @@ fn a_live_rollback_recreates_the_target_from_its_pin_and_pauses_and_a_failed_one
     // success: the target answers on its pinned port
     let t = T::new();
     let lsof = forwarder_lsof(&t);
-    let (old_image, _) = seed(
+    let (old_image, _) = seed_patient(
         &t,
         APP,
         old,
@@ -1193,6 +1242,7 @@ fn a_live_rollback_recreates_the_target_from_its_pin_and_pauses_and_a_failed_one
     let (old_image, _) = seed(&t, APP, old, 100, 38400, false, 9101, &[]);
     let (_, new_cid2) = seed(&t, APP, new, 200, 38401, true, 9102, &[]);
     let _ = new_cid;
+    let started = std::time::Instant::now();
     let o = live(
         &t,
         &lsof,
@@ -1201,6 +1251,10 @@ fn a_live_rollback_recreates_the_target_from_its_pin_and_pauses_and_a_failed_one
             .to_vec(),
     );
     assert_exit(&o, 7);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(PATIENT_DEADLINE_MS),
+        "a target that never answers fails at its short deadline, not at the patient one"
+    );
     assert!(
         o.stdout.contains("failure at preliminary_check"),
         "{}",
@@ -1442,4 +1496,49 @@ fn an_unconfirmed_live_replacements_retained_image_is_removed_by_id_dry_run_firs
     assert!(o.stdout.contains("already released"), "{}", o.stdout);
     assert!(t.h.docker.requests()[n..].iter().all(|r| r.method == "GET"));
     drop(open_j(&t.journal_dir()).expect("the journal replays"));
+}
+
+/// The rollback scenarios that must succeed pin a deadline no loaded CI machine can exhaust, and the ones that fail on
+/// purpose keep the short one, so they stay quick. (A 300 ms budget once failed a success scenario at 319 ms.)
+#[test]
+fn seeded_releases_pin_a_patient_deadline_for_success_and_a_short_one_for_failure() {
+    let t = T::new();
+    seed_patient(
+        &t,
+        APP,
+        "dep_00000000000000000000000020",
+        100,
+        38400,
+        false,
+        9101,
+        &[],
+    );
+    seed(
+        &t,
+        APP,
+        "dep_00000000000000000000000021",
+        200,
+        38401,
+        true,
+        9102,
+        &[],
+    );
+    let (_j, restored) = open_j(&t.journal_dir()).unwrap();
+    let deadline = |dep: &str| {
+        restored
+            .deployments
+            .iter()
+            .find(|d| d.id.as_str() == dep)
+            .and_then(|d| d.pinned.as_ref())
+            .map(|p| p.health.startup_deadline_ms)
+            .unwrap()
+    };
+    assert_eq!(
+        deadline("dep_00000000000000000000000020"),
+        PATIENT_DEADLINE_MS
+    );
+    assert_eq!(
+        deadline("dep_00000000000000000000000021"),
+        QUICK_FAILURE_DEADLINE_MS
+    );
 }
