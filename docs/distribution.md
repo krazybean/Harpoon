@@ -15,3 +15,30 @@ has an asset with that file name, uploaded, of the same size, with the same SHA-
 required next step. Before that, `tools/verify-bundle.sh` (run by the build, DMG and release scripts) checks the bundle
 itself: the desktop reads schema-2 journals and names the schema it supports, the Swift runtime does not open the
 journal, and no acceptance executable, `harpoon-deploy` tool or removal marker is inside.
+
+## Signing an already-built DMG (no rebuild)
+
+`tools/release/macos/sign-existing-dmg.sh INPUT.dmg` signs the app inside a DMG that CI already built and verified, so
+the Rust, Swift and guest assets are not rebuilt and `tools/guest-builder` is not run. The DMG is a read-only compressed
+image, so the script mounts it writable through a **shadow file** (`hdiutil attach -shadow`, copy-on-write: only the
+blocks signing changes are stored), runs the existing `sign-app.sh` and `verify-signatures.sh` on the mounted app,
+converts the image back with the same shadow, and proves that **only the four executables and `CodeResources` differ**
+from the input. The input is never modified and the output is a separately named `*-signed.dmg` (never overwritten).
+
+Stages, each only when asked for: the default signs the app and converts (it uses the Developer ID key; nothing goes to
+Apple); `--dry-run` checks and plans only; `--sign-dmg` also signs the image; `--submit-to-apple` also notarizes
+(`notarize.sh` waits and staples), validates, and writes `SHA256SUMS` and `SIGNING-PROVENANCE.txt`. The free space of the
+work volume must stay above 16 GiB (absolute floor 15 GiB) before each major step. The **final** SHA-256 is that of the
+signed, notarized, stapled file; the SHA-256 of the unsigned CI image is recorded only as the build input.
+
+The regression (`regression-sign-existing-dmg.sh`) is its own CI check, **`signing-tooling`** (`.github/workflows/signing-tooling.yml`),
+not part of `validate`: it needs `hdiutil`, runs under a 10-minute job limit with its own watchdogs, prints which scenario and
+command is running, and on failure prints the disk-image state of the runner. Every disk-image command in the script runs under a
+watchdog (`run_bounded`), so a hang fails with the command named. Image contents are compared **without following symlinks**:
+an earlier `diff -r` followed the image's `Applications -> /Applications` link into the host's real applications, which is slow
+and endless on a runner full of apps.
+
+Measured on a synthetic image (`regression-sign-existing-dmg.sh`): a shadow holds only the changed blocks (3.2 MB for a
+32 MB image whose code and seal changed), the conversion output is about the input's size, and `hdiutil` neither detects
+a shadow from a different image nor reuses a half-finished one safely, so the script refuses an existing shadow and
+never reuses one. `hdiutil convert -format` prints a deprecation notice (macOS points to `diskutil image create`); it works.
