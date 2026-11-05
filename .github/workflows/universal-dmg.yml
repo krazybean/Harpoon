@@ -134,11 +134,42 @@ jobs:
           ls -lh dist/v"$VERSION"/Harpoon-"$VERSION"-universal.dmg
           echo "DMG_PATH=dist/v$VERSION/Harpoon-$VERSION-universal.dmg" >> "$GITHUB_ENV"
 
+      # Checksums and version evidence come from the artifact this job just built, never from release notes. The app
+      # and the bundled runtime must report the version in package.json; the guest manifests are printed as shipped.
+      - name: Record checksums and version evidence
+        if: steps.guest.outputs.available == 'true'
+        run: |
+          VERSION="$(node -p "require('./ui/harpoon-desktop/package.json').version")"
+          APP=ui/harpoon-desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Harpoon.app
+          PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          RUNTIME_VERSION="$("$APP/Contents/Resources/harpoon/bin/harpoon" --version)"
+          test "$PLIST_VERSION" = "$VERSION" || { echo "::error::Info.plist version $PLIST_VERSION != package.json $VERSION"; exit 1; }
+          test "$RUNTIME_VERSION" = "Harpoon $VERSION" || { echo "::error::runtime reports '$RUNTIME_VERSION', expected 'Harpoon $VERSION'"; exit 1; }
+          DIR="$(dirname "$DMG_PATH")"
+          ( cd "$DIR" && shasum -a 256 "$(basename "$DMG_PATH")" > SHA256SUMS && cat SHA256SUMS )
+          {
+            echo "### Universal DMG $VERSION"
+            echo
+            echo '```'
+            cat "$DIR/SHA256SUMS"
+            echo "bytes: $(stat -f%z "$DMG_PATH")"
+            echo "source: $GITHUB_SHA"
+            echo "app/runtime version: $PLIST_VERSION / $RUNTIME_VERSION"
+            echo
+            echo "arm64 guest manifest:"; cat "$APP/Contents/Resources/harpoon/lib/harpoon/guest-assets.manifest"
+            echo
+            echo "x86_64 guest manifest:"; cat "$APP/Contents/Resources/harpoon/lib/harpoon/x86_64/guest-assets.manifest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SUMS_PATH=$DIR/SHA256SUMS" >> "$GITHUB_ENV"
+
       - name: Upload DMG
         if: steps.guest.outputs.available == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: harpoon-universal-dmg
-          path: ${{ env.DMG_PATH }}
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.SUMS_PATH }}
           if-no-files-found: error
           retention-days: 14

@@ -52,8 +52,10 @@ runtime checks. Release tooling and the relocatable tarball are documented in
 `VZErrorDomain 1` startup failures remain a known host/Virtualization.framework
 risk; they were characterized, not fixed.
 
-**Release status:** `v2.0.0-rc.2` is the current testing-prerelease target and is
-not a stable release. The new guest initramfs and kernel match the tracked
+**Release status:** `v2.0.0-rc.3` is the current testing-prerelease target (the
+schema-2 journal-reader compatibility release; see
+[its notes](releases/v2.0.0-rc.3.md)) and is not a stable release. The paragraph
+below records rc.2, whose guest initramfs and kernel match the tracked
 manifest (`30f5a015ca8594bf55acd546e9a5a9d511f6a538c4696be4d698d95edcb96664`
 and `d625d13a08f08ba1befa309edab7fa9360093b7e7c62b03010c0de084ff9ac20`), and
 one upgraded-host smoke boot passed. Second-Mac acceptance, 2×30 cold boots,
