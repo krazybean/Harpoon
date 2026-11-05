@@ -892,7 +892,15 @@ pub fn repo_list(p: &Parsed, out: &mut String) -> R {
                 let _ = writeln!(out, "  last seen {rf} -> {}", s.commit);
             }
         }
-        if let Some(src) = state.git.sources.iter().rev().find(|s| s.repo == r.name) {
+        // a name can be reused by a fresh application: only this application's own deployments count
+        let of_this_app = |s: &&policy::SourceRec| {
+            s.repo == r.name
+                && state
+                    .deployments
+                    .iter()
+                    .any(|d| d.id == s.deployment && d.application_id == r.app)
+        };
+        if let Some(src) = state.git.sources.iter().rev().find(of_this_app) {
             let _ = writeln!(
                 out,
                 "  last deployment from it: {} at commit {} ({})",
