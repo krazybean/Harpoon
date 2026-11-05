@@ -31,6 +31,26 @@ Apple); `--dry-run` checks and plans only; `--sign-dmg` also signs the image; `-
 work volume must stay above 16 GiB (absolute floor 15 GiB) before each major step. The **final** SHA-256 is that of the
 signed, notarized, stapled file; the SHA-256 of the unsigned CI image is recorded only as the build input.
 
+### Resuming from an already-signed image (`--resume-from-signed`)
+
+When the application-signing stage has already run, the later stages continue from its output **without signing the app
+again**: `sign-existing-dmg.sh --resume-from-signed SIGNED.dmg --expect-sha256 HEX --out-dir DIR` plus exactly one of
+`--dry-run` (verify only; writes nothing), `--sign-dmg` or `--submit-to-apple`. The exact SHA-256 of the signed input is
+mandatory (there is no sibling-checksum fallback). Before anything is written it verifies the image (`hdiutil verify`),
+that the image itself is not yet signed or notarized, and that **every executable in the app** carries a Developer ID
+signature with the hardened runtime, a secure timestamp, a team identifier, both architectures (each slice verified) and
+the right entitlements (virtualization on the Swift runtime only), plus `verify-signatures.sh` and `verify-bundle.sh`. It
+never mounts anything writable. The distribution image is a **separate file** (a clone of the signed input, named without
+`-signed`); the signed input stays byte-identical.
+
+Progress is recorded in `<output>.state`, so recovery never repeats work blindly: a submission already recorded is polled,
+not resubmitted (rerun the same command after a timeout or interruption); an accepted but unstapled image is stapled; a
+rejection is reported with its log (`notary-<id>.log`) and **never retried automatically** (move the output and its state
+file aside to start over). An existing output is accepted only when its state shows it came from this exact input;
+symlinked inputs, output directories, outputs and state files are refused. `SHA256SUMS` and `SIGNING-PROVENANCE.txt`
+(signed input and final artifact hashes recorded separately) are written only after the stapled image has been verified
+again: signature, staple, Gatekeeper, and its contents equal to the signed input.
+
 The regression (`regression-sign-existing-dmg.sh`) is its own CI check, **`signing-tooling`** (`.github/workflows/signing-tooling.yml`),
 not part of `validate`: it needs `hdiutil`, runs under a 10-minute job limit with its own watchdogs, prints which scenario and
 command is running, and on failure prints the disk-image state of the runner. Every disk-image command in the script runs under a
