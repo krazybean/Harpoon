@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # @vitejs/plugin-react 6.x declares peer vite ^8.0.0 (npm ci fails with ERESOLVE on our Vite 6: see #173).
+      # Remove this when Vite is deliberately migrated to 8; plugin-react 5.x (vite ^6 to ^8) is the compatible step up.
+      - dependency-name: "@vitejs/plugin-react"
+        versions: ["6.x"]
   - package-ecosystem: "cargo"
     directory: "/ui/harpoon-desktop/src-tauri"
     schedule:
