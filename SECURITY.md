@@ -5,8 +5,9 @@
 | Version | Supported |
 |---|---|
 | `main` | Active development |
-| `0.1.x` | Current public release line |
-| Older pre-release tags | Not supported |
+| `0.1.x` | Current stable release line (latest stable: `v0.1.1`) |
+| `2.0.0-rc.3` | Testing prerelease: security reports are welcome and handled, but it is not a stable release and carries no support commitment |
+| Older pre-release tags (including `2.0.0-rc.1` and `rc.2`) | Not supported |
 
 Users on an older `0.1.x` patch release should upgrade to the latest published `0.1.x` release before reporting a version-specific issue when practical.
 
