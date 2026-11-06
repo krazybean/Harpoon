@@ -18,6 +18,8 @@ disk="$HARPOON_TEST_TMPDIR/data/harpoon-root.img"
 fail() { echo "root disk FAIL: $*" >&2; exit 1; }
 absent() { [ ! -e "$disk" ] || fail "$1: a disk was created at $disk"; }
 size() { stat -f %z "$1"; }
+# size, modification time and the first 64 KiB: a rewrite, truncate or resize shows in one of them, and the 8 GiB file is not read through
+sig() { printf "%s %s %s" "$(stat -f %z "$1")" "$(stat -f %m "$1")" "$(head -c 65536 "$1" | shasum | cut -c1-40)"; }
 
 # inspection commands
 [ "$("$bin" status --json | plutil -extract diskPath raw -)" = "$disk" ] || fail "status --json does not report the default path"
@@ -46,12 +48,12 @@ absent "a rejected start --disk"; [ ! -e "$other" ] || fail "--disk path was cre
 set +e; out=$("$bin" start --disk-size 8G 2>&1); code=$?; set -e
 [ "$code" = 2 ] || fail "start --disk-size with a missing kernel: exit $code ($out)"
 [ "$(size "$disk")" = 8589934592 ] || fail "--disk-size 8G did not provision 8G"
-sum=$(shasum "$disk" | cut -c1-40)
+sum=$(sig "$disk")
 set +e; out=$("$bin" start --disk-size 16G 2>&1); code=$?; set -e
 [ "$code" = 1 ] || fail "start --disk-size 16G on an existing disk: exit $code ($out)"
-[ "$(size "$disk")" = 8589934592 ] && [ "$(shasum "$disk" | cut -c1-40)" = "$sum" ] || fail "an existing disk was changed"
+[ "$(sig "$disk")" = "$sum" ] || fail "an existing disk was changed"
 "$bin" status --json >/dev/null; "$bin" doctor >/dev/null 2>&1 || true
-[ "$(size "$disk")" = 8589934592 ] && [ "$(shasum "$disk" | cut -c1-40)" = "$sum" ] || fail "an inspection changed an existing disk"
+[ "$(sig "$disk")" = "$sum" ] || fail "an inspection changed an existing disk"
 [ "$("$bin" status --json | plutil -extract state raw -)" = stopped ] || fail "something started"
 
 # the default disk is created only at the start boundary (unit test of the resolution API)

@@ -11,7 +11,9 @@ let fm = FileManager.default
 let root = ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"]!
 let dest = root + "/data/harpoon-root.img"
 func size(_ p: String) -> UInt64 { ((try? fm.attributesOfItem(atPath: p))?[.size] as? UInt64) ?? 0 }
-func bytes(_ p: String) -> Data? { try? Data(contentsOf: URL(fileURLWithPath: p)) }
+// the disk is 32 GiB logical: only a bounded head and the modification time are compared, never the whole file
+func head(_ p: String) -> Data? { try? FileHandle(forReadingAtPath: p)?.read(upToCount: 65536) }
+func mtime(_ p: String) -> Date? { (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date }
 
 // missing disk: a path, no file
 require(RuntimeConfig.resolveRootDiskPath().path == dest, "the missing disk resolves to the default destination")
@@ -35,13 +37,14 @@ require(size(dest) == RuntimeConfig.defaultProvisionBytes, "the provisioned disk
 let marker = Data("keep-me".utf8)
 let fh = FileHandle(forWritingAtPath: dest)!
 try! fh.seek(toOffset: 4096); try! fh.write(contentsOf: marker); try! fh.close()
-let before = bytes(dest)!
+let before = head(dest)!
+let modified = mtime(dest)!
 for _ in 0..<2 {
     require(!RuntimeConfig.wouldProvisionRootDisk(URL(fileURLWithPath: dest)), "an existing disk is not provisioned again")
     require(RuntimeConfig.provisionedRootDisk(for: URL(fileURLWithPath: dest)).path == dest, "an existing disk comes back unchanged")
     require(RuntimeConfig.resolveRootDiskPath().path == dest, "an existing disk is what resolves")
 }
-require(bytes(dest)! == before && size(dest) == RuntimeConfig.defaultProvisionBytes, "an existing disk was not rewritten, truncated or resized")
+require(head(dest)! == before && mtime(dest)! == modified && size(dest) == RuntimeConfig.defaultProvisionBytes, "an existing disk was not rewritten, truncated or resized")
 
 // a smaller existing disk is not grown either
 try! fm.removeItem(atPath: dest)
