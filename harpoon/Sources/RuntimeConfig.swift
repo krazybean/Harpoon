@@ -437,7 +437,7 @@ struct RuntimeConfig {
     }
 
     static func desiredProvisionBytes() -> UInt64 {
-        // config file overrides default, env overrides config
+        // unlike cpus/memory, the config file wins over the environment here: HARPOON_DISK_SIZE applies only without a valid config disk-size
         let cfgCandidates = HarpoonRoots.configCandidates()
         for cand in cfgCandidates {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),

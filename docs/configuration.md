@@ -1,6 +1,6 @@
 # Configuration
 
-Harpoon uses a small JSON file for user defaults. CLI flags always win.
+Harpoon uses a small JSON file for user defaults. CLI flags always win, and environment variables override the file for `cpus` and `memory`.
 
 ## Location
 
@@ -13,10 +13,17 @@ Fallback for sandbox: `/tmp/harpoon-runtime/config.json` (tests only). Productio
 ## Precedence
 
 ```
-CLI flag > user config > environment > compiled default
+CLI flag > environment > user config > compiled default      (cpus, memory)
 ```
 
-Compiled defaults: `cpus=2`, `memory=4096` MiB, `disk` `spike2/cache/harpoon-root.img`, etc. Environment (`HARPOON_CPUS`, `HARPOON_MEMORY_MIB`) overrides defaults but is overridden by config and CLI.
+Compiled defaults: `cpus=2`, `memory=4096` MiB, `disk` `spike2/cache/harpoon-root.img`, etc. The environment (`HARPOON_CPUS`, `HARPOON_MEMORY_MIB`) overrides the config file and is overridden only by CLI flags. This is the order the runtime applies (`RuntimeConfig.fromEnvironment`, then `resolveConfigFromArgs`), and `harpoon config set` therefore has no effect on a run that sets one of those variables.
+
+Other settings do not all follow it:
+
+| Setting | Order |
+|---|---|
+| kernel, initramfs, disk path | CLI flag (`--kernel`, `--initramfs`, `--disk`) > environment (`HARPOON_KERNEL`, `HARPOON_INITRAMFS`, `HARPOON_DISK`) > built-in lookup. They are not config-file keys. |
+| disk size (first provision only) | `--disk-size` > config `disk-size` > `HARPOON_DISK_SIZE` > 32G. Here the **config file wins over the environment**. An existing disk is never resized by any of them; use `harpoon disk resize`. |
 
 ## Commands
 
