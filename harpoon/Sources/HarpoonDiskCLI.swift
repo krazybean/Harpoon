@@ -4,11 +4,9 @@ import Darwin
 
 // MARK: - Disk (Stage 3C)
 func diskBackingPathForStatus() -> String {
-    if let p = RuntimeConfig.existingUserDiskPath() { return p }
-    // not yet provisioned — show where it will be
-    let primary = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Harpoon/data/harpoon-root.img").path
-    if FileManager.default.fileExists(atPath: primary) { return primary }
-    return primary
+    // Not provisioned yet: show where it will be. userDiskCandidates is namespace-aware, so under HARPOON_TEST_TMPDIR this is
+    // <root>/data/harpoon-root.img and never the production disk (#186).
+    RuntimeConfig.existingUserDiskPath() ?? HarpoonRoots.userDiskCandidates(testFlags: false)[0]
 }
 
 func guestFilesystemInfoViaMgmt() -> (capacity: UInt64?, used: UInt64?, free: UInt64?)? {
