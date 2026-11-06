@@ -18,12 +18,12 @@ CLI flag > environment > user config > compiled default      (cpus, memory)
 
 Compiled defaults: `cpus=2`, `memory=4096` MiB, `disk` `spike2/cache/harpoon-root.img`, etc. The environment (`HARPOON_CPUS`, `HARPOON_MEMORY_MIB`) overrides the config file and is overridden only by CLI flags. This is the order the runtime applies (`RuntimeConfig.fromEnvironment`, then `resolveConfigFromArgs`), and `harpoon config set` therefore has no effect on a run that sets one of those variables.
 
-Other settings do not all follow it:
+Other settings:
 
 | Setting | Order |
 |---|---|
 | kernel, initramfs, disk path | CLI flag (`--kernel`, `--initramfs`, `--disk`) > environment (`HARPOON_KERNEL`, `HARPOON_INITRAMFS`, `HARPOON_DISK`) > built-in lookup. They are not config-file keys. |
-| disk size (first provision only) | `--disk-size` > config `disk-size` > `HARPOON_DISK_SIZE` > 32G. Here the **config file wins over the environment**. An existing disk is never resized by any of them; use `harpoon disk resize`. |
+| disk size (new disk only) | `--disk-size` > `HARPOON_DISK_SIZE` > config `disk-size` > 32G, the same order as `cpus` and `memory`. A value that is not a size or is below 2G is skipped and the next layer applies. An existing disk is never resized by any of them; use `harpoon disk resize`. |
 
 ## Commands
 
