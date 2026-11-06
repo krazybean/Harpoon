@@ -237,6 +237,7 @@ if flock(harpoonLockFd, LOCK_EX | LOCK_NB) != 0 {
 }
 log("HARPOON_LOCK_ACQUIRED \(lockPath) fd=\(harpoonLockFd)")
 
+config.diskURL = RuntimeConfig.provisionedRootDisk(for: config.diskURL) // first run only; an explicit --disk / HARPOON_DISK is left alone
 if let err = config.validate() {
     lifecycle.fail(err)
     fputs("HARPOON_STATE \(LifecycleState.stopped.rawValue) -> \(LifecycleState.failed.rawValue) reason=\(err)\n", stderr)

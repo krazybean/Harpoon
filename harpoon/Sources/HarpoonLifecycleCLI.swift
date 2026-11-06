@@ -58,7 +58,7 @@ func startArgsError(_ args: [String]) -> (code: Int32, lines: [String])? {
     let cfg = resolveConfigFromArgs(args)
     if let invalid = cfg.validate() { return (2, [invalid]) }
     // --disk-size on a host with no disk provisions one; otherwise the disk must already be a regular file.
-    let provisions = parsed.diskSize != nil && RuntimeConfig.existingUserDiskPath() == nil
+    let provisions = (parsed.diskSize != nil && RuntimeConfig.existingUserDiskPath() == nil) || RuntimeConfig.wouldProvisionRootDisk(cfg.diskURL)
     if !provisions && diskIdentity(at: cfg.diskURL.path) == nil {
         return (1, ["persistent Docker root disk missing or identity invalid: \(cfg.diskURL.path)"])
     }
@@ -151,7 +151,8 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
         rejected.lines.forEach(cliError)
         return rejected.code
     }
-    let cfg = resolveConfigFromArgs(args)
+    var cfg = resolveConfigFromArgs(args)
+    cfg.diskURL = RuntimeConfig.provisionedRootDisk(for: cfg.diskURL) // first run only; the VM is about to start
     guard FileManager.default.fileExists(atPath: cfg.diskURL.path),
           diskIdentity(at: cfg.diskURL.path) != nil else {
         cliError("persistent Docker root disk missing or identity invalid: \(cfg.diskURL.path)")

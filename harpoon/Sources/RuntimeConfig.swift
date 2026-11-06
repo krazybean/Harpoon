@@ -71,7 +71,8 @@ struct RuntimeConfig {
 
     var kernelURL: URL = RuntimeConfig.resolveResource(named: "Image-virt", fallback: "assets/guest/Image-virt")
     var initramfsURL: URL = RuntimeConfig.resolveResource(named: "harpoon-initramfs.cpio.gz", fallback: "assets/guest/harpoon-initramfs.cpio.gz")
-    var diskURL: URL = RuntimeConfig.resolveRootDisk()
+    // A path only: resolving a config never creates a disk. Creation is provisionedRootDisk(for:), called where a VM is about to start.
+    var diskURL: URL = RuntimeConfig.resolveRootDiskPath()
 
     var shareHostPath: String = HarpoonRoots.runDir + "/harpoon-share"
     var virtioFSTag: String = "harpoon-share"
@@ -218,7 +219,35 @@ struct RuntimeConfig {
         return guestAssetDir(URL(fileURLWithPath: "assets/guest")).appendingPathComponent("harpoon-root.img")
     }
 
-    static func resolveRootDisk() -> URL {
+    /// Where the persistent root disk is, or would be created: the first existing user disk, else the default destination. Creates nothing.
+    static func resolveRootDiskPath() -> URL {
+        if let existing = existingUserDiskPath() { return URL(fileURLWithPath: existing) }
+        return URL(fileURLWithPath: defaultRootDiskDestination())
+    }
+
+    static func defaultRootDiskDestination() -> String {
+        let env = ProcessInfo.processInfo.environment
+        let isTest = env["HARPOON_ALLOW_TMP_FALLBACK"] == "1" || env["HARPOON_TEST_MODE"] == "1" || env["HARPOON_TEST_TMPDIR"] != nil
+        return HarpoonRoots.userDiskCandidates(testFlags: isTest)[0]
+    }
+
+    /// True when `url` is the default destination, nothing exists there, and a template is available to provision it from.
+    static func wouldProvisionRootDisk(_ url: URL) -> Bool {
+        url.path == defaultRootDiskDestination()
+            && !FileManager.default.fileExists(atPath: url.path)
+            && existingUserDiskPath() == nil
+            && FileManager.default.fileExists(atPath: rootTemplateURL().path)
+    }
+
+    /// The disk a VM start should use. Provisions the default disk from the template on first run; an explicit path
+    /// (`--disk`, `HARPOON_DISK`) or an existing disk is returned unchanged and nothing is created.
+    static func provisionedRootDisk(for url: URL) -> URL {
+        guard wouldProvisionRootDisk(url) else { return url }
+        let made = provisionDefaultRootDisk()
+        return made.path == rootTemplateURL().path ? url : made
+    }
+
+    private static func provisionDefaultRootDisk() -> URL {
         // User-writable disk takes precedence if exists — NEVER silently delete/replace
         // because size differs from immutable template; template is read-only, user disk is mutable.
         // ponytail: no template-size-equality invariant for already-provisioned disk (resize deferred)
