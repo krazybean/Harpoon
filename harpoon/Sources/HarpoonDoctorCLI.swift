@@ -34,7 +34,8 @@ func handleDoctor() -> Int32 {
     check(FileManager.default.fileExists(atPath: initramfs), "initramfs \(initramfs)")
     let disk = runtime.diskURL.path
     let diskExists = FileManager.default.fileExists(atPath: disk)
-    check(diskExists, "disk \(disk)")
+    let diskPending = RuntimeConfig.wouldProvisionRootDisk(runtime.diskURL)
+    check(diskExists, "disk \(disk)" + (diskPending ? " (not created yet; the first start creates it)" : ""), warn: diskPending)
     if diskExists, let attrs = try? FileManager.default.attributesOfItem(atPath: disk), let sz = attrs[.size] as? UInt64 {
         cliPrint("INFO  disk logical bytes \(sz)")
     }
