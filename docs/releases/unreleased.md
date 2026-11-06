@@ -28,6 +28,12 @@ to create the default root disk as a side effect. The disk is now created only w
 time, and never when an explicit disk path is given. `status --json` can therefore report a `diskPath` that does not exist yet
 before the first start, and `doctor` shows it as a warning (not yet created) instead of a pass.
 
+### `doctor` and `disk status` stay inside a test namespace (#186)
+
+With `HARPOON_TEST_TMPDIR` set, a namespace that has no root disk of its own made `doctor` and `disk status` report the
+production disk (`~/Library/Application Support/Harpoon/data/harpoon-root.img`). They now report `<root>/data/harpoon-root.img`
+as not yet provisioned. Read-only before and after; nothing is created. Without the variable nothing changes.
+
 ## Documentation
 
 - The help text, usage line and configuration guide now state the real precedence for `cpus` and `memory`: CLI flag >

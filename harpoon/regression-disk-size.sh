@@ -54,8 +54,7 @@ for cmd in "status --json" "doctor" "config show" "diagnostics snapshot --json";
   HARPOON_DISK_SIZE=8G "$bin" $cmd >/dev/null 2>&1 || true
   [ ! -e "$disk" ] || fail "'$cmd' created a disk"
 done
-# (`disk status` is not run here: with no disk in the namespace it falls back to the production disk, #186; the size a new disk gets is
-# unit-tested below through the same function it prints.)
+# (`disk status` is covered by regression-namespace-disk-status.sh; the size a new disk gets is unit-tested below.)
 
 # the help states the order
 "$bin" help 2>&1 | grep -q -e '--disk-size > HARPOON_DISK_SIZE > user config > 32G' || fail "help does not state the disk-size order"
