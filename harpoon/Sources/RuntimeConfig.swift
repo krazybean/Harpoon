@@ -465,20 +465,29 @@ struct RuntimeConfig {
         return nil
     }
 
+    /// The size of a NEW root disk: HARPOON_DISK_SIZE, else the config file's disk-size, else 32 GiB (`--disk-size` outranks all
+    /// of these and provisions directly in `harpoon start`). Applied only when a disk is created; an existing disk is never resized.
     static func desiredProvisionBytes() -> UInt64 {
-        // unlike cpus/memory, the config file wins over the environment here: HARPOON_DISK_SIZE applies only without a valid config disk-size
-        let cfgCandidates = HarpoonRoots.configCandidates()
-        for cand in cfgCandidates {
+        provisionBytes(environment: ProcessInfo.processInfo.environment["HARPOON_DISK_SIZE"], config: configuredDiskSize())
+    }
+
+    /// The layers in order, skipping one that is unparseable or below the 2 GiB minimum (the same bound `--disk-size` and
+    /// `config set disk-size` enforce), so a bad value falls through to the next layer and never produces a tiny disk.
+    static func provisionBytes(environment: String?, config: String?) -> UInt64 {
+        for raw in [environment, config] {
+            if let raw, let bytes = parseDiskSize(raw), bytes >= minProvisionBytes { return bytes }
+        }
+        return defaultProvisionBytes
+    }
+
+    /// The disk-size of the first config candidate that has a usable one.
+    static func configuredDiskSize() -> String? {
+        for cand in HarpoonRoots.configCandidates() {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: cand)),
                let obj = try? JSONDecoder().decode(HarpoonUserConfig.self, from: data),
-               let ds = obj.diskSize, let parsed = parseDiskSize(ds) {
-                if parsed >= defaultProvisionBytes { return parsed }
-                if parsed >= minProvisionBytes { return parsed }
-                // if parsed < min, fall back to default (avoid tiny)
-            }
+               let ds = obj.diskSize, let bytes = parseDiskSize(ds), bytes >= minProvisionBytes { return ds }
         }
-        if let raw = ProcessInfo.processInfo.environment["HARPOON_DISK_SIZE"], let p = parseDiskSize(raw) { return p }
-        return defaultProvisionBytes
+        return nil
     }
 
     // host helpers for disk ops
