@@ -16,7 +16,7 @@ Fallback for sandbox: `/tmp/harpoon-runtime/config.json` (tests only). Productio
 CLI flag > user config > environment > compiled default
 ```
 
-Compiled defaults: `cpus=2`, `memory=1024` MiB, `disk` `spike2/cache/harpoon-root.img`, etc. Environment (`HARPOON_CPUS`, `HARPOON_MEMORY_MIB`) overrides defaults but is overridden by config and CLI.
+Compiled defaults: `cpus=2`, `memory=4096` MiB, `disk` `spike2/cache/harpoon-root.img`, etc. Environment (`HARPOON_CPUS`, `HARPOON_MEMORY_MIB`) overrides defaults but is overridden by config and CLI.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Compiled defaults: `cpus=2`, `memory=1024` MiB, `disk` `spike2/cache/harpoon-roo
 harpoon config show          # path + values
 harpoon config path          # print path
 harpoon config set cpus 2    # 1...8
-harpoon config set memory 1024  # 512|768|1024
+harpoon config set memory 1024  # MiB, 512 or more
 harpoon config reset cpus
 harpoon config reset memory
 harpoon config reset all
@@ -33,7 +33,7 @@ harpoon config --help
 
 ## Validation
 
-- `cpus` 1...8, `memory` 512|768|1024. Invalid `harpoon config set memory 128` exits 1 and does not corrupt existing config.
+- `cpus` 1...8; `memory` (MiB) from 512 up to the maximum Virtualization.framework allows on the host (the examples below use 768 and 1024; the compiled default is 4096). Invalid `harpoon config set memory 128` exits 1 and does not corrupt existing config.
 - Malformed `config.json` → `Harpoon configuration is invalid: <reason> Config: <path>` with hint `harpoon config reset ...` or fix JSON. `harpoon doctor` also reports it. File is not silently discarded.
 
 ## Examples

@@ -114,7 +114,7 @@ You do not need to invoke this manually — `npm run build:release` / `npm run r
 
 ## 2. Platform requirements
 
-Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The 2.0 target is Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). Intel/universal packaging is experimental post-2.0 work, and no Windows/Linux host claim is made.
+Harpoon uses Apple's `Virtualization.framework`, so building and running the VM requires **macOS on Apple Silicon (arm64)**. The 2.0 target is Apple Silicon hosts and ARM64 Linux guests (see `docs/compatibility.md` and `docs/architecture.md`). The v2.0.0-rc.3 DMG packages Intel (x86_64) binaries as well, but Intel guest boot is unverified, so Intel remains experimental; no Windows/Linux host claim is made.
 
 Build machine also needs the normal macOS command-line development tools for Swift, Rust, and Tauri:
 
@@ -518,7 +518,7 @@ What is true now:
 
 What is **not** claimed:
 
-- **Developer ID signing** and **Apple notarization** are **not** complete for public distribution. Local ad-hoc / `Apple Development` signing (any valid Apple Development identity if available) is sufficient for local acceptance, but public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
+- A source build is not Developer ID signed or notarized. The published **v2.0.0-rc.3** DMG is: CI builds it ad-hoc signed and it is then re-signed with Developer ID, notarized and stapled afterwards by [`sign-existing-dmg.sh`](distribution.md#signing-an-already-built-dmg-no-rebuild). Local ad-hoc / `Apple Development` signing (any valid Apple Development identity if available) is sufficient for local acceptance, but public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
 
 Building Harpoon from source does not require Developer ID or notarization; those are distribution-time steps.
 
@@ -528,7 +528,7 @@ Building Harpoon from source does not require Developer ID or notarization; thos
 
 - Tauri `bundle.macOS.minimumSystemVersion` = `12.0` (`tauri.conf.json`) → `LSMinimumSystemVersion` in `Info.plist`.
 - Swift `harpoon/build/harpoon` built with `MACOSX_DEPLOYMENT_TARGET=12.0` and `xcrun swiftc -target <arch>-apple-macosx12.0`, `LC_BUILD_VERSION` `minos 12.0` `sdk 26.5`. RPATHs: `/usr/lib/swift`, `@executable_path/../../../Frameworks`, `@loader_path/../../../Frameworks`.
-- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. The 2.0 release gate is Apple Silicon; the universal Intel path remains experimental post-2.0.
+- Virtualization.framework APIs used (`VZVirtualMachine`, `VZLinuxBootLoader`, `VZNAT`, `VZVirtio*`, balloon) are available since macOS 11–12 (`VZGenericPlatformConfiguration` and `VZVirtioFileSystemDeviceConfiguration` set the 12.0 floor). Tauri 2 requires 10.15+. The 2.0 release gate is Apple Silicon; the Intel slices packaged in the universal DMG are unverified at runtime and remain experimental.
 
 **Self-containment:**
 

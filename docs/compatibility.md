@@ -25,12 +25,13 @@
 ## Host Requirements
 
 - macOS 12+ (Monterey) minimum (`harpoon/MIN_MACOS`), set by `VZGenericPlatformConfiguration`; test on macOS 26.5 host in Spike.
-- Apple Silicon hosts with an ARM64 guest are the 2.0 target. Intel/universal
-  packaging and x86_64 guests are experimental post-2.0 work, not a supported
-  compatibility claim or release gate.
+- Apple Silicon hosts with an ARM64 guest are the 2.0 target and the only tested configuration.
+  The v2.0.0-rc.3 DMG is universal: it packages Intel (x86_64) binaries and an x86_64 guest, but
+  no Intel guest has been booted and no Intel Mac used, and the x86_64 guest predates the
+  guest-DNS fix. Intel is experimental, not a supported compatibility claim or release gate.
 - Podman/rootless is experimental and not required for the 2.0 compatibility
   matrix; Docker Desktop and Harpoon are the relevant host contexts.
-- Entitlement `com.apple.security.virtualization` required; binary must be ad-hoc or Developer-ID signed with entitlement.
+- Entitlement `com.apple.security.virtualization` required; binary must be ad-hoc or Developer-ID signed with entitlement. The rc.3 DMG is Developer ID signed and notarized; source builds are ad-hoc signed.
 
 ## Tooling Matrix
 
