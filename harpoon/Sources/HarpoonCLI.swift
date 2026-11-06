@@ -58,7 +58,9 @@ func printUsageFull() {
       --disk PATH
       --disk-size 8G|16G|32G  First provision size (e.g. 8G, 16G) — only when no disk exists; use harpoon disk resize to grow
 
-    Precedence: CLI flag > user config > environment > defaults
+    Precedence (cpus, memory): CLI flag > environment (HARPOON_CPUS, HARPOON_MEMORY_MIB) > user config > defaults
+    Kernel, initramfs, disk: CLI flag > environment (HARPOON_KERNEL, HARPOON_INITRAMFS, HARPOON_DISK) > defaults (not in the config file)
+    Disk size, first provision only: --disk-size > user config > HARPOON_DISK_SIZE > 32G
     Config: ~/Library/Application Support/Harpoon/config.json
 
     Disk (persistent, grow-only, sparse):

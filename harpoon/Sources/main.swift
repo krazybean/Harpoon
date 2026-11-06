@@ -53,8 +53,8 @@ private func vmStartDiagnostics(error: NSError, vm: VZVirtualMachine, manager: V
 
 func printUsage() {
     fputs("usage: harpoon [--cpus 1|2] [--memory MiB>=512] [--kernel PATH] [--initramfs PATH] [--disk PATH]\n", stderr)
-    fputs("defaults: --cpus 2 --memory 4096  (HARPOON_CPUS/HARPOON_MEMORY_MIB env fallback, CLI wins)\n", stderr)
-    fputs("precedence: CLI > config > environment > defaults\n", stderr)
+    fputs("defaults: --cpus 2 --memory 4096  (HARPOON_CPUS/HARPOON_MEMORY_MIB override the config file, CLI wins)\n", stderr)
+    fputs("precedence: CLI > environment > config > defaults\n", stderr)
 }
 
 // A test namespace that cannot be proven separate from production stops everything, before any command.
