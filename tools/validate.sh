@@ -58,6 +58,9 @@ HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-disk-size.sh
 say "Run namespace disk status regression (private namespace, read-only, no VM)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-namespace-disk-status.sh
 
+say "Run asset resolution regression (scratch binary, private namespaces, no VM)"
+sh harpoon/regression-asset-resolution.sh
+
 say "Run lifecycle safety regression suite"
 python3 harpoon/regression-lifecycle-safety.py
 
