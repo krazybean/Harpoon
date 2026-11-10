@@ -11,9 +11,11 @@ pass() { echo "asset-resolution $1 PASS"; }
 fail() { echo "asset-resolution $1 FAIL" >&2; exit 1; }
 check() { "$@" || fail "$1"; }
 
+# Every runtime source, as harpoon/build.sh compiles them (main.swift calls into all of them), so this list cannot drift.
+# Output and module cache stay in $TMP; harpoon/build/harpoon is never touched.
 xcrun swiftc -target "arm64-apple-macosx$(cat "$(dirname "$0")/MIN_MACOS")" \
-  "$ROOT/harpoon/Sources/RuntimeConfig.swift" "$ROOT/harpoon/Sources/Version.swift" "$ROOT/harpoon/Sources/HostPathTranslator.swift" "$ROOT/harpoon/Sources/Lifecycle.swift" "$ROOT/harpoon/Sources/VMManager.swift" "$ROOT/harpoon/Sources/Bridges.swift" "$ROOT/harpoon/Sources/PortForwardManager.swift" "$ROOT/harpoon/Sources/HarpoonCLI.swift" "$ROOT/harpoon/Sources/main.swift" \
-  -framework Virtualization -o "$BIN" -module-cache-path /tmp/harpoon-mcache >/dev/null
+  "$ROOT"/harpoon/Sources/*.swift \
+  -framework Virtualization -o "$BIN" -module-cache-path "$TMP/mcache" >/dev/null
 
 mkdir -p "$APP/bin" "$APP/lib/harpoon" "$TMP/decoy/assets/guest" "$TMP/bin"
 cp "$BIN" "$APP/bin/harpoon"
@@ -21,14 +23,15 @@ touch "$APP/lib/harpoon/Image-virt" "$APP/lib/harpoon/harpoon-initramfs.cpio.gz"
 touch "$TMP/decoy/assets/guest/Image-virt" "$TMP/decoy/assets/guest/harpoon-initramfs.cpio.gz" "$TMP/decoy/assets/guest/harpoon-root.img"
 
 doctor() { (cd "$TMP/decoy" && HARPOON_TEST_TMPDIR="$TMP/state-$1" "$2" doctor); }
-OUT=$(doctor direct "$APP/bin/harpoon")
+# doctor exits 1 on any unrelated failing check (e.g. the Docker context); only the resolved paths are asserted
+OUT=$(doctor direct "$APP/bin/harpoon" || true)
 printf '%s\n' "$OUT" | grep -q "kernel $APP/lib/harpoon/Image-virt" || fail unrelated-cwd
 printf '%s\n' "$OUT" | grep -q "initramfs $APP/lib/harpoon/harpoon-initramfs.cpio.gz" || fail direct-bundle
 pass unrelated-cwd
 pass direct-bundle
 
 ln -s "$APP/bin/harpoon" "$TMP/bin/harpoon"
-OUT=$(doctor symlink "$TMP/bin/harpoon")
+OUT=$(doctor symlink "$TMP/bin/harpoon" || true)
 printf '%s\n' "$OUT" | grep -q "kernel $APP/lib/harpoon/Image-virt" || fail symlink
 pass symlink
 
