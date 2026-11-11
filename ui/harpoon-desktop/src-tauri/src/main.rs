@@ -21,6 +21,21 @@ mod namespace;
 mod app_router;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+struct DiskExpansionStatus {
+    active: bool,
+    phase: String,
+    #[serde(default, rename = "fromBytes")]
+    from_bytes: u64,
+    #[serde(default, rename = "toBytes")]
+    to_bytes: u64,
+}
+
+impl HarpoonStatus {
+    /// A disk expansion is running: the VM is stopped and started by it, so nothing else may start or stop it.
+    fn expansion_active(&self) -> bool { self.disk_expansion.as_ref().map_or(false, |e| e.active) }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
     state: String,
     #[serde(default)]
@@ -45,6 +60,9 @@ struct HarpoonStatus {
     log_path: Option<String>,
     #[serde(default, rename = "dockerReady")]
     docker_ready: Option<bool>,
+    /// Present while a disk expansion record exists; `active` says it is running now rather than interrupted.
+    #[serde(default, rename = "diskExpansion", skip_serializing_if = "Option::is_none")]
+    disk_expansion: Option<DiskExpansionStatus>,
     #[serde(default)]
     failure: Option<RuntimeFailure>,
 }
@@ -1149,6 +1167,16 @@ async fn expand_disk_confirmed(size: String) -> Result<String, String> { off_mai
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reports_a_running_expansion_only_when_it_is_active() {
+        let running: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":true,"phase":"growing","fromBytes":1,"toBytes":2}}"#).unwrap();
+        assert!(running.expansion_active());
+        let interrupted: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":false,"phase":"growing"}}"#).unwrap();
+        assert!(!interrupted.expansion_active());
+        let none: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped"}"#).unwrap();
+        assert!(!none.expansion_active());
+    }
 
     #[test]
     fn disk_size_argument_is_one_plain_size_token() {

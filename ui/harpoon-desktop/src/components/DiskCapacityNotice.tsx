@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import {
-  confirmationMessage, customSizeError, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, GIB,
+  assessSize, confirmationMessage, customSizeError, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, GIB,
 } from "../lib/diskCapacity";
 import type { DiskCapacity, Dismissal } from "../lib/diskCapacity";
 
@@ -110,6 +110,7 @@ export function DiskCapacityNotice({ enabled, onExpanded }: { enabled: boolean; 
                 {cap.suggestedSizes.map((s) => (
                   <label key={s} style={{ display: "block", margin: "4px 0" }}>
                     <input type="radio" name="disk-size" checked={choice === s} onChange={() => setChoice(s)} /> {formatSize(s)}
+                    {assessSize(s, cap).oversubscribed && <span className="text-meta"> — more than this Mac can spare if it ever fills</span>}
                   </label>
                 ))}
                 <label style={{ display: "block", margin: "4px 0" }}>

@@ -23,6 +23,7 @@ import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
+import { expansionActive } from "./lib/diskCapacity";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
 import { useDeployEngine } from "./hooks/useDeployEngine";
 import { navBadge } from "./lib/deployStore";
@@ -43,6 +44,7 @@ type HarpoonStatus = {
   lockPath?: string;
   logPath?: string;
   dockerReady?: boolean;
+  diskExpansion?: { active: boolean; phase: string; fromBytes: number; toBytes: number };
   failure?: RuntimeFailure;
 };
 type RuntimeFailure = { category: string; message: string; source: string; occurredAt: string; underlyingError?: string | null };
@@ -98,7 +100,7 @@ function fmtTs(ts: number | null) {
   return new Date(ts).toLocaleTimeString();
 }
 
-function EngineManageMenu({ state, disabled, onAction }: { state: string; disabled: boolean; onAction: (action: "start" | "stop" | "restart") => void }) {
+function EngineManageMenu({ state, disabled, expanding, onAction }: { state: string; disabled: boolean; expanding: boolean; onAction: (action: "start" | "stop" | "restart") => void }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -118,9 +120,10 @@ function EngineManageMenu({ state, disabled, onAction }: { state: string; disabl
     <button className="btn btn--secondary engine-manage__trigger" aria-haspopup="menu" aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}><span className="engine-manage__label">Harpoon Engine · {state || "unknown"}</span><span className="engine-manage__manage">Manage</span><CaretDown size={14} aria-hidden="true" /></button>
     {open && <div className="engine-manage__menu" role="menu" aria-label="Harpoon Engine actions">
       <div className="engine-manage__scope">Scope: VM + Docker Engine + Harpoon workloads</div>
-      <button role="menuitem" disabled={running} onClick={() => choose("start")}><Play size={14} aria-hidden="true" /> Start Engine</button>
-      <button role="menuitem" disabled={!running} onClick={() => choose("stop")}><Stop size={14} aria-hidden="true" /> Stop Engine</button>
-      <button role="menuitem" disabled={!running} onClick={() => choose("restart")}><ArrowClockwise size={14} aria-hidden="true" /> Restart Engine</button>
+      {expanding && <div className="engine-manage__scope" role="status">A disk expansion is in progress; Start, Stop and Restart are unavailable until it finishes.</div>}
+      <button role="menuitem" disabled={running || expanding} onClick={() => choose("start")}><Play size={14} aria-hidden="true" /> Start Engine</button>
+      <button role="menuitem" disabled={!running || expanding} onClick={() => choose("stop")}><Stop size={14} aria-hidden="true" /> Stop Engine</button>
+      <button role="menuitem" disabled={!running || expanding} onClick={() => choose("restart")}><ArrowClockwise size={14} aria-hidden="true" /> Restart Engine</button>
     </div>}
   </div>;
 }
@@ -658,6 +661,7 @@ export default function App() {
     try { await navigator.clipboard.writeText(bundle); setCopied(true); setTimeout(()=>setCopied(false),1500); } catch {}
   };
 
+  const expanding = expansionActive(status);
   const isStopped = status?.state==="stopped" || status?.state==="stale" || bootstrapPhase==="stopped";
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
   const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
@@ -681,7 +685,7 @@ export default function App() {
           </div>
           <div className="shell-header__right">
             <ResourceMeters />
-            <EngineManageMenu state={status?.state ?? bootstrapPhase} disabled={!tauriAvailable || Boolean(actionInProgress)} onAction={(action) => doAction(action, () => invoke(`${action}_harpoon`))} />
+            <EngineManageMenu state={expanding ? "expanding disk" : status?.state ?? bootstrapPhase} expanding={expanding} disabled={!tauriAvailable || Boolean(actionInProgress)} onAction={(action) => doAction(action, () => invoke(`${action}_harpoon`))} />
             <button onClick={()=>{ refreshStatus(); refreshCounts(); refreshConfig(); refreshDocker(); if(active==="containers") refreshContainers(); if(active==="images") refreshImages(); if(active==="volumes") refreshVolumes(); if(active==="networks") refreshNetworks(); if(active==="diagnostics"){refreshDoctor(); refreshLogs();} }} disabled={!tauriAvailable} className="btn btn--secondary">Refresh</button>
           </div>
         </header>
@@ -720,9 +724,9 @@ export default function App() {
 
         {showStoppedPanel && (
           <div className="panel" style={{ padding:24, marginBottom:12 }}>
-            <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>Harpoon is stopped</div>
-            <div style={{ fontSize:13, color:"#6b7280", marginBottom:12 }}>Press Start to launch the Linux VM and Docker Engine.</div>
-            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
+            <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>{expanding ? "Expanding the Docker disk" : "Harpoon is stopped"}</div>
+            <div style={{ fontSize:13, color:"#6b7280", marginBottom:12 }}>{expanding ? "Harpoon was stopped for a disk expansion and starts again by itself when the disk has been grown. Do not start it manually." : "Press Start to launch the Linux VM and Docker Engine."}</div>
+            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable || expanding} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
           </div>
         )}
 

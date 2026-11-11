@@ -40,11 +40,13 @@ require(DiskPolicy.hostReserveBytes(environment: nil) == 5 * GiB, "default host 
 require(DiskPolicy.hostReserveBytes(environment: "1G") == 1 * GiB, "HARPOON_DISK_HOST_RESERVE is honoured")
 require(DiskPolicy.hostReserveBytes(environment: "banana") == 5 * GiB, "an unparseable reserve keeps the default")
 
-// expansion rules
+// host space policy. Sparse growth allocates almost nothing now (metadata ~2% of the added capacity); the whole new size is only a
+// worst case, limited to 4x the headroom (free - reserve) and flagged when it exceeds it.
 let cap = 512 * GiB, reserve = 5 * GiB
-func err(_ cur: UInt64, _ req: UInt64, host: UInt64? = 100 * GiB, cap: UInt64 = cap) -> String? {
-    DiskPolicy.expansionError(current: cur, requested: req, hostAvailable: host, maxBytes: cap, reserve: reserve)
+func a(_ cur: UInt64, _ req: UInt64, phys: UInt64 = 2 * GiB, host: UInt64? = 100 * GiB, cap: UInt64 = cap) -> DiskPolicy.Assessment {
+    DiskPolicy.assess(current: cur, physical: phys, requested: req, hostAvailable: host, maxBytes: cap, reserve: reserve)
 }
+func err(_ cur: UInt64, _ req: UInt64, phys: UInt64 = 2 * GiB, host: UInt64? = 100 * GiB, cap: UInt64 = cap) -> String? { a(cur, req, phys: phys, host: host, cap: cap).error }
 require(err(4 * GiB, 8 * GiB) == nil, "4 -> 8 GiB with plenty of host space is allowed")
 require(err(4 * GiB, 4 * GiB)?.contains("nothing to grow") == true, "the same size is refused")
 require(err(8 * GiB, 4 * GiB)?.contains("shrinking is not supported") == true, "shrinking is refused")
@@ -52,47 +54,102 @@ require(err(32 * GiB, 8 * GiB)?.contains("shrinking is not supported") == true, 
 require(err(4 * GiB, 1 * GiB)?.contains("2 GiB minimum") == true, "below the minimum is refused")
 require(err(4 * GiB, 600 * GiB)?.contains("growth cap") == true, "above the cap is refused")
 require(err(4 * GiB, 128 * GiB, cap: 64 * GiB)?.contains("growth cap") == true, "a configured cap is enforced")
-require(err(4 * GiB, 16 * GiB, host: 16 * GiB)?.contains("not enough host space") == true, "host space equal to the growth leaves no reserve: refused")
-require(err(4 * GiB, 16 * GiB, host: 17 * GiB - 1)?.contains("not enough host space") == true, "12 GiB growth + 5 GiB reserve needs 17 GiB: one byte less is refused")
-require(err(4 * GiB, 16 * GiB, host: 12 * GiB + reserve) == nil, "exactly growth + reserve is allowed")
 require(err(4 * GiB, 16 * GiB, host: nil)?.contains("could not be read") == true, "unknown host space refuses")
-require(err(4 * GiB, 16 * GiB, host: 2 * GiB)?.contains("not enough host space") == true, "host smaller than the growth is refused")
+// the low-storage Mac: 19 GiB free, 2 GiB already allocated. 32 GiB is offered (flagged), not refused as the old rule did.
+let lowMac = a(4 * GiB, 32 * GiB, phys: 2 * GiB, host: 19 * GiB)
+require(lowMac.error == nil, "32 GiB on a 19 GiB-free Mac is allowed: only metadata is needed now")
+require(lowMac.oversubscribed, "...and flagged: filling it needs 30 GiB, more than the 14 GiB headroom")
+require(lowMac.immediateBytes == UInt64((Double(28 * GiB) * 0.02).rounded(.up)), "immediate need is 2% of the added capacity")
+require(lowMac.worstCaseBytes == 30 * GiB, "worst case is the new size minus what is already allocated")
+require(!a(4 * GiB, 8 * GiB, phys: 2 * GiB, host: 19 * GiB).oversubscribed, "8 GiB fits within the headroom: not flagged")
+require(err(4 * GiB, 64 * GiB, phys: 2 * GiB, host: 19 * GiB)?.contains("4 times") == true, "62 GiB worst case exceeds 4 x 14 GiB: refused")
+require(err(4 * GiB, 32 * GiB, phys: 2 * GiB, host: 8 * GiB) != nil, "32 GiB on 8 GiB free (headroom 3, limit 12) is refused")
+require(err(4 * GiB, 8 * GiB, phys: 2 * GiB, host: 8 * GiB) == nil, "8 GiB on 8 GiB free is allowed (worst case 6 within 4 x 3)")
+require(err(4 * GiB, 8 * GiB, host: 5 * GiB)?.contains("not enough host space") == true, "free space equal to the reserve leaves nothing for metadata: refused")
+require(err(4 * GiB, 8 * GiB, host: 3 * GiB)?.contains("not enough host space") == true, "host below the reserve is refused")
+require(err(4 * GiB, 8 * GiB, phys: 8 * GiB, host: reserve + UInt64((Double(4 * GiB) * 0.02).rounded(.up)) - 1)?.contains("not enough host space") == true, "one byte short of metadata + reserve is refused")
+require(err(4 * GiB, 8 * GiB, phys: 8 * GiB, host: reserve + UInt64((Double(4 * GiB) * 0.02).rounded(.up))) == nil, "exactly metadata + reserve is allowed")
+// a large allocation already on the host raises the worst case only by the unallocated part
+require(a(100 * GiB, 128 * GiB, phys: 90 * GiB, host: 40 * GiB).error == nil, "a mostly allocated disk only needs its unallocated remainder in the worst case")
 
-// suggestions: only larger, only what would be accepted, at most three
-func sug(_ cur: UInt64, host: UInt64? = 500 * GiB, cap: UInt64 = cap) -> [UInt64] {
-    DiskPolicy.suggestedSizes(current: cur, hostAvailable: host, maxBytes: cap, reserve: reserve)
+// suggestions: only larger, only what would be accepted, at most three, with the oversubscription flag
+func sug(_ cur: UInt64, phys: UInt64 = 2 * GiB, host: UInt64? = 500 * GiB, cap: UInt64 = cap) -> [(bytes: UInt64, oversubscribed: Bool)] {
+    DiskPolicy.suggestions(current: cur, physical: phys, hostAvailable: host, maxBytes: cap, reserve: reserve)
 }
-require(sug(4 * GiB) == [8 * GiB, 16 * GiB, 32 * GiB], "from 4 GiB: 8, 16, 32")
-require(sug(32 * GiB) == [64 * GiB, 128 * GiB, 256 * GiB], "an existing 32 GiB disk is offered larger sizes only")
-require(sug(6 * GiB) == [8 * GiB, 16 * GiB, 32 * GiB], "a custom 6 GiB disk is offered the next ladder steps")
+func sizes(_ x: [(bytes: UInt64, oversubscribed: Bool)]) -> [UInt64] { x.map { $0.bytes } }
+require(sizes(sug(4 * GiB)) == [8 * GiB, 16 * GiB, 32 * GiB], "from 4 GiB: 8, 16, 32")
+require(sizes(sug(32 * GiB)) == [64 * GiB, 128 * GiB, 256 * GiB], "an existing 32 GiB disk is offered larger sizes only")
+require(sizes(sug(6 * GiB)) == [8 * GiB, 16 * GiB, 32 * GiB], "a custom 6 GiB disk is offered the next ladder steps")
 require(sug(512 * GiB).isEmpty, "at the cap nothing is offered")
-require(sug(4 * GiB, cap: 16 * GiB) == [8 * GiB, 16 * GiB], "the cap trims the offer")
-require(sug(4 * GiB, host: 20 * GiB) == [8 * GiB, 16 * GiB], "host space trims the offer (16 needs 12+5 <= 20; 32 does not)")
-require(sug(4 * GiB, host: 6 * GiB).isEmpty, "a nearly full host is offered nothing")
+require(sizes(sug(4 * GiB, cap: 16 * GiB)) == [8 * GiB, 16 * GiB], "the cap trims the offer")
+require(sug(4 * GiB, host: 4 * GiB).isEmpty, "a host with less than the reserve is offered nothing")
 require(sug(4 * GiB, host: nil).isEmpty, "unknown host space is offered nothing")
-require(sug(4 * GiB).allSatisfy { $0 > 4 * GiB }, "every suggestion is larger than the current size")
+require(sug(4 * GiB).allSatisfy { $0.bytes > 4 * GiB && !$0.oversubscribed }, "plenty of host space: larger sizes, none flagged")
+let low = sug(4 * GiB, phys: 2 * GiB, host: 19 * GiB)
+require(sizes(low) == [8 * GiB, 16 * GiB, 32 * GiB], "a 19 GiB-free Mac is still offered 8, 16 and 32 GiB")
+require(low.map { $0.oversubscribed } == [false, false, true], "...with only 32 GiB flagged")
 
-// filesystem verification after the restart
-require(DiskPolicy.filesystemExpanded(before: 3_900 * MiB, after: 7_900 * MiB, from: 4 * GiB, to: 8 * GiB), "a filesystem that gained about the added capacity is expanded")
-require(!DiskPolicy.filesystemExpanded(before: 3_900 * MiB, after: 3_900 * MiB, from: 4 * GiB, to: 8 * GiB), "an unchanged filesystem is not expanded")
-require(!DiskPolicy.filesystemExpanded(before: 3_900 * MiB, after: 5_000 * MiB, from: 4 * GiB, to: 8 * GiB), "a partly grown filesystem is not expanded")
-require(!DiskPolicy.filesystemExpanded(before: 0, after: 7 * GiB, from: 8 * GiB, to: 4 * GiB), "a shrink is never an expansion")
+// filesystem verification after the restart: absolute, so an unknown earlier reading cannot fake success
+require(DiskPolicy.filesystemExpanded(after: 7_900 * MiB, from: 4 * GiB, to: 8 * GiB), "a filesystem that reports about the new size is expanded")
+require(!DiskPolicy.filesystemExpanded(after: 3_900 * MiB, from: 4 * GiB, to: 8 * GiB), "an unchanged filesystem is not expanded")
+require(!DiskPolicy.filesystemExpanded(after: 5_000 * MiB, from: 4 * GiB, to: 8 * GiB), "a partly grown filesystem is not expanded")
+require(!DiskPolicy.filesystemExpanded(after: 0, from: 4 * GiB, to: 8 * GiB), "a zero reading is not expanded")
+require(!DiskPolicy.filesystemExpanded(after: 7 * GiB, from: 8 * GiB, to: 4 * GiB), "a shrink is never an expansion")
 
-// interrupted-expansion record: written before the work, removed on success, explains each interruption
-let rec = base + "/disk-expansion.json"
-let r = DiskExpansionRecord(phase: "growing", fromBytes: 4 * GiB, toBytes: 8 * GiB, diskPath: "/x/harpoon-root.img", startedAt: "t")
+// interrupted-expansion record: durable, read back, explained from the disk's actual size
+let rec = base + "/rec/disk-expansion.json"
+let r = DiskExpansionRecord(phase: "growing", fromBytes: 4 * GiB, toBytes: 8 * GiB, diskPath: "/x/harpoon-root.img", startedAt: "t", pid: getpid())
 require(DiskExpansionRecord.load(at: rec) == nil, "no record before an expansion")
-r.save(at: rec)
+require(r.save(at: rec) == nil, "a record saves (creating its directory)")
 require(DiskExpansionRecord.load(at: rec) == r, "the record round-trips")
-require(r.recovery(currentLogical: 4 * GiB).contains("was not grown") && r.recovery(currentLogical: 4 * GiB).contains("harpoon disk expand 8G --yes"), "growing, not yet grown: retry the expansion")
-require(r.recovery(currentLogical: 8 * GiB).contains("harpoon start") && r.recovery(currentLogical: 8 * GiB).contains("expands the filesystem on boot"), "growing, already grown: start and the guest finishes")
-var s1 = r; s1.phase = "stopping"
-require(s1.recovery(currentLogical: 4 * GiB).contains("disk was not changed"), "interrupted while stopping: the disk is unchanged")
-var s2 = r; s2.phase = "starting"
-require(s2.recovery(currentLogical: 8 * GiB).contains("harpoon start"), "interrupted while starting: start it")
-require(!s2.recovery(currentLogical: 8 * GiB).lowercased().contains("rolled back"), "no rollback is claimed")
+require((try! fm.attributesOfItem(atPath: rec))[.posixPermissions] as! Int == 0o600, "the record is private")
+require(!fm.fileExists(atPath: rec + ".tmp"), "no temp file is left behind")
+var r2 = r; r2.phase = "starting"
+require(r2.save(at: rec) == nil && DiskExpansionRecord.load(at: rec)?.phase == "starting", "an update replaces the record")
+// a record that cannot be saved says so: a directory in its place, an unwritable directory
+try! fm.createDirectory(atPath: base + "/blocked/disk-expansion.json", withIntermediateDirectories: true)
+require(r.save(at: base + "/blocked/disk-expansion.json") != nil, "a record path that is a directory is a save failure")
+try! fm.createDirectory(atPath: base + "/ro", withIntermediateDirectories: true)
+chmod(base + "/ro", 0o500)
+if geteuid() != 0 { require(r.save(at: base + "/ro/disk-expansion.json") != nil, "an unwritable directory is a save failure") }
+chmod(base + "/ro", 0o700)
+require(DiskExpansionRecord.load(at: base + "/ro/disk-expansion.json") == nil, "a failed save leaves no record")
+// recovery is judged from the disk file, whatever phase was last written
+for phase in ["stopping", "growing", "starting", "verifying"] {
+    var x = r; x.phase = phase
+    let notGrown = x.recovery(currentLogical: 4 * GiB), grown = x.recovery(currentLogical: 8 * GiB)
+    require(notGrown.contains("was not grown") && notGrown.contains("harpoon disk expand 8G --yes"), "\(phase), not grown: retry the expansion")
+    require(grown.contains("already 8 GiB") && grown.contains("harpoon start") && grown.contains("expands the filesystem on boot"), "\(phase), grown: start and the guest finishes")
+    require(!notGrown.lowercased().contains("rolled back") && !grown.lowercased().contains("rolled back"), "no rollback is claimed")
+}
+require(r.isActive == isHarpoonProcess(pid: getpid()), "a record is active exactly when its live process is a harpoon process")
+var dead = r; dead.pid = 99999999
+require(!dead.isActive, "a record whose process is gone is interrupted, not active")
+var nopid = r; nopid.pid = nil
+require(!nopid.isActive, "a record without a pid is never active")
 DiskExpansionRecord.clear(at: rec)
 require(DiskExpansionRecord.load(at: rec) == nil, "the record is removed when cleared")
+
+// the restart must reproduce the running VM exactly
+func meta(cpus: Int = 2, mem: Int = 2048, disk: String, kernel: String? = "K", initramfs: String? = "I") -> RuntimeMetadata {
+    RuntimeMetadata(pid: 1, startedAt: "t", cpus: cpus, memoryMiB: mem, diskPath: disk, socketPath: "s", uuid: "u", binary: "b",
+                    diskIdentity: nil, diskResolvedPath: nil, failure: nil, kernelPath: kernel, initramfsPath: initramfs)
+}
+let diskA = base + "/a.img", diskB = base + "/b.img", kA = base + "/kernel", iA = base + "/initramfs", kB = base + "/kernel2"
+for f in [diskA, diskB, kA, iA, kB] { fm.createFile(atPath: f, contents: Data("x".utf8)) }
+func cfg(cpus: Int = 2, mem: Int = 2048, disk: String, kernel: String, initramfs: String) -> RuntimeConfig {
+    var c = RuntimeConfig(); c.cpuCount = cpus; c.memoryMIB = mem; c.diskURL = URL(fileURLWithPath: disk)
+    c.kernelURL = URL(fileURLWithPath: kernel); c.initramfsURL = URL(fileURLWithPath: initramfs); return c
+}
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskA, kernel: kA, initramfs: iA)).isEmpty, "identical settings: nothing to refuse")
+require(expansionConfigMismatches(meta: meta(cpus: 4, disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskA, kernel: kA, initramfs: iA)).contains { $0.hasPrefix("cpus") }, "different CPUs are refused")
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(mem: 4096, disk: diskA, kernel: kA, initramfs: iA)).contains { $0.hasPrefix("memory") }, "different memory is refused")
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskB, kernel: kA, initramfs: iA)).contains { $0.hasPrefix("disk") }, "a different disk is refused")
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskA, kernel: kB, initramfs: iA)).contains { $0.hasPrefix("kernel") }, "a different kernel is refused")
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskA, kernel: kA, initramfs: kB)).contains { $0.hasPrefix("initramfs") }, "a different initramfs is refused")
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: nil, initramfs: nil), resolved: cfg(disk: diskA, kernel: kA, initramfs: iA)).count == 2, "a VM started by an older build (kernel/initramfs unrecorded) cannot be guaranteed")
+try! fm.createSymbolicLink(atPath: base + "/k-link", withDestinationPath: kA)
+require(expansionConfigMismatches(meta: meta(disk: diskA, kernel: kA, initramfs: iA), resolved: cfg(disk: diskA, kernel: base + "/k-link", initramfs: iA)).isEmpty, "a symlink to the same kernel is the same kernel")
 
 // the immutable template is never a disk
 let tmplDir = base + "/tmpl"

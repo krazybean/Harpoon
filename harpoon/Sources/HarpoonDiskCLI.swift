@@ -74,9 +74,10 @@ struct DiskFacts {
         guard let g = guest else { return .unknown }
         return DiskPolicy.pressure(used: g.used, available: g.free)
     }
-    var suggestions: [UInt64] {
-        DiskPolicy.suggestedSizes(current: logical, hostAvailable: hostAvailable, maxBytes: DiskPolicy.maxBytes(), reserve: DiskPolicy.hostReserveBytes())
+    var suggestionDetails: [(bytes: UInt64, oversubscribed: Bool)] {
+        DiskPolicy.suggestions(current: logical, physical: physical, hostAvailable: hostAvailable, maxBytes: DiskPolicy.maxBytes(), reserve: DiskPolicy.hostReserveBytes())
     }
+    var suggestions: [UInt64] { suggestionDetails.map { $0.bytes } }
 }
 
 func collectDiskFacts() -> DiskFacts {
@@ -101,7 +102,12 @@ func diskSizeArg(_ bytes: UInt64) -> String { RuntimeConfig.formatBytes(bytes).r
 func diskAdvisoryLines(_ f: DiskFacts) -> [String] {
     var out: [String] = []
     if let p = f.pending {
-        out.append("Interrupted disk expansion (\(p.phase), \(RuntimeConfig.formatBytes(p.fromBytes)) -> \(RuntimeConfig.formatBytes(p.toBytes))): \(p.recovery(currentLogical: f.provisioned ? f.logical : nil))")
+        let span = "\(RuntimeConfig.formatBytes(p.fromBytes)) -> \(RuntimeConfig.formatBytes(p.toBytes))"
+        if p.isActive {
+            out.append("Disk expansion in progress (\(p.phase), \(span)): Harpoon is being stopped, grown and started again; do not start or stop it until it finishes.")
+        } else {
+            out.append("Interrupted disk expansion (\(p.phase), \(span)): \(p.recovery(currentLogical: f.provisioned ? f.logical : nil))")
+        }
     }
     switch f.pressure {
     case .warning, .critical:
@@ -123,6 +129,7 @@ func diskStatusJSON(_ f: DiskFacts) -> String {
         "backingPath": f.backing, "provisioned": f.provisioned, "state": f.state,
         "logicalBytes": f.logical, "physicalBytes": f.physical, "defaultBytes": f.desired,
         "pressure": f.pressure.rawValue, "suggestedSizes": f.suggestions.map { $0 },
+        "suggestions": f.suggestionDetails.map { ["bytes": $0.bytes, "oversubscribed": $0.oversubscribed] as [String: Any] },
         "maxBytes": DiskPolicy.maxBytes(), "hostReserveBytes": DiskPolicy.hostReserveBytes(),
         "expansionRequiresRestart": true,
         "thresholds": ["warnUsedPercent": DiskPolicy.warnUsedPercent, "criticalUsedPercent": DiskPolicy.criticalUsedPercent,
@@ -132,7 +139,7 @@ func diskStatusJSON(_ f: DiskFacts) -> String {
     if let c = f.configured { obj["configured"] = c }
     if let g = f.guest { obj["guest"] = ["capacityBytes": g.capacity, "usedBytes": g.used, "availableBytes": g.free] }
     if let p = f.pending {
-        obj["pendingExpansion"] = ["phase": p.phase, "fromBytes": p.fromBytes, "toBytes": p.toBytes,
+        obj["pendingExpansion"] = ["phase": p.phase, "fromBytes": p.fromBytes, "toBytes": p.toBytes, "active": p.isActive,
                                    "recovery": p.recovery(currentLogical: f.provisioned ? f.logical : nil)]
     }
     let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data("{}".utf8)
@@ -282,7 +289,7 @@ func handleDiskExpand(args: [String]) -> Int32 {
         return 2
     }
     guard let controlLock = LifecycleControlLock() else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     let snap = statusSnapshot()
@@ -295,7 +302,8 @@ func handleDiskExpand(args: [String]) -> Int32 {
         cliError("Harpoon is \(snap.state); wait for it to settle, then retry")
         return 1
     }
-    // The disk to grow must be the one the running VM actually has open, not merely the default path.
+    let startArgs = restartStartArgs([])
+    // The disk to grow must be the one the running VM actually has open, and the restart must reproduce the VM exactly.
     var backing = configured
     if running {
         guard let meta = snap.meta else {
@@ -308,21 +316,31 @@ func handleDiskExpand(args: [String]) -> Int32 {
             return 1
         }
         backing = meta.diskPath
+        let differences = expansionConfigMismatches(meta: meta, resolved: resolveConfigFromArgs(startArgs))
+        if !differences.isEmpty {
+            cliError("refused: restarting for the expansion would not reproduce the running VM:")
+            differences.forEach { cliError("  - \($0)") }
+            cliError("nothing was stopped. Expand manually (harpoon stop; harpoon disk resize \(positional[0]); then start with the settings you want), or restart Harpoon once so it records them, then retry.")
+            return 1
+        }
     }
     if let protected = RuntimeConfig.templateProtectionError(for: backing) { cliError(protected); return 1 }
-    let (current, _) = RuntimeConfig.backingFileInfo(at: backing)
+    let (current, physical) = RuntimeConfig.backingFileInfo(at: backing)
     let host = (try? FileManager.default.attributesOfFileSystem(forPath: backing))?[.systemFreeSize] as? UInt64
-    if let refusal = DiskPolicy.expansionError(current: current, requested: requested, hostAvailable: host, maxBytes: DiskPolicy.maxBytes(), reserve: DiskPolicy.hostReserveBytes()) {
+    let assessment = DiskPolicy.assess(current: current, physical: physical, requested: requested, hostAvailable: host, maxBytes: DiskPolicy.maxBytes(), reserve: DiskPolicy.hostReserveBytes())
+    if let refusal = assessment.error {
         cliError("refused: \(refusal)")
         return 1
     }
-    let startArgs = restartStartArgs([])
     if running, let rejected = startArgsError(startArgs) {
         rejected.lines.forEach(cliError)
         cliError("expansion refused before stopping anything: the running Harpoon was not touched")
         return rejected.code
     }
     cliPrint("Expand \(backing): \(RuntimeConfig.formatBytes(current)) -> \(RuntimeConfig.formatBytes(requested))")
+    if assessment.oversubscribed {
+        cliPrint("NOTE: if this disk filled completely it would need up to \(RuntimeConfig.formatBytes(assessment.worstCaseBytes)) on this Mac, more than it can spare after the reserve. Nothing stops a guest that fills it; keep an eye on `harpoon disk status`.")
+    }
     if running {
         cliPrint("This stops Harpoon, grows the disk, and starts it again. Running containers are interrupted and restart policies apply.")
     } else {
@@ -333,19 +351,40 @@ func handleDiskExpand(args: [String]) -> Int32 {
         return 2
     }
 
+    // The recovery record must be on disk (and read back) before anything is stopped or resized.
     var record = DiskExpansionRecord(phase: "stopping", fromBytes: current, toBytes: requested, diskPath: backing,
-                                     startedAt: ISO8601DateFormatter().string(from: Date()))
-    let guestBefore = running ? guestFilesystemInfoViaMgmt()?.capacity : nil
+                                     startedAt: ISO8601DateFormatter().string(from: Date()), pid: getpid())
+    if let why = record.save() {
+        cliError("refused: cannot write the recovery record (\(why)); nothing was stopped or resized")
+        return 1
+    }
+    let plannedID = diskIdentity(at: backing)
+    func saveProgress(_ phase: String) {
+        record.phase = phase
+        // Stopping already happened; a failed update must not abort. The recovery text is judged by the disk's size, not this phase.
+        if let why = record.save() { cliError("warning: could not update the recovery record (\(why)); recovery will be judged from the disk size") }
+    }
     if running {
-        record.save()
         let stopCode = handleStop(controlLock: controlLock)
         if stopCode != 0 {
             cliError("expansion aborted: Harpoon was not stopped cleanly; the disk was not changed (still \(RuntimeConfig.formatBytes(current)))")
             DiskExpansionRecord.clear()
             return stopCode
         }
+        // "Stopped" must be real before the file is touched: no lock holder, no live runtime.
+        let after = statusSnapshot()
+        if isLockHeld() || after.state == "running" || after.state == "starting" || after.state == "booting" || (after.alive && after.isHarpoon) {
+            cliError("expansion aborted: Harpoon still looks active (\(after.state)); the disk was not changed")
+            DiskExpansionRecord.clear()
+            return 1
+        }
     }
-    record.phase = "growing"; record.save()
+    if diskIdentity(at: backing) != plannedID {
+        cliError("expansion aborted: the disk file changed identity since the plan; it was not grown. \(running ? "Harpoon is stopped; start it with: harpoon start" : "")")
+        DiskExpansionRecord.clear()
+        return 1
+    }
+    saveProgress("growing")
     let grow = growBackingFile(backing, to: requested)
     if grow != 0 {
         cliError("expansion failed while growing the disk file; your data is untouched. \(record.recovery(currentLogical: RuntimeConfig.backingFileInfo(at: backing).logical))")
@@ -358,7 +397,7 @@ func handleDiskExpand(args: [String]) -> Int32 {
         cliPrint("Disk grown to \(RuntimeConfig.formatBytes(requested)). Run `harpoon start`; the guest expands the filesystem on boot.")
         return 0
     }
-    record.phase = "starting"; record.save()
+    saveProgress("starting")
     Thread.sleep(forTimeInterval: 0.5)
     let startCode = handleStart(args: startArgs, controlLock: controlLock)
     if startCode != 0 {
@@ -366,23 +405,31 @@ func handleDiskExpand(args: [String]) -> Int32 {
         cliError("Try: harpoon start   (see `harpoon doctor` and \(HarpoonPaths.logFile.path)). The record stays until a start is verified.")
         return startCode
     }
-    record.phase = "verifying"; record.save()
+    saveProgress("verifying")
+    // Success needs all of: the file is the requested size, Harpoon is running with Docker ready, and the guest filesystem reports
+    // the added capacity. Each failure is reported as what it is; none is reported as success.
     let deadline = Date().addingTimeInterval(120)
     var ready = false, expanded = false
     while Date() < deadline {
-        ready = statusSnapshot().dockerReady
+        let s = statusSnapshot()
+        ready = s.state == "running" && s.dockerReady
         if ready, let cap = guestFilesystemInfoViaMgmt()?.capacity {
-            expanded = DiskPolicy.filesystemExpanded(before: guestBefore ?? 0, after: cap, from: current, to: requested)
+            expanded = DiskPolicy.filesystemExpanded(after: cap, from: current, to: requested)
             if expanded { break }
         }
         Thread.sleep(forTimeInterval: 2)
     }
+    let finalLogical = RuntimeConfig.backingFileInfo(at: backing).logical
+    if finalLogical != requested {
+        cliError("Harpoon started but the disk file is \(RuntimeConfig.formatBytes(finalLogical)), not the requested \(RuntimeConfig.formatBytes(requested)). Check `harpoon disk status`.")
+        return 1
+    }
     if !ready {
-        cliError("Harpoon started but Docker did not become ready within 120s. The disk is \(RuntimeConfig.formatBytes(requested)); data is preserved. Check `harpoon doctor`.")
+        cliError("Harpoon started but Docker did not become ready within 120s. The disk is \(RuntimeConfig.formatBytes(requested)); data is preserved. Check `harpoon doctor`. The record stays until this is verified.")
         return 1
     }
     if !expanded {
-        cliError("Docker is ready but the guest filesystem did not report the larger size within 120s. Run `harpoon disk status`; if the filesystem is still smaller than the disk, restart Harpoon (`harpoon restart`) so the guest runs resize2fs.")
+        cliError("Docker is ready but the guest filesystem did not report the larger size within 120s. Run `harpoon disk status`; if the filesystem is still smaller than the disk, restart Harpoon (`harpoon restart`) so the guest runs resize2fs. The record stays until this is verified.")
         return 1
     }
     DiskExpansionRecord.clear()

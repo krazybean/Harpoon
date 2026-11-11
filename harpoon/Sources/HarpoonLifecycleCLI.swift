@@ -68,7 +68,7 @@ func startArgsError(_ args: [String]) -> (code: Int32, lines: [String])? {
 func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> Int32 {
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     // duplicate check via lock probe
@@ -222,7 +222,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
     let uuid = UUID().uuidString
     let iso = ISO8601DateFormatter().string(from: Date())
     let resolvedDiskPath = cfg.diskURL.standardized.resolvingSymlinksInPath().path
-    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil)
+    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil, kernelPath: cfg.kernelURL.path, initramfsPath: cfg.initramfsURL.path)
     if let data = try? JSONEncoder().encode(meta) {
         try? data.write(to: HarpoonPaths.jsonFile)
     }
@@ -339,7 +339,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
 func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     guard let pid = readPIDFile() else {
@@ -436,7 +436,7 @@ func restartStartArgs(_ args: [String]) -> [String] {
 
 func handleRestart(args: [String]) -> Int32 {
     guard let controlLock = LifecycleControlLock() else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     let startArgs = restartStartArgs(args)

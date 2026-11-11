@@ -94,34 +94,96 @@ case "$out" in *olled*) fail "claims a rollback: $out";; esac
 
 # --- a "running" Harpoon: a stand-in process is never signalled unless the user confirmed -----------------------------------------
 ns 4G
-cp /bin/sleep "$HARPOON_TEST_TMPDIR/harpoon-standin"; codesign --force -s - "$HARPOON_TEST_TMPDIR/harpoon-standin" 2>/dev/null  # a copied system binary needs its own ad-hoc signature to run
-"$HARPOON_TEST_TMPDIR/harpoon-standin" 600 & fake_pid=$!
+# A stand-in whose executable path contains "harpoon", as isHarpoonProcess requires. It is built here rather than copied from
+# /bin/sleep: a copied system binary loses its platform signature and is killed on the hosted runner.
+mkdir -p "$tmp/standin-src"; echo 'import Foundation; sleep(600)' > "$tmp/standin-src/main.swift"
+xcrun swiftc -module-cache-path "$tmp/module-cache" "$tmp/standin-src/main.swift" -o "$HARPOON_TEST_TMPDIR/harpoon-standin" 2>&1 | grep -E "error" && fail "stand-in did not compile" || true
+"$HARPOON_TEST_TMPDIR/harpoon-standin" & fake_pid=$!
+sleep 1; kill -0 "$fake_pid" 2>/dev/null || fail "the stand-in process died at startup"
+# valid start settings (fake kernel and initramfs with a matching manifest) so a run reaches the confirmation gate
+mkdir -p "$tmp/guest" "$tmp/guest2"
+for d in guest guest2; do
+  echo "k$d" > "$tmp/$d/Image-virt"; echo "i$d" > "$tmp/$d/initramfs"
+  printf 'harpoon-guest-assets-v1\nkernel_sha256 %s\ninitramfs_sha256 %s\n' "$(shasum -a 256 "$tmp/$d/Image-virt" | cut -d' ' -f1)" "$(shasum -a 256 "$tmp/$d/initramfs" | cut -d' ' -f1)" > "$tmp/$d/guest-assets.manifest"
+done
+export HARPOON_KERNEL="$tmp/guest/Image-virt" HARPOON_INITRAMFS="$tmp/guest/initramfs"
 echo "$fake_pid" > "$HARPOON_TEST_TMPDIR/runtime.pid"
-printf '{"pid":%s,"startedAt":"t","cpus":2,"memoryMiB":2048,"diskPath":"%s","socketPath":"%s/harpoon-docker.sock","uuid":"u","binary":"b"}\n' "$fake_pid" "$disk" "$HARPOON_TEST_TMPDIR" > "$HARPOON_TEST_TMPDIR/runtime.json"
+meta() { # meta [cpus] [extra-json]: what the running VM recorded when it started
+  printf '{"pid":%s,"startedAt":"t","cpus":%s,"memoryMiB":2048,"diskPath":"%s","socketPath":"%s/harpoon-docker.sock","uuid":"u","binary":"b"%s}\n' "$fake_pid" "${1:-2}" "$disk" "$HARPOON_TEST_TMPDIR" "${2-,\"kernelPath\":\"$HARPOON_KERNEL\",\"initramfsPath\":\"$HARPOON_INITRAMFS\"}" > "$HARPOON_TEST_TMPDIR/runtime.json"
+}
+meta
 : > "$HARPOON_TEST_TMPDIR/harpoon-docker.sock"; echo HARPOON_RUNNING > "$HARPOON_TEST_TMPDIR/harpoon.log"
 run status --json; case "$out" in *'"running"'*) ;; *) fail "stand-in does not look like a running Harpoon: $out";; esac
 before=$(sig "$disk")
-# valid start settings (fake kernel and initramfs with a matching manifest) so the run reaches the confirmation gate
-mkdir -p "$tmp/guest"; echo k > "$tmp/guest/Image-virt"; echo i > "$tmp/guest/initramfs"
-printf 'harpoon-guest-assets-v1\nkernel_sha256 %s\ninitramfs_sha256 %s\n' "$(shasum -a 256 "$tmp/guest/Image-virt" | cut -d' ' -f1)" "$(shasum -a 256 "$tmp/guest/initramfs" | cut -d' ' -f1)" > "$tmp/guest/guest-assets.manifest"
-export HARPOON_KERNEL="$tmp/guest/Image-virt" HARPOON_INITRAMFS="$tmp/guest/initramfs"
+untouched() { kill -0 "$fake_pid" 2>/dev/null || fail "$1: the running process was signalled"; [ ! -e "$HARPOON_TEST_TMPDIR/harpoon-stop" ] || fail "$1: a stop was requested"; [ "$(sig "$disk")" = "$before" ] || fail "$1: the disk changed"; }
+
 run disk expand 8G </dev/null
 [ "$code" = 2 ] || fail "running, unconfirmed: exit $code ($out)"
 case "$out" in *"Running containers are interrupted"*) ;; *) fail "running, unconfirmed does not warn about interruption: $out";; esac
 case "$out" in *"not confirmed"*) ;; *) fail "running, unconfirmed: $out";; esac
-kill -0 "$fake_pid" 2>/dev/null || fail "an unconfirmed expansion signalled the running process"
-[ -e "$HARPOON_TEST_TMPDIR/runtime.pid" ] && [ ! -e "$HARPOON_TEST_TMPDIR/harpoon-stop" ] || fail "an unconfirmed expansion touched the lifecycle files"
-[ "$(sig "$disk")" = "$before" ] || fail "an unconfirmed expansion changed the disk"
-# a start that would be rejected is refused BEFORE anything is stopped, even with --yes
+[ -e "$HARPOON_TEST_TMPDIR/runtime.pid" ] || fail "an unconfirmed expansion touched the lifecycle files"
+[ ! -e "$HARPOON_TEST_TMPDIR/disk-expansion.json" ] || fail "an unconfirmed expansion wrote a record"
+untouched "unconfirmed"
+
+# a start that would be rejected is refused BEFORE anything is stopped, even with --yes (here the kernel differs and is missing)
 runenv HARPOON_KERNEL="$tmp/guest/missing" disk expand 8G --yes
-[ "$code" = 2 ] || fail "running, start would fail: exit $code ($out)"; case "$out" in *"refused before stopping anything"*) ;; *) fail "running, start would fail: $out";; esac
-kill -0 "$fake_pid" 2>/dev/null || fail "a refused expansion signalled the running process"
-[ "$(sig "$disk")" = "$before" ] || fail "a refused expansion changed the disk"
+[ "$code" = 1 ] || fail "running, kernel differs: exit $code ($out)"; case "$out" in *"would not reproduce the running VM"*"kernel:"*) ;; *) fail "running, kernel differs: $out";; esac
+untouched "kernel differs"
+# the restart must reproduce the running VM: CPUs, memory, kernel and initramfs may not differ, and unrecorded ones cannot be guaranteed
+printf '{"cpus":4}\n' > "$HARPOON_TEST_TMPDIR/config.json"
+run disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, config would change the cpus: exit $code ($out)"; case "$out" in *"cpus: running with 2, a restart would use 4"*"nothing was stopped"*) ;; *) fail "cpus: $out";; esac
+untouched "cpus differ"
+printf '{"cpus":2,"memory":1024}\n' > "$HARPOON_TEST_TMPDIR/config.json"
+run disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, config would change the memory: exit $code ($out)"; case "$out" in *"memory: running with 2048 MiB, a restart would use 1024 MiB"*) ;; *) fail "memory: $out";; esac
+untouched "memory differs"
+rm -f "$HARPOON_TEST_TMPDIR/config.json"
+runenv HARPOON_KERNEL="$tmp/guest2/Image-virt" disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, other kernel: exit $code ($out)"; case "$out" in *"kernel: running with"*) ;; *) fail "other kernel: $out";; esac
+untouched "other kernel"
+runenv HARPOON_INITRAMFS="$tmp/guest2/initramfs" disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, other initramfs: exit $code ($out)"; case "$out" in *"initramfs: running with"*) ;; *) fail "other initramfs: $out";; esac
+untouched "other initramfs"
+runenv HARPOON_DISK="$tmp/other-disk.img" disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, other disk: exit $code ($out)"; case "$out" in *"disk: running with"*) ;; *) fail "other disk: $out";; esac
+untouched "other disk"
+meta 2 ""   # a VM started by an older build recorded no kernel or initramfs
+run disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, unrecorded kernel: exit $code ($out)"; case "$out" in *"not recorded by the Harpoon that started this VM"*) ;; *) fail "unrecorded: $out";; esac
+untouched "unrecorded kernel"
+meta   # restore
+
+# the recovery record must be on disk before anything is stopped: a record that cannot be written refuses the expansion
+mkdir "$HARPOON_TEST_TMPDIR/disk-expansion.json"
+run disk expand 8G --yes
+[ "$code" = 1 ] || fail "running, record not writable: exit $code ($out)"; case "$out" in *"cannot write the recovery record"*"nothing was stopped or resized"*) ;; *) fail "record: $out";; esac
+untouched "unwritable record"
+rmdir "$HARPOON_TEST_TMPDIR/disk-expansion.json"
+
 # the running Harpoon's disk must be the disk being grown
 sed -i '' "s|\"diskPath\":\"[^\"]*\"|\"diskPath\":\"$tmp/elsewhere.img\"|" "$HARPOON_TEST_TMPDIR/runtime.json"; : > "$tmp/elsewhere.img"
 run disk expand 8G --yes
-[ "$code" = 1 ] || fail "different active disk: exit $code ($out)"; case "$out" in *"not "*"refusing to expand a disk it does not use"*|*"refusing to expand a disk it does not use"*) ;; *) fail "different active disk: $out";; esac
-kill -0 "$fake_pid" 2>/dev/null || fail "a refused expansion signalled the running process"
+[ "$code" = 1 ] || fail "different active disk: exit $code ($out)"; case "$out" in *"refusing to expand a disk it does not use"*) ;; *) fail "different active disk: $out";; esac
+untouched "different active disk"
+meta
+
+# an expansion that is running is visible to status, the other lifecycle commands and the desktop; an interrupted one is not "active"
+printf '{"phase":"growing","fromBytes":4294967296,"toBytes":8589934592,"diskPath":"%s","startedAt":"t","pid":%s}\n' "$disk" "$fake_pid" > "$HARPOON_TEST_TMPDIR/disk-expansion.json"
+run status --json; case "$out" in *'"active" : true'*) ;; *) fail "status does not show the running expansion: $out";; esac
+run disk status; case "$out" in *"Disk expansion in progress (growing"*) ;; *) fail "disk status does not show the running expansion: $out";; esac
+perl -e 'open my $f, ">", $ARGV[0] or die; flock($f, 2) or die; print "held\n"; sleep 30' "$HARPOON_TEST_TMPDIR/harpoon-lifecycle.lock" > "$tmp/holder.out" &
+holder=$!; sleep 1
+for c in start stop restart; do
+  run $c; [ "$code" = 11 ] || fail "$c during an expansion: exit $code ($out)"; case "$out" in *"disk expansion is in progress (growing, 4 GiB -> 8 GiB)"*) ;; *) fail "$c does not name the expansion: $out";; esac
+done
+run disk expand 8G --yes; [ "$code" = 11 ] || fail "a second expansion: exit $code ($out)"
+untouched "competing lifecycle commands"
+printf '{"phase":"growing","fromBytes":4294967296,"toBytes":8589934592,"diskPath":"%s","startedAt":"t","pid":99999999}\n' "$disk" > "$HARPOON_TEST_TMPDIR/disk-expansion.json"
+run status --json; case "$out" in *'"active" : false'*) ;; *) fail "a dead expansion is shown as active: $out";; esac
+run start; [ "$code" = 11 ] || fail "start while the lock is held: exit $code"; case "$out" in *"another lifecycle operation is in progress"*) ;; *) fail "a dead expansion is named as the cause: $out";; esac
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+rm -f "$HARPOON_TEST_TMPDIR/disk-expansion.json"
 kill "$fake_pid" 2>/dev/null || true; fake_pid=
 
 # --- unit test of the policy ---------------------------------------------------------------------------------------------------

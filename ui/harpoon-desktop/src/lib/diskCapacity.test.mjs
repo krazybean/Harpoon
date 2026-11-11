@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { confirmationMessage, customSizeError, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, usedPercent, GIB, MIB } from "./diskCapacity.ts";
+import { assessSize, confirmationMessage, customSizeError, expansionActive, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, usedPercent, GIB, MIB } from "./diskCapacity.ts";
 
 const cap = (over = {}) => ({
   provisioned: true, state: "running", logicalBytes: 4 * GIB, physicalBytes: 2 * GIB, hostAvailableBytes: 100 * GIB,
@@ -38,7 +38,7 @@ test("a dismissed critical notice comes back after an hour, not before, and not 
   assert.equal(noticeLevel(cap({ pressure: "warning", logicalBytes: 8 * GIB }), d, 5001), "warning", "a grown disk is a new situation");
 });
 
-test("custom sizes are checked against growth-only, the cap and the host reserve", () => {
+test("custom sizes are checked against growth-only, the cap and the host policy", () => {
   const c = cap();
   assert.equal(customSizeError("12", c), null);
   assert.match(customSizeError("abc", c), /whole number/);
@@ -47,10 +47,31 @@ test("custom sizes are checked against growth-only, the cap and the host reserve
   assert.match(customSizeError("4", c), /disks only grow/);
   assert.match(customSizeError("2", c), /disks only grow/);
   assert.match(customSizeError("600", c), /growth cap/);
-  assert.match(customSizeError("90", cap({ hostAvailableBytes: 50 * GIB })), /host has 50 GiB free/);
   assert.match(customSizeError("12", cap({ hostAvailableBytes: undefined })), /unknown/);
-  assert.equal(customSizeError("12", cap({ hostAvailableBytes: 13 * GIB })), null, "8 GiB growth + 5 GiB reserve fits in 13 GiB");
-  assert.match(customSizeError("12", cap({ hostAvailableBytes: 12 * GIB })), /must leave 5 GiB free/);
+  assert.match(customSizeError("12", cap({ hostAvailableBytes: 5 * GIB })), /metadata/, "free space equal to the reserve leaves nothing for the grow");
+});
+
+test("a low-storage Mac keeps useful choices: sparse growth needs metadata now, the rest is a flagged worst case", () => {
+  const low = cap({ hostAvailableBytes: 19 * GIB, physicalBytes: 2 * GIB });
+  assert.equal(assessSize(8 * GIB, low).error, null);
+  assert.equal(assessSize(8 * GIB, low).oversubscribed, false);
+  const big = assessSize(32 * GIB, low);
+  assert.equal(big.error, null, "32 GiB is allowed on a 19 GiB-free Mac");
+  assert.equal(big.oversubscribed, true, "...and flagged: filling it needs 30 GiB, headroom is 14");
+  assert.equal(big.worstCaseBytes, 30 * GIB);
+  assert.match(assessSize(64 * GIB, low).error, /more than 4 times the 14 GiB/, "62 GiB worst case is beyond 4x the headroom");
+  assert.equal(assessSize(16 * GIB, cap({ hostAvailableBytes: 100 * GIB })).oversubscribed, false);
+  const m = confirmationMessage(low, 32 * GIB);
+  assert.match(m, /would need up to 30 GiB/);
+  assert.match(m, /nothing stops a guest that fills it/);
+  assert.doesNotMatch(confirmationMessage(low, 8 * GIB), /would need up to/);
+});
+
+test("the controls know when an expansion is running", () => {
+  assert.equal(expansionActive(null), false);
+  assert.equal(expansionActive({}), false);
+  assert.equal(expansionActive({ diskExpansion: { active: false, phase: "growing" } }), false, "an interrupted record is not an operation in progress");
+  assert.equal(expansionActive({ diskExpansion: { active: true, phase: "starting" } }), true);
 });
 
 test("the notice and the confirmation tell the user what will happen", () => {

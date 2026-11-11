@@ -41,7 +41,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     let worker_stop = stop.clone();
     let (wake, wake_rx) = mpsc::channel::<()>();
     let thread = thread::Builder::new().name("harpoon-bootstrap".into()).spawn(move || {
-        let started = std::time::Instant::now();
+        let mut started = std::time::Instant::now();
         let initial = match crate::refresh_status() {
             Ok(status) => status,
             Err(error) => { emit_complete(&app, false, Some(error)); return; }
@@ -53,7 +53,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             emit_complete(&app, false, Some(message));
             return;
         }
-        if matches!(initial.state.as_str(), "stopped" | "stale") {
+        // A disk expansion stops and starts the VM itself; starting it here would fight the expansion for the lifecycle lock.
+        if matches!(initial.state.as_str(), "stopped" | "stale") && !initial.expansion_active() {
             if let Err(error) = crate::start_harpoon_blocking() {
                 emit_complete(&app, false, Some(error));
                 return;
@@ -68,6 +69,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             }
             match crate::refresh_status() {
                 Ok(status) => {
+                    // The startup clock does not run while a disk expansion has the VM stopped; it restarts when the expansion ends.
+                    if status.expansion_active() { started = std::time::Instant::now(); }
                     emit_status(&app, &status);
                     if status.state == "running" && status.docker_ready == Some(true) {
                         emit_complete(&app, true, None);

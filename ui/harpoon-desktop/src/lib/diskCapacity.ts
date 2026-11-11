@@ -12,10 +12,11 @@ export interface DiskCapacity {
   hostAvailableBytes?: number;
   pressure: DiskPressure;
   suggestedSizes: number[];
+  suggestions?: { bytes: number; oversubscribed: boolean }[];
   maxBytes: number;
   hostReserveBytes: number;
   guest?: { capacityBytes: number; usedBytes: number; availableBytes: number };
-  pendingExpansion?: { phase: string; fromBytes: number; toBytes: number; recovery: string };
+  pendingExpansion?: { phase: string; fromBytes: number; toBytes: number; active?: boolean; recovery: string };
 }
 
 export interface Dismissal {
@@ -76,19 +77,35 @@ export function dismissalFor(c: DiskCapacity, now: number): Dismissal {
   return { level: c.pressure === "critical" ? "critical" : "warning", logicalBytes: c.logicalBytes, usedBucket: bucket(c), at: now };
 }
 
-/** Why a custom size (in whole GiB, as typed) cannot be offered for confirmation, or null. The runtime re-checks everything. */
+export interface SizeAssessment { error: string | null; oversubscribed: boolean; worstCaseBytes: number }
+
+/**
+ * The runtime's host-space policy, mirrored so the dialog can explain a size before asking. Sparse growth allocates almost nothing
+ * now (ext4 metadata, about 2% of the added capacity, must fit with the reserve); filling the whole disk is only a worst case, which
+ * may be at most 4x the headroom (free minus reserve) and is flagged when it exceeds it. The runtime re-checks everything.
+ */
+export function assessSize(requested: number, c: DiskCapacity): SizeAssessment {
+  const worst = Math.max(0, requested - c.physicalBytes);
+  const no = (error: string): SizeAssessment => ({ error, oversubscribed: false, worstCaseBytes: worst });
+  if (requested <= c.logicalBytes) return no(`Choose more than the current ${formatSize(c.logicalBytes)}; disks only grow.`);
+  if (requested > c.maxBytes) return no(`The growth cap is ${formatSize(c.maxBytes)}.`);
+  const host = c.hostAvailableBytes;
+  if (host === undefined) return no("Host free space is unknown.");
+  const immediate = Math.ceil((requested - c.logicalBytes) * 0.02);
+  if (immediate > host || host - immediate < c.hostReserveBytes) {
+    return no(`The host has ${formatSize(host)} free; the grow needs about ${formatSize(immediate)} for filesystem metadata and ${formatSize(c.hostReserveBytes)} must stay free.`);
+  }
+  const headroom = host - c.hostReserveBytes;
+  if (worst > headroom * 4) {
+    return no(`Filling a ${formatSize(requested)} disk could need ${formatSize(worst)}, more than 4 times the ${formatSize(headroom)} this Mac can spare. Choose a smaller size or free space.`);
+  }
+  return { error: null, oversubscribed: worst > headroom, worstCaseBytes: worst };
+}
+
+/** Why a custom size (in whole GiB, as typed) cannot be offered for confirmation, or null. */
 export function customSizeError(input: string, c: DiskCapacity): string | null {
   if (!/^\d+$/.test(input.trim())) return "Enter a whole number of GiB.";
-  const bytes = Number(input.trim()) * GIB;
-  if (bytes <= c.logicalBytes) return `Choose more than the current ${formatSize(c.logicalBytes)}; disks only grow.`;
-  if (bytes > c.maxBytes) return `The growth cap is ${formatSize(c.maxBytes)}.`;
-  const host = c.hostAvailableBytes;
-  if (host === undefined) return "Host free space is unknown.";
-  const added = bytes - c.logicalBytes;
-  if (added > host || host - added < c.hostReserveBytes) {
-    return `The host has ${formatSize(host)} free; growing by ${formatSize(added)} must leave ${formatSize(c.hostReserveBytes)} free.`;
-  }
-  return null;
+  return assessSize(Number(input.trim()) * GIB, c).error;
 }
 
 export function summary(c: DiskCapacity): string {
@@ -100,7 +117,14 @@ export function summary(c: DiskCapacity): string {
 
 /** The text of the confirmation: what happens, to what, and that containers are interrupted. Shown before any lifecycle action. */
 export function confirmationMessage(c: DiskCapacity, requestedBytes: number): string {
+  const a = assessSize(requestedBytes, c);
   return `Harpoon will stop its VM, grow the Docker disk from ${formatSize(c.logicalBytes)} to ${formatSize(requestedBytes)}, then start it again. `
     + `Running containers are interrupted and restart according to their restart policy. Your images, volumes and containers are kept. `
-    + `This cannot be undone: disks only grow.`;
+    + `This cannot be undone: disks only grow.`
+    + (a.oversubscribed ? ` If this disk ever filled completely it would need up to ${formatSize(a.worstCaseBytes)} on this Mac, more than it can spare; nothing stops a guest that fills it, so keep an eye on free space.` : "");
+}
+
+/** A disk expansion is running (or was started by another window); lifecycle controls must not offer Start, Stop or Restart. */
+export function expansionActive(status: { diskExpansion?: { active?: boolean } } | null | undefined): boolean {
+  return Boolean(status?.diskExpansion?.active);
 }
