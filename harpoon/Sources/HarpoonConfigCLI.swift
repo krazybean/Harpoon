@@ -17,13 +17,13 @@ func handleConfig(args: [String]) -> Int32 {
         if let c = cfg {
             if let v = c.cpus { cliPrint("cpus: \(v)") } else { cliPrint("cpus: (default 2)") }
             if let v = c.memory { cliPrint("memory: \(v)") } else { cliPrint("memory: (default 4096)") }
-            if let v = c.diskSize { cliPrint("disk-size: \(v)") } else { cliPrint("disk-size: (default 32G)") }
+            if let v = c.diskSize { cliPrint("disk-size: \(v)") } else { cliPrint("disk-size: (default 4G)") }
             if c.cpus==nil && c.memory==nil && c.diskSize==nil { cliPrint("(no user config, using defaults)") }
         } else {
             cliPrint("(no user config, using defaults)")
             cliPrint("cpus: (default 2)")
             cliPrint("memory: (default 4096)")
-            cliPrint("disk-size: (default 32G)")
+            cliPrint("disk-size: (default 4G)")
         }
         return 0
     } else if args[0]=="get" && args.count>=2 {
@@ -37,7 +37,7 @@ func handleConfig(args: [String]) -> Int32 {
             if let v = cfg?.memory { cliPrint("\(v)") } else { cliPrint("4096") }
             return 0
         } else if key=="disk-size" || key=="diskSize" || key=="disk_size" {
-            if let v = cfg?.diskSize { cliPrint(v) } else { cliPrint("32G") }
+            if let v = cfg?.diskSize { cliPrint(v) } else { cliPrint("4G") }
             return 0
         } else {
             cliError("unknown config key: \(key)"); return 1

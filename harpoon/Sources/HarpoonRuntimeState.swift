@@ -143,6 +143,9 @@ struct RuntimeMetadata: Codable {
     var failure: RuntimeFailure?
     /// Where the forwarder dials the guest; absent unless the address was discovered (see `ForwardTarget`).
     var forwardTarget: ForwardTarget? = nil
+    /// The kernel and initramfs this VM was started with, so a disk expansion can restart it with the same ones. Absent for VMs started by older builds.
+    var kernelPath: String? = nil
+    var initramfsPath: String? = nil
 }
 
 struct RuntimeFailure: Codable {

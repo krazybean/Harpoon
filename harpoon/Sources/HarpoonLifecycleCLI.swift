@@ -68,7 +68,7 @@ func startArgsError(_ args: [String]) -> (code: Int32, lines: [String])? {
 func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> Int32 {
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     // duplicate check via lock probe
@@ -222,7 +222,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
     let uuid = UUID().uuidString
     let iso = ISO8601DateFormatter().string(from: Date())
     let resolvedDiskPath = cfg.diskURL.standardized.resolvingSymlinksInPath().path
-    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil)
+    let meta = RuntimeMetadata(pid: childPid, startedAt: iso, cpus: cfg.cpuCount, memoryMiB: cfg.memoryMIB, diskPath: cfg.diskURL.path, socketPath: HarpoonPaths.dockerSocketPath, uuid: uuid, binary: execURL.path, diskIdentity: diskIdentity(at: resolvedDiskPath), diskResolvedPath: resolvedDiskPath, failure: nil, kernelPath: cfg.kernelURL.path, initramfsPath: cfg.initramfsURL.path)
     if let data = try? JSONEncoder().encode(meta) {
         try? data.write(to: HarpoonPaths.jsonFile)
     }
@@ -339,7 +339,7 @@ func handleStart(args: [String], controlLock: LifecycleControlLock? = nil) -> In
 func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
     let ownedLock = controlLock ?? LifecycleControlLock()
     guard ownedLock != nil else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
     guard let pid = readPIDFile() else {
@@ -417,27 +417,29 @@ func handleStop(controlLock: LifecycleControlLock? = nil) -> Int32 {
     return 0
 }
 
+/// The start arguments a restart (or a disk expansion) reuses so the VM comes back with the settings it had.
+func restartStartArgs(_ args: [String]) -> [String] {
+    if !args.isEmpty { return args }
+    // preserve config: use user config or last metadata, but do not require metadata
+    // prefer user config, else last metadata, else defaults (empty means start uses config/defaults)
+    let (cfgOpt, _) = loadUserConfig()
+    if cfgOpt != nil {
+        // config will be loaded by start via RuntimeConfig, so no need to pass args
+        return []
+    } else if let meta = readMetadata() {
+        // fallback to last runtime metadata for surprising preservation (but not persistent)
+        // we still pass as CLI so restart preserves previous run's values without persisting
+        return ["--cpus", "\(meta.cpus)", "--memory", "\(meta.memoryMiB)"]
+    }
+    return []
+}
+
 func handleRestart(args: [String]) -> Int32 {
     guard let controlLock = LifecycleControlLock() else {
-        cliError("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress")
+        cliError(controlBusyMessage())
         return 11
     }
-    var startArgs = args
-    if startArgs.isEmpty {
-        // preserve config: use user config or last metadata, but do not require metadata
-        // prefer user config, else last metadata, else defaults (empty means start uses config/defaults)
-        let (cfgOpt, _) = loadUserConfig()
-        if cfgOpt != nil {
-            // config will be loaded by start via RuntimeConfig, so no need to pass args
-            startArgs = []
-        } else if let meta = readMetadata() {
-            // fallback to last runtime metadata for surprising preservation (but not persistent)
-            // we still pass as CLI so restart preserves previous run's values without persisting
-            startArgs = ["--cpus", "\(meta.cpus)", "--memory", "\(meta.memoryMiB)"]
-        } else {
-            startArgs = []
-        }
-    }
+    let startArgs = restartStartArgs(args)
     // Nothing below may stop the engine unless the start that follows would be accepted.
     if let rejected = startArgsError(startArgs) {
         rejected.lines.forEach(cliError)

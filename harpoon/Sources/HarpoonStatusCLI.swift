@@ -21,6 +21,10 @@ func handleStatus(args: [String]=[]) -> Int32 {
             "mgmtReady": isMgmtServiceReachable()
         ]
         if let pid = snap.pid { json["pid"] = pid }
+        // Lets the desktop show that Start/Stop/Restart would collide with a disk expansion, and which phase it is in.
+        if let r = DiskExpansionRecord.load() {
+            json["diskExpansion"] = ["active": r.isActive, "phase": r.phase, "fromBytes": r.fromBytes, "toBytes": r.toBytes]
+        }
         if let m = snap.meta {
             json["cpus"] = m.cpus
             json["memoryMiB"] = m.memoryMiB

@@ -21,6 +21,21 @@ mod namespace;
 mod app_router;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+struct DiskExpansionStatus {
+    active: bool,
+    phase: String,
+    #[serde(default, rename = "fromBytes")]
+    from_bytes: u64,
+    #[serde(default, rename = "toBytes")]
+    to_bytes: u64,
+}
+
+impl HarpoonStatus {
+    /// A disk expansion is running: the VM is stopped and started by it, so nothing else may start or stop it.
+    fn expansion_active(&self) -> bool { self.disk_expansion.as_ref().map_or(false, |e| e.active) }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct HarpoonStatus {
     state: String,
     #[serde(default)]
@@ -45,6 +60,9 @@ struct HarpoonStatus {
     log_path: Option<String>,
     #[serde(default, rename = "dockerReady")]
     docker_ready: Option<bool>,
+    /// Present while a disk expansion record exists; `active` says it is running now rather than interrupted.
+    #[serde(default, rename = "diskExpansion", skip_serializing_if = "Option::is_none")]
+    disk_expansion: Option<DiskExpansionStatus>,
     #[serde(default)]
     failure: Option<RuntimeFailure>,
 }
@@ -1073,6 +1091,29 @@ fn resize_disk_blocking(size: String) -> Result<String, String> {
     if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
 }
 
+// Disk capacity (the runtime owns the policy; these only relay). `get_disk_capacity` is read-only. `expand_disk_confirmed` stops,
+// grows and restarts Harpoon: the UI calls it only after the user accepted the confirmation dialog, and it passes `--yes` for that.
+fn get_disk_capacity_blocking() -> Result<String, String> {
+    let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
+    let out = Command::new(&bin).args(["disk", "status", "--json"]).output().map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()) }
+    else { Err(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim().to_string()) }
+}
+
+/// A disk size the CLI accepts as one token: whole number of G or M, nothing else (no flags, no paths).
+fn is_disk_size_arg(size: &str) -> bool {
+    let digits = size.trim_end_matches(|c| c == 'G' || c == 'M');
+    size.len() <= 8 && size.len() > digits.len() && size.len() - digits.len() == 1 && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+fn expand_disk_confirmed_blocking(size: String) -> Result<String, String> {
+    if !is_disk_size_arg(&size) { return Err(format!("invalid disk size: {size}")); }
+    let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
+    let out = Command::new(&bin).args(["disk", "expand", &size, "--yes"]).output().map_err(|e| e.to_string())?;
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
+}
+
 #[tauri::command(async)]
 fn open_shell_session(app: tauri::AppHandle, manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, context: String, container_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<shell::ShellSession, String> {
     namespace::refuse_in_namespace("A container shell")?;
@@ -1117,9 +1158,31 @@ async fn restart_harpoon() -> Result<String, String> { off_main(restart_harpoon_
 #[tauri::command]
 async fn resize_disk(size: String) -> Result<String, String> { off_main(move || resize_disk_blocking(size)).await }
 
+#[tauri::command]
+async fn get_disk_capacity() -> Result<String, String> { off_main(get_disk_capacity_blocking).await }
+
+#[tauri::command]
+async fn expand_disk_confirmed(size: String) -> Result<String, String> { off_main(move || expand_disk_confirmed_blocking(size)).await }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reports_a_running_expansion_only_when_it_is_active() {
+        let running: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":true,"phase":"growing","fromBytes":1,"toBytes":2}}"#).unwrap();
+        assert!(running.expansion_active());
+        let interrupted: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":false,"phase":"growing"}}"#).unwrap();
+        assert!(!interrupted.expansion_active());
+        let none: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped"}"#).unwrap();
+        assert!(!none.expansion_active());
+    }
+
+    #[test]
+    fn disk_size_argument_is_one_plain_size_token() {
+        for ok in ["8G", "16G", "1536M", "512G"] { assert!(is_disk_size_arg(ok), "{ok}"); }
+        for bad in ["", "G", "8", "8g", "8GB", "-8G", "8G --yes", "8 G", "../8G", "1.5G", "123456789G", "8GM", "--disk"] { assert!(!is_disk_size_arg(bad), "{bad:?}"); }
+    }
 
     #[test]
     fn stats_fields_preserve_docker_units_and_missing_values() {
@@ -1339,7 +1402,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
-            get_harpoon_binary_path, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
+            get_harpoon_binary_path, get_disk_capacity, expand_disk_confirmed, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
             list_containers, compose_import::pick_compose_folder, compose_import::preview_compose_project, compose_import::launch_compose_project, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,

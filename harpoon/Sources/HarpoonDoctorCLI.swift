@@ -197,6 +197,8 @@ func handleDoctor() -> Int32 {
         } else {
             cliPrint("INFO  Filesystem capacity ........ unavailable (VM stopped) — backing above is authoritative")
         }
+        // low guest space / interrupted expansion: say what to run, never act
+        for line in diskAdvisoryLines(collectDiskFacts()) { cliPrint("WARN  \(line)"); warned += 1 }
         // host free space
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: backing), let freeHost = attrs[.systemFreeSize] as? UInt64, freeHost < 2 * 1024 * 1024 * 1024 {
             check(false, "Host filesystem low free \(RuntimeConfig.formatBytes(freeHost)) — sparse growth may fail", warn:true)

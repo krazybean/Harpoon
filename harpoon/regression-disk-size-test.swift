@@ -1,6 +1,6 @@
 import Foundation
 
-// Unit test for the size of a NEW root disk (#184): HARPOON_DISK_SIZE > config disk-size > 32 GiB, and a bad value falls through.
+// Unit test for the size of a NEW root disk (#184): HARPOON_DISK_SIZE > config disk-size > 4 GiB, and a bad value falls through.
 // Runs in private HARPOON_TEST_TMPDIR namespaces with a fake template (HARPOON_TEST_ROOT); no VM, no engine. `log` is main.swift's.
 func log(_ m: String) {}
 func require(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -28,24 +28,24 @@ func provisioned(config: String?, env: String?) -> UInt64 {
 }
 
 // the layers
-require(provisioned(config: nil, env: nil) == 32 * GiB, "default only: 32 GiB")
+require(provisioned(config: nil, env: nil) == 4 * GiB, "default only: 4 GiB")
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: nil) == 16 * GiB, "config only: 16 GiB")
 require(provisioned(config: nil, env: "8G") == 8 * GiB, "environment only: 8 GiB")
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: "8G") == 8 * GiB, "the environment beats the config file")
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: "64G") == 64 * GiB, "the environment beats the config file (larger)")
-require(provisioned(config: #"{"cpus":2}"#, env: nil) == 32 * GiB, "a config file without disk-size leaves the default")
+require(provisioned(config: #"{"cpus":2}"#, env: nil) == 4 * GiB, "a config file without disk-size leaves the default")
 
 // invalid and below-minimum values are skipped, layer by layer
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: "banana") == 16 * GiB, "an unparseable environment value falls through to the config file")
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: "1G") == 16 * GiB, "an environment value below 2G falls through to the config file")
 require(provisioned(config: #"{"diskSize":"16G"}"#, env: "") == 16 * GiB, "an empty environment value falls through to the config file")
-require(provisioned(config: #"{"diskSize":"banana"}"#, env: nil) == 32 * GiB, "an unparseable config value falls through to the default")
-require(provisioned(config: #"{"diskSize":"1G"}"#, env: nil) == 32 * GiB, "a config value below 2G falls through to the default")
-require(provisioned(config: #"{"diskSize":"banana"}"#, env: "banana") == 32 * GiB, "two bad values leave the default")
+require(provisioned(config: #"{"diskSize":"banana"}"#, env: nil) == 4 * GiB, "an unparseable config value falls through to the default")
+require(provisioned(config: #"{"diskSize":"1G"}"#, env: nil) == 4 * GiB, "a config value below 2G falls through to the default")
+require(provisioned(config: #"{"diskSize":"banana"}"#, env: "banana") == 4 * GiB, "two bad values leave the default")
 require(provisioned(config: #"{"diskSize":"1G"}"#, env: "8G") == 8 * GiB, "a bad config value does not hide a good environment value")
 require(provisioned(config: "{ not json", env: "8G") == 8 * GiB, "a malformed config file does not hide a good environment value")
 require(RuntimeConfig.provisionBytes(environment: "2G", config: "16G") == 2 * GiB, "the minimum itself is accepted")
-require(RuntimeConfig.defaultProvisionBytes == 32 * GiB, "the default is 32 GiB")
+require(RuntimeConfig.defaultProvisionBytes == 4 * GiB, "the default is 4 GiB")
 
 // an existing disk is never resized or rewritten, whatever the layers say
 n += 1

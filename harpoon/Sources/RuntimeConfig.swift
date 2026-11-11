@@ -374,7 +374,24 @@ struct RuntimeConfig {
            type != .typeRegular {
             return "persistent disk identity invalid: not a regular file \(diskURL.path)"
         }
+        if let protected = Self.templateProtectionError(for: diskURL.path) { return protected }
         // disk is optional for validation — ramdisk fallback exists but production expects block
+        return nil
+    }
+
+    /// The guest root templates (installed bundle, source tree, `HARPOON_TEST_ROOT`) are immutable sources that new disks are cloned
+    /// from. A VM attaches its disk writable and `disk resize` truncates it, so neither may ever be pointed at one.
+    static func templateProtectionError(for path: String) -> String? {
+        var templates = [rootTemplateURL().path]
+        if let lib = installedLibDir() { templates.append(guestAssetDir(lib).appendingPathComponent("harpoon-root.img").path) }
+        if let src = sourceAssetRoot() { templates.append(guestAssetDir(src).appendingPathComponent("harpoon-root.img").path) }
+        let target = URL(fileURLWithPath: path).standardized.resolvingSymlinksInPath().path
+        let targetID = diskIdentity(at: path)
+        for t in templates {
+            let same = URL(fileURLWithPath: t).standardized.resolvingSymlinksInPath().path == target
+                || (targetID != nil && diskIdentity(at: t) == targetID)
+            if same { return "refusing to use the immutable guest template as a disk: \(path)" }
+        }
         return nil
     }
 
@@ -416,12 +433,15 @@ struct RuntimeConfig {
 
     var diskLogicalBytes: UInt64 {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: diskURL.path),
-              let size = attrs[.size] as? UInt64 else { return 32 * 1024 * 1024 * 1024 } // default 32GiB (sparse)
+              let size = attrs[.size] as? UInt64 else { return Self.defaultProvisionBytes }
         return size
     }
 
     // Stage 3C: disk size parsing and defaults (sparse)
-    static let defaultProvisionBytes: UInt64 = 32 * 1024 * 1024 * 1024 // 32 GiB logical sparse default (was 8G)
+    /// Logical size of a NEW root disk. PROVISIONAL (was 32 GiB): the shipped guest needs about 335 MiB and booted Docker at the 2 GiB
+    /// template size, so 4 GiB is expected to hold Docker plus a basic workload, but that has not been confirmed with a live boot at 4 GiB.
+    /// Fallback: `HARPOON_DISK_SIZE=32G` or `harpoon config set disk-size 32G`, or change this one constant. Existing disks keep their size.
+    static let defaultProvisionBytes: UInt64 = 4 * 1024 * 1024 * 1024
     static let minProvisionBytes: UInt64 = 2 * 1024 * 1024 * 1024 // must fit template contents (~500M) but enforce 8G for new
     static func parseDiskSize(_ s: String) -> UInt64? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -465,7 +485,7 @@ struct RuntimeConfig {
         return nil
     }
 
-    /// The size of a NEW root disk: HARPOON_DISK_SIZE, else the config file's disk-size, else 32 GiB (`--disk-size` outranks all
+    /// The size of a NEW root disk: HARPOON_DISK_SIZE, else the config file's disk-size, else 4 GiB (`--disk-size` outranks all
     /// of these and provisions directly in `harpoon start`). Applied only when a disk is created; an existing disk is never resized.
     static func desiredProvisionBytes() -> UInt64 {
         provisionBytes(environment: ProcessInfo.processInfo.environment["HARPOON_DISK_SIZE"], config: configuredDiskSize())

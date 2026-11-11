@@ -60,12 +60,14 @@ func printUsageFull() {
 
     Precedence (cpus, memory): CLI flag > environment (HARPOON_CPUS, HARPOON_MEMORY_MIB) > user config > defaults
     Kernel, initramfs, disk: CLI flag > environment (HARPOON_KERNEL, HARPOON_INITRAMFS, HARPOON_DISK) > defaults (not in the config file)
-    Disk size, new disk only (an existing disk is never resized): --disk-size > HARPOON_DISK_SIZE > user config > 32G
+    Disk size, new disk only (an existing disk is never resized): --disk-size > HARPOON_DISK_SIZE > user config > 4G (provisional)
     Config: ~/Library/Application Support/Harpoon/config.json
 
     Disk (persistent, grow-only, sparse):
       harpoon disk status           Backing logical/physical, FS used/free, config
       harpoon disk resize 16G       Grow to 16G (VM stopped, never shrink)
+      harpoon disk expand 16G --yes Stop, grow, restart and verify (interrupts running containers; nothing happens without --yes)
+      harpoon disk status --json    Same facts as JSON, plus low-space level and suggested sizes
       harpoon start --disk-size 16G First provision 16G (no disk), otherwise use resize
 
     Docker:
