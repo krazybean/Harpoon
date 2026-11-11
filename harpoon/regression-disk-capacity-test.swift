@@ -92,6 +92,10 @@ require(low.map { $0.oversubscribed } == [false, false, true], "...with only 32 
 // filesystem verification after the restart: absolute, so an unknown earlier reading cannot fake success
 require(DiskPolicy.filesystemExpanded(after: 7_900 * MiB, from: 4 * GiB, to: 8 * GiB), "a filesystem that reports about the new size is expanded")
 require(!DiskPolicy.filesystemExpanded(after: 3_900 * MiB, from: 4 * GiB, to: 8 * GiB), "an unchanged filesystem is not expanded")
+require(DiskPolicy.filesystemMatchesBacking(capacity: 4 * GiB * 96 / 100, logical: 4 * GiB), "ext4 geometry on a 4 GiB disk (about 4% overhead) is consistent")
+require(DiskPolicy.filesystemMatchesBacking(capacity: 8 * GiB, logical: 8 * GiB), "an equal capacity is consistent")
+require(!DiskPolicy.filesystemMatchesBacking(capacity: 4 * GiB - 100 * MiB, logical: 8 * GiB), "a 4 GiB filesystem on an 8 GiB file is an incomplete expansion")
+require(!DiskPolicy.filesystemMatchesBacking(capacity: 7 * GiB, logical: 8 * GiB), "a filesystem 12% short is still flagged")
 require(!DiskPolicy.filesystemExpanded(after: 5_000 * MiB, from: 4 * GiB, to: 8 * GiB), "a partly grown filesystem is not expanded")
 require(!DiskPolicy.filesystemExpanded(after: 0, from: 4 * GiB, to: 8 * GiB), "a zero reading is not expanded")
 require(!DiskPolicy.filesystemExpanded(after: 7 * GiB, from: 8 * GiB, to: 4 * GiB), "a shrink is never an expansion")

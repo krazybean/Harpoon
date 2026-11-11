@@ -47,6 +47,13 @@ With `HARPOON_TEST_TMPDIR` set, a namespace that has no root disk of its own mad
 production disk (`~/Library/Application Support/Harpoon/data/harpoon-root.img`). They now report `<root>/data/harpoon-root.img`
 as not yet provisioned. Read-only before and after; nothing is created. Without the variable nothing changes.
 
+### `doctor` no longer warns about normal ext4 overhead, and the desktop shows the disk image size
+
+`doctor` compared the backing file with the guest's `df` capacity using a 2% ceiling, but ext4 on the shipped layout keeps about 3 to 5%
+for the journal and inode tables, so a healthy 4 GiB disk warned. The ceiling is now 6%; a filesystem that is genuinely short of the file
+(an unfinished expansion) still warns. `harpoon status --json` now reports `diskLogicalBytes`, so the desktop's *Disk image* tile no longer
+reads "Unavailable". The field is absent when the disk file does not exist yet; older responses without it still render as before.
+
 ## Documentation
 
 - The help text, usage line and configuration guide now state the real precedence for `cpus` and `memory`: CLI flag >
