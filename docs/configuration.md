@@ -23,7 +23,37 @@ Other settings:
 | Setting | Order |
 |---|---|
 | kernel, initramfs, disk path | CLI flag (`--kernel`, `--initramfs`, `--disk`) > environment (`HARPOON_KERNEL`, `HARPOON_INITRAMFS`, `HARPOON_DISK`) > built-in lookup. They are not config-file keys. |
-| disk size (new disk only) | `--disk-size` > `HARPOON_DISK_SIZE` > config `disk-size` > 32G, the same order as `cpus` and `memory`. A value that is not a size or is below 2G is skipped and the next layer applies. An existing disk is never resized by any of them; use `harpoon disk resize`. |
+| disk size (new disk only) | `--disk-size` > `HARPOON_DISK_SIZE` > config `disk-size` > 4G (provisional default; was 32G), the same order as `cpus` and `memory`. A value that is not a size or is below 2G is skipped and the next layer applies. An existing disk is never resized by any of them; use `harpoon disk resize`. |
+
+## Disk capacity and expansion
+
+A new root disk is **4 GiB logical** (sparse; provisional). An existing disk keeps whatever size it has, including 32 GiB ones, and an
+explicit `--disk-size`, `HARPOON_DISK_SIZE` or `disk-size` still decides the size of a new one.
+
+Harpoon watches the guest filesystem while it runs and warns **before** it fills. The runtime decides the level from `df`:
+
+| Level | Condition (either) |
+|---|---|
+| warning | 80% used, or 1 GiB or less available |
+| critical | 92% used, or 384 MiB or less available |
+
+The absolute limits make small disks warn in time; the percentages cover large ones. ext4 keeps 5% for root, and `dockerd` runs as root,
+so waiting for zero available leaves nothing to act with.
+
+Growing the disk **stops the VM**, so it is always the user's decision:
+
+- **Desktop:** a notice shows capacity, used/available space, host free space and suggested sizes (the next sizes above the current one that
+  fit), with a custom size. *Not now* is remembered and does not repeat at the same level; it returns if usage climbs 5 more points or the
+  level becomes critical (a dismissed critical notice repeats after an hour). *Confirm expansion* asks once more, says containers are
+  interrupted, and only then stops Harpoon, grows the disk, starts it and checks that the filesystem grew and Docker is ready.
+- **Terminal:** `harpoon disk status` prints the warning and the exact command; `harpoon disk status --json` is the same data for tools.
+  `harpoon disk expand 8G --yes` performs the expansion; without `--yes` it prints what would happen and changes nothing. It never prompts,
+  so scripts cannot hang, and nothing resizes or restarts without `--yes`. `harpoon disk resize` still grows a stopped Harpoon's disk.
+
+Limits (environment variables): `HARPOON_DISK_MAX` (default 512G) caps the logical size; `HARPOON_DISK_HOST_RESERVE` (default 5G) is the host
+space that must remain free after counting the added capacity (the growth plus the reserve must fit in the host's free space). Disks never
+shrink, and a guest template is never used as a disk. If an expansion is interrupted, `disk status` and `doctor` say how far it got and what to
+run; growing the file is repeatable and the guest finishes the filesystem on its next boot. There is no rollback after the disk file has grown.
 
 ## Commands
 

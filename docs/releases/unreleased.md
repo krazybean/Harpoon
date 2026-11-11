@@ -4,10 +4,23 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### New root disks start at 4 GiB, and Harpoon offers to grow them (provisional)
+
+A **new** root disk is 4 GiB logical (sparse) instead of 32 GiB. Disks that already exist are not touched, and an explicit
+`--disk-size`, `HARPOON_DISK_SIZE` or `disk-size` still wins. **The 4 GiB default is provisional:** the guest uses about 335 MiB and has run
+Docker at the 2 GiB template size, but a live boot at 4 GiB has not been recorded yet, and some workloads need more (`azure-sql-edge`
+exhausted 2 GiB). To keep the old behavior, set `HARPOON_DISK_SIZE=32G` or `harpoon config set disk-size 32G` before the first start.
+
+While Harpoon runs, the desktop warns when the Docker disk passes 80% (or 1 GiB free) and again at 92% (or 384 MiB free), and offers larger
+sizes. Choosing one asks for confirmation, then stops Harpoon, grows the disk, starts it and verifies the filesystem and Docker. Running
+containers are interrupted. Nothing resizes or restarts without that confirmation. Headless: `harpoon disk status [--json]` shows the
+warning and `harpoon disk expand <size> --yes` performs it (no prompt; without `--yes` it changes nothing). See `docs/configuration.md`.
+A guest template can no longer be attached as a disk or resized.
+
 ### Disk size for a new root disk follows the same order as cpus and memory (#184)
 
 `CLI flag > environment > config file > built-in default`: `harpoon start --disk-size`, then `HARPOON_DISK_SIZE`, then the
-`disk-size` key in `config.json`, then 32 GiB.
+`disk-size` key in `config.json`, then 4 GiB (was 32 GiB; see below).
 
 **If you relied on the config file winning:** until now `harpoon config set disk-size 16G` overrode `HARPOON_DISK_SIZE`.
 It no longer does. If `HARPOON_DISK_SIZE` is set in your environment (a shell profile, a launch agent, a script), it now
@@ -19,7 +32,7 @@ config file, unset the variable.
 - A value that is not a size, or is below 2 GiB, is skipped and the next layer applies (previously an unparseable
   environment value was also ignored, but one below 2 GiB produced a template-sized disk). `--disk-size` and
   `harpoon config set disk-size` still reject such values with an error.
-- The default is unchanged (32 GiB, sparse).
+- The default is now 4 GiB, sparse (see the next section).
 
 ### Inspecting the root disk no longer creates it (#183)
 

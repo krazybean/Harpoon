@@ -758,3 +758,8 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .port-exposure__host[data-tone="warn"], .port-exposure__line[data-tone="warn"] { color: var(--warning-fg); }
 .port-exposure__host[data-tone="ok"], .port-exposure__line[data-tone="ok"] { color: var(--text-secondary); }
 .container-detail__list-row { min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }
+
+/* Low-disk notice: in flow under the header, not a modal; the confirmation itself is the shared dialog. */
+.disk-notice { background: var(--warning-bg); color: var(--warning-fg); border: 1px solid #78350F; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+.disk-notice--critical { background: var(--error-bg); color: var(--error-fg); border-color: var(--error); }
+.disk-notice .dialog-actions { margin-top: 8px; }

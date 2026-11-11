@@ -22,6 +22,7 @@ import { configureResourceSampler } from "./lib/resourceSamplerStore";
 import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
+import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
 import { useDeployEngine } from "./hooks/useDeployEngine";
 import { navBadge } from "./lib/deployStore";
@@ -684,6 +685,7 @@ export default function App() {
             <button onClick={()=>{ refreshStatus(); refreshCounts(); refreshConfig(); refreshDocker(); if(active==="containers") refreshContainers(); if(active==="images") refreshImages(); if(active==="volumes") refreshVolumes(); if(active==="networks") refreshNetworks(); if(active==="diagnostics"){refreshDoctor(); refreshLogs();} }} disabled={!tauriAvailable} className="btn btn--secondary">Refresh</button>
           </div>
         </header>
+        <DiskCapacityNotice enabled={tauriAvailable && status?.state === "running" && bootstrapPhase === "ready"} onExpanded={() => { refreshStatus(); refreshDocker(); }} />
         {actionError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{actionError}</div>}
         {statusError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>status error: {statusError}</div>}
         {status?.failure && status.state !== "failed" && !showFailed && <div role="alert" style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{status.failure.message} <button className="btn btn--secondary btn--sm" onClick={() => handleNav("diagnostics")} style={{ marginLeft: 8 }}>View diagnostics</button></div>}

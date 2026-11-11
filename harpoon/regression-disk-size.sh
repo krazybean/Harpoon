@@ -1,5 +1,5 @@
 #!/bin/sh
-# Size of a new root disk (#184): --disk-size > HARPOON_DISK_SIZE > config disk-size > 32 GiB, applied only when a disk is created.
+# Size of a new root disk (#184): --disk-size > HARPOON_DISK_SIZE > config disk-size > 4 GiB, applied only when a disk is created.
 # CLI layer and existing-disk preservation through the binary (every `start` has a missing kernel and stops in validation, so no VM
 # starts); the environment/config layers and invalid values through a unit test of the resolution API. Private HARPOON_TEST_TMPDIR
 # namespaces and a fake template. Usage: sh harpoon/regression-disk-size.sh [harpoon-binary]
@@ -57,7 +57,7 @@ done
 # (`disk status` is covered by regression-namespace-disk-status.sh; the size a new disk gets is unit-tested below.)
 
 # the help states the order
-"$bin" help 2>&1 | grep -q -e '--disk-size > HARPOON_DISK_SIZE > user config > 32G' || fail "help does not state the disk-size order"
+"$bin" help 2>&1 | grep -q -e '--disk-size > HARPOON_DISK_SIZE > user config > 4G (provisional)' || fail "help does not state the disk-size order"
 
 # environment and config layers, invalid values, default size (unit test of the resolution API)
 S="$ROOT/harpoon/Sources"
