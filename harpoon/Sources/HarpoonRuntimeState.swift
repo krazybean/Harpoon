@@ -252,22 +252,7 @@ func isLockHeld() -> Bool {
     }
 }
 
-func dockerSocketReady() -> Bool {
-    let path = HarpoonPaths.dockerSocketPath
-    let fm = FileManager.default
-    if !fm.fileExists(atPath: path) { return false }
-    // try connect to socket to see if live
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    if fd < 0 { return false }
-    defer { close(fd) }
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    memset(&addr.sun_path, 0, MemoryLayout.size(ofValue: addr.sun_path))
-    _ = path.withCString { src in withUnsafeMutablePointer(to: &addr.sun_path) { dst in strncpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src, MemoryLayout.size(ofValue: dst.pointee)-1) } }
-    let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-    let ret = withUnsafePointer(to: addr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in connect(fd, sp, len) } }
-    return ret == 0
-}
+func dockerSocketReady() -> Bool { dockerSocketProbe(path: HarpoonPaths.dockerSocketPath).answered }
 
 // MARK: - Metadata helpers
 
@@ -408,7 +393,8 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     }
     let lockHeld = isLockHeld()
     let sockExists = FileManager.default.fileExists(atPath: HarpoonPaths.dockerSocketPath)
-    let dockerReady = dockerSocketReady()
+    let probe = dockerSocketProbe(path: HarpoonPaths.dockerSocketPath)
+    let dockerReady = probe.answered
     // fallback: check HARPOON_RUNNING in log (sandbox may block unix connect)
     // check both primary and fallback locations due to sandbox divergence
     var logHasRunning = false
@@ -424,7 +410,8 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
             break
         }
     }
-    let effectiveReady = dockerReady || (sockExists && logHasRunning)
+    // the log stands in only when the socket cannot be connected to at all; a socket that accepts but does not answer is not ready
+    let effectiveReady = dockerReady || (sockExists && logHasRunning && !probe.connected)
     // `run` is a supported foreground entrypoint and deliberately has no launcher
     // metadata. Its exclusive lock is therefore the secondary liveness signal.
     let activeRuntime = (alive && isHarpoon) || lockHeld

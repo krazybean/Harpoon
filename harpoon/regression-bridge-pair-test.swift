@@ -152,6 +152,59 @@ do {
     settle(to: base, "closeAll")
 }
 
+// 7b. guest-down gate: after repeated failures only one probe per interval; one success reopens it
+do {
+    let h = VsockHealth(threshold: 3, probeInterval: 15), t0 = Date()
+    require(h.allow(t0) && !h.degraded, "healthy at the start")
+    h.failed(); h.failed(); require(h.allow(t0), "below the threshold every connect is allowed")
+    h.failed(); require(h.degraded, "three failures degrade")
+    require(h.allow(t0), "the first attempt after degrading is the probe")
+    var refused = 0; for _ in 0..<500 where !h.allow(t0.addingTimeInterval(5)) { refused += 1 }
+    require(refused == 500, "a storm inside the probe interval must not reach the framework (\(500 - refused) got through)")
+    require(h.allow(t0.addingTimeInterval(16)) && !h.allow(t0.addingTimeInterval(17)), "one probe per interval")
+    h.failed(); require(h.degraded, "a failed probe keeps it degraded")
+    h.succeeded(); require(!h.degraded && h.allow(t0.addingTimeInterval(18)) && h.allow(t0.addingTimeInterval(18)), "a success reopens the gate")
+}
+
+// 7c. Docker readiness is an answered /_ping, not a socket that accepts (what a bridge to a dead guest does)
+do {
+    require(dockerPingAnswered("HTTP/1.1 200 OK\r\nApi-Version: 1.51\r\n\r\nOK"), "200 is ready")
+    require(!dockerPingAnswered("HTTP/1.1 500 Internal\r\n\r\n") && !dockerPingAnswered(""), "non-200 or empty is not ready")
+    let dir = NSTemporaryDirectory() + "hp-ping-\(getpid())"; try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let stopLock = NSLock()
+    func listener(_ path: String, reply: String?) -> () -> Void {
+        unlink(path)
+        let l = socket(AF_UNIX, SOCK_STREAM, 0); var a = sockaddr_un(); a.sun_family = sa_family_t(AF_UNIX)
+        _ = path.withCString { src in withUnsafeMutablePointer(to: &a.sun_path) { strncpy(UnsafeMutableRawPointer($0).assumingMemoryBound(to: CChar.self), src, 100) } }
+        _ = withUnsafePointer(to: a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(l, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        listen(l, 4)
+        let done = DispatchSemaphore(value: 0); var halt = false
+        DispatchQueue.global().async {
+            var held: [Int32] = []
+            while true {
+                stopLock.lock(); let h = halt; stopLock.unlock(); if h { break }
+                var p = pollfd(fd: l, events: Int16(POLLIN), revents: 0)
+                if poll(&p, 1, 50) <= 0 { continue }
+                let c = accept(l, nil, nil); if c < 0 { continue }
+                if let r = reply { _ = r.withCString { write(c, $0, strlen($0)) }; close(c) } else { held.append(c) }
+            }
+            held.forEach { close($0) }; close(l); done.signal()
+        }
+        return { stopLock.lock(); halt = true; stopLock.unlock(); done.wait() }
+    }
+    let sock = dir + "/d.sock"
+    let silent = listener(sock, reply: nil)         // accepts and never answers: the bridge in front of a dead guest
+    let t0 = Date(); let r1 = dockerSocketProbe(path: sock, timeoutSeconds: 1)
+    require(r1.connected && !r1.answered, "an accepting but silent socket is connected, not ready")
+    require(Date().timeIntervalSince(t0) < 3, "the probe is bounded")
+    silent()
+    let live = listener(sock, reply: "HTTP/1.0 200 OK\r\n\r\nOK")
+    let r2 = dockerSocketProbe(path: sock); require(r2.connected && r2.answered, "an answering daemon is ready")
+    live()
+    let r3 = dockerSocketProbe(path: dir + "/none.sock"); require(!r3.connected && !r3.answered, "no socket is neither")
+}
+
 // 8. bounded over a long run of probes: descriptors stay flat, they do not creep up
 do {
     var peak = base

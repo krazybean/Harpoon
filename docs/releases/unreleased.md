@@ -78,6 +78,11 @@ answer), a blocked write waits without a busy loop and ends as soon as the clien
 number of open connections is bounded (256 Docker, 32 management) and shutdown closes them, and a listener that runs out of descriptors pauses
 instead of spinning. The desktop startup overlay now gives way as soon as the runtime reports running with Docker ready (after 10 s at most),
 each startup read is time-bounded, and a sustained management outage is shown as a warning rather than a hang.
+- A dead guest no longer looks like a ready Docker. `harpoon status` now counts Docker as ready only when `GET /_ping` is
+  answered through the socket (a bridge to a crashed guest still accepts connections). After three vsock connect failures
+  the Docker bridge, the management bridge and port sync stop calling the Virtualization framework (which cannot cancel a
+  connect and keeps a descriptor for each one that never completes) and try one probe every 15 s until the guest answers.
+  Port sync no longer stays in flight forever behind a connect that never returns.
 
 ## Documentation
 
