@@ -58,6 +58,9 @@ HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-disk-size.sh
 say "Run disk expansion regression (private namespaces, stand-in process, no VM)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-disk-expand.sh
 
+say "Run disk reclaim regression (private namespace, stand-in process, fake guest management socket, no VM)"
+HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-disk-reclaim.sh
+
 say "Run namespace disk status regression (private namespace, read-only, no VM)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-namespace-disk-status.sh
 

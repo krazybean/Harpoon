@@ -763,3 +763,8 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .disk-notice { background: var(--warning-bg); color: var(--warning-fg); border: 1px solid #78350F; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
 .disk-notice--critical { background: var(--error-bg); color: var(--error-fg); border-color: var(--error); }
 .disk-notice .dialog-actions { margin-top: 8px; }
+.expansion-progress__bar { display: block; width: 100%; height: 6px; margin: 8px 0; }
+.expansion-progress__stages { list-style: none; margin: 0 0 8px; padding: 0; }
+.expansion-progress__stage { margin: 2px 0; opacity: 0.55; }
+.expansion-progress__stage--active { opacity: 1; font-weight: 600; }
+.expansion-progress__stage--done { opacity: 0.85; }

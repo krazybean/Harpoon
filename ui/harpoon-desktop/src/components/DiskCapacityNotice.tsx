@@ -21,7 +21,7 @@ function saveDismissal(d: Dismissal | null) {
  * choices, and the VM is touched only after the confirmation dialog is accepted. When the desktop is not connected to the runtime
  * (`enabled` false) it renders nothing and polls nothing.
  */
-export function DiskCapacityNotice({ enabled, onExpanded }: { enabled: boolean; onExpanded: () => void }) {
+export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabled: boolean; stagesShown: boolean; onExpanded: () => void }) {
   const [cap, setCap] = useState<DiskCapacity | null>(null);
   const [dismissal, setDismissal] = useState<Dismissal | null>(() => loadDismissal());
   const [reviewing, setReviewing] = useState(false);
@@ -47,6 +47,7 @@ export function DiskCapacityNotice({ enabled, onExpanded }: { enabled: boolean; 
   const level = busy ? "none" : noticeLevel(cap, dismissal, Date.now());
   // While an expansion runs Harpoon is stopped for a while, so `enabled` goes false; keep the progress and the outcome on screen.
   if (!busy && !result && (!enabled || level === "none")) return null;
+  if (busy && stagesShown) return null;
 
   const requested: number | null = choice === "custom" ? (custom.trim() && /^\d+$/.test(custom.trim()) ? Number(custom.trim()) * GIB : null) : choice;
   const customError = choice === "custom" && cap ? customSizeError(custom, cap) : null;
@@ -80,7 +81,8 @@ export function DiskCapacityNotice({ enabled, onExpanded }: { enabled: boolean; 
 
   return (
     <div role={level === "critical" ? "alert" : "status"} className={level === "critical" ? "disk-notice disk-notice--critical" : "disk-notice"}>
-      {busy && <div>Expanding the Docker disk: stopping Harpoon, growing the disk, starting it again. This can take a few minutes; running containers are interrupted.</div>}
+      {/* once the runtime's record exists the stage list (ExpansionProgress) says where it is; this covers the moment before it does */}
+      {busy && !stagesShown && <div>Expanding the Docker disk. Waiting for the runtime to report the first stage; running containers are interrupted.</div>}
       {!busy && result && (
         <div>
           <div style={{ color: result.ok ? "var(--text-primary)" : "var(--error-fg)", whiteSpace: "pre-wrap" }}>{result.text}</div>

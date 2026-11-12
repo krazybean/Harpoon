@@ -218,3 +218,33 @@ func controlBusyMessage() -> String {
     }
     return "HARPOON_CONTROL_BUSY: another lifecycle operation is in progress"
 }
+
+/// User-confirmed space reclamation: guest `fstrim /` punches holes in the sparse image for blocks ext4 no longer uses. Nothing is
+/// promised beforehand; the result is the measured change in the file's APFS allocation, which may be zero (or even a small growth,
+/// because the guest keeps writing). The logical size never changes and no Docker object is touched.
+enum DiskReclaim {
+    enum TrimResult: Equatable { case ok, unsupported, failed }
+
+    /// BusyBox/util-linux report "not supported" when the device or filesystem takes no discards, and 127 / "not found" without fstrim.
+    static func classifyTrim(code: Int32, stderr: String) -> TrimResult {
+        if code == 0 { return .ok }
+        let e = stderr.lowercased()
+        if code == 127 || e.contains("not supported") || e.contains("not found") || e.contains("no such file") || e.contains("applet") { return .unsupported }
+        return .failed
+    }
+
+    struct Report: Equatable {
+        var logicalBefore: UInt64, logicalAfter: UInt64
+        var physicalBefore: UInt64, physicalAfter: UInt64
+        var logicalPreserved: Bool { logicalBefore == logicalAfter }
+        /// Signed: negative means the allocation shrank.
+        var changeBytes: Int64 { Int64(clamping: physicalAfter) - Int64(clamping: physicalBefore) }
+        var reclaimedBytes: UInt64 { physicalBefore > physicalAfter ? physicalBefore - physicalAfter : 0 }
+        var message: String {
+            if !logicalPreserved { return "The disk's logical size changed from \(RuntimeConfig.formatBytes(logicalBefore)) to \(RuntimeConfig.formatBytes(logicalAfter)); this should never happen, run `harpoon disk status`." }
+            if reclaimedBytes > 0 { return "Reclaimed \(RuntimeConfig.formatBytes(reclaimedBytes)) of host disk space (\(RuntimeConfig.formatBytes(physicalBefore)) -> \(RuntimeConfig.formatBytes(physicalAfter)))." }
+            if changeBytes > 0 { return "Nothing was reclaimed: the allocation grew by \(RuntimeConfig.formatBytes(UInt64(changeBytes))) while trimming because the guest kept writing." }
+            return "Nothing was reclaimed: the allocation is unchanged at \(RuntimeConfig.formatBytes(physicalAfter)). The guest had no unused blocks to give back."
+        }
+    }
+}

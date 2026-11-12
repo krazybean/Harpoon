@@ -71,6 +71,25 @@ and what to run, judged from the disk's actual size; growing the file is repeata
 no rollback after the disk file has grown. Success is reported only when the file has the requested size, Harpoon is running with Docker ready,
 and the guest filesystem reports most of the added capacity.
 
+### Reclaiming unused space
+
+Deleting images or files in the guest frees guest blocks but not the Mac's disk: the image is a sparse file and macOS only gets space back
+when the guest discards the blocks (Stage 8 measured this with `fstrim /`). `harpoon disk reclaim --yes` (desktop: *Resources* → *Reclaim
+unused space…*) asks the running guest to run `fstrim /` over the management channel and reports the **measured** change in the image's
+APFS allocation before and after, including zero or a small growth (the guest keeps writing). It promises no amount beforehand.
+
+- It does not delete Docker images, containers or volumes, does not prune anything, does not restart Harpoon and never changes the disk's
+  logical capacity (it fails loudly if that changed). Without `--yes` it explains and changes nothing (exit 2).
+- It needs a running Harpoon with a reachable management service, and holds the lifecycle lock, so it refuses (exit 11) while a start, stop,
+  restart, expansion or another reclaim runs. A guest without trim support (`fstrim` missing or the discard not supported) is reported as
+  unsupported; any other `fstrim` failure is reported as a failure with the allocation seen. `--json` prints the same facts for tools:
+  `status` (`reclaimed`, `nothing-reclaimed`, `unsupported`, `failed`, `busy`, `not-running`, `engine-unreachable`), `logicalBytes`,
+  `physicalBeforeBytes`, `physicalAfterBytes`, `reclaimedBytes`, `changeBytes`, `message`.
+
+Expansion progress. While an expansion runs, `harpoon status --json` reports `diskExpansion.phase` from the recovery record (`stopping`,
+`growing`, `starting`, `verifying`), and the desktop lists those four stages with an indeterminate bar (no percentages). The panel
+disappears when the record is cleared after a verified success; an interrupted record stays and carries `diskExpansion.recovery`.
+
 ## Commands
 
 ```

@@ -101,3 +101,56 @@ test("the runtime's JSON is parsed defensively", () => {
   const ok = parseDiskCapacity(JSON.stringify(cap()));
   assert.equal(ok.logicalBytes, 4 * GIB);
 });
+
+import { EXPANSION_STAGES, expansionPanel, expansionStages, interruptedText, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "./diskCapacity.ts";
+
+test("expansion stages follow the recorded phase, in order, with no invented progress", () => {
+  assert.deepEqual(EXPANSION_STAGES.map((s) => s.label), ["Stopping Harpoon", "Growing sparse disk", "Starting Harpoon", "Verifying filesystem and Docker readiness"]);
+  const states = (phase) => expansionStages({ active: true, phase }).map((s) => s.state);
+  assert.deepEqual(states("stopping"), ["active", "pending", "pending", "pending"]);
+  assert.deepEqual(states("growing"), ["done", "active", "pending", "pending"]);
+  assert.deepEqual(states("starting"), ["done", "done", "active", "pending"]);
+  assert.deepEqual(states("verifying"), ["done", "done", "done", "active"]);
+  assert.deepEqual(states("from-the-future"), ["pending", "pending", "pending", "pending"], "an unknown phase marks nothing active");
+  assert.deepEqual(expansionStages(undefined).map((s) => s.state), ["pending", "pending", "pending", "pending"]);
+});
+
+test("the expansion panel exists only while a record does: running, interrupted, then gone after success", () => {
+  assert.equal(expansionPanel(undefined), "none", "no record after a verified success: the panel clears");
+  assert.equal(expansionPanel(null), "none");
+  assert.equal(expansionPanel({ active: true, phase: "growing" }), "running");
+  assert.equal(expansionPanel({ active: false, phase: "growing" }), "interrupted");
+  assert.equal(expansionPanel({ phase: "growing" }), "interrupted", "a record without `active` is not treated as running");
+  assert.ok(expansionActive({ diskExpansion: { active: true } }) && !expansionActive({ diskExpansion: { active: false } }) && !expansionActive({}), "lifecycle controls are blocked only while running");
+});
+
+test("an interrupted expansion keeps its recovery text, and older runtimes still get something actionable", () => {
+  assert.equal(interruptedText({ active: false, phase: "growing", recovery: "Run `harpoon start`." }), "Run `harpoon start`.");
+  assert.match(interruptedText({ active: false, phase: "starting" }), /stopped at "starting".*harpoon disk status/s);
+});
+
+test("reclaim results parse from the runtime's JSON, and anything else becomes an error message", () => {
+  const ok = parseReclaimResult('{"status":"reclaimed","message":"Reclaimed 2 GiB","reclaimedBytes":2147483648,"logicalBytes":4294967296}');
+  assert.equal(ok.status, "reclaimed"); assert.equal(ok.reclaimedBytes, 2 * GIB);
+  assert.equal(parseReclaimResult('{"status":"nothing-reclaimed","message":"Nothing was reclaimed","reclaimedBytes":0}').reclaimedBytes, 0, "zero is a result, not an error");
+  assert.deepEqual(parseReclaimResult("HARPOON_CONTROL_BUSY: another lifecycle operation is in progress"), { status: "error", message: "HARPOON_CONTROL_BUSY: another lifecycle operation is in progress" });
+  assert.equal(parseReclaimResult("").status, "error");
+  assert.equal(parseReclaimResult('{"nope":1}').status, "error");
+});
+
+test("reclaim is offered only for a running provisioned disk with no expansion running", () => {
+  assert.equal(reclaimBlockedReason(cap(), undefined), null);
+  assert.match(reclaimBlockedReason(cap({ state: "stopped" }), undefined), /must be running/);
+  assert.match(reclaimBlockedReason(cap({ provisioned: false }), undefined), /No Docker disk/);
+  assert.match(reclaimBlockedReason(null, undefined), /No Docker disk/);
+  assert.match(reclaimBlockedReason(cap(), { active: true, phase: "growing" }), /expansion is in progress/);
+  assert.equal(reclaimBlockedReason(cap(), { active: false, phase: "growing" }), null, "an interrupted record does not block (the runtime still refuses what is unsafe)");
+});
+
+test("the reclaim confirmation states what it does not do and promises no amount", () => {
+  const m = reclaimConfirmationMessage(cap({ physicalBytes: 3 * GIB }));
+  assert.match(m, /4 GiB capacity stays the same/); assert.match(m, /3 GiB is currently allocated/);
+  assert.match(m, /does not delete Docker images, containers or volumes/); assert.match(m, /does not restart Harpoon/);
+  assert.match(m, /may be small or zero/);
+  assert.doesNotMatch(m, /will (free|reclaim|return) \d/i, "no promised amount");
+});

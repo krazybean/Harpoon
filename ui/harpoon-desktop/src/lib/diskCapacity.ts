@@ -128,3 +128,66 @@ export function confirmationMessage(c: DiskCapacity, requestedBytes: number): st
 export function expansionActive(status: { diskExpansion?: { active?: boolean } } | null | undefined): boolean {
   return Boolean(status?.diskExpansion?.active);
 }
+
+// --- expansion progress -----------------------------------------------------------------------------------------------------------
+// The runtime writes its phase to the expansion record before each step (`stopping`, `growing`, `starting`, `verifying`) and
+// `harpoon status --json` relays it as `diskExpansion`. The stages below are exactly those phases: no percentages, no timers.
+
+export interface ExpansionState { active?: boolean; phase: string; fromBytes?: number; toBytes?: number; recovery?: string }
+
+export const EXPANSION_STAGES = [
+  { phase: "stopping", label: "Stopping Harpoon" },
+  { phase: "growing", label: "Growing sparse disk" },
+  { phase: "starting", label: "Starting Harpoon" },
+  { phase: "verifying", label: "Verifying filesystem and Docker readiness" },
+] as const;
+
+export type StageState = "done" | "active" | "pending";
+
+/** "running": show stages and block lifecycle actions; "interrupted": show what to do; "none": no record, show nothing (cleared after success). */
+export function expansionPanel(e: ExpansionState | null | undefined): "none" | "running" | "interrupted" {
+  if (!e) return "none";
+  return e.active ? "running" : "interrupted";
+}
+
+/** The four stages with the one the record names marked active. An unknown phase (a newer runtime) marks none active rather than guessing. */
+export function expansionStages(e: ExpansionState | null | undefined): { label: string; state: StageState }[] {
+  const at = EXPANSION_STAGES.findIndex((s) => s.phase === e?.phase);
+  return EXPANSION_STAGES.map((s, i) => ({ label: s.label, state: at < 0 ? "pending" : i < at ? "done" : i === at ? "active" : "pending" }));
+}
+
+/** Interrupted-expansion text: the runtime's own recovery instructions when it supplies them (older runtimes do not). */
+export function interruptedText(e: ExpansionState): string {
+  return e.recovery || `A disk expansion stopped at "${e.phase}". Nothing was lost. Run \`harpoon status\` and \`harpoon disk status\` to see where it stopped.`;
+}
+
+// --- space reclamation ------------------------------------------------------------------------------------------------------------
+
+export interface ReclaimResult {
+  status: string; message: string;
+  logicalBytes?: number; physicalBeforeBytes?: number; physicalAfterBytes?: number; reclaimedBytes?: number; changeBytes?: number;
+}
+
+/** `harpoon disk reclaim --yes --json` prints one JSON object (also on failure). Anything else is shown as the message it is. */
+export function parseReclaimResult(text: string): ReclaimResult {
+  try {
+    const o = JSON.parse(text);
+    if (o && typeof o === "object" && typeof o.status === "string") return { ...o, message: typeof o.message === "string" ? o.message : o.status };
+  } catch { /* fall through */ }
+  return { status: "error", message: text.trim() || "Reclaiming unused space failed." };
+}
+
+/** Why the action is unavailable right now, or null. Reclamation needs the running guest and must not overlap an expansion. */
+export function reclaimBlockedReason(c: DiskCapacity | null, expansion: ExpansionState | null | undefined): string | null {
+  if (expansionPanel(expansion) === "running") return "A disk expansion is in progress.";
+  if (!c || !c.provisioned) return "No Docker disk exists yet.";
+  if (c.state !== "running") return "Harpoon must be running to reclaim unused space.";
+  return null;
+}
+
+/** The text of the confirmation. It states what reclamation is and is not, and promises no amount. */
+export function reclaimConfirmationMessage(c: DiskCapacity): string {
+  return `Harpoon will ask the guest to trim unused blocks (fstrim /) so macOS can take back disk space. The disk's ${formatSize(c.logicalBytes)} capacity stays the same, `
+    + `${formatSize(c.physicalBytes)} is currently allocated on this Mac, and the amount returned is measured afterwards: it may be small or zero. `
+    + `This does not delete Docker images, containers or volumes, does not prune anything, and does not restart Harpoon.`;
+}

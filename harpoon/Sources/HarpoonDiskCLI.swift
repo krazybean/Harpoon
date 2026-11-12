@@ -277,6 +277,61 @@ func handleDiskResize(args: [String]) -> Int32 {
 
 /// `harpoon disk expand <size> [--yes]`: grow the disk of a running (or stopped) Harpoon. It stops the VM, so it never acts without
 /// `--yes`, never prompts (scripts must not hang), and refuses everything it can refuse BEFORE stopping anything.
+/// `harpoon disk reclaim --yes [--json]`: run `fstrim /` in the guest and report the measured change in host allocation. Needs a running
+/// Harpoon, holds the lifecycle lock (so it cannot overlap a start, stop, restart, expansion or another reclaim), never restarts the VM,
+/// never prunes Docker, and never changes the logical size.
+func handleDiskReclaim(args: [String]) -> Int32 {
+    let confirmed = args.contains("--yes"), json = args.contains("--json")
+    if args.contains(where: { $0 != "--yes" && $0 != "--json" }) { cliError("usage: harpoon disk reclaim --yes [--json]"); return 2 }
+    func fail(_ status: String, _ message: String, code: Int32 = 1, extra: [String: Any] = [:]) -> Int32 {
+        if json {
+            var o: [String: Any] = ["status": status, "message": message]
+            o.merge(extra) { a, _ in a }
+            if let d = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]), let s = String(data: d, encoding: .utf8) { print(s) }
+        } else { cliError(message) }
+        return code
+    }
+    guard let lock = LifecycleControlLock() else { return fail("busy", controlBusyMessage(), code: 11) }
+    _ = lock // held until return
+    let snap = statusSnapshot()
+    guard snap.state == "running" else {
+        return fail("not-running", "Harpoon is \(snap.state); reclaiming unused space needs the running guest. Start Harpoon first (nothing was changed).")
+    }
+    guard let meta = snap.meta, !meta.diskPath.isEmpty else {
+        return fail("unknown-disk", "cannot confirm which disk the running Harpoon uses (no runtime metadata); nothing was changed")
+    }
+    guard isMgmtServiceReachable() else {
+        return fail("engine-unreachable", "the guest management service is not reachable, so the guest cannot be asked to trim; nothing was changed")
+    }
+    let (logical, before) = RuntimeConfig.backingFileInfo(at: meta.diskPath)
+    guard logical > 0 else { return fail("unknown-disk", "\(meta.diskPath) is missing or empty; nothing was changed") }
+    if !confirmed {
+        cliError("Reclaim unused space on \(meta.diskPath): capacity \(RuntimeConfig.formatBytes(logical)), \(RuntimeConfig.formatBytes(before)) currently allocated on this Mac.")
+        cliError("This asks the guest to run `fstrim /`, which hands blocks that ext4 no longer uses back to macOS. It does not delete Docker images, containers or volumes, does not restart Harpoon, and does not change the disk's capacity. The amount reclaimed is not known in advance and may be zero.")
+        cliError("Nothing was changed. Run `harpoon disk reclaim --yes` to proceed.")
+        return 2
+    }
+    let r = mgmtExecCapture(argv: ["fstrim", "/"], timeoutSeconds: 900)
+    let (logicalAfter, after) = RuntimeConfig.backingFileInfo(at: meta.diskPath)
+    let report = DiskReclaim.Report(logicalBefore: logical, logicalAfter: logicalAfter, physicalBefore: before, physicalAfter: after)
+    let facts: [String: Any] = ["logicalBytes": logicalAfter, "physicalBeforeBytes": before, "physicalAfterBytes": after,
+                                "reclaimedBytes": report.reclaimedBytes, "changeBytes": report.changeBytes]
+    let detail = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    switch DiskReclaim.classifyTrim(code: r.code, stderr: r.stderr) {
+    case .unsupported:
+        return fail("unsupported", "The guest does not support trimming this disk (\(detail.isEmpty ? "fstrim exit \(r.code)" : detail)). Nothing was reclaimed; allocation is \(RuntimeConfig.formatBytes(after)).", extra: facts)
+    case .failed:
+        return fail("failed", "fstrim did not complete (\(detail.isEmpty ? "exit \(r.code)" : detail)). Allocation went from \(RuntimeConfig.formatBytes(before)) to \(RuntimeConfig.formatBytes(after)); Harpoon was not restarted and nothing was deleted.", extra: facts)
+    case .ok:
+        if !report.logicalPreserved { return fail("error", report.message, extra: facts) }
+        if json {
+            var o = facts; o["status"] = report.reclaimedBytes > 0 ? "reclaimed" : "nothing-reclaimed"; o["message"] = report.message
+            if let d = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]), let s = String(data: d, encoding: .utf8) { print(s) }
+        } else { cliPrint(report.message) }
+        return 0
+    }
+}
+
 func handleDiskExpand(args: [String]) -> Int32 {
     let confirmed = args.contains("--yes")
     let positional = args.filter { $0 != "--yes" }
@@ -443,6 +498,7 @@ func handleDisk(args: [String]) -> Int32 {
         cliPrint("  status [--json]     Show backing file, logical, physical, filesystem, used/free, low-space warning")
         cliPrint("  resize <new-size>   Grow sparse disk (e.g. harpoon disk resize 16G) — VM must be stopped, grow-only")
         cliPrint("  expand <size> --yes Stop Harpoon, grow the disk, start it again and verify (interrupts running containers; without --yes nothing happens)")
+        cliPrint("  reclaim --yes [--json] Give unused guest blocks back to macOS (guest fstrim /; no restart, no Docker changes; the amount is measured, not promised)")
         return 0
     }
     switch args[0] {
@@ -455,6 +511,8 @@ func handleDisk(args: [String]) -> Int32 {
         return handleDiskResize(args: Array(args.dropFirst(1)))
     case "expand":
         return handleDiskExpand(args: Array(args.dropFirst(1)))
+    case "reclaim":
+        return handleDiskReclaim(args: Array(args.dropFirst(1)))
     default:
         cliError("unknown disk subcommand: \(args[0])")
         return 2

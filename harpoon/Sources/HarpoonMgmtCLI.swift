@@ -59,7 +59,7 @@ func managementReady() -> Bool {
 
 // Bounded request used by diagnostics collectors. It preserves argv boundaries
 // and the existing management socket contract; it is not a second guest API.
-func mgmtExecCapture(argv: [String], maxBytes: Int = 512 * 1024) -> (code: Int32, stdout: String, stderr: String) {
+func mgmtExecCapture(argv: [String], maxBytes: Int = 512 * 1024, timeoutSeconds: Int = 5) -> (code: Int32, stdout: String, stderr: String) {
     let snap = statusSnapshot()
     guard snap.state != "stopped" && snap.state != "stale",
           waitForManagementReady(), let fd = connectMgmtSocket() else {
@@ -77,7 +77,7 @@ func mgmtExecCapture(argv: [String], maxBytes: Int = 512 * 1024) -> (code: Int32
         if written <= 0 { return (1, "", "management request failed") }
         offset += written
     }
-    var timeout = timeval(tv_sec: 5, tv_usec: 0)
+    var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     var response = Data()
     var buffer = [UInt8](repeating: 0, count: 8192)
