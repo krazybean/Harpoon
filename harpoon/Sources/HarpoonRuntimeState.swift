@@ -380,7 +380,7 @@ func resolveConfigFromArgs(_ args: [String]) -> RuntimeConfig {
     return c
 }
 
-func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?) {
+func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?, dockerUnverified: Bool) {
     let pid = readPIDFile()
     let meta = readMetadata()
     let alive: Bool
@@ -394,8 +394,7 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     let lockHeld = isLockHeld()
     let sockExists = FileManager.default.fileExists(atPath: HarpoonPaths.dockerSocketPath)
     let probe = dockerSocketProbe(path: HarpoonPaths.dockerSocketPath)
-    let dockerReady = probe.answered
-    // fallback: check HARPOON_RUNNING in log (sandbox may block unix connect)
+    // HARPOON_RUNNING in the log is history, not health: it only marks readiness as unverified when the socket cannot be probed (sandbox)
     // check both primary and fallback locations due to sandbox divergence
     var logHasRunning = false
     let logCandidates = HarpoonRoots.testRoot != nil ? [HarpoonPaths.logFile.path] : [
@@ -410,14 +409,13 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
             break
         }
     }
-    // the log stands in only when the socket cannot be connected to at all; a socket that accepts but does not answer is not ready
-    let effectiveReady = dockerReady || (sockExists && logHasRunning && !probe.connected)
+    let readiness = dockerReadiness(sockExists: sockExists, probe: probe, logHasRunning: logHasRunning)
     // `run` is a supported foreground entrypoint and deliberately has no launcher
     // metadata. Its exclusive lock is therefore the secondary liveness signal.
     let activeRuntime = (alive && isHarpoon) || lockHeld
     let state: String
     if activeRuntime {
-        state = sockExists && effectiveReady ? "running" : "starting"
+        state = sockExists && readiness.ready ? "running" : "starting"
     } else if meta?.failure != nil {
         state = "failed"
     } else if pid != nil {
@@ -427,5 +425,5 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     } else {
         state = "stopped"
     }
-    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta, meta?.failure)
+    return (state, pid, alive, isHarpoon, lockHeld, sockExists, readiness.ready, meta, meta?.failure, readiness.unverified)
 }

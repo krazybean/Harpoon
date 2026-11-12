@@ -112,6 +112,20 @@ func dockerSocketProbe(path: String, timeoutSeconds: Int = 2) -> (connected: Boo
 
 func dockerPingAnswered(_ response: String) -> Bool { response.hasPrefix("HTTP/1.") && response.prefix(32).contains(" 200") }
 
+/// Docker is ready only when the daemon answered `/_ping`. A log that once said HARPOON_RUNNING, with a socket that cannot be probed
+/// (sandboxed callers), is reported as unverified and never as ready; a socket that connects but does not answer is neither.
+func dockerReadiness(sockExists: Bool, probe: (connected: Bool, answered: Bool), logHasRunning: Bool) -> (ready: Bool, unverified: Bool) {
+    (probe.answered, !probe.answered && sockExists && logHasRunning && !probe.connected)
+}
+
+/// The kernel's own panic line from the guest console, or nil. Anchored to the console's `[ seconds]` prefix so text a workload prints
+/// cannot pass for it.
+func guestPanicLine(in serial: String) -> String? {
+    guard let re = try? NSRegularExpression(pattern: "^\\[ *\\d+\\.\\d+\\] Kernel panic - not syncing:.*$", options: [.anchorsMatchLines]),
+          let m = re.firstMatch(in: serial, range: NSRange(serial.startIndex..., in: serial)), let r = Range(m.range, in: serial) else { return nil }
+    return String(serial[r].prefix(200))
+}
+
 /// accept() failures that mean "out of descriptors/buffers right now": the listener must pause, not spin on the same failure.
 func acceptShouldBackOff(_ err: Int32) -> Bool { err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM }
 

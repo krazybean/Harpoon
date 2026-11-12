@@ -205,6 +205,36 @@ do {
     let r3 = dockerSocketProbe(path: dir + "/none.sock"); require(!r3.connected && !r3.answered, "no socket is neither")
 }
 
+// 7d. readiness never comes from history: existing socket + stale running log + failed probe
+do {
+    typealias P = (connected: Bool, answered: Bool)
+    let silent: P = (true, false), refused: P = (false, false), ok: P = (true, true)
+    var r = dockerReadiness(sockExists: true, probe: silent, logHasRunning: true)
+    require(!r.ready && !r.unverified, "socket accepts, daemon silent, log says RUNNING: not ready and not even unverified")
+    r = dockerReadiness(sockExists: true, probe: refused, logHasRunning: true)
+    require(!r.ready && r.unverified, "cannot probe, stale log: not ready, reported unverified")
+    r = dockerReadiness(sockExists: true, probe: refused, logHasRunning: false)
+    require(!r.ready && !r.unverified, "cannot probe, no log: nothing to report")
+    r = dockerReadiness(sockExists: false, probe: refused, logHasRunning: true)
+    require(!r.ready && !r.unverified, "no socket file: not unverified either")
+    r = dockerReadiness(sockExists: true, probe: ok, logHasRunning: false)
+    require(r.ready && !r.unverified, "an answered ping is ready whatever the log says")
+}
+
+// 7e. the guest kernel panic seen on the console (taken from the incident's serial log)
+do {
+    let incident = """
+    HARPOON_SPIKE_OK
+    HARPOON_SPIKE_OK
+    [   87.633055] Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+    [   87.633189] CPU: 0 UID: 0 PID: 1 Comm: init Not tainted 6.12.110-0-virt #1-Alpine
+    """
+    let line = guestPanicLine(in: incident)
+    require(line?.contains("Attempted to kill init! exitcode=0x0000000b") == true, "panic line found: \(line ?? "nil")")
+    require(guestPanicLine(in: "HARPOON_SPIKE_OK\nHARPOON_DOCKER_READY\n") == nil, "a healthy console has none")
+    require(guestPanicLine(in: "echo Kernel panic - not syncing: fake\n   Kernel panic - not syncing: indented") == nil, "text without the kernel's timestamp prefix is not a panic")
+}
+
 // 8. bounded over a long run of probes: descriptors stay flat, they do not creep up
 do {
     var peak = base

@@ -185,6 +185,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         return vm
     }
 
+    /// First kernel panic line seen on the guest console. A panic fires no stop callback, so this is the only host-side sign of it.
+    var guestPanic: String?
+
     func checkSerial() -> String {
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: config.serialLogPath)), !d.isEmpty else { return "" }
         let s = String(data: d, encoding: .utf8) ?? ""
@@ -199,6 +202,12 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         if s.contains("HARPOON_DOCKER_FAILED") && bootFailedReason == nil {
             bootFailedReason = String(s.components(separatedBy: "HARPOON_DOCKER_FAILED").last?.prefix(400) ?? "")
             log("HARPOON_DOCKER_FAILED observed \(bootFailedReason ?? "")")
+        }
+        if guestPanic == nil, let line = guestPanicLine(in: s) {
+            guestPanic = line
+            log("HARPOON_GUEST_PANIC vmState=\(vm?.state.rawValue ?? -1) stopCallback=none \(line)")
+            // Surfaced only: no shutdown, restart or exit. The engine keeps running so the evidence stays inspectable.
+            recordRuntimeFailure(RuntimeFailure(category: "guest_panic", message: "The guest kernel panicked, so Docker and the management channel are unavailable. Harpoon has not restarted it.", source: "Harpoon guest console", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: line))
         }
         return s
     }
