@@ -182,9 +182,7 @@ func handleDoctor() -> Int32 {
         if let info = guestFilesystemInfoViaMgmt(), let cap = info.capacity {
             cliPrint("INFO  Filesystem capacity ........ \(RuntimeConfig.formatBytes(cap))")
             if let free = info.free { cliPrint("INFO  Filesystem free ............ \(RuntimeConfig.formatBytes(free))") }
-            // df reports usable ext4 capacity, not the raw filesystem geometry.
-            // ponytail: retain the existing 2% ceiling; replace with guest geometry over mgmt when available.
-            if logical > cap && logical - cap > logical / 50 {
+            if !DiskPolicy.filesystemMatchesBacking(capacity: cap, logical: logical) {
                 check(false, "Persistent disk backing \(RuntimeConfig.formatBytes(logical)) exceeds filesystem usable capacity \(RuntimeConfig.formatBytes(cap)) by more than ext4 overhead — inspect resize state", warn:true)
             } else {
                 check(true, "Filesystem capacity consistent with backing (ext4 overhead allowed)")

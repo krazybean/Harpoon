@@ -41,6 +41,7 @@ case "$out" in *"Nothing is started"*) ;; *) fail "stopped expand does not say n
 [ ! -e "$HARPOON_TEST_TMPDIR/runtime.pid" ] || fail "a stopped expand started something"
 [ ! -e "$HARPOON_TEST_TMPDIR/disk-expansion.json" ] || fail "a finished expand left a record"
 run status --json; case "$out" in *'"state" : "stopped"'*|*'"state":"stopped"'*) ;; *) fail "state after a stopped expand: $out";; esac
+case "$out" in *"\"diskLogicalBytes\" : $((8 * G))"*) ;; *) fail "status --json lacks the logical backing size: $out";; esac
 
 # shrink and no-op are refused, whatever --yes says, and the disk is untouched
 before=$(sig "$disk")

@@ -36,6 +36,11 @@ func handleStatus(args: [String]=[]) -> Int32 {
             json["memoryMiB"] = cfg.memoryMIB
             json["diskPath"] = cfg.diskURL.path
         }
+        // Logical size of the backing file the desktop shows as "Disk image"; absent when the file does not exist yet.
+        if let path = json["diskPath"] as? String,
+           let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 {
+            json["diskLogicalBytes"] = size
+        }
         if let failure = snap.failure,
            let data = try? JSONEncoder().encode(failure),
            let value = try? JSONSerialization.jsonObject(with: data) {

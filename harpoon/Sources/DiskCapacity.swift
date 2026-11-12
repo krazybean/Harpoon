@@ -117,6 +117,12 @@ enum DiskPolicy {
         return out
     }
 
+    /// `df` reports usable ext4 capacity: the journal, inode tables and reserved GDT blocks (about 3 to 5% on the shipped layout) are not in it.
+    /// A backing file larger than that by more than 6% means the filesystem was not finished growing; anything smaller is just ext4 geometry.
+    static func filesystemMatchesBacking(capacity: UInt64, logical: UInt64) -> Bool {
+        capacity >= logical || logical - capacity <= logical / 100 * 6
+    }
+
     /// A grown filesystem is "expanded" when it reports most of the added capacity, judged against the old LOGICAL size so an unknown
     /// earlier reading cannot make a filesystem that did not grow look grown. ext4 metadata takes a little, hence 75%.
     static func filesystemExpanded(after: UInt64, from: UInt64, to: UInt64) -> Bool {
