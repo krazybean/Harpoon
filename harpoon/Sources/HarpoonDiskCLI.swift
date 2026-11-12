@@ -179,7 +179,7 @@ func handleDiskStatus(json: Bool = false) -> Int32 {
         cliPrint("Filesystem:        \(RuntimeConfig.formatBytes(g.capacity))")
         cliPrint("Used:              \(RuntimeConfig.formatBytes(g.used))")
         cliPrint("Free:              \(RuntimeConfig.formatBytes(g.free))")
-        if logical > g.capacity {
+        if !DiskPolicy.filesystemMatchesBacking(capacity: g.capacity, logical: logical) {
             cliPrint("WARNING: backing \(RuntimeConfig.formatBytes(logical)) > filesystem \(RuntimeConfig.formatBytes(g.capacity)) — interrupted resize pending, next boot will expand")
         }
         // host free space warning

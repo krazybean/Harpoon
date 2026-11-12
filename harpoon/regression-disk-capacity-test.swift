@@ -94,6 +94,7 @@ require(DiskPolicy.filesystemExpanded(after: 7_900 * MiB, from: 4 * GiB, to: 8 *
 require(!DiskPolicy.filesystemExpanded(after: 3_900 * MiB, from: 4 * GiB, to: 8 * GiB), "an unchanged filesystem is not expanded")
 require(DiskPolicy.filesystemMatchesBacking(capacity: 4 * GiB * 96 / 100, logical: 4 * GiB), "ext4 geometry on a 4 GiB disk (about 4% overhead) is consistent")
 require(DiskPolicy.filesystemMatchesBacking(capacity: 8 * GiB, logical: 8 * GiB), "an equal capacity is consistent")
+require(DiskPolicy.filesystemMatchesBacking(capacity: 8_378_609_664, logical: 8_589_934_592), "observed healthy 8 GiB disk (df 8378609664, 2.5% overhead) is consistent")
 require(!DiskPolicy.filesystemMatchesBacking(capacity: 4 * GiB - 100 * MiB, logical: 8 * GiB), "a 4 GiB filesystem on an 8 GiB file is an incomplete expansion")
 require(!DiskPolicy.filesystemMatchesBacking(capacity: 7 * GiB, logical: 8 * GiB), "a filesystem 12% short is still flagged")
 require(!DiskPolicy.filesystemExpanded(after: 5_000 * MiB, from: 4 * GiB, to: 8 * GiB), "a partly grown filesystem is not expanded")
