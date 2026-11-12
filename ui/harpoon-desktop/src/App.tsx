@@ -24,7 +24,7 @@ import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
 import { ExpansionProgress } from "./components/ExpansionProgress";
-import { reconcilePhase, startAvailable, stoppedPanelVisible } from "./lib/lifecycle";
+import { OVERLAY_GRACE_MS, degradedManagement, overlayShouldYield, reconcilePhase, startAvailable, stoppedPanelVisible, withTimeout } from "./lib/lifecycle";
 import type { BootstrapPhase } from "./lib/lifecycle";
 import { expansionActive } from "./lib/diskCapacity";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
@@ -47,6 +47,7 @@ type HarpoonStatus = {
   lockPath?: string;
   logPath?: string;
   dockerReady?: boolean;
+  mgmtReady?: boolean;
   diskExpansion?: { active: boolean; phase: string; fromBytes: number; toBytes: number; recovery?: string };
   failure?: RuntimeFailure;
 };
@@ -324,17 +325,18 @@ export default function App() {
     try {
       setBootstrapPhase("launching");
       setBootstrapStatus("Resolving Harpoon binary…");
-      await refreshBinary();
+      await withTimeout(refreshBinary(), 10_000);
       await new Promise(r => setTimeout(r, 120));
       setBootstrapPhase("discovering");
       setBootstrapStatus("Checking runtime status…");
-      const read0 = await statusShelf.refreshResult();
+      const read0 = (await withTimeout(statusShelf.refreshResult(), 15_000)) ?? { ok: false as const, error: "Reading Harpoon status timed out after 15 seconds." };
       setBootstrapStatus("Reading runtime configuration and Docker state…");
-      await Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]);
+      // bounded: a slow step must not pin the startup overlay (the runtime status, not these reads, decides whether Harpoon is ready)
+      await withTimeout(Promise.allSettled([refreshConfig(), refreshDocker(), refreshCounts(), refreshLogPath()]), 10_000);
       // Stage 3B: ensure Harpoon docker context exists (idempotent, no default switch, Finder-safe resolver)
       // This fixes clean-install where context was manually required; safe to run repeatedly
       setBootstrapStatus("Ensuring Harpoon Docker context…");
-      try { await invoke<string>("ensure_harpoon_context"); } catch (e) { console.warn("ensure_harpoon_context failed", e); }
+      try { await withTimeout(invoke<string>("ensure_harpoon_context"), 8_000); } catch (e) { console.warn("ensure_harpoon_context failed", e); }
       if (bootstrapEventPush) {
         await bootstrapEventReadyRef.current;
         try { await invoke("start_bootstrap_worker"); }
@@ -439,6 +441,19 @@ export default function App() {
     if (bootstrapPhase === "failed" && next === "ready") { setStatusReadFailure(null); setBootstrapError(null); }
     setBootstrapPhase(next);
   }, [status, statusError, statusReadFailure, binaryPath, bootstrapPhase]);
+
+  // Whatever a startup step is doing, a runtime that reports running with Docker ready does not stay behind the overlay.
+  useEffect(()=>{
+    if (!binaryPath || !overlayShouldYield(bootstrapPhase, status, Boolean(actionInProgress))) return;
+    const id = window.setTimeout(()=>{ bootstrapActiveRef.current = false; setBootstrapError(null); setBootstrapPhase("ready"); }, OVERLAY_GRACE_MS);
+    return ()=>window.clearTimeout(id);
+  }, [bootstrapPhase, status, binaryPath, actionInProgress]);
+
+  const [mgmtDownSince, setMgmtDownSince] = useState<number | null>(null);
+  useEffect(()=>{
+    const down = status?.state==="running" && status?.dockerReady===true && status?.mgmtReady===false;
+    setMgmtDownSince(prev => down ? (prev ?? Date.now()) : null);
+  }, [status]);
 
   // Rust owns normal refresh scheduling; the JS path is an emergency startup fallback only.
   useEffect(()=>{
@@ -681,6 +696,11 @@ export default function App() {
           </div>
         </header>
         <ExpansionProgress expansion={status?.diskExpansion} />
+        {degradedManagement(status, mgmtDownSince, Date.now()) && (
+          <div role="status" className="disk-notice">
+            <strong>Guest management is not responding.</strong> Docker is ready and containers keep working. <code className="text-code">harpoon exec</code>, <code className="text-code">harpoon shell</code>, guest disk figures and space reclamation are unavailable until it recovers. Try <code className="text-code">harpoon doctor</code>; restarting Harpoon usually restores it.
+          </div>
+        )}
         <DiskCapacityNotice stagesShown={expanding} enabled={tauriAvailable && status?.state === "running" && bootstrapPhase === "ready"} onExpanded={() => { refreshStatus(); refreshDocker(); }} />
         {actionError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{actionError}</div>}
         {statusError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>status error: {statusError}</div>}

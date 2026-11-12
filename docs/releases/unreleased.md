@@ -68,6 +68,17 @@ header said running while the Overview showed "Harpoon is stopped" with an enabl
 running with Docker ready now always moves the desktop to ready (also out of a stale "stopped" or timed-out "failed"), an externally started VM
 is followed through its boot stages, and the Start panel and button are never offered for a running, starting, stopping or expanding VM.
 
+### Bridge connections no longer pile up when a client gives up, and the desktop startup cannot hang on one
+
+The Docker and management bridges closed a connection only when both sides had ended. A client that gave up (for example a status probe that
+timed out) while the guest stayed silent left both descriptors open for as long as the guest said nothing, so a guest whose management
+service did not answer collected two descriptors per probe. Each connection is now owned by one object on one serial queue: descriptors are
+closed only after their dispatch sources are cancelled, a client that is gone entirely is detected (a client that only half-closed still gets its
+answer), a blocked write waits without a busy loop and ends as soon as the client is gone, connects that never answer time out after 10 s, the
+number of open connections is bounded (256 Docker, 32 management) and shutdown closes them, and a listener that runs out of descriptors pauses
+instead of spinning. The desktop startup overlay now gives way as soon as the runtime reports running with Docker ready (after 10 s at most),
+each startup read is time-bounded, and a sustained management outage is shown as a warning rather than a hang.
+
 ## Documentation
 
 - The help text, usage line and configuration guide now state the real precedence for `cpus` and `memory`: CLI flag >

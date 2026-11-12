@@ -35,6 +35,9 @@ final class BridgeSet {
     var mgmtListenerFd: Int32 = -1
     var mgmtListenerSource: DispatchSourceRead?
     var ownsMgmtSocket = false
+    // accepted connections in flight or open, per bridge: bounded, and closed on shutdown
+    let dockerSlots = BridgeSlots(limits: BridgeLimits(maxPairs: 256))
+    let mgmtSlots = BridgeSlots(limits: BridgeLimits(maxPairs: 32))
 
     init(config: RuntimeConfig, vsockDevice: VZVirtioSocketDevice?, balloonDevice: VZVirtioTraditionalMemoryBalloonDevice?, log: @escaping (String)->Void) {
         self.config = config
@@ -60,6 +63,7 @@ final class BridgeSet {
         let dockerSocketIdentity = ownedSocketIdentity(fd: listenerFd, path: config.dockerSocketPath, owned: ownsDockerSocket)
         let balloonSocketIdentity = ownedSocketIdentity(fd: balloonControlFd, path: config.balloonControlPath, owned: ownsBalloonControlSocket)
         let mgmtSocketIdentity = ownedSocketIdentity(fd: mgmtListenerFd, path: config.mgmtSocketPath, owned: ownsMgmtSocket)
+        dockerSlots.closeAll("bridge stopping"); mgmtSlots.closeAll("bridge stopping")
         // FD ownership: DispatchSource cancelHandler owns close; stopAll only cancels and nils.
         if listenerSource != nil {
             listenerSource?.cancel(); listenerSource = nil
