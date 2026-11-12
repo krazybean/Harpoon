@@ -59,7 +59,7 @@ set +e; out=$("$bin" start --disk-size 16G 2>&1); code=$?; set -e
 # the default disk is created only at the start boundary (unit test of the resolution API)
 S="$ROOT/harpoon/Sources"
 cp "$ROOT/harpoon/regression-root-disk-test.swift" "$tmp/main.swift"
-xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$tmp/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
+xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$S/BridgePair.swift" "$tmp/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
 rm -rf "$HARPOON_TEST_TMPDIR"; mkdir -p "$HARPOON_TEST_TMPDIR"
 "$tmp/unit"
 echo "root disk regression PASS"

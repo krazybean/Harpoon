@@ -192,6 +192,6 @@ unset HARPOON_KERNEL HARPOON_INITRAMFS
 S="$ROOT/harpoon/Sources"
 mkdir -p "$tmp/unit-src" "$tmp/unit-ns"
 cp "$ROOT/harpoon/regression-disk-capacity-test.swift" "$tmp/unit-src/main.swift"
-xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$S/DiskCapacity.swift" "$tmp/unit-src/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
+xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$S/BridgePair.swift" "$S/DiskCapacity.swift" "$tmp/unit-src/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
 HARPOON_TEST_TMPDIR="$tmp/unit-ns" "$tmp/unit"
 echo "disk expand regression PASS"
