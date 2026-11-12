@@ -24,6 +24,8 @@ import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
 import { ExpansionProgress } from "./components/ExpansionProgress";
+import { reconcilePhase, startAvailable, stoppedPanelVisible } from "./lib/lifecycle";
+import type { BootstrapPhase } from "./lib/lifecycle";
 import { expansionActive } from "./lib/diskCapacity";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
 import { useDeployEngine } from "./hooks/useDeployEngine";
@@ -53,7 +55,6 @@ type DoctorResult = { raw: string; passed: number; warnings: number; failures: n
 type ConfigResult = { cpus: number; memory: number; raw: string; path: string };
 type Counts = { containers: number; running: number; images: number; volumes: number; networks: number };
 type DiscoveredContext = { id: string; name: string; engine: string; endpoint?: string | null; source: string; state: "detected" | "connected" | "unavailable" | "authentication_needed"; current: boolean; harpoon: boolean; detail: string; capabilities: Record<string, "available" | "unsupported" | "unknown"> };
-type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting" | "vm_booting" | "docker_starting" | "ready" | "failed";
 type RuntimeRefreshEvent = { key: string; ok: boolean; generation?: number; value?: unknown; error?: string; values?: RuntimeRefreshEvent[] };
 type BootstrapEvent = { status?: HarpoonStatus; observedAtMs?: number; ok?: boolean; error?: string | null };
 // Deployments shows the real deployment engine (a simulation only in an explicit development preview); it is code-split so the
@@ -111,7 +112,7 @@ function EngineManageMenu({ state, disabled, expanding, onAction }: { state: str
     document.addEventListener("mousedown", close); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
   }, [open]);
-  const running = state === "running" || state === "starting" || state === "booting";
+  const running = state === "running" || state === "starting" || state === "booting" || state === "stopping";
   const choose = async (action: "start" | "stop" | "restart") => {
     setOpen(false);
     if (action !== "start" && !(await confirmAction(`${action === "stop" ? "Stop" : "Restart"} Harpoon Engine? This affects the VM, Docker Engine, and workloads running in the Harpoon context.`, action === "stop" ? "Stop engine" : "Restart engine"))) return;
@@ -432,22 +433,11 @@ export default function App() {
   // Reconcile bootstrap with live authoritative shelf data — header and overlay must share truth
   useEffect(()=>{
     if (bootstrapActiveRef.current) return;
-    if (statusReadFailure !== null && bootstrapPhase==="failed" && status?.state==="running" && status?.dockerReady && !statusError) {
-      // a later status read succeeded: the earlier read failure is over (a real startup failure never takes this path)
-      setStatusReadFailure(null); setBootstrapError(null); setBootstrapPhase("ready");
-      return;
-    }
-    if (status?.state==="running" && status?.dockerReady && binaryPath) {
-      if (bootstrapPhase==="discovering" || bootstrapPhase==="launching" || bootstrapPhase==="starting" || bootstrapPhase==="vm_booting" || bootstrapPhase==="docker_starting") {
-        setBootstrapPhase("ready");
-      }
-    } else if (status?.state==="stopped" || status?.state==="stale") {
-      if (bootstrapPhase==="ready" || bootstrapPhase==="discovering" || bootstrapPhase==="launching" || bootstrapPhase==="docker_starting" || bootstrapPhase==="starting" || bootstrapPhase==="vm_booting") {
-        setBootstrapPhase("stopped");
-      }
-    } else if (status?.state==="failed") {
-      if (bootstrapPhase!=="failed") setBootstrapPhase("failed");
-    }
+    const next = reconcilePhase(bootstrapPhase, status, { binaryPath: Boolean(binaryPath), statusError: Boolean(statusError) });
+    if (!next || next === bootstrapPhase) return;
+    // leaving "failed" for a confirmed running runtime ends that failure (an earlier unreadable status, or a slow but successful start)
+    if (bootstrapPhase === "failed" && next === "ready") { setStatusReadFailure(null); setBootstrapError(null); }
+    setBootstrapPhase(next);
   }, [status, statusError, statusReadFailure, binaryPath, bootstrapPhase]);
 
   // Rust owns normal refresh scheduling; the JS path is an emergency startup fallback only.
@@ -667,7 +657,7 @@ export default function App() {
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
   const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
   const showFailed = !technologyShowcase && !topologyPrototype && bootstrapPhase==="failed";
-  const showStoppedPanel = !technologyShowcase && !topologyPrototype && !deployPreviewActive && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed && !expanding;
+  const showStoppedPanel = !technologyShowcase && !topologyPrototype && !deployPreviewActive && stoppedPanelVisible(bootstrapPhase, status) && !showBootstrapOverlay && !showFailed;
 
   return (
     <div className="shell">
@@ -728,7 +718,7 @@ export default function App() {
           <div className="panel" style={{ padding:24, marginBottom:12 }}>
             <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>Harpoon is stopped</div>
             <div style={{ fontSize:13, color:"#6b7280", marginBottom:12 }}>Press Start to launch the Linux VM and Docker Engine.</div>
-            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
+            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable || !startAvailable(status)} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
           </div>
         )}
 

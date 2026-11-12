@@ -61,6 +61,13 @@ reports the measured change in the image's APFS allocation, including zero. It d
 the disk's capacity. The disk-expansion panel now shows the real stage (stopping, growing, starting, verifying) from the recovery record, also
 when the desktop reconnects mid-expansion, clears after a verified success, and keeps the recovery instructions if an expansion is interrupted.
 
+### The desktop follows the runtime after an external stop/start or disk expansion
+
+After Harpoon was stopped and started from a terminal (including `harpoon disk expand`), the desktop kept its "stopped" bootstrap state: the
+header said running while the Overview showed "Harpoon is stopped" with an enabled Start button, and Refresh did not help. A status that says
+running with Docker ready now always moves the desktop to ready (also out of a stale "stopped" or timed-out "failed"), an externally started VM
+is followed through its boot stages, and the Start panel and button are never offered for a running, starting, stopping or expanding VM.
+
 ## Documentation
 
 - The help text, usage line and configuration guide now state the real precedence for `cpus` and `memory`: CLI flag >
