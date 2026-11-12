@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/vm-guard-reexec.sh"
 set +u
 
 # Stage 2 gate. Host, guest, and workload cgroup domains remain separate.

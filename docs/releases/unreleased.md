@@ -4,6 +4,14 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### VM-backed tests run under a deadline and a watchdog (test tooling only)
+
+Scripts that boot or drive a real VM now re-run under `tools/vm-test-guard.py`: wall-clock deadline, preflight and 15 s sampling of
+free disk / memory pressure / current swapping, ownership by an inherited per-run marker and exact (pid, start time) identity (never a
+pre-existing VM, the runner, or an unrelated process), exclusive use of the production namespace (a running engine makes the run refuse
+unless `VMGUARD_ADOPT_EXISTING=1`), a supervised detached reaper, a `--sweep` for orphans, and bounded failure diagnostics. Production VM uptime is not limited. See
+`docs/testing-vm-containment.md`, including what cannot be guaranteed.
+
 ### A guest can no longer exhaust the host through its console or memory (provisional until hardware-validated)
 
 - **Guest console.** The serial console is read from a pipe by a dedicated thread, scanned for readiness, failure and kernel-panic

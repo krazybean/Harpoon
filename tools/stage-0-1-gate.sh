@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/vm-guard-reexec.sh"
 set -u
 
 # Stage 0–1 exit barrier. This script observes the existing runtime; it does

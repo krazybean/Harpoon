@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 BIN="harpoon/build/harpoon"
 say() { echo "[m10] $*"; }

@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 # Published-port forwarding, end to end: explicit guest-loopback publishing (-p 127.0.0.1:P:C) and ordinary
 # publishing (-p P:C) must both be reachable from Mac loopback, and only from there.
 #

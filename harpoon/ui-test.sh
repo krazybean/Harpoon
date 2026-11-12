@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # UI — lifecycle smoke via Harpoon CLI (UI is thin client, so CLI is authoritative)
 # Ponytail: UI must not own VM/lock/socket, must call existing harpoon surface, closing UI must not stop Harpoon

@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M13 Resource Baseline & Performance Characterization
 # DO NOT OPTIMIZE RUNTIME — measurement only

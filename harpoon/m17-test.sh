@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M17 Runtime Resilience — prove existing stale/doctor/VZNAT/failed-boot/clock/soak via Harpoon primitives
 # Ponytail: 90% already via Lifecycle/doctor/PortForwardManager/VMManager — no new daemon

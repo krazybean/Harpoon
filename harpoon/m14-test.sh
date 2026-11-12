@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 
 # M14 paired idle optimization validation — PortForwardManager 2s vs 10s

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/vm-guard-reexec.sh"
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

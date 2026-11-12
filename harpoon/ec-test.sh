@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # EC — Ecosystem Compatibility — single bounded harness
 # Ponytail: Harpoon is transport (unix:///tmp/harpoon-docker.sock → vsock → guest Docker), not Docker reimplementation. Proxy must be transparent, concurrent, half-close correct. Test ecosystem tools against real Engine, fix only demonstrated bridge/lifecycle gaps, no new abstractions.

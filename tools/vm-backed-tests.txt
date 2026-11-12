@@ -1,0 +1,46 @@
+# Every script that boots (or drives) a real Harpoon VM must be `guarded`: it sources tools/vm-guard-reexec.sh as its second line, so it
+# always runs under tools/vm-test-guard.py (wall-clock deadline, host-resource supervision, owned-process cleanup).
+# `exempt` scripts mention the engine but never boot a VM (stand-in processes, --help, offline checks); each needs a reason.
+# harpoon/regression-vm-test-guard.sh fails if a script that starts the engine or talks to its Docker endpoint is in neither list.
+guarded harpoon/ec-test.sh
+guarded harpoon/ui-test.sh
+guarded harpoon/m3-test.sh
+guarded harpoon/m4-test.sh
+guarded harpoon/m5-test.sh
+guarded harpoon/m6-test.sh
+guarded harpoon/m7-test.sh
+guarded harpoon/m8-test.sh
+guarded harpoon/m9-test.sh
+guarded harpoon/m10-test.sh
+guarded harpoon/m11-test.sh
+guarded harpoon/m12-test.sh
+guarded harpoon/m13-test.sh
+guarded harpoon/m14-test.sh
+guarded harpoon/m15-balloon-test.sh
+guarded harpoon/m15-test.sh
+guarded harpoon/m16-test.sh
+guarded harpoon/m17-test.sh
+guarded harpoon/m18-test.sh
+guarded harpoon/regression-foreground-status.sh
+guarded harpoon/regression-loopback-publish.sh
+guarded tools/stage-0-1-gate.sh
+guarded tools/stage-2-resource-gate.sh
+guarded tools/stage-6-docker-boundary-gate.sh
+guarded tools/stage-7-consistency-check.sh
+guarded tools/stage-8-disk-reclamation-check.sh
+guarded tools/verify-buildx-build.sh
+guarded tools/guest-builder/regression-mgmt-migration.sh
+guarded tools/guest-builder/regression-python-runtime-repair.sh
+exempt harpoon/cli-parity-test.sh only start --help; lifecycle commands refuse outside a private namespace
+exempt harpoon/install.sh installs files, never starts the engine
+exempt harpoon/uninstall.sh removes files, never starts the engine
+exempt harpoon/regression-bridges.sh socket doubles
+exempt harpoon/regression-disk-expand.sh stand-in process and fake Docker ping
+exempt harpoon/regression-disk-reclaim.sh stand-in process and fake guest management socket
+exempt harpoon/regression-docker-diagnostics.sh offline diagnostics against doubles
+exempt harpoon/regression-lifecycle-isolation.sh fake engine in a private namespace
+exempt harpoon/regression-stage5.sh structural tests, no VM
+exempt tools/guest-builder/regression-packaged-mgmt-migration.sh fake bundled root, no VM
+exempt tools/regression-stage2-runtime-ownership.sh offline ownership checks
+exempt tools/regression-stage8-disk-reclamation.sh offline check of the stage-8 script
+exempt tools/release/macos/build.sh packaging only

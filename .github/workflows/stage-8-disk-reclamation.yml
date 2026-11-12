@@ -24,6 +24,9 @@ jobs:
         run: bash harpoon/build.sh
       - name: Run controlled reclamation probe
         run: bash tools/stage-8-disk-reclamation-check.sh
+      - name: Sweep VM processes orphaned by a killed run
+        if: always()
+        run: python3 tools/vm-test-guard.py --sweep
       - name: Upload Stage 8 evidence
         if: always()
         uses: actions/upload-artifact@v7
