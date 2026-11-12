@@ -8,6 +8,7 @@ export type BootstrapPhase = "launching" | "discovering" | "stopped" | "starting
 export interface LifecycleStatus {
   state: string;
   dockerReady?: boolean;
+  mgmtReady?: boolean;
   failure?: unknown;
   diskExpansion?: { active?: boolean } | null;
 }
@@ -47,4 +48,29 @@ export function stoppedPanelVisible(phase: BootstrapPhase, status: LifecycleStat
 export function startAvailable(status: LifecycleStatus | null | undefined): boolean {
   if (!status) return true;
   return !["running", "starting", "booting", "stopping"].includes(status.state) && !status.diskExpansion?.active;
+}
+
+// --- startup that cannot hang, and degraded management ------------------------------------------------------------------------------
+
+/** How long a running, Docker-ready runtime may sit behind the startup overlay before the overlay gives way. */
+export const OVERLAY_GRACE_MS = 10_000;
+/** Management channel down this long (while Docker is ready) before a warning is shown; a booting guest answers Docker first. */
+export const MGMT_WARNING_AFTER_MS = 20_000;
+
+/** Resolves with the promise's value, or `undefined` when it has not settled in `ms`. Never rejects. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(undefined), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(undefined); });
+  });
+}
+
+/** The startup overlay may be dropped: a step of the bootstrap sequence is stuck but the runtime itself says running with Docker ready. */
+export function overlayShouldYield(phase: BootstrapPhase, status: LifecycleStatus | null | undefined, actionInProgress: boolean): boolean {
+  return !actionInProgress && TRANSIENT.includes(phase) && status?.state === "running" && Boolean(status.dockerReady);
+}
+
+/** Docker works but the guest management channel (exec, shell, filesystem stats, reclaim) does not, for long enough to be worth saying. */
+export function degradedManagement(status: LifecycleStatus | null | undefined, downSince: number | null, now: number): boolean {
+  return status?.state === "running" && Boolean(status.dockerReady) && status.mgmtReady === false && downSince !== null && now - downSince >= MGMT_WARNING_AFTER_MS;
 }

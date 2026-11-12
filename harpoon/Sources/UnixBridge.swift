@@ -70,57 +70,44 @@ func startUnixBridge() -> Bool {
             if cfd < 0 {
                 if errno == EAGAIN || errno == EWOULDBLOCK { break }
                 self.log("accept error \(String(cString:strerror(errno)))")
+                // out of descriptors: a level-triggered listener would fire again at once and spin; pause it briefly instead
+                if acceptShouldBackOff(errno) { source.suspend(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { source.resume() } }
                 break
             }
             let bid = nextId; nextId += 1
             self.log("BRIDGE_ACCEPT \(bid) fd=\(cfd)")
-            guard let dev = self.vsockDevice else { self.log("BRIDGE_CLOSE \(bid) vsock not ready"); close(cfd); continue }
+            guard self.dockerSlots.acquire() else {
+                self.log("BRIDGE_BUSY \(bid) \(self.dockerSlots.live) connections already open (limit \(self.dockerSlots.limits.maxPairs)); closing")
+                close(cfd); continue
+            }
+            guard let dev = self.vsockDevice else { self.log("BRIDGE_CLOSE \(bid) vsock not ready"); close(cfd); self.dockerSlots.release(); continue }
+            // Resolved exactly once: by the guest's answer or by the timeout, so a connect that never answers cannot hold the client open.
+            let pending = PendingConnect()
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.dockerSlots.limits.connectTimeoutSeconds) {
+                if pending.claim() { self.log("BRIDGE_CLOSE \(bid) vsock connect timed out"); close(cfd); self.dockerSlots.release() }
+            }
             dev.connect(toPort: self.config.vsockPort) { result in
+                guard pending.claim() else { if case .success(let late) = result { late.close() }; return }
                 switch result {
                 case .failure(let e):
                     self.log("VSOCK_CONNECT_FAILURE port \(self.config.vsockPort) error \(e)")
                     self.log("BRIDGE_CLOSE \(bid) vsock connect failed")
-                    close(cfd)
+                    close(cfd); self.dockerSlots.release()
                 case .success(let conn):
                     let vfd = conn.fileDescriptor
                     self.log("BRIDGE_VSOCK_CONNECTED \(bid) vsockFd=\(vfd) clientFd=\(cfd)")
-                    // M4: request-aware host-path translation for bind mounts, otherwise transparent proxy
-                    // Use blocking read for first request to allow transformation, then fallback to transparent DispatchSource proxy
-                    DispatchQueue.global().async { [weak self] in
-                        guard let self = self else { close(cfd); conn.close(); return }
+                    do {
                         // M4 keep-alive streaming HTTP/1.1 parser for host-path translation.
                         // For each complete HTTP request on a keep-alive connection, parse request line + headers,
                         // honor Content-Length, translate POST .../containers/create via HostPathTranslator, otherwise forward verbatim.
                         // Detect Connection: Upgrade / Upgrade: tcp hijack and switch to transparent raw proxy.
-                        // vsock->client remains transparent half-close aware; client->vsock is streaming parsed.
-                        // Ensure clientFd is non-blocking for DispatchSource.
-                        let cflags = fcntl(cfd, F_GETFL, 0)
-                        if cflags >= 0 { _ = fcntl(cfd, F_SETFL, cflags | O_NONBLOCK) }
-                        let vflags = fcntl(vfd, F_GETFL, 0)
-                        if vflags >= 0 { _ = fcntl(vfd, F_SETFL, vflags | O_NONBLOCK) }
-                        let cr = DispatchSource.makeReadSource(fileDescriptor: cfd, queue: .global())
-                        let vr = DispatchSource.makeReadSource(fileDescriptor: vfd, queue: .global())
-                        var closedCr = false, closedVr = false, closed = false
+                        // vsock->client is transparent and half-close aware; client->vsock is streaming parsed.
+                        // BridgePair owns both descriptors and runs every handler below on its one serial queue, so the parser state
+                        // (clientBuf, hijacked) needs no locking and closing cannot race.
+                        let pair = BridgePair(id: bid, tag: "BRIDGE", clientFd: cfd, peerFd: vfd, slots: self.dockerSlots, log: self.log, closePeer: { conn.close() })
                         var hijacked = false
                         var clientBuf = Data()
-                        func closeBoth(_ reason: String) {
-                            if closed { return }; closed = true
-                            cr.cancel(); vr.cancel(); close(cfd); conn.close()
-                            self.log("BRIDGE_CLOSE \(bid) \(reason) clientFd=\(cfd) vsockFd=\(vfd)")
-                        }
-                        func writeAllToVsock(_ data: Data) -> Bool {
-                            var off = 0
-                            let total = data.count
-                            while off < total {
-                                let w = data.withUnsafeBytes { ptr in write(vfd, ptr.baseAddress!.advanced(by: off), total - off) }
-                                if w > 0 { off += Int(w); continue }
-                                if w < 0 && errno == EINTR { continue }
-                                if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                                if w < 0 && errno == EPIPE { closeBoth("vsock EPIPE during forward"); return false }
-                                self.log("BRIDGE_CLOSE \(bid) vsock write error \(String(cString:strerror(errno)))"); closeBoth("vsock write"); return false
-                            }
-                            return true
-                        }
+                        func writeAllToVsock(_ data: Data) -> Bool { pair.writePeer(data) }
                         // Helper to try to parse and forward as many complete requests as available in clientBuf.
                         // Returns true if buffer was consumed and should continue, false if need more data.
                         func drainClientBuffer() {
@@ -274,14 +261,7 @@ func startUnixBridge() -> Bool {
                                         errData.append(errBody)
                                         self.log("HARPOON_TRANSLATION_REJECT \(bid) path=\(invalid.path) reason=\(invalid.reason)")
                                         // write error directly to client (Docker CLI)
-                                        var off = 0
-                                        while off < errData.count {
-                                            let w = errData.withUnsafeBytes { ptr in write(cfd, ptr.baseAddress!.advanced(by: off), errData.count - off) }
-                                            if w > 0 { off += Int(w); continue }
-                                            if w < 0 && errno == EINTR { continue }
-                                            if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                                            break
-                                        }
+                                        _ = pair.writeClient(Array(errData))
                                         clientBuf.removeSubrange(0..<totalLen)
                                         // do not forward to vsock; continue to next pipelined request
                                         continue
@@ -313,28 +293,13 @@ func startUnixBridge() -> Bool {
                                 // continue to parse next pipelined request if any
                             }
                         }
-                        cr.setEventHandler {
-                            var buf = [UInt8](repeating: 0, count: 8192)
-                            let n = buf.withUnsafeMutableBytes { ptr in read(cfd, ptr.baseAddress!, ptr.count) }
-                            if n == 0 { closedCr = true; cr.cancel(); shutdown(vfd, SHUT_WR); self.log("BRIDGE_CLIENT_EOF \(bid)"); if closedVr { closeBoth("both EOF") }; return }
-                            if n < 0 {
-                                if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }
-                                self.log("BRIDGE_CLOSE \(bid) client read error \(String(cString:strerror(errno)))"); closeBoth("client read"); return
-                            }
+                        pair.onClientData = { pair, chunk in
                             if hijacked {
                                 // transparent raw forwarding after hijack
-                                var off = 0
-                                while off < n {
-                                    let w = buf.withUnsafeBytes { ptr in write(vfd, ptr.baseAddress!.advanced(by: off), n-off) }
-                                    if w > 0 { off += Int(w); continue }
-                                    if w < 0 && errno == EINTR { continue }
-                                    if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                                    if w < 0 && errno == EPIPE { closeBoth("vsock EPIPE"); return }
-                                    self.log("BRIDGE_CLOSE \(bid) vsock write error \(String(cString:strerror(errno)))"); closeBoth("vsock write"); return
-                                }
+                                _ = pair.writePeer(chunk)
                                 return
                             }
-                            clientBuf.append(contentsOf: buf[0..<n])
+                            clientBuf.append(contentsOf: chunk)
                             if clientBuf.count > 4*1024*1024 {
                                 // safety: avoid unbounded buffer, switch to transparent
                                 self.log("HARPOON_HTTP_HIJACK \(bid) switching-transparent")
@@ -346,25 +311,7 @@ func startUnixBridge() -> Bool {
                             drainClientBuffer()
                             // if buffer still holds incomplete request, wait for more data (do not forward partial)
                         }
-                        vr.setEventHandler {
-                            var buf = [UInt8](repeating: 0, count: 8192)
-                            let n = buf.withUnsafeMutableBytes { ptr in read(vfd, ptr.baseAddress!, ptr.count) }
-                            if n == 0 { closedVr = true; vr.cancel(); shutdown(cfd, SHUT_WR); self.log("BRIDGE_VSOCK_EOF \(bid)"); if closedCr { closeBoth("both EOF") }; return }
-                            if n < 0 {
-                                if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }
-                                self.log("BRIDGE_CLOSE \(bid) vsock read \(String(cString:strerror(errno)))"); closeBoth("vsock read"); return
-                            }
-                            var off = 0
-                            while off < n {
-                                let w = buf.withUnsafeBytes { ptr in write(cfd, ptr.baseAddress!.advanced(by: off), n-off) }
-                                if w > 0 { off += Int(w); continue }
-                                if w < 0 && errno == EINTR { continue }
-                                if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                                if w < 0 && errno == EPIPE { closeBoth("client EPIPE"); return }
-                                self.log("BRIDGE_CLOSE \(bid) client write \(String(cString:strerror(errno)))"); closeBoth("client write"); return
-                            }
-                        }
-                        cr.resume(); vr.resume()
+                        pair.start()
                         self.log("BRIDGE_VSOCK_CONNECTED \(bid) proxy start streaming")
                     }
                 }

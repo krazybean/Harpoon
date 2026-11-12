@@ -54,62 +54,33 @@ func startMgmtBridge() -> Bool {
             if cfd < 0 {
                 if errno == EAGAIN || errno == EWOULDBLOCK { break }
                 self.log("HARPOON_MGMT_ACCEPT_FAILED \(String(cString:strerror(errno)))")
+                // out of descriptors: a level-triggered listener would fire again at once and spin; pause it briefly instead
+                if acceptShouldBackOff(errno) { source.suspend(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { source.resume() } }
                 break
             }
             let bid = nextId; nextId += 1
             self.log("HARPOON_MGMT_ACCEPT \(bid) fd=\(cfd)")
-            guard let dev = self.vsockDevice else { self.log("HARPOON_MGMT_CLOSE \(bid) vsock not ready"); close(cfd); continue }
+            guard self.mgmtSlots.acquire() else {
+                self.log("HARPOON_MGMT_BUSY \(bid) \(self.mgmtSlots.live) connections already open (limit \(self.mgmtSlots.limits.maxPairs)); closing")
+                close(cfd); continue
+            }
+            guard let dev = self.vsockDevice else { self.log("HARPOON_MGMT_CLOSE \(bid) vsock not ready"); close(cfd); self.mgmtSlots.release(); continue }
+            // Resolved exactly once: by the guest's answer or by the timeout, so a connect that never answers cannot hold the client open.
+            let pending = PendingConnect()
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.mgmtSlots.limits.connectTimeoutSeconds) {
+                if pending.claim() { self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect timed out"); close(cfd); self.mgmtSlots.release() }
+            }
             dev.connect(toPort: self.config.mgmtVsockPort) { result in
+                guard pending.claim() else { if case .success(let late) = result { late.close() }; return }
                 switch result {
                 case .failure(let e):
                     self.log("HARPOON_MGMT_VSOCK_CONNECT_FAILURE \(bid) port \(self.config.mgmtVsockPort) error \(e)")
                     self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect failed")
-                    close(cfd)
+                    close(cfd); self.mgmtSlots.release()
                 case .success(let conn):
-                    let vfd = conn.fileDescriptor
-                    self.log("HARPOON_MGMT_VSOCK_CONNECTED \(bid) vsockFd=\(vfd) clientFd=\(cfd)")
-                    // simple bidirectional pipe, vsock<->unix
-                    let cflags = fcntl(cfd, F_GETFL, 0); if cflags >= 0 { _ = fcntl(cfd, F_SETFL, cflags | O_NONBLOCK) }
-                    let vflags = fcntl(vfd, F_GETFL, 0); if vflags >= 0 { _ = fcntl(vfd, F_SETFL, vflags | O_NONBLOCK) }
-                    let cr = DispatchSource.makeReadSource(fileDescriptor: cfd, queue: .global())
-                    let vr = DispatchSource.makeReadSource(fileDescriptor: vfd, queue: .global())
-                    var closedCr = false, closedVr = false, closed = false
-                    func closeBoth(_ reason: String) {
-                        if closed { return }; closed = true
-                        cr.cancel(); vr.cancel(); close(cfd); conn.close()
-                        self.log("HARPOON_MGMT_CLOSE \(bid) \(reason) clientFd=\(cfd) vsockFd=\(vfd)")
-                    }
-                    cr.setEventHandler {
-                        var buf = [UInt8](repeating: 0, count: 8192)
-                        let n = buf.withUnsafeMutableBytes { ptr in read(cfd, ptr.baseAddress!, ptr.count) }
-                        if n == 0 { closedCr = true; cr.cancel(); shutdown(vfd, SHUT_WR); self.log("HARPOON_MGMT_CLIENT_EOF \(bid)"); if closedVr { closeBoth("both EOF") }; return }
-                        if n < 0 { if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }; self.log("HARPOON_MGMT_CLOSE \(bid) client read \(String(cString:strerror(errno)))"); closeBoth("client read"); return }
-                        var off = 0
-                        while off < n {
-                            let w = buf.withUnsafeBytes { ptr in write(vfd, ptr.baseAddress!.advanced(by: off), n-off) }
-                            if w > 0 { off += Int(w); continue }
-                            if w < 0 && errno == EINTR { continue }
-                            if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                            if w < 0 && errno == EPIPE { closeBoth("vsock EPIPE"); return }
-                            self.log("HARPOON_MGMT_CLOSE \(bid) vsock write \(String(cString:strerror(errno)))"); closeBoth("vsock write"); return
-                        }
-                    }
-                    vr.setEventHandler {
-                        var buf = [UInt8](repeating: 0, count: 8192)
-                        let n = buf.withUnsafeMutableBytes { ptr in read(vfd, ptr.baseAddress!, ptr.count) }
-                        if n == 0 { closedVr = true; vr.cancel(); shutdown(cfd, SHUT_WR); self.log("HARPOON_MGMT_VSOCK_EOF \(bid)"); if closedCr { closeBoth("both EOF") }; return }
-                        if n < 0 { if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }; self.log("HARPOON_MGMT_CLOSE \(bid) vsock read \(String(cString:strerror(errno)))"); closeBoth("vsock read"); return }
-                        var off = 0
-                        while off < n {
-                            let w = buf.withUnsafeBytes { ptr in write(cfd, ptr.baseAddress!.advanced(by: off), n-off) }
-                            if w > 0 { off += Int(w); continue }
-                            if w < 0 && errno == EINTR { continue }
-                            if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(1000); continue }
-                            if w < 0 && errno == EPIPE { closeBoth("client EPIPE"); return }
-                            self.log("HARPOON_MGMT_CLOSE \(bid) client write \(String(cString:strerror(errno)))"); closeBoth("client write"); return
-                        }
-                    }
-                    cr.resume(); vr.resume()
+                    self.log("HARPOON_MGMT_VSOCK_CONNECTED \(bid) vsockFd=\(conn.fileDescriptor) clientFd=\(cfd)")
+                    // vsock <-> unix pipe; BridgePair owns both descriptors until both sources are cancelled
+                    BridgePair(id: bid, tag: "HARPOON_MGMT", clientFd: cfd, peerFd: conn.fileDescriptor, slots: self.mgmtSlots, log: self.log, closePeer: { conn.close() }).start()
                 }
             }
         }

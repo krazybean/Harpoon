@@ -76,3 +76,35 @@ test("a failed expansion leaves Start available with the recovery panel, once no
   assert.equal(stoppedPanelVisible("stopped", interrupted), true);
   assert.equal(expansionPanel(interrupted.diskExpansion), "interrupted");
 });
+
+import { MGMT_WARNING_AFTER_MS, degradedManagement, overlayShouldYield, withTimeout } from "./lifecycle.ts";
+
+test("withTimeout gives up on a step that never settles and never rejects", async () => {
+  assert.equal(await withTimeout(new Promise(() => {}), 20), undefined, "a hung step resolves empty after the timeout");
+  assert.equal(await withTimeout(Promise.resolve(7), 1000), 7);
+  assert.equal(await withTimeout(Promise.reject(new Error("x")), 1000), undefined, "a failing step does not throw into the bootstrap");
+});
+
+test("the startup overlay yields once the runtime says running with Docker ready, whatever the startup steps are doing", () => {
+  for (const phase of ["launching", "discovering", "starting", "vm_booting", "docker_starting"]) {
+    assert.equal(overlayShouldYield(phase, running, false), true, phase);
+  }
+  assert.equal(overlayShouldYield("discovering", { state: "running", dockerReady: true, mgmtReady: false }, false), true, "management being down does not hold the overlay");
+  assert.equal(overlayShouldYield("discovering", { state: "running", dockerReady: false }, false), false, "Docker not ready yet: keep waiting");
+  assert.equal(overlayShouldYield("discovering", { state: "stopped" }, false), false);
+  assert.equal(overlayShouldYield("ready", running, false), false, "nothing to yield from");
+  assert.equal(overlayShouldYield("failed", running, false), false, "a failure is not hidden by the overlay rule");
+  assert.equal(overlayShouldYield("starting", running, true), false, "a restart this window is performing is not cut short");
+  assert.equal(overlayShouldYield("discovering", null, false), false);
+});
+
+test("a degraded-management warning appears only for a sustained outage with Docker ready", () => {
+  const down = { state: "running", dockerReady: true, mgmtReady: false };
+  assert.equal(degradedManagement(down, 1000, 1000 + MGMT_WARNING_AFTER_MS - 1), false, "a booting guest is not an outage");
+  assert.equal(degradedManagement(down, 1000, 1000 + MGMT_WARNING_AFTER_MS), true);
+  assert.equal(degradedManagement({ ...down, mgmtReady: true }, 1000, 1e9), false);
+  assert.equal(degradedManagement({ state: "running", dockerReady: true }, 1000, 1e9), false, "an older runtime that does not report it says nothing");
+  assert.equal(degradedManagement({ ...down, dockerReady: false }, 1000, 1e9), false, "Docker not ready is a different problem");
+  assert.equal(degradedManagement({ ...down, state: "stopped" }, 1000, 1e9), false);
+  assert.equal(degradedManagement(down, null, 1e9), false, "no outage start recorded");
+});

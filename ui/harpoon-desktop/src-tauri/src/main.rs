@@ -57,6 +57,9 @@ struct HarpoonStatus {
     sock_exists: Option<bool>,
     #[serde(default, rename = "lockHeld")]
     lock_held: Option<bool>,
+    /// Whether the guest management channel answered the runtime's probe; absent from older runtimes.
+    #[serde(default, rename = "mgmtReady", skip_serializing_if = "Option::is_none")]
+    mgmt_ready: Option<bool>,
     #[serde(default, rename = "lockPath")]
     lock_path: Option<String>,
     #[serde(default, rename = "logPath")]
@@ -1200,6 +1203,16 @@ mod tests {
         assert_eq!(s.disk_expansion.as_ref().and_then(|e| e.recovery.clone()).as_deref(), Some("Run harpoon start."));
         let old: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":false,"phase":"growing"}}"#).unwrap();
         assert!(old.disk_expansion.unwrap().recovery.is_none());
+    }
+
+    #[test]
+    fn management_readiness_is_relayed_when_present_and_absent_for_older_runtimes() {
+        let down: HarpoonStatus = serde_json::from_str(r#"{"state":"running","dockerReady":true,"mgmtReady":false}"#).unwrap();
+        assert_eq!(down.mgmt_ready, Some(false));
+        assert!(serde_json::to_string(&down).unwrap().contains("\"mgmtReady\":false"));
+        let old: HarpoonStatus = serde_json::from_str(r#"{"state":"running","dockerReady":true}"#).unwrap();
+        assert_eq!(old.mgmt_ready, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("mgmtReady"));
     }
 
     #[test]
