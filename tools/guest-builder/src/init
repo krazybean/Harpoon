@@ -979,4 +979,25 @@ else
   echo "dockerd log tail $(tail -n 50 /tmp/dockerd.log 2>&1 | tail -n 50)" > /dev/hvc0
 fi
 
-while true; do sleep 2; echo "HARPOON_SPIKE_OK" > /dev/hvc0; done
+# BEGIN idle-loop
+# PID 1 must never exit and must never spin. If `sleep` itself fails (it was seen dying of SIGILL, which turned this loop into an
+# unthrottled console flood), say so once, pace with the shell builtin `read` on a fifo (no fork), and after 20 straight failures park
+# on a blocking read. A working `sleep` resets everything, so a one-off failure costs nothing.
+IDLE_FIFO=${IDLE_FIFO:-/tmp/.harpoon-idle}
+mkfifo "$IDLE_FIFO" 2>/dev/null || true
+SLEEP_FAILS=0
+while true; do
+  if sleep 2; then
+    SLEEP_FAILS=0
+    echo "HARPOON_SPIKE_OK" > /dev/hvc0
+  else
+    SLEEP_FAILS=$((SLEEP_FAILS + 1))
+    [ "$SLEEP_FAILS" -eq 1 ] && echo "HARPOON_INIT_SLEEP_FAILED" > /dev/hvc0
+    if [ "$SLEEP_FAILS" -lt 20 ]; then
+      read -t 2 _idle <> "$IDLE_FIFO" 2>/dev/null || true
+    else
+      read _idle <> "$IDLE_FIFO" 2>/dev/null || read _idle < /dev/hvc0 2>/dev/null || true
+    fi
+  fi
+done
+# END idle-loop

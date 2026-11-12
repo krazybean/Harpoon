@@ -65,6 +65,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     // serial poll
     var serialPoll: DispatchSourceTimer?
+    var serial: SerialCollector?
+    private var serialStorageReported = false
+    private var serialReaderReported = false
     var bootReady = false
     var mgmtReady = false
     var bootFailedReason: String?
@@ -133,11 +136,17 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         cfg.bootLoader = bl
         cfg.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         // serial
-        let serialURL = URL(fileURLWithPath: config.serialLogPath)
-        try? FileManager.default.removeItem(at: serialURL)
-        let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-        serial.attachment = try VZFileSerialPortAttachment(url: serialURL, append: false)
-        cfg.serialPorts = [serial]
+        // A pipe, not a file: VZFileSerialPortAttachment has no size limit, so a guest could grow it without bound. The collector drains
+        // this pipe continuously and owns every byte that is kept (bounded rotating log, bounded tail).
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { throw NSError(domain: "Harpoon", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "serial console pipe: \(String(cString: strerror(errno)))"]) }
+        _ = fcntl(fds[0], F_SETFD, FD_CLOEXEC); _ = fcntl(fds[1], F_SETFD, FD_CLOEXEC)
+        let collector = SerialCollector(readFd: fds[0], logPath: config.serialLogPath, log: { [weak self] in self?.log($0) })
+        serial = collector
+        collector.start()
+        let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
+        serialPort.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: FileHandle(fileDescriptor: fds[1], closeOnDealloc: false))
+        cfg.serialPorts = [serialPort]
         // network
         let net = VZVirtioNetworkDeviceConfiguration()
         net.attachment = VZNATNetworkDeviceAttachment()
@@ -188,28 +197,38 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     /// First kernel panic line seen on the guest console. A panic fires no stop callback, so this is the only host-side sign of it.
     var guestPanic: String?
 
-    func checkSerial() -> String {
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: config.serialLogPath)), !d.isEmpty else { return "" }
-        let s = String(data: d, encoding: .utf8) ?? ""
-        if s.contains("HARPOON_DOCKER_READY") && !bootReady {
+    /// Applies what the collector thread has seen. No file I/O: this only reads a lock-protected snapshot.
+    func checkSerial() {
+        guard let c = serial else { return }
+        let s = c.snapshot()
+        if s.dockerReady && !bootReady {
             bootReady = true
             log("HARPOON_DOCKER_READY observed")
         }
-        if s.contains("HARPOON_MGMT_READY") && !mgmtReady {
+        if s.mgmtReady && !mgmtReady {
             mgmtReady = true
             log("HARPOON_MGMT_READY observed")
         }
-        if s.contains("HARPOON_DOCKER_FAILED") && bootFailedReason == nil {
-            bootFailedReason = String(s.components(separatedBy: "HARPOON_DOCKER_FAILED").last?.prefix(400) ?? "")
-            log("HARPOON_DOCKER_FAILED observed \(bootFailedReason ?? "")")
+        if let r = s.dockerFailedReason, bootFailedReason == nil {
+            bootFailedReason = r
+            log("HARPOON_DOCKER_FAILED observed \(r)")
         }
-        if guestPanic == nil, let line = guestPanicLine(in: s) {
+        if guestPanic == nil, let line = s.panicLine {
             guestPanic = line
             log("HARPOON_GUEST_PANIC vmState=\(vm?.state.rawValue ?? -1) stopCallback=none \(line)")
             // Surfaced only: no shutdown, restart or exit. The engine keeps running so the evidence stays inspectable.
             recordRuntimeFailure(RuntimeFailure(category: "guest_panic", message: "The guest kernel panicked, so Docker and the management channel are unavailable. Harpoon has not restarted it.", source: "Harpoon guest console", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: line))
         }
-        return s
+        // Diagnostics storage failing never stops the guest (the console is still drained); it is recorded, not hidden.
+        if let e = s.storageError, !serialStorageReported {
+            serialStorageReported = true
+            recordRuntimeFailure(RuntimeFailure(category: "serial_storage", message: "Harpoon cannot store the guest console log. The guest is unaffected and its console is still being read.", source: "Harpoon serial collector", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: e))
+        }
+        // A dead reader is the one way the console could back up into the guest, so it is always a recorded failure.
+        if let e = s.readerFailure, !serialReaderReported {
+            serialReaderReported = true
+            recordRuntimeFailure(RuntimeFailure(category: "serial_collector", message: "Harpoon stopped reading the guest console; guest console output may block until Harpoon is restarted.", source: "Harpoon serial collector", occurredAt: ISO8601DateFormatter().string(from: Date()), underlyingError: e))
+        }
     }
 
     @discardableResult

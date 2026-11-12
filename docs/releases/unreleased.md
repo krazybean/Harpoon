@@ -4,6 +4,25 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### A guest can no longer exhaust the host through its console or memory (provisional until hardware-validated)
+
+- **Guest console.** The serial console is read from a pipe by a dedicated thread, scanned for readiness, failure and kernel-panic
+  markers as bytes (split reads, binary and malformed UTF-8 are handled), and kept in a rotating two-file log of at most 8 MiB
+  (`harpoon-serial.log`, `harpoon-serial.log.1`) written at a limited rate (2 MiB burst, then 64 KiB/s). A console flood is still
+  drained and scanned, its excess is counted and noted in `harpoon.log` (`HARPOON_SERIAL_OVERFLOW`), and **a healthy guest is never
+  stopped because its console is noisy or old**. Previously the whole log was re-read every second and could grow without limit. Only the
+  newest output is retained, so very early boot lines are rotated out of a flooded log.
+- **Failures are recorded, not silent.** `serial_storage` (the log cannot be written; the guest is unaffected) and `serial_collector`
+  (the reader stopped; console output could back up into the guest) appear as the runtime failure in `status --json`.
+- **Memory admission.** `harpoon start`/`run` now reserves guest memory in a host-wide registry (`/tmp/harpoon-admission-<uid>`),
+  shared by every `HARPOON_TEST_TMPDIR` namespace. Each guest counts its memory plus 512 MiB; the total may not exceed 60% of physical
+  RAM, otherwise the start is refused (exit 11) with the numbers. Reservations are flock-held, so a crashed engine's reservation is
+  reclaimed automatically, and concurrent starts are serialized. A registry that cannot be made private refuses the start.
+- **Guest init.** The final idle loop no longer spins if `sleep` itself fails: it reports `HARPOON_INIT_SLEEP_FAILED` once, paces with a
+  shell builtin, and parks after 20 straight failures. PID 1 never exits. **This takes effect only in a rebuilt initramfs**
+  (`tools/guest-builder/build-initramfs.sh`); the committed one is unchanged and its `.inputs` fingerprint is now stale by design.
+- The underlying `sleep`/PID 1 faults (SIGILL / SIGSEGV) are still unexplained.
+
 ### New root disks start at 4 GiB, and Harpoon offers to grow them (provisional)
 
 A **new** root disk is 4 GiB logical (sparse) instead of 32 GiB. Disks that already exist are not touched, and an explicit

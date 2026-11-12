@@ -244,6 +244,20 @@ if let err = config.validate() {
     fputs("config validation failed: \(err)\n", stderr)
     exit(5)
 }
+// Admission is host-wide (every namespace shares one registry) and held until this process exits. It fails closed.
+let hostMemoryMiB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024))
+let memoryReservation: MemoryAdmission.Reservation
+switch MemoryAdmission.reserve(requestedMiB: config.memoryMIB, hostMiB: hostMemoryMiB, namespace: ProcessInfo.processInfo.environment["HARPOON_TEST_TMPDIR"] ?? "production") {
+case .admitted(let r):
+    memoryReservation = r
+    log("HARPOON_MEMORY_ADMITTED requestedMiB=\(config.memoryMIB) hostMiB=\(hostMemoryMiB) reservation=\(r.path)")
+case .denied(let why), .unavailable(let why):
+    lifecycle.fail(why)
+    log("HARPOON_MEMORY_ADMISSION_DENIED \(why)")
+    fputs("\(why)\n", stderr)
+    exit(11)
+}
+
 log("HARPOON_CPU_CONFIG_COUNT \(config.cpuCount)")
 log("HARPOON_MEMORY_CONFIG_MIB \(config.memoryMIB)")
 log("HARPOON_MEMORY_CONFIG_BYTES \(config.memorySizeBytes)")
@@ -357,7 +371,7 @@ let readyPoll = DispatchSource.makeTimerSource(queue: .main)
 readyPoll.schedule(deadline: .now()+1, repeating: 1)
 var readyPollCancelled = false
 readyPoll.setEventHandler {
-    _ = manager.checkSerial()
+    manager.checkSerial()
     if manager.bootReady && !readyPollCancelled {
         readyPollCancelled = true
         lifecycle.transition(to: .dockerReady)
@@ -405,10 +419,11 @@ DispatchQueue.main.asyncAfter(deadline: .now()+config.bootTimeout) {
     if !manager.bootReady && manager.bootFailedReason == nil && !readyPollCancelled {
         readyPollCancelled = true
         readyPoll.cancel()
-        let tail = manager.checkSerial().suffix(800)
+        manager.checkSerial()
+        let tail = manager.serial?.tail(800) ?? ""
         let reason = "guest readiness timeout after \(config.bootTimeout)s"
         lifecycle.fail(reason)
-        log("GUEST_INIT_FAILURE no HARPOON_DOCKER_READY after \(config.bootTimeout)s tail=\(tail)")
+        log("GUEST_INIT_FAILURE no HARPOON_DOCKER_READY after \(config.bootTimeout)s consoleBytesSeen=\(manager.serial?.snapshot().bytesSeen ?? -1) tail=\(tail)")
         initiateShutdown(reason: "BOOT_TIMEOUT", failureCode: 6)
     }
 }
