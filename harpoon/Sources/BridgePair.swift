@@ -81,6 +81,8 @@ final class BridgePair {
     private var monitor: DispatchSourceTimer?
     private var clientEOF = false, peerEOF = false, closed = false
     private var cancelsPending = 2
+    private let stopLock = NSLock()
+    private var stopReason: String?   // set from any thread by closeAsync; read by a blocked write, which owns the queue and would never see a queued close
     private var selfRetain: BridgePair?   // alive until both descriptors are closed, whoever else holds it
 
     /// Bytes read from the client. The default forwards them untouched; the Docker bridge installs its HTTP-aware forwarder.
@@ -113,7 +115,12 @@ final class BridgePair {
         cs.resume(); ps.resume()
     }
 
-    func closeAsync(_ reason: String) { queue.async { self.close(reason) } }
+    /// Safe from any thread, including while the pair's queue is stuck in a blocked write: the flag ends that write within one poll tick.
+    func closeAsync(_ reason: String) {
+        stopLock.lock(); if stopReason == nil { stopReason = reason }; stopLock.unlock()
+        queue.async { self.close(reason) }
+    }
+    private var stopRequested: String? { stopLock.lock(); defer { stopLock.unlock() }; return stopReason }
 
     /// Idempotent; call on the pair's queue. Cancels both sources; the cancel handlers close the descriptors.
     func close(_ reason: String) {
@@ -146,6 +153,7 @@ final class BridgePair {
             if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                 var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
                 _ = poll(&p, 1, 100)
+                if let why = stopRequested { close(why); return false }
                 if unixPeerClosed(clientFd) { close("client closed while a \(side) write was blocked"); return false }
                 continue
             }

@@ -121,6 +121,25 @@ do {
     settle(to: base, "stalled guest")
 }
 
+// 6b. shutdown while a write is blocked and the client is still connected: the close must not wait behind the write
+do {
+    let slots = BridgeSlots(limits: fast)
+    require(slots.acquire(), "slot")
+    let (c, g, _) = bridged(slots, id: 900)
+    let blob = [UInt8](repeating: 0x42, count: 1 << 20)
+    let writer = DispatchQueue(label: "test.writer2")
+    writer.async { for _ in 0..<64 { if blob.withUnsafeBytes({ write(c, $0.baseAddress!, $0.count) }) < 0 && errno != EAGAIN && errno != EINTR { break } } }
+    usleep(1_000_000)                          // guest never reads: the pair is parked inside writeAll; client stays connected
+    require(slots.live == 1, "pair should still be live while blocked")
+    let t0 = Date()
+    slots.closeAll("test shutdown during blocked write")
+    require(waitFor(3) { slots.live == 0 }, "shutdown did not release a pair blocked in a write")
+    require(Date().timeIntervalSince(t0) < 2, "shutdown of a blocked pair was not bounded")
+    require(logs.contains { $0.contains("test shutdown during blocked write") }, "close reason recorded")
+    close(c); close(g); writer.sync {}
+    settle(to: base, "shutdown during blocked write")
+}
+
 // 7. shutdown closes every live pair
 do {
     let slots = BridgeSlots(limits: fast)
