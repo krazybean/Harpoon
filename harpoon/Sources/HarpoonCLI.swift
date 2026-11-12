@@ -68,6 +68,7 @@ func printUsageFull() {
       harpoon disk resize 16G       Grow to 16G (VM stopped, never shrink)
       harpoon disk expand 16G --yes Stop, grow, restart and verify (interrupts running containers; nothing happens without --yes)
       harpoon disk status --json    Same facts as JSON, plus low-space level and suggested sizes
+      harpoon disk reclaim --yes    Trim unused guest blocks so macOS gets the space back (running Harpoon; no restart, no Docker changes)
       harpoon start --disk-size 16G First provision 16G (no disk), otherwise use resize
 
     Docker:

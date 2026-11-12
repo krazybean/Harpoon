@@ -22,9 +22,6 @@ func handleStatus(args: [String]=[]) -> Int32 {
         ]
         if let pid = snap.pid { json["pid"] = pid }
         // Lets the desktop show that Start/Stop/Restart would collide with a disk expansion, and which phase it is in.
-        if let r = DiskExpansionRecord.load() {
-            json["diskExpansion"] = ["active": r.isActive, "phase": r.phase, "fromBytes": r.fromBytes, "toBytes": r.toBytes]
-        }
         if let m = snap.meta {
             json["cpus"] = m.cpus
             json["memoryMiB"] = m.memoryMiB
@@ -40,6 +37,12 @@ func handleStatus(args: [String]=[]) -> Int32 {
         if let path = json["diskPath"] as? String,
            let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 {
             json["diskLogicalBytes"] = size
+        }
+        if let r = DiskExpansionRecord.load() {
+            var e: [String: Any] = ["active": r.isActive, "phase": r.phase, "fromBytes": r.fromBytes, "toBytes": r.toBytes]
+            // An interrupted expansion carries what to do next, judged from the disk's actual size, so the desktop can show it as is.
+            if !r.isActive { e["recovery"] = r.recovery(currentLogical: json["diskLogicalBytes"] as? UInt64) }
+            json["diskExpansion"] = e
         }
         if let failure = snap.failure,
            let data = try? JSONEncoder().encode(failure),

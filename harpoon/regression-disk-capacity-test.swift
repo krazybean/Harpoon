@@ -178,3 +178,20 @@ extension RuntimeConfig { var templateProtectionError: String? { Self.templatePr
 let t0 = (try! fm.attributesOfItem(atPath: tmpl))[.size] as! UInt64
 require(t0 == 4096, "the template was not modified by any check")
 print("disk capacity unit test PASS")
+
+// --- space reclamation: trim classification and the measured report ------------------------------------------------------------------
+require(DiskReclaim.classifyTrim(code: 0, stderr: "") == .ok, "fstrim exit 0 is a completed trim")
+require(DiskReclaim.classifyTrim(code: 1, stderr: "fstrim: /: the discard operation is not supported") == .unsupported, "a device without discard is unsupported")
+require(DiskReclaim.classifyTrim(code: 127, stderr: "sh: fstrim: not found") == .unsupported, "a guest without fstrim is unsupported")
+require(DiskReclaim.classifyTrim(code: 1, stderr: "fstrim: applet not found") == .unsupported, "a BusyBox without the applet is unsupported")
+require(DiskReclaim.classifyTrim(code: 32, stderr: "FITRIM ioctl failed: Input/output error") == .failed, "an I/O error is a failure, not 'unsupported'")
+require(DiskReclaim.classifyTrim(code: 1, stderr: "") == .failed, "an unexplained non-zero exit is a failure")
+let shrunk = DiskReclaim.Report(logicalBefore: 4 * GiB, logicalAfter: 4 * GiB, physicalBefore: 3 * GiB, physicalAfter: 1 * GiB)
+require(shrunk.reclaimedBytes == 2 * GiB && shrunk.changeBytes == -2 * Int64(GiB) && shrunk.logicalPreserved, "a smaller allocation is reported as reclaimed")
+require(shrunk.message.contains("Reclaimed 2.00 GiB") || shrunk.message.contains("Reclaimed 2 GiB"), "the message states the measured amount: \(shrunk.message)")
+let zero = DiskReclaim.Report(logicalBefore: 4 * GiB, logicalAfter: 4 * GiB, physicalBefore: 1 * GiB, physicalAfter: 1 * GiB)
+require(zero.reclaimedBytes == 0 && zero.changeBytes == 0 && zero.message.hasPrefix("Nothing was reclaimed"), "zero reclaimed is reported as zero")
+let grown = DiskReclaim.Report(logicalBefore: 4 * GiB, logicalAfter: 4 * GiB, physicalBefore: 1 * GiB, physicalAfter: 1 * GiB + 8 * MiB)
+require(grown.reclaimedBytes == 0 && grown.changeBytes == Int64(8 * MiB) && grown.message.contains("grew by"), "growth during the trim is not called a reclaim")
+let changed = DiskReclaim.Report(logicalBefore: 4 * GiB, logicalAfter: 2 * GiB, physicalBefore: 1 * GiB, physicalAfter: 1 * GiB)
+require(!changed.logicalPreserved && changed.message.contains("logical size changed"), "a changed logical size is flagged")

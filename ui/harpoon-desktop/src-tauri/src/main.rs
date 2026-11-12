@@ -24,6 +24,9 @@ mod app_router;
 struct DiskExpansionStatus {
     active: bool,
     phase: String,
+    /// What to do next; only present for an interrupted expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<String>,
     #[serde(default, rename = "fromBytes")]
     from_bytes: u64,
     #[serde(default, rename = "toBytes")]
@@ -1114,6 +1117,16 @@ fn expand_disk_confirmed_blocking(size: String) -> Result<String, String> {
     if out.status.success() { Ok(combined.trim().to_string()) } else { Err(combined.trim().to_string()) }
 }
 
+/// Reclaim unused space: the runtime runs `fstrim /` in the guest and measures the change. Its JSON result (also for refusals and
+/// failures, with a non-zero exit) is relayed as is; the desktop shows it. Only called after the user confirmed in the UI.
+fn reclaim_disk_confirmed_blocking() -> Result<String, String> {
+    let bin = resolve_harpoon_binary().map_err(|e| e.to_string())?;
+    let out = Command::new(&bin).args(["disk", "reclaim", "--yes", "--json"]).output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let text = if stdout.is_empty() { String::from_utf8_lossy(&out.stderr).trim().to_string() } else { stdout };
+    if out.status.success() { Ok(text) } else { Err(text) }
+}
+
 #[tauri::command(async)]
 fn open_shell_session(app: tauri::AppHandle, manager: tauri::State<'_, std::sync::Arc<shell::ShellManager>>, context: String, container_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<shell::ShellSession, String> {
     namespace::refuse_in_namespace("A container shell")?;
@@ -1162,6 +1175,9 @@ async fn resize_disk(size: String) -> Result<String, String> { off_main(move || 
 async fn get_disk_capacity() -> Result<String, String> { off_main(get_disk_capacity_blocking).await }
 
 #[tauri::command]
+async fn reclaim_disk_confirmed() -> Result<String, String> { off_main(reclaim_disk_confirmed_blocking).await }
+
+#[tauri::command]
 async fn expand_disk_confirmed(size: String) -> Result<String, String> { off_main(move || expand_disk_confirmed_blocking(size)).await }
 
 #[cfg(test)]
@@ -1176,6 +1192,14 @@ mod tests {
         assert!(!interrupted.expansion_active());
         let none: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped"}"#).unwrap();
         assert!(!none.expansion_active());
+    }
+
+    #[test]
+    fn interrupted_expansion_keeps_its_recovery_text_and_older_status_still_parses() {
+        let s: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":false,"phase":"growing","recovery":"Run harpoon start."}}"#).unwrap();
+        assert_eq!(s.disk_expansion.as_ref().and_then(|e| e.recovery.clone()).as_deref(), Some("Run harpoon start."));
+        let old: HarpoonStatus = serde_json::from_str(r#"{"state":"stopped","diskExpansion":{"active":false,"phase":"growing"}}"#).unwrap();
+        assert!(old.disk_expansion.unwrap().recovery.is_none());
     }
 
     #[test]
@@ -1402,7 +1426,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status, start_harpoon, stop_harpoon, restart_harpoon,
             get_doctor, get_log_path, get_recent_logs, get_config, set_memory, set_cpus, get_docker_info,
-            get_harpoon_binary_path, get_disk_capacity, expand_disk_confirmed, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
+            get_harpoon_binary_path, get_disk_capacity, expand_disk_confirmed, reclaim_disk_confirmed, get_docker_cli_path, get_docker_compose_info, get_creds_helper_status, ensure_harpoon_context, get_disk_status, resize_disk,
             list_containers, compose_import::pick_compose_folder, compose_import::preview_compose_project, compose_import::launch_compose_project, run_sample_container, start_container, stop_container, restart_container, remove_container, logs_container, inspect_container,
             list_images, inspect_image, remove_image, stats_container,
             list_volumes, inspect_volume, remove_volume,

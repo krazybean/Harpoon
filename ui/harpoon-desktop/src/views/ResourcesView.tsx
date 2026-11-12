@@ -1,12 +1,14 @@
 import { memo } from "react";
 import { fmtTs } from "../components/ShelfPrimitives";
+import { DiskReclaimCard } from "../components/DiskReclaimCard";
 
 type ConfigResult = { cpus: number; memory: number; raw: string; path: string };
-type HarpoonStatus = { cpus?: number; memoryMiB?: number; diskPath?: string; diskLogicalBytes?: number };
+type HarpoonStatus = { cpus?: number; memoryMiB?: number; diskPath?: string; diskLogicalBytes?: number; diskExpansion?: { active?: boolean; phase: string } };
 
 export const ResourcesView = memo(function ResourcesView({
-  config, configAt, status, binaryPath, actionInProgress, onSetCpus, onSetMemory
+  running, config, configAt, status, binaryPath, actionInProgress, onSetCpus, onSetMemory
 }: {
+  running: boolean;
   config: ConfigResult | null;
   configAt: number | null;
   status: HarpoonStatus | null;
@@ -41,6 +43,7 @@ export const ResourcesView = memo(function ResourcesView({
           </div>
         </div>
       </div>
+      <DiskReclaimCard enabled={running} expansion={status?.diskExpansion} />
     </div>
   );
 });

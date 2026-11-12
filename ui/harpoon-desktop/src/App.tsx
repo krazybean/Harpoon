@@ -23,6 +23,7 @@ import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
+import { ExpansionProgress } from "./components/ExpansionProgress";
 import { expansionActive } from "./lib/diskCapacity";
 import { useDeploySimulation } from "./hooks/useDeploySimulation";
 import { useDeployEngine } from "./hooks/useDeployEngine";
@@ -44,7 +45,7 @@ type HarpoonStatus = {
   lockPath?: string;
   logPath?: string;
   dockerReady?: boolean;
-  diskExpansion?: { active: boolean; phase: string; fromBytes: number; toBytes: number };
+  diskExpansion?: { active: boolean; phase: string; fromBytes: number; toBytes: number; recovery?: string };
   failure?: RuntimeFailure;
 };
 type RuntimeFailure = { category: string; message: string; source: string; occurredAt: string; underlyingError?: string | null };
@@ -666,7 +667,7 @@ export default function App() {
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
   const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
   const showFailed = !technologyShowcase && !topologyPrototype && bootstrapPhase==="failed";
-  const showStoppedPanel = !technologyShowcase && !topologyPrototype && !deployPreviewActive && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed;
+  const showStoppedPanel = !technologyShowcase && !topologyPrototype && !deployPreviewActive && bootstrapPhase==="stopped" && !showBootstrapOverlay && !showFailed && !expanding;
 
   return (
     <div className="shell">
@@ -689,7 +690,8 @@ export default function App() {
             <button onClick={()=>{ refreshStatus(); refreshCounts(); refreshConfig(); refreshDocker(); if(active==="containers") refreshContainers(); if(active==="images") refreshImages(); if(active==="volumes") refreshVolumes(); if(active==="networks") refreshNetworks(); if(active==="diagnostics"){refreshDoctor(); refreshLogs();} }} disabled={!tauriAvailable} className="btn btn--secondary">Refresh</button>
           </div>
         </header>
-        <DiskCapacityNotice enabled={tauriAvailable && status?.state === "running" && bootstrapPhase === "ready"} onExpanded={() => { refreshStatus(); refreshDocker(); }} />
+        <ExpansionProgress expansion={status?.diskExpansion} />
+        <DiskCapacityNotice stagesShown={expanding} enabled={tauriAvailable && status?.state === "running" && bootstrapPhase === "ready"} onExpanded={() => { refreshStatus(); refreshDocker(); }} />
         {actionError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{actionError}</div>}
         {statusError && !showFailed && <div style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>status error: {statusError}</div>}
         {status?.failure && status.state !== "failed" && !showFailed && <div role="alert" style={{ background: "var(--error-bg)", border: "1px solid #7F1D1D", color: "var(--error-fg)", padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{status.failure.message} <button className="btn btn--secondary btn--sm" onClick={() => handleNav("diagnostics")} style={{ marginLeft: 8 }}>View diagnostics</button></div>}
@@ -714,9 +716,9 @@ export default function App() {
               {status?.failure?.underlyingError && <details style={{ marginTop:8 }}><summary>View underlying diagnostics</summary><code>{status.failure.underlyingError}</code></details>}
             </div>
             <div style={{ display:"flex", gap:8 }}>
-              <button onClick={()=>runBootstrap(true)} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"1px solid #111827", fontSize:13 }}>Retry</button>
+              <button disabled={expanding} onClick={()=>runBootstrap(true)} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"1px solid #111827", fontSize:13 }}>Retry</button>
               <button onClick={()=>handleNav("diagnostics")} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Diagnostics</button>
-              <button onClick={()=>{ refreshStatus(); setBootstrapPhase("discovering"); runBootstrap(true); }} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Check again</button>
+              <button disabled={expanding} onClick={()=>{ refreshStatus(); setBootstrapPhase("discovering"); runBootstrap(true); }} style={{ padding:"8px 14px", borderRadius:8, background:"white", border:"1px solid #d1d5db", fontSize:13 }}>Check again</button>
             </div>
             <div style={{ fontSize:11, color:"#6b7280", marginTop:12 }}>{statusReadFailure !== null ? "Reading the status failed; that does not mean Harpoon failed to start. Nothing was started, stopped or restarted. Check again, or review Diagnostics." : "The runtime is stopped; no automatic restart was attempted. Review Diagnostics before trying again."}</div>
           </div>
@@ -724,9 +726,9 @@ export default function App() {
 
         {showStoppedPanel && (
           <div className="panel" style={{ padding:24, marginBottom:12 }}>
-            <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>{expanding ? "Expanding the Docker disk" : "Harpoon is stopped"}</div>
-            <div style={{ fontSize:13, color:"#6b7280", marginBottom:12 }}>{expanding ? "Harpoon was stopped for a disk expansion and starts again by itself when the disk has been grown. Do not start it manually." : "Press Start to launch the Linux VM and Docker Engine."}</div>
-            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable || expanding} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
+            <div style={{ fontWeight:600, fontSize:14, marginBottom:6 }}>Harpoon is stopped</div>
+            <div style={{ fontSize:13, color:"#6b7280", marginBottom:12 }}>Press Start to launch the Linux VM and Docker Engine.</div>
+            <button onClick={()=>doAction("start", ()=>invoke("start_harpoon"))} disabled={!tauriAvailable} style={{ padding:"8px 14px", borderRadius:8, background:"#111827", color:"white", border:"none", fontSize:13 }}>Start Harpoon</button>
           </div>
         )}
 
@@ -735,7 +737,7 @@ export default function App() {
           <>
             {technologyShowcase ? <TechnologyIconShowcase /> : topologyPrototype && DevTopologyPrototype ? <Suspense fallback={<div className="panel">Loading topology prototype…</div>}><DevTopologyPrototype /></Suspense> : <>
             {active==="overview" && <OverviewView status={status} statusAt={statusAt} dockerVersion={dockerVersion} dockerAt={dockerAt} counts={counts} countsAt={countsAt} config={config} configAt={configAt} doctor={doctor} doctorAt={doctorAt} binaryPath={binaryPath} logPath={logPath} bootstrapPhase={bootstrapPhase} runtimePolling={true} runtimePollingPaused={[]} onOpenDiagnostics={()=>handleNav("diagnostics")} onOpenContainers={()=>handleNav("containers")} onOpenResources={()=>handleNav("resources")} />}
-            {active==="resources" && <ResourcesView config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
+            {active==="resources" && <ResourcesView running={status?.state==="running" && bootstrapPhase==="ready"} config={config} configAt={configAt} status={status} binaryPath={binaryPath} actionInProgress={actionInProgress} onSetCpus={(v)=>doAction("cpus", ()=>invoke("set_cpus", { cpus: v }))} onSetMemory={(v)=>doAction("memory", ()=>invoke("set_memory", { memory: v }))} />}
             {active==="diagnostics" && <DiagnosticsView binaryPath={binaryPath} logs={logs} logsAt={logsAt} logsRefreshing={logsShelf.refreshing} logsError={logsShelf.error} logPath={logPath} doctor={doctor} doctorAt={doctorAt} doctorRefreshing={doctorShelf.refreshing} doctorError={doctorShelf.error} status={status} configRaw={config?.raw ?? null} bootstrapPhase={bootstrapPhase} onCopy={handleCopyDiagnostics} copied={copied} onRefreshDoctor={()=>doctorShelf.refresh()} onRefreshLogs={()=>logsShelf.refresh()} />}
             {active==="contexts" && <ContextsView contexts={contextsShelf.data ?? []} refreshing={contextsShelf.refreshing} error={contextsShelf.error} updatedAt={contextsShelf.updatedAt} hasCache={contextsShelf.hasCache} stale={contextsShelf.stale} refresh={refreshContexts} />}
             {active==="containers" && destination.kind==="container" && <ContainerDetailView engine={destination.engine} context={destination.context} containerId={destination.containerId} actionInProgress={actionInProgress} doAction={doAction} onBack={()=>handleNav("containers")} onNavigate={handleNav} hostListeners={hostListenersShelf.data ?? undefined} />}

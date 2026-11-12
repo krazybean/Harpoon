@@ -54,6 +54,13 @@ for the journal and inode tables, so a healthy 4 GiB disk warned. The ceiling is
 (an unfinished expansion) still warns. `harpoon status --json` now reports `diskLogicalBytes`, so the desktop's *Disk image* tile no longer
 reads "Unavailable". The field is absent when the disk file does not exist yet; older responses without it still render as before.
 
+### Reclaim unused disk space, and stage-by-stage expansion progress
+
+`harpoon disk reclaim --yes` (desktop: Resources → *Reclaim unused space…*) runs `fstrim /` in the running guest after explicit confirmation and
+reports the measured change in the image's APFS allocation, including zero. It does not delete or prune Docker data, restart Harpoon or change
+the disk's capacity. The disk-expansion panel now shows the real stage (stopping, growing, starting, verifying) from the recovery record, also
+when the desktop reconnects mid-expansion, clears after a verified success, and keeps the recovery instructions if an expansion is interrupted.
+
 ## Documentation
 
 - The help text, usage line and configuration guide now state the real precedence for `cpus` and `memory`: CLI flag >
