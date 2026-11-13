@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M16 Disk & Storage Lifecycle — bounded 2G sparse clone is proven, growable is YAGNI
 # Measures: bounded host disk (cp -c sparse), df reporting, system df/prune, persistence, journaling/fsck

@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M15 baseline — host-visible post-workload reclamation with pinned runtime identity
 # Fail-fast syntax self-check (top-level workflow): both harnesses must pass bash -n before any live run

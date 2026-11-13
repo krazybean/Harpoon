@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 BIN="harpoon/build/harpoon"
 STAGE="dist/harpoon-0.1.0-dev-darwin-arm64"

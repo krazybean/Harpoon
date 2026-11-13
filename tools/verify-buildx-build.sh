@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "$0")/vm-guard-reexec.sh"
 set -uo pipefail
 # Hermetic build test for the bundled Docker Buildx against a RUNNING Harpoon VM (A7 #5/#6 in
 # docs/results/COMPAT_BUILDX_AND_PORT_FORWARDING.md; evidence in docs/results/DEPLOY_BUILDX_VALIDATION.md).

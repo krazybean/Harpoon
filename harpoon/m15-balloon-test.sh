@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M15 balloon experiment — same baseline as m15-test.sh but with one bounded balloon after release, pinned runtime
 if command -v bash >/dev/null 2>&1; then

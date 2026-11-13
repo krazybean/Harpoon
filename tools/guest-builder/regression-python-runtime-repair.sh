@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "$0")/../vm-guard-reexec.sh"
 set -euo pipefail
 
 # Proves initramfs reconciliation repairs only the immutable management Python runtime.

@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -euo pipefail
 
 BIN=${1:-harpoon/build/harpoon}

@@ -64,6 +64,12 @@ HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-disk-reclaim.sh
 say "Run bridge connection lifecycle regression (socketpair doubles, no VM)"
 sh harpoon/regression-bridge-pair.sh
 
+say "Run resource safeguard regression (serial collector flood, memory admission, guest idle loop; mutation-checked, no VM)"
+sh harpoon/regression-resource-safeguards.sh
+
+say "Run VM test containment regression (fake engines and helpers, mutation-checked, no VM)"
+sh harpoon/regression-vm-test-guard.sh
+
 say "Run namespace disk status regression (private namespace, read-only, no VM)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-namespace-disk-status.sh
 

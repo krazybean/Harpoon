@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 HOST_SOCK="/tmp/harpoon-docker.sock"
 CONTROL_SOCK="/tmp/harpoon-control"

@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M12 Phase 2 Acceptance orchestrator
 # Records env, verifies staged product, manages start sequencing, captures PASS/FAIL/BLOCKED

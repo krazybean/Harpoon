@@ -44,7 +44,10 @@ func startPortForwarding() {
 }
 
 func parseGuestIP() -> String? {
-    guard let d = try? Data(contentsOf: URL(fileURLWithPath: config.serialLogPath)), let s = String(data: d, encoding: .utf8) else { return nil }
+    // The log is a bounded rotating file; read only its first MiB (the address is printed at boot), never the whole file.
+    guard let h = FileHandle(forReadingAtPath: config.serialLogPath), let d = try? h.read(upToCount: 1 << 20) else { return nil }
+    try? h.close()
+    let s = String(decoding: d, as: UTF8.self)
     var ip: String?
     for line in s.components(separatedBy: "\n") where line.contains("HARPOON_GUEST_IP") {
         let parts = line.components(separatedBy: "HARPOON_GUEST_IP")

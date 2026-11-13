@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M3 bounded compatibility test — must be run when harpoon is RUNNING
 # All commands use explicit DOCKER_HOST=unix:///tmp/harpoon-docker.sock

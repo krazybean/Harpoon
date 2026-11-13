@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/vm-guard-reexec.sh"
 set -u
 
 # Stage 8: controlled image deletion vs guest free space and host APFS allocation.

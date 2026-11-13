@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 BIN="harpoon/build/harpoon"
 HOST_SOCK="/tmp/harpoon-docker.sock"

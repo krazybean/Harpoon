@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/../tools/vm-guard-reexec.sh"
 set -eu
 # M18 Public-Release Hardening — bounded release-path smoke
 # Ponytail: no new daemon, reuse existing harpoon primitives, document rather than build
