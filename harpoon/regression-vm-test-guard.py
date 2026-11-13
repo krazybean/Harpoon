@@ -37,7 +37,9 @@ HELPER = W + "/hpt-fake-helper.py"
 open(HELPER, "w").write("import os, time\nos.setsid()\ntime.sleep(300)\n")
 
 def metrics(disk=100, pressure=1, swap_used=0, swap_total=10 * 2**30, swap_out=0):
-    json.dump({"disk_free": disk * 2**30, "pressure": pressure, "swap_used": swap_used, "swap_total": swap_total, "swap_out": swap_out}, open(W + "/metrics.json", "w"))
+    # Replace atomically: the guard re-reads this file while the churn thread rewrites it, and a torn read (truncated, not yet written) falls back to the real host's metrics.
+    with open(W + "/metrics.json.tmp", "w") as f: json.dump({"disk_free": disk * 2**30, "pressure": pressure, "swap_used": swap_used, "swap_total": swap_total, "swap_out": swap_out}, f)
+    os.replace(W + "/metrics.json.tmp", W + "/metrics.json")
 
 def guard(args, cmd, timeout=60, env=None):
     t = time.time()
