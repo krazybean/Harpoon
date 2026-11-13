@@ -75,25 +75,27 @@ echo "== guest init idle loop (real block from tools/guest-builder/src/init)"
 INIT="$ROOT/tools/guest-builder/src/init"
 sed -n '/^# BEGIN idle-loop/,/^# END idle-loop/p' "$INIT" > "$tmp/idle.raw"
 [ -s "$tmp/idle.raw" ] || fail "idle-loop markers not found in init"
-mkdir -p "$tmp/shim-fail" "$tmp/shim-ok" "$tmp/shim-once"
+mkdir -p "$tmp/shim-fail" "$tmp/shim-ok" "$tmp/shim-once" "$tmp/shim-cap"
 printf '#!/bin/sh\necho x >> "$CALLS"\nexit 1\n' > "$tmp/shim-fail/sleep"
 printf '#!/bin/sh\necho x >> "$CALLS"\nexec /bin/sleep 0.2\n' > "$tmp/shim-ok/sleep"
 printf '#!/bin/sh\nif [ ! -f "$CALLS.once" ]; then : > "$CALLS.once"; echo x >> "$CALLS"; exit 1; fi\necho x >> "$CALLS"\nexec /bin/sleep 0.2\n' > "$tmp/shim-once/sleep"
+# fails like shim-fail, and after 50 calls stops the loop that called it (its parent shell): a spin reaches 50 at any speed, a paced loop never does
+printf '#!/bin/sh\necho x >> "$CALLS"\n[ "$(wc -l < "$CALLS")" -ge 50 ] && kill "$PPID"\nexit 1\n' > "$tmp/shim-cap/sleep"
 chmod +x "$tmp"/shim-*/sleep
 
-# run_idle <script> <shim dir> <seconds>: runs the loop for a bounded time, then kills it. Sets CALLS (sleep invocations), $tmp/console.
+# run_idle <script> <shim dir> <seconds> [<tenths of a second to wait for it to stop itself>]: runs the loop for a bounded time, then kills it. Sets CALLS (sleep invocations), $tmp/console.
 run_idle() {
   : > "$tmp/console"; : > "$tmp/calls"; rm -f "$tmp/calls.once" "$tmp/fifo"
   # the console is a device in the guest (writes append); here it is a file, so make the writes append too
   sed -e "s#> /dev/hvc0#>> $tmp/console#g" -e "s#/dev/hvc0#$tmp/console#g" "$1" > "$tmp/run.sh"
   CALLS="$tmp/calls" IDLE_FIFO="$tmp/fifo" PATH="$2:$PATH" sh "$tmp/run.sh" 2>/dev/null &
   pid=$!
-  /bin/sleep "$3"
-  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  if [ -n "${4:-}" ]; then i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$4" ]; do /bin/sleep 0.1; i=$((i+1)); done; else /bin/sleep "$3"; fi
+  kill "$pid" 2>/dev/null || true; { wait "$pid"; } 2>/dev/null || true
   CALLS_N=$(wc -l < "$tmp/calls" | tr -d ' ')
   FAILED_N=$(grep -c HARPOON_INIT_SLEEP_FAILED "$tmp/console" || true)
   OK_N=$(grep -c HARPOON_SPIKE_OK "$tmp/console" || true)
-}
+} 2>/dev/null  # the shell's "Terminated" job notice for a loop the shim stopped
 
 run_idle "$tmp/idle.raw" "$tmp/shim-fail" 3
 [ "$CALLS_N" -le 4 ] || fail "idle loop spins when sleep fails: $CALLS_N sleep calls in 3 s"
@@ -117,8 +119,9 @@ echo "  ok   after repeated failure PID 1 parks on a blocking read ($CALLS_N sle
 
 # negative control: the loop this replaced must be seen to spin by the same harness
 printf 'while true; do sleep 2; echo "HARPOON_SPIKE_OK" > /dev/hvc0; done\n' > "$tmp/idle.old"
-run_idle "$tmp/idle.old" "$tmp/shim-fail" 1
-[ "$CALLS_N" -gt 100 ] || fail "harness cannot detect the old spin (only $CALLS_N calls): the idle-loop checks above prove nothing"
-echo "  ok   negative control: the old loop made $CALLS_N sleep calls in 1 s"
+# (count-based, not rate-based: the shim ends the loop at 50 calls, so a slow host only takes longer, up to the 30 s wait)
+run_idle "$tmp/idle.old" "$tmp/shim-cap" 0 300
+[ "$CALLS_N" -ge 50 ] || fail "harness cannot detect the old spin (only $CALLS_N calls before the 30 s limit): the idle-loop checks above prove nothing"
+echo "  ok   negative control: the old loop reached the $CALLS_N-call cap"
 
 echo "resource safeguards: PASS"
