@@ -185,6 +185,28 @@ def s_ancestor():  # a process several levels up (the runner) is never signalled
     subprocess.run(["sh", "-c", f"sh -c 'python3 {u} $PPID'; echo $? > {W}/anc.rc; echo survived > {W}/anc.out"], capture_output=True, text=True, env=ENV)
     check(os.path.exists(W + "/anc.out") and open(W + "/anc.rc").read().strip() == "0", "the guard's grandparent (outer shell) survives an exact-identity kill request")
 
+def s_engine_classification():  # only `harpoon run [--options]` is an engine; the short-lived CLI forms must not be owned or escalated against
+    d = W + "/cls"; os.makedirs(d, exist_ok=True)
+    for n in ("run", "start", "stop", "status"): open(f"{d}/{n}", "w").write("sleep 30\n")  # /bin/sh (argv[0] "harpoon", unmangled in `ps`) runs ./<subcommand> as its script
+    def live(*argv):  # a real process whose `ps` command line is exactly "harpoon <argv>" (argv[0] is the basename the guard keys on)
+        p = subprocess.Popen(argv, executable="/bin/sh", cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.4); return p
+    cases = [(("harpoon", "run"), True), (("harpoon", "run", "--cpus", "1", "--memory", "1024"), True), (("harpoon", "run", "--", "x"), True),
+             (("harpoon", "run", "alpine"), False), (("harpoon", "start"), False), (("harpoon", "stop"), False), (("harpoon", "status"), False)]
+    for argv, want in cases:
+        p = live(*argv)
+        try:
+            cmd = G.command(p.pid)
+            check(G.is_engine(cmd) is want, f"'{' '.join(argv)}' is {'' if want else 'not '}an engine")
+        finally:
+            p.kill(); p.wait()
+    leave = f"import subprocess, sys; p = subprocess.Popen(['harpoon', 'status'], executable='/bin/sh', cwd={d!r}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); open({d!r} + '/cli.pid', 'w').write(str(p.pid))"
+    metrics(); rc, err, _ = guard(["--deadline", "20"] + FAST, [sys.executable, "-c", leave])
+    pid = int(open(d + "/cli.pid").read())
+    check(rc == 0 and "owns engine" not in err, f"a leftover `harpoon status` is not recorded as an engine (rc {rc})")
+    check(wait_until(lambda: not pid_alive(pid), 3), "but, carrying the run's marker, it is still stopped as the test's own process")
+    check(G.is_engine("/Users/x/harpoon/build/harpoon run --cpus 1") and not G.is_engine("/usr/bin/vim harpoon") and not G.is_engine(""), "full paths match, other programs and empty lines do not")
+
 def s_stale_ledger():
     metrics(); led = W + "/ledger"; os.makedirs(led, mode=0o700, exist_ok=True)
     dead = subprocess.Popen(["sleep", "0.1"]); dead_ident = G.ident(dead.pid); dead.wait()

@@ -60,7 +60,9 @@ def command(pid):
 
 def is_engine(cmdline):
     tokens = cmdline.split()
-    return bool(tokens) and (os.path.basename(tokens[0]) == "harpoon" or (TEST and ENGINE_MATCH in " ".join(tokens[:2])))
+    # The engine is `harpoon run [--options]`; start/stop/status and `run IMAGE` (a Docker thin client) are short-lived CLI calls.
+    return bool(tokens) and ((os.path.basename(tokens[0]) == "harpoon" and tokens[1:2] == ["run"] and (len(tokens) == 2 or tokens[2].startswith("-")))
+                             or (TEST and ENGINE_MATCH in " ".join(tokens[:2])))
 
 def ancestors():
     out, pid = set(), os.getpid()

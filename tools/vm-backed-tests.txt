@@ -44,3 +44,4 @@ exempt tools/guest-builder/regression-packaged-mgmt-migration.sh fake bundled ro
 exempt tools/regression-stage2-runtime-ownership.sh offline ownership checks
 exempt tools/regression-stage8-disk-reclamation.sh offline check of the stage-8 script
 exempt tools/release/macos/build.sh packaging only
+exempt harpoon/regression-vm-test-guard.sh fake engines only; its own inventory pattern matches itself

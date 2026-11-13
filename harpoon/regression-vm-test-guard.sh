@@ -97,6 +97,10 @@ mutate preflight 'if m1["disk_free"] < a.min_disk_start:' 'if False:'
 caught preflight preflight
 mutate diskabort 'if m["disk_free"] < a.min_disk_abort:' 'if False:'
 caught diskabort pressure
+mutate engine_run 'tokens[1:2] == ["run"] and (len(tokens) == 2 or tokens[2].startswith("-"))' 'True'
+caught engine_run engine_classification
+mutate engine_args 'and (len(tokens) == 2 or tokens[2].startswith("-"))' 'and True'
+caught engine_args engine_classification
 mutate sigterm 'if state["sig"]: outcome' 'if False: outcome'
 caught sigterm interrupt
 mutate occupancy 'if moved >= ACTIVE_SWAP:' 'if moved >= ACTIVE_SWAP or m2["swap_used"] / max(m2["swap_total"], 1) >= 0.85:'
