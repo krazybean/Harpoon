@@ -12,7 +12,7 @@ pre-existing VM, the runner, or an unrelated process), exclusive use of the prod
 unless `VMGUARD_ADOPT_EXISTING=1`), a supervised detached reaper, a `--sweep` for orphans, and bounded failure diagnostics. Production VM uptime is not limited. See
 `docs/testing-vm-containment.md`, including what cannot be guaranteed.
 
-### A guest can no longer exhaust the host through its console or memory (provisional until hardware-validated)
+### A guest can no longer exhaust the host through its console or memory (hardware-validated once; see the [v2.0.0 notes](v2.0.0.md))
 
 - **Guest console.** The serial console is read from a pipe by a dedicated thread, scanned for readiness, failure and kernel-panic
   markers as bytes (split reads, binary and malformed UTF-8 are handled), and kept in a rotating two-file log of at most 8 MiB
@@ -27,15 +27,15 @@ unless `VMGUARD_ADOPT_EXISTING=1`), a supervised detached reaper, a `--sweep` fo
   RAM, otherwise the start is refused (exit 11) with the numbers. Reservations are flock-held, so a crashed engine's reservation is
   reclaimed automatically, and concurrent starts are serialized. A registry that cannot be made private refuses the start.
 - **Guest init.** The final idle loop no longer spins if `sleep` itself fails: it reports `HARPOON_INIT_SLEEP_FAILED` once, paces with a
-  shell builtin, and parks after 20 straight failures. PID 1 never exits. **This takes effect only in a rebuilt initramfs**
-  (`tools/guest-builder/build-initramfs.sh`); the committed one is unchanged and its `.inputs` fingerprint is now stale by design.
-- The underlying `sleep`/PID 1 faults (SIGILL / SIGSEGV) are still unexplained.
+  shell builtin, and parks after 20 straight failures. PID 1 never exits. The in-tree arm64 initramfs was rebuilt with this loop
+  (sha256 `58420573…`; `guest-assets.manifest` and `.inputs` updated). The x86_64 initramfs comes from the older guest-assets tarball and does not include it.
+- The underlying `sleep`/PID 1 faults (SIGILL / SIGSEGV) are still unexplained and intermittent; see the [v2.0.0 notes](v2.0.0.md#known-issue-unexplained-intermittent-guest-faults).
 
 ### New root disks start at 4 GiB, and Harpoon offers to grow them (provisional)
 
 A **new** root disk is 4 GiB logical (sparse) instead of 32 GiB. Disks that already exist are not touched, and an explicit
 `--disk-size`, `HARPOON_DISK_SIZE` or `disk-size` still wins. **The 4 GiB default is provisional:** the guest uses about 335 MiB and has run
-Docker at the 2 GiB template size, but a live boot at 4 GiB has not been recorded yet, and some workloads need more (`azure-sql-edge`
+Docker at the 2 GiB template size, and a live boot at a 4 GiB disk was recorded once (the 2026-11-13 reliability gate, [v2.0.0 notes](v2.0.0.md)), but some workloads need more (`azure-sql-edge`
 exhausted 2 GiB). To keep the old behavior, set `HARPOON_DISK_SIZE=32G` or `harpoon config set disk-size 32G` before the first start.
 
 While Harpoon runs, the desktop warns when the Docker disk passes 80% (or 1 GiB free) and again at 92% (or 384 MiB free), and offers larger

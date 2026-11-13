@@ -206,7 +206,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Known Limitations / v0.1 Scope
 
-- **Platform:** Apple Silicon with ARM64 Linux guests is the tested platform. The rc.3 DMG is universal (it packages Intel binaries and an x86_64 guest), but Intel guest boot has not been verified, so Intel remains experimental. Windows/Linux hosts are not supported. Podman/rootless is not a 2.0 gate.
+- **Platform:** Apple Silicon with ARM64 Linux guests is the supported 2.0 release target and the only tested platform. The universal DMG packages Intel binaries and an x86_64 guest, but Intel guest boot has not been verified, so Intel is experimental and unsupported. Windows/Linux hosts are unsupported. Podman/rootless is not a 2.0 gate.
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
 - **Distribution signing:** the v2.0.0-rc.3 DMG is Developer ID signed, notarized and stapled. Earlier prereleases and source builds are ad-hoc signed (`com.apple.security.virtualization`) and are not notarized.
 - **Deployments:** live deployment, replacement and rollback are closed in shipping builds, as are registration removal and application removal.
@@ -237,6 +237,8 @@ an Apple Silicon Docker smoke test. Still open: installation and first-launch
 acceptance of the shipping desktop, Intel guest boot, second-Mac acceptance,
 2×30 cold boots, and upgrade/rollback with persistent state preserved. Harpoon
 v0.1.1 remains the latest stable desktop release.
+
+The 2.0.0 release is being prepared (version set, [draft notes](docs/releases/v2.0.0.md)); it is not tagged, signed or published, and its clean-install and signing/notarization gates are open.
 
 Artifacts are published on the repository Releases page. Source builds remain supported via `bash harpoon/build.sh` (see [Building](docs/building.md)).
 
