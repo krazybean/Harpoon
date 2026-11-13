@@ -138,14 +138,23 @@ final class PortForwardManager {
             return
         }
         guard let dev = vsockDevice else { completion(nil); return }
+        guard vsockHealth.allow() else { log("HARPOON_PORT_VSOCK_SKIPPED guest vsock unavailable"); completion(nil); return }
         log("HARPOON_PORT_VSOCK_CONNECT \(path)")
+        // A connect the framework never answers must not hold syncInFlight forever (it did: port sync stopped for good).
+        let pending = PendingConnect()
+        DispatchQueue.main.asyncAfter(deadline: .now() + BridgeLimits().connectTimeoutSeconds) {
+            if pending.claim() { vsockHealth.failed(); self.log("HARPOON_PORT_VSOCK_TIMEOUT \(path)"); completion(nil) }
+        }
         // MAIN: VZ connect — required on main
         dev.connect(toPort: 2375) { result in
             // VZ completion is on main
+            guard pending.claim() else { if case .success(let late) = result { vsockHealth.succeeded(); late.close() }; return }
             switch result {
             case .failure(_):
+                vsockHealth.failed()
                 completion(nil)
             case .success(let conn):
+                vsockHealth.succeeded()
                 self.log("HARPOON_PORT_VSOCK_CONNECTED \(path)")
                 let fd = conn.fileDescriptor
                 // BACKGROUND: blocking fd I/O off main

@@ -65,19 +65,22 @@ func startMgmtBridge() -> Bool {
                 close(cfd); continue
             }
             guard let dev = self.vsockDevice else { self.log("HARPOON_MGMT_CLOSE \(bid) vsock not ready"); close(cfd); self.mgmtSlots.release(); continue }
+            guard vsockHealth.allow() else { self.log("HARPOON_MGMT_CLOSE \(bid) guest vsock unavailable (recent connects failed); not connecting"); close(cfd); self.mgmtSlots.release(); continue }
             // Resolved exactly once: by the guest's answer or by the timeout, so a connect that never answers cannot hold the client open.
             let pending = PendingConnect()
             DispatchQueue.main.asyncAfter(deadline: .now() + self.mgmtSlots.limits.connectTimeoutSeconds) {
-                if pending.claim() { self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect timed out"); close(cfd); self.mgmtSlots.release() }
+                if pending.claim() { vsockHealth.failed(); self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect timed out"); close(cfd); self.mgmtSlots.release() }
             }
             dev.connect(toPort: self.config.mgmtVsockPort) { result in
-                guard pending.claim() else { if case .success(let late) = result { late.close() }; return }
+                guard pending.claim() else { if case .success(let late) = result { vsockHealth.succeeded(); late.close() }; return }
                 switch result {
                 case .failure(let e):
+                    vsockHealth.failed()
                     self.log("HARPOON_MGMT_VSOCK_CONNECT_FAILURE \(bid) port \(self.config.mgmtVsockPort) error \(e)")
                     self.log("HARPOON_MGMT_CLOSE \(bid) vsock connect failed")
                     close(cfd); self.mgmtSlots.release()
                 case .success(let conn):
+                    vsockHealth.succeeded()
                     self.log("HARPOON_MGMT_VSOCK_CONNECTED \(bid) vsockFd=\(conn.fileDescriptor) clientFd=\(cfd)")
                     // vsock <-> unix pipe; BridgePair owns both descriptors until both sources are cancelled
                     BridgePair(id: bid, tag: "HARPOON_MGMT", clientFd: cfd, peerFd: conn.fileDescriptor, slots: self.mgmtSlots, log: self.log, closePeer: { conn.close() }).start()

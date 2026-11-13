@@ -63,6 +63,69 @@ final class PendingConnect {
     func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true }
 }
 
+/// One verdict on the guest's vsock transport, shared by the Docker bridge, the management bridge and port sync. VZVirtioSocketDevice.connect
+/// has no cancel or timeout: with the guest dead (its init panicked) completions never arrive or arrive as resets, and the framework keeps
+/// one descriptor per connect that never completed. After `threshold` failures with no success in between only one probe per
+/// `probeInterval` is let through; the rest are refused without touching the framework. Any success closes the gate.
+final class VsockHealth {
+    private let lock = NSLock()
+    private var stalls = 0
+    private var nextProbe = Date.distantPast
+    let threshold: Int, probeInterval: TimeInterval
+    init(threshold: Int = 3, probeInterval: TimeInterval = 15) { self.threshold = threshold; self.probeInterval = probeInterval }
+    func allow(_ now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if stalls < threshold { return true }
+        if now >= nextProbe { nextProbe = now.addingTimeInterval(probeInterval); return true }
+        return false
+    }
+    func succeeded() { lock.lock(); stalls = 0; lock.unlock() }
+    func failed() { lock.lock(); stalls += 1; lock.unlock() }
+    var degraded: Bool { lock.lock(); defer { lock.unlock() }; return stalls >= threshold }
+}
+let vsockHealth = VsockHealth()
+
+/// `connected`: something accepts on the host socket (the bridge does, even with the guest dead). `answered`: the Docker daemon behind it
+/// replied to `GET /_ping`, which is the only thing that makes Docker ready.
+func dockerSocketProbe(path: String, timeoutSeconds: Int = 2) -> (connected: Bool, answered: Bool) {
+    if !FileManager.default.fileExists(atPath: path) { return (false, false) }
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    if fd < 0 { return (false, false) }
+    defer { close(fd) }
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    memset(&addr.sun_path, 0, MemoryLayout.size(ofValue: addr.sun_path))
+    _ = path.withCString { src in withUnsafeMutablePointer(to: &addr.sun_path) { dst in strncpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src, MemoryLayout.size(ofValue: dst.pointee)-1) } }
+    let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+    let ret = withUnsafePointer(to: addr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in connect(fd, sp, len) } }
+    if ret != 0 { return (false, false) }
+    var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var on: Int32 = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    let req = "GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n"
+    if req.withCString({ write(fd, $0, strlen($0)) }) < 0 { return (true, false) }
+    var buf = [UInt8](repeating: 0, count: 256)
+    let n = read(fd, &buf, buf.count)
+    return (true, n > 0 && dockerPingAnswered(String(decoding: buf[0..<n], as: UTF8.self)))
+}
+
+func dockerPingAnswered(_ response: String) -> Bool { response.hasPrefix("HTTP/1.") && response.prefix(32).contains(" 200") }
+
+/// Docker is ready only when the daemon answered `/_ping`. A log that once said HARPOON_RUNNING, with a socket that cannot be probed
+/// (sandboxed callers), is reported as unverified and never as ready; a socket that connects but does not answer is neither.
+func dockerReadiness(sockExists: Bool, probe: (connected: Bool, answered: Bool), logHasRunning: Bool) -> (ready: Bool, unverified: Bool) {
+    (probe.answered, !probe.answered && sockExists && logHasRunning && !probe.connected)
+}
+
+/// The kernel's own panic line from the guest console, or nil. Anchored to the console's `[ seconds]` prefix so text a workload prints
+/// cannot pass for it.
+func guestPanicLine(in serial: String) -> String? {
+    guard let re = try? NSRegularExpression(pattern: "^\\[ *\\d+\\.\\d+\\] Kernel panic - not syncing:.*$", options: [.anchorsMatchLines]),
+          let m = re.firstMatch(in: serial, range: NSRange(serial.startIndex..., in: serial)), let r = Range(m.range, in: serial) else { return nil }
+    return String(serial[r].prefix(200))
+}
+
 /// accept() failures that mean "out of descriptors/buffers right now": the listener must pause, not spin on the same failure.
 func acceptShouldBackOff(_ err: Int32) -> Bool { err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM }
 

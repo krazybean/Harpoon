@@ -81,19 +81,22 @@ func startUnixBridge() -> Bool {
                 close(cfd); continue
             }
             guard let dev = self.vsockDevice else { self.log("BRIDGE_CLOSE \(bid) vsock not ready"); close(cfd); self.dockerSlots.release(); continue }
+            guard vsockHealth.allow() else { self.log("BRIDGE_CLOSE \(bid) guest vsock unavailable (recent connects failed); not connecting"); close(cfd); self.dockerSlots.release(); continue }
             // Resolved exactly once: by the guest's answer or by the timeout, so a connect that never answers cannot hold the client open.
             let pending = PendingConnect()
             DispatchQueue.main.asyncAfter(deadline: .now() + self.dockerSlots.limits.connectTimeoutSeconds) {
-                if pending.claim() { self.log("BRIDGE_CLOSE \(bid) vsock connect timed out"); close(cfd); self.dockerSlots.release() }
+                if pending.claim() { vsockHealth.failed(); self.log("BRIDGE_CLOSE \(bid) vsock connect timed out"); close(cfd); self.dockerSlots.release() }
             }
             dev.connect(toPort: self.config.vsockPort) { result in
-                guard pending.claim() else { if case .success(let late) = result { late.close() }; return }
+                guard pending.claim() else { if case .success(let late) = result { vsockHealth.succeeded(); late.close() }; return }
                 switch result {
                 case .failure(let e):
+                    vsockHealth.failed()
                     self.log("VSOCK_CONNECT_FAILURE port \(self.config.vsockPort) error \(e)")
                     self.log("BRIDGE_CLOSE \(bid) vsock connect failed")
                     close(cfd); self.dockerSlots.release()
                 case .success(let conn):
+                    vsockHealth.succeeded()
                     let vfd = conn.fileDescriptor
                     self.log("BRIDGE_VSOCK_CONNECTED \(bid) vsockFd=\(vfd) clientFd=\(cfd)")
                     do {

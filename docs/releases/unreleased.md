@@ -78,6 +78,17 @@ answer), a blocked write waits without a busy loop and ends as soon as the clien
 number of open connections is bounded (256 Docker, 32 management) and shutdown closes them, and a listener that runs out of descriptors pauses
 instead of spinning. The desktop startup overlay now gives way as soon as the runtime reports running with Docker ready (after 10 s at most),
 each startup read is time-bounded, and a sustained management outage is shown as a warning rather than a hang.
+- A dead guest no longer looks like a ready Docker. `harpoon status` now counts Docker as ready only when `GET /_ping` is
+  answered through the socket (a bridge to a crashed guest still accepts connections). After three vsock connect failures
+  the Docker bridge, the management bridge and port sync stop calling the Virtualization framework (which cannot cancel a
+  connect and keeps a descriptor for each one that never completes) and try one probe every 15 s until the guest answers.
+  Port sync no longer stays in flight forever behind a connect that never returns. A stale `HARPOON_RUNNING` log line no
+  longer makes Docker or the engine look ready when the live probe fails or cannot connect; `status --json` reports that
+  case as `dockerUnverified: true` with `dockerReady: false`.
+- A guest kernel panic is now surfaced. The host gets no stop callback for one, so the runtime watches the guest console and,
+  on the kernel's panic line, logs `HARPOON_GUEST_PANIC` and records a `guest_panic` failure that `status` and the desktop banner
+  show. It does not restart or stop anything. Known and unresolved: the guest's PID 1 (the init shell script) died of SIGSEGV
+  in the observed panic; the cause needs a separate investigation, and `panic=1` was deliberately not added.
 
 ## Documentation
 

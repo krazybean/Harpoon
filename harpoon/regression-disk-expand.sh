@@ -7,8 +7,8 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 bin=${1:-${HARPOON_BIN:-$ROOT/harpoon/build/harpoon}}
 tmp=$(mktemp -d)
-fake_pid=
-cleanup() { [ -z "$fake_pid" ] || kill "$fake_pid" 2>/dev/null || true; rm -rf "$tmp"; }
+fake_pid=; dock_pid=
+cleanup() { [ -z "$dock_pid" ] || kill "$dock_pid" 2>/dev/null || true; [ -z "$fake_pid" ] || kill "$fake_pid" 2>/dev/null || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 export HARPOON_TEST_ROOT="$tmp/template.img"
 head -c 1048576 /dev/zero > "$HARPOON_TEST_ROOT"
@@ -113,7 +113,8 @@ meta() { # meta [cpus] [extra-json]: what the running VM recorded when it starte
   printf '{"pid":%s,"startedAt":"t","cpus":%s,"memoryMiB":2048,"diskPath":"%s","socketPath":"%s/harpoon-docker.sock","uuid":"u","binary":"b"%s}\n' "$fake_pid" "${1:-2}" "$disk" "$HARPOON_TEST_TMPDIR" "${2-,\"kernelPath\":\"$HARPOON_KERNEL\",\"initramfsPath\":\"$HARPOON_INITRAMFS\"}" > "$HARPOON_TEST_TMPDIR/runtime.json"
 }
 meta
-: > "$HARPOON_TEST_TMPDIR/harpoon-docker.sock"; echo HARPOON_RUNNING > "$HARPOON_TEST_TMPDIR/harpoon.log"
+python3 -I "$(dirname "$0")/fake-docker-ping.py" "$HARPOON_TEST_TMPDIR/harpoon-docker.sock" & dock_pid=$!; for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$HARPOON_TEST_TMPDIR/harpoon-docker.sock" ] && break; sleep 0.3; done
+ echo HARPOON_RUNNING > "$HARPOON_TEST_TMPDIR/harpoon.log"
 run status --json; case "$out" in *'"running"'*) ;; *) fail "stand-in does not look like a running Harpoon: $out";; esac
 before=$(sig "$disk")
 untouched() { kill -0 "$fake_pid" 2>/dev/null || fail "$1: the running process was signalled"; [ ! -e "$HARPOON_TEST_TMPDIR/harpoon-stop" ] || fail "$1: a stop was requested"; [ "$(sig "$disk")" = "$before" ] || fail "$1: the disk changed"; }
@@ -192,6 +193,6 @@ unset HARPOON_KERNEL HARPOON_INITRAMFS
 S="$ROOT/harpoon/Sources"
 mkdir -p "$tmp/unit-src" "$tmp/unit-ns"
 cp "$ROOT/harpoon/regression-disk-capacity-test.swift" "$tmp/unit-src/main.swift"
-xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$S/DiskCapacity.swift" "$tmp/unit-src/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
+xcrun swiftc -module-cache-path "$tmp/module-cache" "$S/RuntimeConfig.swift" "$S/Version.swift" "$S/ForwardTarget.swift" "$S/HarpoonRuntimeState.swift" "$S/BridgePair.swift" "$S/DiskCapacity.swift" "$tmp/unit-src/main.swift" -framework Virtualization -o "$tmp/unit" 2>&1 | grep -E "error" && fail "unit test did not compile" || true
 HARPOON_TEST_TMPDIR="$tmp/unit-ns" "$tmp/unit"
 echo "disk expand regression PASS"

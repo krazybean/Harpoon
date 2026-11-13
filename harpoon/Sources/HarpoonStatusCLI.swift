@@ -15,6 +15,7 @@ func handleStatus(args: [String]=[]) -> Int32 {
             "isolated": HarpoonRoots.testRoot != nil,
             "logPath": HarpoonPaths.logFile.path,
             "dockerReady": snap.dockerReady,
+            "dockerUnverified": snap.dockerUnverified,
             "sockExists": snap.sockExists,
             "lockHeld": snap.lockHeld,
             "mgmtSocketPath": HarpoonPaths.mgmtSocketPath,

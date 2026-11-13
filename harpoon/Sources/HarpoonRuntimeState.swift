@@ -252,22 +252,7 @@ func isLockHeld() -> Bool {
     }
 }
 
-func dockerSocketReady() -> Bool {
-    let path = HarpoonPaths.dockerSocketPath
-    let fm = FileManager.default
-    if !fm.fileExists(atPath: path) { return false }
-    // try connect to socket to see if live
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    if fd < 0 { return false }
-    defer { close(fd) }
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    memset(&addr.sun_path, 0, MemoryLayout.size(ofValue: addr.sun_path))
-    _ = path.withCString { src in withUnsafeMutablePointer(to: &addr.sun_path) { dst in strncpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src, MemoryLayout.size(ofValue: dst.pointee)-1) } }
-    let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-    let ret = withUnsafePointer(to: addr) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in connect(fd, sp, len) } }
-    return ret == 0
-}
+func dockerSocketReady() -> Bool { dockerSocketProbe(path: HarpoonPaths.dockerSocketPath).answered }
 
 // MARK: - Metadata helpers
 
@@ -395,7 +380,7 @@ func resolveConfigFromArgs(_ args: [String]) -> RuntimeConfig {
     return c
 }
 
-func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?) {
+func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bool, lockHeld: Bool, sockExists: Bool, dockerReady: Bool, meta: RuntimeMetadata?, failure: RuntimeFailure?, dockerUnverified: Bool) {
     let pid = readPIDFile()
     let meta = readMetadata()
     let alive: Bool
@@ -408,8 +393,8 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     }
     let lockHeld = isLockHeld()
     let sockExists = FileManager.default.fileExists(atPath: HarpoonPaths.dockerSocketPath)
-    let dockerReady = dockerSocketReady()
-    // fallback: check HARPOON_RUNNING in log (sandbox may block unix connect)
+    let probe = dockerSocketProbe(path: HarpoonPaths.dockerSocketPath)
+    // HARPOON_RUNNING in the log is history, not health: it only marks readiness as unverified when the socket cannot be probed (sandbox)
     // check both primary and fallback locations due to sandbox divergence
     var logHasRunning = false
     let logCandidates = HarpoonRoots.testRoot != nil ? [HarpoonPaths.logFile.path] : [
@@ -424,13 +409,13 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
             break
         }
     }
-    let effectiveReady = dockerReady || (sockExists && logHasRunning)
+    let readiness = dockerReadiness(sockExists: sockExists, probe: probe, logHasRunning: logHasRunning)
     // `run` is a supported foreground entrypoint and deliberately has no launcher
     // metadata. Its exclusive lock is therefore the secondary liveness signal.
     let activeRuntime = (alive && isHarpoon) || lockHeld
     let state: String
     if activeRuntime {
-        state = sockExists && effectiveReady ? "running" : "starting"
+        state = sockExists && readiness.ready ? "running" : "starting"
     } else if meta?.failure != nil {
         state = "failed"
     } else if pid != nil {
@@ -440,5 +425,5 @@ func statusSnapshot() -> (state: String, pid: Int32?, alive: Bool, isHarpoon: Bo
     } else {
         state = "stopped"
     }
-    return (state, pid, alive, isHarpoon, lockHeld, sockExists, dockerReady, meta, meta?.failure)
+    return (state, pid, alive, isHarpoon, lockHeld, sockExists, readiness.ready, meta, meta?.failure, readiness.unverified)
 }

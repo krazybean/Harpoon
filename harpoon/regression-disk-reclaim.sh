@@ -7,8 +7,8 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 bin=${1:-${HARPOON_BIN:-$ROOT/harpoon/build/harpoon}}
 tmp=$(mktemp -d)
-fake_pid=; mgmt_pid=; holder=
-cleanup() { for p in "$fake_pid" "$mgmt_pid" "$holder"; do [ -z "$p" ] || kill "$p" 2>/dev/null || true; done; rm -rf "$tmp"; }
+fake_pid=; mgmt_pid=; holder=; dock_pid=
+cleanup() { for p in "$dock_pid" "$fake_pid" "$mgmt_pid" "$holder"; do [ -z "$p" ] || kill "$p" 2>/dev/null || true; done; rm -rf "$tmp"; }
 trap cleanup EXIT
 export HARPOON_TEST_ROOT="$tmp/template.img"
 head -c 1048576 /dev/zero > "$HARPOON_TEST_ROOT"
@@ -37,7 +37,8 @@ xcrun swiftc -module-cache-path "$tmp/module-cache" "$tmp/standin-src/main.swift
 sleep 1; kill -0 "$fake_pid" 2>/dev/null || fail "the stand-in process died at startup"
 echo "$fake_pid" > "$HARPOON_TEST_TMPDIR/runtime.pid"
 printf '{"pid":%s,"startedAt":"t","cpus":2,"memoryMiB":2048,"diskPath":"%s","socketPath":"%s/harpoon-docker.sock","uuid":"u","binary":"b"}\n' "$fake_pid" "$disk" "$HARPOON_TEST_TMPDIR" > "$HARPOON_TEST_TMPDIR/runtime.json"
-: > "$HARPOON_TEST_TMPDIR/harpoon-docker.sock"; echo HARPOON_RUNNING > "$HARPOON_TEST_TMPDIR/harpoon.log"
+python3 -I "$(dirname "$0")/fake-docker-ping.py" "$HARPOON_TEST_TMPDIR/harpoon-docker.sock" & dock_pid=$!; for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$HARPOON_TEST_TMPDIR/harpoon-docker.sock" ] && break; sleep 0.3; done
+ echo HARPOON_RUNNING > "$HARPOON_TEST_TMPDIR/harpoon.log"
 run status --json; has '"running"' "stand-in is not running"
 
 # disconnected engine: running, but no management socket

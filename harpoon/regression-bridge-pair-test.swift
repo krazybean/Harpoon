@@ -152,6 +152,89 @@ do {
     settle(to: base, "closeAll")
 }
 
+// 7b. guest-down gate: after repeated failures only one probe per interval; one success reopens it
+do {
+    let h = VsockHealth(threshold: 3, probeInterval: 15), t0 = Date()
+    require(h.allow(t0) && !h.degraded, "healthy at the start")
+    h.failed(); h.failed(); require(h.allow(t0), "below the threshold every connect is allowed")
+    h.failed(); require(h.degraded, "three failures degrade")
+    require(h.allow(t0), "the first attempt after degrading is the probe")
+    var refused = 0; for _ in 0..<500 where !h.allow(t0.addingTimeInterval(5)) { refused += 1 }
+    require(refused == 500, "a storm inside the probe interval must not reach the framework (\(500 - refused) got through)")
+    require(h.allow(t0.addingTimeInterval(16)) && !h.allow(t0.addingTimeInterval(17)), "one probe per interval")
+    h.failed(); require(h.degraded, "a failed probe keeps it degraded")
+    h.succeeded(); require(!h.degraded && h.allow(t0.addingTimeInterval(18)) && h.allow(t0.addingTimeInterval(18)), "a success reopens the gate")
+}
+
+// 7c. Docker readiness is an answered /_ping, not a socket that accepts (what a bridge to a dead guest does)
+do {
+    require(dockerPingAnswered("HTTP/1.1 200 OK\r\nApi-Version: 1.51\r\n\r\nOK"), "200 is ready")
+    require(!dockerPingAnswered("HTTP/1.1 500 Internal\r\n\r\n") && !dockerPingAnswered(""), "non-200 or empty is not ready")
+    let dir = NSTemporaryDirectory() + "hp-ping-\(getpid())"; try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let stopLock = NSLock()
+    func listener(_ path: String, reply: String?) -> () -> Void {
+        unlink(path)
+        let l = socket(AF_UNIX, SOCK_STREAM, 0); var a = sockaddr_un(); a.sun_family = sa_family_t(AF_UNIX)
+        _ = path.withCString { src in withUnsafeMutablePointer(to: &a.sun_path) { strncpy(UnsafeMutableRawPointer($0).assumingMemoryBound(to: CChar.self), src, 100) } }
+        _ = withUnsafePointer(to: a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(l, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        listen(l, 4)
+        let done = DispatchSemaphore(value: 0); var halt = false
+        DispatchQueue.global().async {
+            var held: [Int32] = []
+            while true {
+                stopLock.lock(); let h = halt; stopLock.unlock(); if h { break }
+                var p = pollfd(fd: l, events: Int16(POLLIN), revents: 0)
+                if poll(&p, 1, 50) <= 0 { continue }
+                let c = accept(l, nil, nil); if c < 0 { continue }
+                if let r = reply { _ = r.withCString { write(c, $0, strlen($0)) }; close(c) } else { held.append(c) }
+            }
+            held.forEach { close($0) }; close(l); done.signal()
+        }
+        return { stopLock.lock(); halt = true; stopLock.unlock(); done.wait() }
+    }
+    let sock = dir + "/d.sock"
+    let silent = listener(sock, reply: nil)         // accepts and never answers: the bridge in front of a dead guest
+    let t0 = Date(); let r1 = dockerSocketProbe(path: sock, timeoutSeconds: 1)
+    require(r1.connected && !r1.answered, "an accepting but silent socket is connected, not ready")
+    require(Date().timeIntervalSince(t0) < 3, "the probe is bounded")
+    silent()
+    let live = listener(sock, reply: "HTTP/1.0 200 OK\r\n\r\nOK")
+    let r2 = dockerSocketProbe(path: sock); require(r2.connected && r2.answered, "an answering daemon is ready")
+    live()
+    let r3 = dockerSocketProbe(path: dir + "/none.sock"); require(!r3.connected && !r3.answered, "no socket is neither")
+}
+
+// 7d. readiness never comes from history: existing socket + stale running log + failed probe
+do {
+    typealias P = (connected: Bool, answered: Bool)
+    let silent: P = (true, false), refused: P = (false, false), ok: P = (true, true)
+    var r = dockerReadiness(sockExists: true, probe: silent, logHasRunning: true)
+    require(!r.ready && !r.unverified, "socket accepts, daemon silent, log says RUNNING: not ready and not even unverified")
+    r = dockerReadiness(sockExists: true, probe: refused, logHasRunning: true)
+    require(!r.ready && r.unverified, "cannot probe, stale log: not ready, reported unverified")
+    r = dockerReadiness(sockExists: true, probe: refused, logHasRunning: false)
+    require(!r.ready && !r.unverified, "cannot probe, no log: nothing to report")
+    r = dockerReadiness(sockExists: false, probe: refused, logHasRunning: true)
+    require(!r.ready && !r.unverified, "no socket file: not unverified either")
+    r = dockerReadiness(sockExists: true, probe: ok, logHasRunning: false)
+    require(r.ready && !r.unverified, "an answered ping is ready whatever the log says")
+}
+
+// 7e. the guest kernel panic seen on the console (taken from the incident's serial log)
+do {
+    let incident = """
+    HARPOON_SPIKE_OK
+    HARPOON_SPIKE_OK
+    [   87.633055] Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+    [   87.633189] CPU: 0 UID: 0 PID: 1 Comm: init Not tainted 6.12.110-0-virt #1-Alpine
+    """
+    let line = guestPanicLine(in: incident)
+    require(line?.contains("Attempted to kill init! exitcode=0x0000000b") == true, "panic line found: \(line ?? "nil")")
+    require(guestPanicLine(in: "HARPOON_SPIKE_OK\nHARPOON_DOCKER_READY\n") == nil, "a healthy console has none")
+    require(guestPanicLine(in: "echo Kernel panic - not syncing: fake\n   Kernel panic - not syncing: indented") == nil, "text without the kernel's timestamp prefix is not a panic")
+}
+
 // 8. bounded over a long run of probes: descriptors stay flat, they do not creep up
 do {
     var peak = base

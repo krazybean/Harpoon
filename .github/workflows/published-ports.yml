@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - harpoon/Sources/PortForwardManager.swift
+      - harpoon/Sources/BridgePair.swift
       - harpoon/Sources/PortForwardBridge.swift
       - harpoon/Sources/ForwardTarget.swift
       - harpoon/regression-forward-target.swift
@@ -15,6 +16,7 @@ on:
     branches: [main]
     paths:
       - harpoon/Sources/PortForwardManager.swift
+      - harpoon/Sources/BridgePair.swift
       - harpoon/Sources/PortForwardBridge.swift
       - harpoon/Sources/ForwardTarget.swift
       - harpoon/regression-forward-target.swift
