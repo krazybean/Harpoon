@@ -280,7 +280,8 @@ fn a_rollback_serves_the_earlier_release_from_its_pinned_configuration_and_pause
             Call::PreliminaryCheck,
             Call::StopCurrent,
             Call::StartNew,
-            Call::FinalCheck
+            Call::FinalCheck,
+            Call::ConfirmServing
         ]
     );
     assert!(

@@ -3020,3 +3020,270 @@ mod b15;
 // Attended deployment and replacement in the shipping gate; trigger-driven execution (Gate U) stays closed.
 #[path = "attended/mod.rs"]
 mod attended;
+
+// ------------------------------------------------------------------ restart-policy: serving containers come back by themselves
+
+/// A finished, serving release whose container exists in Docker (running or not) with this deployment's labels.
+fn serving_fixture(
+    t: &T,
+    status: DeploymentStatus,
+    running: bool,
+    labelled: bool,
+) -> (ApplicationId, DeploymentId, String) {
+    t.docker_runtime();
+    let (app, dep) = ids(31);
+    let name = format!("hp-{dep}");
+    let labels = if labelled {
+        harpoon_deploy::backend::harpoon_labels(&app, &dep)
+    } else {
+        vec![]
+    };
+    let id = t.h.docker.with(|s| s.add_container(&name, labels, running));
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    let mut d = finished(&app, &dep, status);
+    d.release = Some(harpoon_deploy::ids::ReleaseId::from_deployment(&dep));
+    j.persist(&d).unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::Container,
+        &name,
+        Disposition::RemoveOnFailure,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::Container, &name, &id))
+        .unwrap();
+    (app, dep, id)
+}
+
+fn policy_args(t: &T, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "restart-policy".into(),
+        "--docker-socket".into(),
+        t.socket(),
+        "--resources-dir".into(),
+        t.resources(),
+    ];
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v
+}
+
+fn policy_in_docker(t: &T, id: &str) -> String {
+    t.h.docker.with(|s| {
+        support::fake_docker::restart_policy_of(s.containers.iter().find(|c| c.id == id).unwrap())
+    })
+}
+
+fn docker_mutations(t: &T) -> usize {
+    t.h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method != "GET")
+        .count()
+}
+
+#[test]
+fn restart_policy_reports_first_and_changes_only_with_the_opt_in() {
+    let t = T::new();
+    let (_, _, id) = serving_fixture(&t, DeploymentStatus::Succeeded, true, true);
+    let before = t.journal_bytes();
+    let o = go(&t, &SHIPPING, &policy_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("would set unless-stopped") && o.stdout.contains("dry run"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        (docker_mutations(&t), policy_in_docker(&t, &id)),
+        (0, "no".to_string()),
+        "a dry run changes nothing"
+    );
+
+    // --apply without the exact opt-in is refused before Docker is contacted
+    let n = t.docker_requests();
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply"]));
+    assert_exit(&o, 6);
+    assert_eq!(t.docker_requests(), n);
+
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("set unless-stopped"), "{}", o.stdout);
+    assert_eq!(policy_in_docker(&t, &id), "unless-stopped");
+    assert_eq!(t.journal_bytes(), before, "the journal is not written");
+    // idempotent
+    let m = docker_mutations(&t);
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("already unless-stopped"), "{}", o.stdout);
+    assert_eq!(docker_mutations(&t), m);
+}
+
+#[test]
+fn restart_policy_leaves_a_stopped_serving_container_stopped() {
+    let t = T::new();
+    let (_, _, id) = serving_fixture(&t, DeploymentStatus::Succeeded, false, true);
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("not running") && o.stdout.contains("not started"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        docker_mutations(&t),
+        0,
+        "a stopped application is neither started nor given a policy"
+    );
+    assert_eq!(policy_in_docker(&t, &id), "no");
+}
+
+#[test]
+fn restart_policy_does_not_touch_a_container_the_journal_does_not_vouch_for() {
+    let t = T::new();
+    // the recorded id now belongs to a container without this deployment's Harpoon labels
+    let (_, _, id) = serving_fixture(&t, DeploymentStatus::Succeeded, true, false);
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 7);
+    assert!(
+        o.stdout.contains("not the recorded container"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(docker_mutations(&t), 0);
+    assert_eq!(policy_in_docker(&t, &id), "no");
+}
+
+#[test]
+fn restart_policy_ignores_a_release_that_failed_and_refuses_to_act_mid_deployment() {
+    let t = T::new();
+    let (_, _, id) = serving_fixture(&t, DeploymentStatus::Failed, true, true);
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("nothing is recorded as serving"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        (docker_mutations(&t), policy_in_docker(&t, &id)),
+        (0, "no".to_string()),
+        "a failed release is never revived"
+    );
+
+    let t = T::new();
+    serving_fixture(&t, DeploymentStatus::Running, true, true);
+    let n = t.docker_requests();
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("recover"), "{}", o.stderr);
+    assert_eq!(t.docker_requests(), n);
+}
+
+#[test]
+fn restart_policy_needs_an_explicit_socket_and_a_real_runtime() {
+    let t = T::new();
+    serving_fixture(&t, DeploymentStatus::Succeeded, true, true);
+    let o = t.cli(&["restart-policy", "--resources-dir", &t.resources()]);
+    assert_exit(&o, 5);
+    assert!(
+        o.stderr.contains("explicit --docker-socket"),
+        "{}",
+        o.stderr
+    );
+    std::fs::write(t.rt.join("runtime-kind"), "simulated\n").unwrap();
+    let o = go(&t, &SHIPPING, &policy_args(&t, &[]));
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("simulated"), "{}", o.stderr);
+}
+
+#[test]
+fn restart_policy_after_a_replacement_touches_only_the_release_that_serves_now() {
+    let t = T::new();
+    t.docker_runtime();
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let app = ids(41).0;
+    let mk = |seed: u8, finished_ms: u64, running: bool| {
+        let dep = ids(seed).1;
+        let name = format!("hp-{dep}");
+        let labels = harpoon_deploy::backend::harpoon_labels(&app, &dep);
+        let id = t.h.docker.with(|s| s.add_container(&name, labels, running));
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let mut d = finished(&app, &dep, DeploymentStatus::Succeeded);
+        d.release = Some(harpoon_deploy::ids::ReleaseId::from_deployment(&dep));
+        d.finished_ms = Some(finished_ms);
+        j.persist(&d).unwrap();
+        j.record(&intent(
+            &app,
+            &dep,
+            ResourceKind::Container,
+            &name,
+            Disposition::RemoveOnFailure,
+        ))
+        .unwrap();
+        j.record(&receipt(&dep, ResourceKind::Container, &name, &id))
+            .unwrap();
+        id
+    };
+    // the older release was running with unless-stopped and was stopped by the replacement; the newer one serves
+    let old = mk(42, 5_000, false);
+    t.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .find(|c| c.id == old)
+            .unwrap()
+            .restart_policy = Some("unless-stopped".into())
+    });
+    let new = mk(43, 9_000, true);
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_exit(&o, 0);
+    assert_eq!(policy_in_docker(&t, &new), "unless-stopped");
+    let touched: Vec<String> =
+        t.h.docker
+            .requests()
+            .into_iter()
+            .filter(|r| r.method != "GET")
+            .map(|r| r.path)
+            .collect();
+    assert_eq!(
+        touched,
+        vec![format!("/containers/{new}/update")],
+        "only the serving release is changed, the stopped one is not started or updated"
+    );
+    assert!(!t
+        .h
+        .docker
+        .with(|s| s.containers.iter().find(|c| c.id == old).unwrap().running));
+}
+
+#[test]
+fn restart_policy_with_no_journal_or_a_damaged_one_never_guesses_ownership() {
+    // no journal: nothing is known, so nothing is touched
+    let t = T::new();
+    t.h.docker
+        .with(|s| s.add_container("hp-dep_looks_like_ours", vec![], true));
+    let o = go(&t, &SHIPPING, &policy_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("no journal exists"), "{}", o.stdout);
+    assert_eq!(t.docker_requests(), 0);
+
+    // a damaged journal: an explicit failure, and Docker is not contacted
+    let t = T::new();
+    serving_fixture(&t, DeploymentStatus::Succeeded, true, true);
+    let path = t.journal_dir().join(SQLITE_FILE);
+    let mut bytes = std::fs::read(&path).unwrap();
+    for b in bytes.iter_mut().take(64) {
+        *b = 0xFF;
+    }
+    std::fs::write(&path, bytes).unwrap();
+    let n = t.docker_requests();
+    let auth = format!("--{AUTH_FLAG}={AUTH_PHRASE}");
+    let o = go(&t, &SHIPPING, &policy_args(&t, &["--apply", &auth]));
+    assert_ne!(o.code, 0, "stdout:\n{}\nstderr:\n{}", o.stdout, o.stderr);
+    assert_eq!(t.docker_requests(), n);
+    assert_eq!(docker_mutations(&t), 0);
+}

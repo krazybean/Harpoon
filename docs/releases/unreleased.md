@@ -4,6 +4,15 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### Applications come back after a Harpoon restart (lifecycle fix, not released)
+
+- **Cause.** Harpoon created every application container with restart policy `no`, so after any guest restart the applications stayed
+  down until started by hand. The database container (a Compose service with `unless-stopped`) came back; the applications did not.
+- **Fix.** A release that is confirmed serving is set to `unless-stopped`, after its success is durable in the journal. Candidates and
+  failed releases stay `no`. Releases that were stopped on purpose, including the one a replacement stopped, stay stopped.
+  `harpoon-deploy restart-policy` (dry run by default) applies the same to releases that predate this. See
+  [Application recovery after a restart](../deployment-recovery.md).
+
 ### Source deployments: a repository without a Dockerfile builds from a recipe Harpoon generates (2.0.1 work, not released)
 
 - **Detection.** When a registration names no Dockerfile and the checkout has none, Harpoon detects an npm project (`package.json`;
