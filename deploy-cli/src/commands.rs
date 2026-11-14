@@ -1322,13 +1322,18 @@ fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     }
     let _ = writeln!(
         out,
-        "base images (local only, never pulled): {}{}",
+        "base images ({}): {}{}",
+        if s.cfg.plan.is_some() {
+            "generated build: the builder fetches an image that is not cached"
+        } else {
+            "local only, never pulled"
+        },
         if s.images.is_empty() {
             "none".to_string()
         } else {
             s.images.iter().cloned().collect::<Vec<_>>().join(", ")
         },
-        if socket.is_none() {
+        if socket.is_none() && s.cfg.plan.is_none() {
             " — presence not checked"
         } else {
             ""
@@ -1384,7 +1389,13 @@ fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     );
     let _ = writeln!(
         out,
-        "limits: 256 MiB memory, 0.5 CPU, 64 PIDs, no swap, no restart policy, no volumes"
+        "limits: {}, no restart policy, no volumes{}",
+        if s.cfg.limits == Limits::UNLIMITED {
+            "no per-application memory, CPU or process caps (the VM's own safeguards apply)"
+        } else {
+            "256 MiB memory, 0.5 CPU, 64 PIDs, no swap"
+        },
+        s.cfg.network.as_ref().map_or(String::new(), |n| format!(", joins Docker network {n}"))
     );
     let _ = writeln!(
         out,
