@@ -888,6 +888,7 @@ mod git_records {
             context: None,
             target: None,
             health_path: None,
+            settings: None,
             at_ms: 1,
         }
     }
