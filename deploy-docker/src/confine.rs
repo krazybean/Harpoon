@@ -176,7 +176,11 @@ fn confine_dirs(root: &Path, context: &Path) -> Result<(PathBuf, PathBuf), Confi
 
 /// A source whose Dockerfile Harpoon generates: the text is held in memory and written only into the private build
 /// snapshot. The workspace must not already hold a file of that name, so nothing the user wrote is shadowed.
-pub fn confine_generated(root: &Path, context: &Path, text: String) -> Result<Source, ConfineError> {
+pub fn confine_generated(
+    root: &Path,
+    context: &Path,
+    text: String,
+) -> Result<Source, ConfineError> {
     let (root_real, ctx_real) = confine_dirs(root, context)?;
     let wanted = ctx_real.join(crate::plan::GENERATED_DOCKERFILE);
     if std::fs::symlink_metadata(&wanted).is_ok() {

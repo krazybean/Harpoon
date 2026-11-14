@@ -511,13 +511,25 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
     match (method, seg.as_slice()) {
         ("GET", ["_ping"]) => (200, "OK".into()),
         ("GET", ["system", "df"]) => {
-            let entries: Vec<String> = s.build_cache.iter().map(|(n, u)| format!("{{\"Size\":{n},\"InUse\":{u}}}")).collect();
+            let entries: Vec<String> = s
+                .build_cache
+                .iter()
+                .map(|(n, u)| format!("{{\"Size\":{n},\"InUse\":{u}}}"))
+                .collect();
             (200, format!("{{\"BuildCache\":[{}]}}", entries.join(",")))
         }
         ("POST", ["build", "prune"]) => {
-            let freed: u64 = s.build_cache.iter().filter(|(_, u)| !*u).map(|(n, _)| *n).sum();
+            let freed: u64 = s
+                .build_cache
+                .iter()
+                .filter(|(_, u)| !*u)
+                .map(|(n, _)| *n)
+                .sum();
             s.build_cache.retain(|(_, u)| *u);
-            (200, format!("{{\"CachesDeleted\":[],\"SpaceReclaimed\":{freed}}}"))
+            (
+                200,
+                format!("{{\"CachesDeleted\":[],\"SpaceReclaimed\":{freed}}}"),
+            )
         }
         ("GET", ["info"]) => {
             let (name, root, kernel) = if s.info.0.is_empty() {

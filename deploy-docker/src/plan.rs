@@ -47,7 +47,9 @@ fn command_problem(what: &str, v: &str) -> Result<(), String> {
         return Err(format!("the {what} command is empty"));
     }
     if v.len() > MAX_COMMAND {
-        return Err(format!("the {what} command is longer than {MAX_COMMAND} characters"));
+        return Err(format!(
+            "the {what} command is longer than {MAX_COMMAND} characters"
+        ));
     }
     if let Some(c) = v.chars().find(|c| c.is_control()) {
         return Err(format!(
@@ -141,10 +143,20 @@ impl Settings {
             items.push(("start", s(v.clone())));
         }
         if let Some(v) = self.style {
-            items.push(("style", s(if v == Style::Production { "production" } else { "development" })));
+            items.push((
+                "style",
+                s(if v == Style::Production {
+                    "production"
+                } else {
+                    "development"
+                }),
+            ));
         }
         if let Some(v) = self.kind {
-            items.push(("kind", s(if v == Kind::Service { "service" } else { "job" })));
+            items.push((
+                "kind",
+                s(if v == Kind::Service { "service" } else { "job" }),
+            ));
         }
         if let Some(v) = &self.network {
             items.push(("network", s(v.clone())));
@@ -197,7 +209,11 @@ fn node_major(engines: Option<&str>, nvmrc: Option<&str>) -> u32 {
             .split(|c: char| c.is_whitespace() || c == '|')
             .filter(|t| !t.is_empty())
             .filter_map(|t| {
-                let op = t.chars().next().filter(|c| matches!(c, '<' | '>' | '^' | '~' | '=')).unwrap_or('=');
+                let op = t
+                    .chars()
+                    .next()
+                    .filter(|c| matches!(c, '<' | '>' | '^' | '~' | '='))
+                    .unwrap_or('=');
                 let digits: String = t
                     .trim_start_matches(|c: char| !c.is_ascii_digit())
                     .chars()
@@ -207,7 +223,11 @@ fn node_major(engines: Option<&str>, nvmrc: Option<&str>) -> u32 {
             })
             .collect();
         // "<23" means 22; ">=22.1 <23" means 22; ">=20" alone means the lowest named (20).
-        let upper = nums.iter().filter(|(o, _)| *o == '<').map(|(_, n)| n.saturating_sub(1)).max();
+        let upper = nums
+            .iter()
+            .filter(|(o, _)| *o == '<')
+            .map(|(_, n)| n.saturating_sub(1))
+            .max();
         upper.or_else(|| nums.iter().map(|(_, n)| *n).max())
     });
     let from_rc = nvmrc.and_then(|t| {
@@ -217,23 +237,36 @@ fn node_major(engines: Option<&str>, nvmrc: Option<&str>) -> u32 {
             .next()
             .and_then(|m| m.parse().ok())
     });
-    from_range.or(from_rc).filter(|m| (14..=40).contains(m)).unwrap_or(22)
+    from_range
+        .or(from_rc)
+        .filter(|m| (14..=40).contains(m))
+        .unwrap_or(22)
 }
 
 fn detect_node(dir: &Path, pkg: &str) -> Result<Detected, String> {
     let j = Json::parse(pkg).map_err(|e| format!("package.json is not valid JSON: {}", e.0))?;
-    let other_manager = ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"].iter().any(|f| exists(dir, f));
+    let other_manager = ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"]
+        .iter()
+        .any(|f| exists(dir, f));
     if other_manager && !exists(dir, "package-lock.json") {
         return Err("this project uses a package manager other than npm; Harpoon builds npm projects only (add a Dockerfile, or an npm package-lock.json)".into());
     }
     let scripts = j.get("scripts");
-    let script = |n: &str| scripts.and_then(|s| s.get(n)).and_then(Json::as_str).is_some();
+    let script = |n: &str| {
+        scripts
+            .and_then(|s| s.get(n))
+            .and_then(Json::as_str)
+            .is_some()
+    };
     let has_dep = |n: &str| {
         ["dependencies", "devDependencies"]
             .iter()
             .any(|k| j.get(k).and_then(|d| d.get(n)).is_some())
     };
-    let engines = j.get("engines").and_then(|e| e.get("node")).and_then(Json::as_str);
+    let engines = j
+        .get("engines")
+        .and_then(|e| e.get("node"))
+        .and_then(Json::as_str);
     let major = node_major(engines, read(dir, ".nvmrc").as_deref());
     let framework = if has_dep("next") {
         "Next.js"
@@ -300,9 +333,15 @@ fn detect_python(dir: &Path) -> Result<Detected, String> {
         return Err("no requirements.txt, uv.lock or pyproject.toml found".into());
     }
     let (framework, install) = if uv {
-        ("Python (uv)", "pip install --no-cache-dir uv && uv sync --frozen --no-dev")
+        (
+            "Python (uv)",
+            "pip install --no-cache-dir uv && uv sync --frozen --no-dev",
+        )
     } else if reqs {
-        ("Python (pip)", "pip install --no-cache-dir -r requirements.txt")
+        (
+            "Python (pip)",
+            "pip install --no-cache-dir -r requirements.txt",
+        )
     } else {
         ("Python (pip)", "pip install --no-cache-dir .")
     };
@@ -327,7 +366,9 @@ fn detect_python(dir: &Path) -> Result<Detected, String> {
     let start = start.map(|c| if uv { format!("uv run {c}") } else { c });
     let mut notes = Vec::new();
     if start.is_none() {
-        notes.push("no start command found (no Procfile web line, main.py or app.py); set one".into());
+        notes.push(
+            "no start command found (no Procfile web line, main.py or app.py); set one".into(),
+        );
     }
     Ok(Detected {
         language: Language::Python,
@@ -372,11 +413,10 @@ impl BuildPlan {
             Style::Production => d.start.clone(),
             Style::Development => d.dev_start.clone().or_else(|| d.start.clone()),
         };
-        let start = set
-            .start
-            .clone()
-            .or(default_start)
-            .ok_or_else(|| format!("{}: no start command was detected; set one", d.framework))?;
+        let start =
+            set.start.clone().or(default_start).ok_or_else(|| {
+                format!("{}: no start command was detected; set one", d.framework)
+            })?;
         let build = match style {
             Style::Development => None,
             Style::Production => set.build.clone().or_else(|| d.build.clone()),
@@ -399,7 +439,11 @@ impl BuildPlan {
             self.install,
             self.build.as_deref().unwrap_or("-"),
             self.start,
-            if self.style == Style::Production { "production" } else { "development" }
+            if self.style == Style::Production {
+                "production"
+            } else {
+                "development"
+            }
         )
     }
 
@@ -412,10 +456,15 @@ impl BuildPlan {
             .map(|id| format!("--mount=type=secret,id={id},env={id} "))
             .collect();
         let mut out = String::new();
-        out.push_str(&format!("FROM {}\nWORKDIR /app\n", self.detected.base_image));
+        out.push_str(&format!(
+            "FROM {}\nWORKDIR /app\n",
+            self.detected.base_image
+        ));
         // Bounds the Node heap for install and build only (an ARG is not part of the image's runtime environment),
         // so one build cannot take the whole guest from the engine's own services. `--build-arg NODE_OPTIONS` overrides.
-        if self.detected.language == Language::Node && !build_args.iter().any(|a| a == "NODE_OPTIONS") {
+        if self.detected.language == Language::Node
+            && !build_args.iter().any(|a| a == "NODE_OPTIONS")
+        {
             out.push_str("ARG NODE_OPTIONS=--max-old-space-size=2048\n");
         }
         for a in build_args {
@@ -473,7 +522,10 @@ mod tests {
 
     #[test]
     fn next_with_lockfile_and_postinstall() {
-        let d = tmp("next", &[("package.json", NEXT), ("package-lock.json", "{}")]);
+        let d = tmp(
+            "next",
+            &[("package.json", NEXT), ("package-lock.json", "{}")],
+        );
         let det = detect(&d).unwrap();
         assert_eq!(det.framework, "Next.js");
         assert_eq!(det.base_image, "node:22-slim");
@@ -481,8 +533,12 @@ mod tests {
         assert!(det.install_needs_source);
         let plan = BuildPlan::resolve(det, &Settings::default()).unwrap();
         let df = plan.dockerfile(3000, &[], &["DATABASE_URL".into()]);
-        assert!(df.contains("COPY . .\nRUN --mount=type=secret,id=DATABASE_URL,env=DATABASE_URL npm ci\n"));
-        assert!(df.contains("RUN --mount=type=secret,id=DATABASE_URL,env=DATABASE_URL npm run build\n"));
+        assert!(df.contains(
+            "COPY . .\nRUN --mount=type=secret,id=DATABASE_URL,env=DATABASE_URL npm ci\n"
+        ));
+        assert!(
+            df.contains("RUN --mount=type=secret,id=DATABASE_URL,env=DATABASE_URL npm run build\n")
+        );
         assert!(df.contains("CMD [\"/bin/sh\",\"-c\",\"exec npm start\"]"));
         assert!(!df.contains("DATABASE_URL=")); // the id, never a value
         assert!(crate::dockerfile::required_images(&df).is_ok());
@@ -490,7 +546,10 @@ mod tests {
 
     #[test]
     fn plain_node_caches_dependencies_first() {
-        let d = tmp("plain", &[("package.json", r#"{"scripts":{"start":"node a.js"}}"#)]);
+        let d = tmp(
+            "plain",
+            &[("package.json", r#"{"scripts":{"start":"node a.js"}}"#)],
+        );
         let plan = BuildPlan::resolve(detect(&d).unwrap(), &Settings::default()).unwrap();
         let df = plan.dockerfile(8080, &["A".into()], &[]);
         assert!(df.starts_with("FROM node:22-slim\nWORKDIR /app\nARG NODE_OPTIONS=--max-old-space-size=2048\nARG A\nCOPY package.json package-lock.json* ./\nRUN npm install\nCOPY . .\n"));
@@ -507,8 +566,14 @@ mod tests {
 
     #[test]
     fn overrides_and_development_style() {
-        let d = tmp("dev", &[("package.json", NEXT), ("package-lock.json", "{}")]);
-        let set = Settings::parse(r#"{"style":"development","start":"npx next dev","install":"npm install"}"#).unwrap();
+        let d = tmp(
+            "dev",
+            &[("package.json", NEXT), ("package-lock.json", "{}")],
+        );
+        let set = Settings::parse(
+            r#"{"style":"development","start":"npx next dev","install":"npm install"}"#,
+        )
+        .unwrap();
         let plan = BuildPlan::resolve(detect(&d).unwrap(), &set).unwrap();
         assert!(plan.build.is_none());
         let df = plan.dockerfile(3000, &[], &[]);
@@ -522,7 +587,14 @@ mod tests {
         let det = detect(&d).unwrap();
         assert_eq!(det.start.as_deref(), Some("python app.py"));
         assert!(det.base_image.starts_with("python:3.12"));
-        let d = tmp("uv", &[("pyproject.toml", "[project]"), ("uv.lock", ""), ("main.py", "")]);
+        let d = tmp(
+            "uv",
+            &[
+                ("pyproject.toml", "[project]"),
+                ("uv.lock", ""),
+                ("main.py", ""),
+            ],
+        );
         let det = detect(&d).unwrap();
         assert_eq!(det.start.as_deref(), Some("uv run python main.py"));
         assert!(det.install.contains("uv sync --frozen"));
@@ -532,7 +604,10 @@ mod tests {
 
     #[test]
     fn settings_validate_and_round_trip() {
-        let s = Settings::parse(r#"{"start":"npm start","kind":"job","network":"collectiv-harpoon-test_default"}"#).unwrap();
+        let s = Settings::parse(
+            r#"{"start":"npm start","kind":"job","network":"collectiv-harpoon-test_default"}"#,
+        )
+        .unwrap();
         assert_eq!(Settings::parse(&s.canonical()).unwrap(), s);
         for bad in [
             r#"{"start":"a\nb"}"#,

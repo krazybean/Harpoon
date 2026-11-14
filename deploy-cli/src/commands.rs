@@ -19,11 +19,11 @@ use harpoon_deploy_docker::attribution::HostGuestProof;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, confine_generated, Source};
-use harpoon_deploy_docker::plan::{BuildPlan, Settings};
 use harpoon_deploy_docker::dockerfile::required_images;
 use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
+use harpoon_deploy_docker::plan::{BuildPlan, Settings};
 use harpoon_deploy_docker::preflight::context_size_with;
 use harpoon_deploy_journal::{writer_lock_status, LockStatus, Restored};
 use std::collections::BTreeSet;
@@ -1397,7 +1397,10 @@ fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
         } else {
             "256 MiB memory, 0.5 CPU, 64 PIDs, no swap"
         },
-        s.cfg.network.as_ref().map_or(String::new(), |n| format!(", joins Docker network {n}"))
+        s.cfg
+            .network
+            .as_ref()
+            .map_or(String::new(), |n| format!(", joins Docker network {n}"))
     );
     let _ = writeln!(
         out,
@@ -1567,7 +1570,11 @@ pub(crate) fn describe(a: &Action) -> String {
     }
 }
 
-pub(crate) fn docker_backend(p: &Parsed, rt: &Runtime, socket: &Path) -> Result<DockerBackend, Fail> {
+pub(crate) fn docker_backend(
+    p: &Parsed,
+    rt: &Runtime,
+    socket: &Path,
+) -> Result<DockerBackend, Fail> {
     let resources = p.value("resources-dir").ok_or_else(|| {
         Fail::config(
             "--resources-dir DIR is required (the bundled-resources directory holding Buildx)",
@@ -1753,7 +1760,15 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         .map_err(|e| Fail::failed(e.to_string()))?;
     // Configuration and secrets, resolved and fetched before the journal is written to, anything is
     // built, or Docker is contacted: a missing or inaccessible secret stops the run here.
-    let mut prep = config_cmds::prepare(p, svc, &restored.config, &d.application_id, &s.env, &[], s.cfg.plan.as_ref().map(|x| x.identity()).as_deref())?;
+    let mut prep = config_cmds::prepare(
+        p,
+        svc,
+        &restored.config,
+        &d.application_id,
+        &s.env,
+        &[],
+        s.cfg.plan.as_ref().map(|x| x.identity()).as_deref(),
+    )?;
     journal
         .config(&prep.snapshot(&d.id, &d.application_id))
         .map_err(journal_config_err)?;

@@ -28,14 +28,31 @@ fn world_with(t: &T, serving_pins_the_old_image: bool) -> W {
     let (app, old) = ids(1);
     let (_, serving) = ids(2);
     let (_, failed) = ids(3);
-    let mut w = W { app: app.clone(), old: old.clone(), serving: serving.clone(), failed: failed.clone(), ids: Default::default() };
+    let mut w = W {
+        app: app.clone(),
+        old: old.clone(),
+        serving: serving.clone(),
+        failed: failed.clone(),
+        ids: Default::default(),
+    };
     let (mut j, _) = open_j(&t.journal_dir()).unwrap();
-    for (n, (dep, status, at)) in [(&old, DeploymentStatus::Succeeded, 10_000u64), (&serving, DeploymentStatus::Succeeded, 20_000), (&failed, DeploymentStatus::Failed, 30_000)].into_iter().enumerate() {
+    for (n, (dep, status, at)) in [
+        (&old, DeploymentStatus::Succeeded, 10_000u64),
+        (&serving, DeploymentStatus::Succeeded, 20_000),
+        (&failed, DeploymentStatus::Failed, 30_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut d = finished(&app, dep, status);
         if status == DeploymentStatus::Succeeded {
             d.release = Some(ReleaseId::from_deployment(dep));
             if dep == &serving {
-                let pinned = support::fake_iid(if serving_pins_the_old_image { 2000 } else { 2001 });
+                let pinned = support::fake_iid(if serving_pins_the_old_image {
+                    2000
+                } else {
+                    2001
+                });
                 d.pinned = Some(harpoon_deploy::release::ReleaseConfig {
                     image_id: pinned,
                     image_tag: "harpoon/x:y".into(),
@@ -54,19 +71,40 @@ fn world_with(t: &T, serving_pins_the_old_image: bool) -> W {
         }
         d.finished_ms = Some(at);
         j.persist(&d).unwrap();
-        let tag = format!("harpoon/{}:{}-0123456789abcdef0123456789abcdef", app.as_str().to_ascii_lowercase(), dep);
+        let tag = format!(
+            "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+            app.as_str().to_ascii_lowercase(),
+            dep
+        );
         let iid = support::fake_iid(2000 + n as u64);
         let lbl = harpoon_deploy::backend::harpoon_labels(&app, dep);
-        t.h.docker.with(|s| s.add_image_with_id(&iid, &[&tag], lbl.clone(), vec![]));
-        j.record(&intent(&app, dep, ResourceKind::Image, &tag, Disposition::Retain)).unwrap();
-        j.record(&receipt(dep, ResourceKind::Image, &tag, &iid)).unwrap();
+        t.h.docker
+            .with(|s| s.add_image_with_id(&iid, &[&tag], lbl.clone(), vec![]));
+        j.record(&intent(
+            &app,
+            dep,
+            ResourceKind::Image,
+            &tag,
+            Disposition::Retain,
+        ))
+        .unwrap();
+        j.record(&receipt(dep, ResourceKind::Image, &tag, &iid))
+            .unwrap();
         let mut cid = String::new();
         if status == DeploymentStatus::Succeeded {
             let name = format!("hp-{dep}");
             let running = dep == &serving;
             cid = t.h.docker.with(|s| s.add_container(&name, lbl, running));
-            j.record(&intent(&app, dep, ResourceKind::Container, &name, Disposition::RemoveOnFailure)).unwrap();
-            j.record(&receipt(dep, ResourceKind::Container, &name, &cid)).unwrap();
+            j.record(&intent(
+                &app,
+                dep,
+                ResourceKind::Container,
+                &name,
+                Disposition::RemoveOnFailure,
+            ))
+            .unwrap();
+            j.record(&receipt(dep, ResourceKind::Container, &name, &cid))
+                .unwrap();
         }
         w.ids.insert(dep.to_string(), (iid, cid));
     }
@@ -74,7 +112,10 @@ fn world_with(t: &T, serving_pins_the_old_image: bool) -> W {
 }
 
 fn args(t: &T, extra: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = ["cleanup-releases", "--docker-socket"].iter().map(|s| s.to_string()).collect();
+    let mut v: Vec<String> = ["cleanup-releases", "--docker-socket"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     v.push(t.socket());
     v.push("--resources-dir".into());
     v.push(t.resources());
@@ -86,7 +127,8 @@ fn image_present(t: &T, id: &str) -> bool {
     t.h.docker.with(|s| s.images.iter().any(|i| i.id == id))
 }
 fn container_present(t: &T, id: &str) -> bool {
-    t.h.docker.with(|s: &mut St| s.containers.iter().any(|c| c.id == id))
+    t.h.docker
+        .with(|s: &mut St| s.containers.iter().any(|c| c.id == id))
 }
 
 #[test]
@@ -96,11 +138,30 @@ fn a_dry_run_changes_nothing_and_names_what_it_would_remove() {
     let before = t.journal_bytes();
     let o = go(&t, &SHIPPING, &args(&t, &[]));
     assert_exit(&o, 0);
-    assert!(o.stdout.contains(&format!("remove container hp-{}", w.old)), "{}", o.stdout);
-    assert!(o.stdout.contains("would remove 1 container(s)"), "{}", o.stdout);
-    assert!(!o.stdout.contains(&format!("hp-{}", w.serving)) || o.stdout.contains("protected"), "{}", o.stdout);
-    assert_eq!(t.journal_bytes(), before, "a dry run never writes the journal");
-    assert!(t.h.docker.requests().iter().all(|r| r.method != "DELETE"), "a dry run deletes nothing");
+    assert!(
+        o.stdout.contains(&format!("remove container hp-{}", w.old)),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("would remove 1 container(s)"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        !o.stdout.contains(&format!("hp-{}", w.serving)) || o.stdout.contains("protected"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        t.journal_bytes(),
+        before,
+        "a dry run never writes the journal"
+    );
+    assert!(
+        t.h.docker.requests().iter().all(|r| r.method != "DELETE"),
+        "a dry run deletes nothing"
+    );
 }
 
 #[test]
@@ -112,24 +173,52 @@ fn apply_removes_superseded_and_failed_artifacts_and_never_the_serving_release()
     let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
     let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
     let (fail_i, _) = w.ids[&w.failed.to_string()].clone();
-    assert!(!container_present(&t, &old_c) && !image_present(&t, &old_i), "the superseded release is gone");
-    assert!(!image_present(&t, &fail_i), "the failed deployment's retained image is gone");
-    assert!(container_present(&t, &srv_c) && image_present(&t, &srv_i), "the serving release is untouched");
+    assert!(
+        !container_present(&t, &old_c) && !image_present(&t, &old_i),
+        "the superseded release is gone"
+    );
+    assert!(
+        !image_present(&t, &fail_i),
+        "the failed deployment's retained image is gone"
+    );
+    assert!(
+        container_present(&t, &srv_c) && image_present(&t, &srv_i),
+        "the serving release is untouched"
+    );
     // the journal says so, and history stays
     let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
     assert_eq!(r.deployments.len(), 3, "deployment history is kept");
-    for e in r.ledger.entries().iter().filter(|e| e.deployment == w.old || e.deployment == w.failed) {
+    for e in r
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == w.old || e.deployment == w.failed)
+    {
         assert!(e.is_released(), "{:?} is recorded as released", e.key);
     }
-    assert!(r.ledger.entries().iter().filter(|e| e.deployment == w.serving).all(|e| !e.is_released()));
+    assert!(r
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == w.serving)
+        .all(|e| !e.is_released()));
     // an older release is no longer a rollback target; the serving one is unaffected
     let retained = harpoon_deploy::rollback::retained_releases(&r.ledger, &r.deployments, &w.app);
     let old = retained.iter().find(|x| x.deployment == w.old).unwrap();
-    assert!(old.problems.iter().any(|p| p.contains("retained image")), "{:?}", old.problems);
+    assert!(
+        old.problems.iter().any(|p| p.contains("retained image")),
+        "{:?}",
+        old.problems
+    );
     // a second run has nothing left to do
     let again = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&again, 0);
-    assert!(again.stdout.contains("removed 0 container(s)") && again.stdout.contains("removed 0 image(s)"), "{}", again.stdout);
+    assert!(
+        again.stdout.contains("removed 0 container(s)")
+            && again.stdout.contains("removed 0 image(s)"),
+        "{}",
+        again.stdout
+    );
 }
 
 #[test]
@@ -139,11 +228,18 @@ fn an_unfinished_deployment_stops_the_cleanup_before_anything_is_touched() {
     {
         let (mut j, _) = open_j(&t.journal_dir()).unwrap();
         let (_, running) = ids(9);
-        j.persist(&finished(&w.app, &running, DeploymentStatus::Running)).unwrap();
+        j.persist(&finished(&w.app, &running, DeploymentStatus::Running))
+            .unwrap();
     }
     let o = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&o, 6);
-    assert!(o.stderr.contains("unfinished") || o.stderr.contains("not finished") || o.stderr.contains("running"), "{}", o.stderr);
+    assert!(
+        o.stderr.contains("unfinished")
+            || o.stderr.contains("not finished")
+            || o.stderr.contains("running"),
+        "{}",
+        o.stderr
+    );
     let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
     assert!(image_present(&t, &old_i) && container_present(&t, &old_c));
 }
@@ -156,11 +252,18 @@ fn an_image_the_serving_release_pins_is_kept_even_when_an_older_deployment_recor
     let o = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&o, 0);
     assert!(image_present(&t, &old_i), "{}", o.stdout);
-    assert!(o.stdout.contains("the serving release pins this image"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("the serving release pins this image"),
+        "{}",
+        o.stdout
+    );
 }
 
 fn cache_args(t: &T, extra: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = ["prune-build-cache", "--docker-socket"].iter().map(|s| s.to_string()).collect();
+    let mut v: Vec<String> = ["prune-build-cache", "--docker-socket"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     v.push(t.socket());
     v.extend(extra.iter().map(|s| s.to_string()));
     v
@@ -170,12 +273,20 @@ fn cache_args(t: &T, extra: &[&str]) -> Vec<String> {
 fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused_part_goes() {
     let t = T::new();
     t.docker_runtime();
-    t.h.docker.with(|s| s.build_cache = vec![(1_000, false), (500, true), (250, false)]);
+    t.h.docker
+        .with(|s| s.build_cache = vec![(1_000, false), (500, true), (250, false)]);
     // a dry run reports the reclaimable size and sends no prune
     let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
     assert_exit(&o, 0);
-    assert!(o.stdout.contains("build-cache-reclaimable-bytes: 1250"), "{}", o.stdout);
-    assert!(t.h.docker.requests().iter().all(|r| r.method != "POST"), "a dry run prunes nothing");
+    assert!(
+        o.stdout.contains("build-cache-reclaimable-bytes: 1250"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        t.h.docker.requests().iter().all(|r| r.method != "POST"),
+        "a dry run prunes nothing"
+    );
     // applying without the authorization is refused before Docker is asked to change anything
     let refused = go(&t, &SHIPPING, &cache_args(&t, &["--apply"]));
     assert_ne!(refused.code, 0, "{}", refused.stdout);
@@ -183,9 +294,19 @@ fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused
     // applied: Docker prunes, the in-use entry stays, and nothing but the cache is touched
     let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
     assert_exit(&o, 0);
-    assert!(o.stdout.contains("build-cache-reclaimed-bytes: 1250"), "{}", o.stdout);
-    assert_eq!(t.h.docker.with(|s| s.build_cache.clone()), vec![(500, true)]);
-    assert!(t.h.docker.requests().iter().all(|r| r.method != "DELETE"), "no image or container was removed");
+    assert!(
+        o.stdout.contains("build-cache-reclaimed-bytes: 1250"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.clone()),
+        vec![(500, true)]
+    );
+    assert!(
+        t.h.docker.requests().iter().all(|r| r.method != "DELETE"),
+        "no image or container was removed"
+    );
 }
 
 // ---------------------------------------------------------------- ownership and classification
@@ -218,7 +339,10 @@ fn register(t: &T, w: &W, name: &str) {
         at_ms: 5,
     })))
     .unwrap();
-    for (dep, sha) in [(&w.old, "aaaaaaa1111111111111111111111111111111aa"), (&w.serving, "bbbbbbb2222222222222222222222222222222bb")] {
+    for (dep, sha) in [
+        (&w.old, "aaaaaaa1111111111111111111111111111111aa"),
+        (&w.serving, "bbbbbbb2222222222222222222222222222222bb"),
+    ] {
         j.git(&GitRecord::Source(SourceRec {
             deployment: dep.clone(),
             repo: name.into(),
@@ -235,13 +359,19 @@ fn register(t: &T, w: &W, name: &str) {
 }
 
 fn items(stdout: &str) -> Vec<Json> {
-    stdout.lines().filter_map(|l| l.strip_prefix("item: ")).map(|l| Json::parse(l).expect("an item line is JSON")).collect()
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("item: "))
+        .map(|l| Json::parse(l).expect("an item line is JSON"))
+        .collect()
 }
 fn field<'a>(j: &'a Json, k: &str) -> &'a str {
     j.get(k).and_then(Json::as_str).unwrap_or("")
 }
 fn find<'a>(all: &'a [Json], dep: &DeploymentId, kind: &str) -> &'a Json {
-    all.iter().find(|i| field(i, "deployment") == dep.as_str() && field(i, "kind") == kind).unwrap_or_else(|| panic!("no {kind} item for {dep}: {all:?}"))
+    all.iter()
+        .find(|i| field(i, "deployment") == dep.as_str() && field(i, "kind") == kind)
+        .unwrap_or_else(|| panic!("no {kind} item for {dep}: {all:?}"))
 }
 
 #[test]
@@ -251,25 +381,63 @@ fn every_item_names_its_application_release_and_a_grounded_verdict() {
     register(&t, &w, "shop");
     {
         let (mut j, _) = open_j(&t.journal_dir()).unwrap();
-        j.record(&intent(&w.app, &w.old, ResourceKind::PortLease, "38000", Disposition::RemoveOnFailure)).unwrap();
-        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000")).unwrap();
+        j.record(&intent(
+            &w.app,
+            &w.old,
+            ResourceKind::PortLease,
+            "38000",
+            Disposition::RemoveOnFailure,
+        ))
+        .unwrap();
+        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000"))
+            .unwrap();
     }
     let o = go(&t, &SHIPPING, &args(&t, &[]));
     assert_exit(&o, 0);
     let all = items(&o.stdout);
     let old_c = find(&all, &w.old, "container");
-    assert_eq!((field(old_c, "verdict"), field(old_c, "reason"), field(old_c, "appName"), field(old_c, "commit")), ("ready", "superseded", "shop", "aaaaaaa"));
+    assert_eq!(
+        (
+            field(old_c, "verdict"),
+            field(old_c, "reason"),
+            field(old_c, "appName"),
+            field(old_c, "commit")
+        ),
+        ("ready", "superseded", "shop", "aaaaaaa")
+    );
     assert_eq!(field(old_c, "environment"), "production");
     assert_eq!(old_c.get("physical"), Some(&Json::Bool(true)));
     let lease = find(&all, &w.old, "port-lease");
-    assert_eq!((field(lease, "verdict"), field(lease, "reason")), ("reconcile", "stale-port-lease"));
-    assert_eq!(lease.get("physical"), Some(&Json::Null), "a lease has no Docker object, and is not said to");
+    assert_eq!(
+        (field(lease, "verdict"), field(lease, "reason")),
+        ("reconcile", "stale-port-lease")
+    );
+    assert_eq!(
+        lease.get("physical"),
+        Some(&Json::Null),
+        "a lease has no Docker object, and is not said to"
+    );
     let failed = find(&all, &w.failed, "image");
-    assert_eq!((field(failed, "verdict"), field(failed, "reason")), ("ready", "failed-attempt"));
+    assert_eq!(
+        (field(failed, "verdict"), field(failed, "reason")),
+        ("ready", "failed-attempt")
+    );
     // the serving release is listed as protected, with the reason
     let srv = find(&all, &w.serving, "container");
-    assert_eq!((field(srv, "verdict"), field(srv, "reason"), field(srv, "commit")), ("protected", "serving-release", "bbbbbbb"));
-    assert_eq!(find(&all, &w.serving, "image").get("verdict").and_then(Json::as_str), Some("protected"));
+    assert_eq!(
+        (
+            field(srv, "verdict"),
+            field(srv, "reason"),
+            field(srv, "commit")
+        ),
+        ("protected", "serving-release", "bbbbbbb")
+    );
+    assert_eq!(
+        find(&all, &w.serving, "image")
+            .get("verdict")
+            .and_then(Json::as_str),
+        Some("protected")
+    );
 }
 
 #[test]
@@ -281,7 +449,11 @@ fn an_application_without_metadata_is_unassociated_never_guessed() {
     assert_eq!(c.get("appName"), Some(&Json::Null));
     assert_eq!(c.get("environment"), Some(&Json::Null));
     assert_eq!(c.get("commit"), Some(&Json::Null));
-    assert_eq!(field(c, "app"), w.app.as_str(), "the journal's own application id is still given");
+    assert_eq!(
+        field(c, "app"),
+        w.app.as_str(),
+        "the journal's own application id is still given"
+    );
 }
 
 #[test]
@@ -290,20 +462,42 @@ fn a_dry_run_judges_images_as_the_apply_will_after_the_containers_and_leases_are
     let w = world(&t);
     {
         let (mut j, _) = open_j(&t.journal_dir()).unwrap();
-        j.record(&intent(&w.app, &w.old, ResourceKind::PortLease, "38000", Disposition::RemoveOnFailure)).unwrap();
-        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000")).unwrap();
+        j.record(&intent(
+            &w.app,
+            &w.old,
+            ResourceKind::PortLease,
+            "38000",
+            Disposition::RemoveOnFailure,
+        ))
+        .unwrap();
+        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000"))
+            .unwrap();
     }
     let dry = go(&t, &SHIPPING, &args(&t, &[]));
-    assert!(!dry.stdout.contains("still has unreleased resources"), "the dry run must not hold an image back for a record the same run releases:\n{}", dry.stdout);
+    assert!(
+        !dry.stdout.contains("still has unreleased resources"),
+        "the dry run must not hold an image back for a record the same run releases:\n{}",
+        dry.stdout
+    );
     let (old_i, _) = w.ids[&w.old.to_string()].clone();
-    assert!(dry.stdout.contains(&format!("(id {old_i}) of {}", w.old)), "{}", dry.stdout);
+    assert!(
+        dry.stdout.contains(&format!("(id {old_i}) of {}", w.old)),
+        "{}",
+        dry.stdout
+    );
     // one apply does all of it, and a second has nothing left (idempotent)
     let applied = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&applied, 0);
     assert!(!image_present(&t, &old_i));
     let again = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&again, 0);
-    assert!(items(&again.stdout).iter().all(|i| field(i, "verdict") == "protected"), "{}", again.stdout);
+    assert!(
+        items(&again.stdout)
+            .iter()
+            .all(|i| field(i, "verdict") == "protected"),
+        "{}",
+        again.stdout
+    );
 }
 
 #[test]
@@ -319,15 +513,39 @@ fn objects_docker_no_longer_has_are_reconciliation_not_removal() {
     let all = items(&dry.stdout);
     for kind in ["container", "image"] {
         let i = find(&all, &w.old, kind);
-        assert_eq!((field(i, "verdict"), field(i, "reason")), ("reconcile", "already-absent"), "{kind}");
+        assert_eq!(
+            (field(i, "verdict"), field(i, "reason")),
+            ("reconcile", "already-absent"),
+            "{kind}"
+        );
         assert_eq!(i.get("physical"), Some(&Json::Bool(false)));
     }
     // only the failed deployment's image is physically present; the absent container and image claim nothing
-    assert!(dry.stdout.contains("reclaimed-containers: 0") && dry.stdout.contains("reclaimed-images: 1"), "{}", dry.stdout);
+    assert!(
+        dry.stdout.contains("reclaimed-containers: 0")
+            && dry.stdout.contains("reclaimed-images: 1"),
+        "{}",
+        dry.stdout
+    );
     let applied = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
     assert_exit(&applied, 0);
     let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
-    assert!(r.ledger.entries().iter().filter(|e| e.deployment == w.old).all(|e| e.is_released()), "the journal no longer lists them");
-    let deletes = t.h.docker.requests().iter().filter(|r| r.method == "DELETE").count();
-    assert_eq!(deletes, 1, "only the failed deployment's present image is deleted; nothing absent is");
+    assert!(
+        r.ledger
+            .entries()
+            .iter()
+            .filter(|e| e.deployment == w.old)
+            .all(|e| e.is_released()),
+        "the journal no longer lists them"
+    );
+    let deletes =
+        t.h.docker
+            .requests()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .count();
+    assert_eq!(
+        deletes, 1,
+        "only the failed deployment's present image is deleted; nothing absent is"
+    );
 }

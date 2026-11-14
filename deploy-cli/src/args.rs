@@ -348,13 +348,31 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         command: "prune-build-cache",
-        values: &["runtime-dir", "docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address", AUTH_FLAG],
+        values: &[
+            "runtime-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "resources-dir",
+            "forwarder-pid",
+            "forwarder-command",
+            "forward-address",
+            AUTH_FLAG,
+        ],
         switches: &["apply"],
     },
     Spec {
         command: "cleanup-releases",
         // the desktop hands every Docker-touching command the same runtime coordinates; only the management socket is used
-        values: &["runtime-dir", "docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address", AUTH_FLAG],
+        values: &[
+            "runtime-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "resources-dir",
+            "forwarder-pid",
+            "forwarder-command",
+            "forward-address",
+            AUTH_FLAG,
+        ],
         switches: &["apply"],
     },
     Spec {

@@ -484,7 +484,11 @@ impl RepoRec {
         if self.container_port == 0 {
             return Err("a container port is required".into());
         }
-        if self.settings.as_ref().is_some_and(|s| s.len() > 8192 || s.contains('\0')) {
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.len() > 8192 || s.contains('\0'))
+        {
             return Err("the deployment settings are too large".into());
         }
         for s in [&self.username, &self.project, &self.environment].into_iter().flatten() {
@@ -609,31 +613,32 @@ fn unopt(s: &str) -> Result<Option<String>, String> {
 
 pub fn encode(r: &GitRecord) -> String {
     let body = match r {
-        GitRecord::Repo(x) => format!(
-            "gitrepo\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            x.name,
-            hex(&x.url),
-            opt(&x.username),
-            x.cred.as_str(),
-            opt(&x.known_host),
-            x.webhook.map(WebhookKind::as_str).unwrap_or("-"),
-            x.app,
-            opt(&x.project),
-            opt(&x.environment),
-            hex(&x.branch),
-            if x.filters.is_empty() {
-                "-".to_string()
-            } else {
-                x.filters.iter().map(|f| hex(f)).collect::<Vec<_>>().join(",")
-            },
-            x.container_port,
-            opt(&x.dockerfile),
-            opt(&x.context),
-            opt(&x.target),
-            opt(&x.health_path),
-            x.at_ms
-        )
-        + &x.settings.as_ref().map(|v| format!("\t{}", hex(v))).unwrap_or_default(),
+        GitRecord::Repo(x) => {
+            format!(
+                "gitrepo\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                x.name,
+                hex(&x.url),
+                opt(&x.username),
+                x.cred.as_str(),
+                opt(&x.known_host),
+                x.webhook.map(WebhookKind::as_str).unwrap_or("-"),
+                x.app,
+                opt(&x.project),
+                opt(&x.environment),
+                hex(&x.branch),
+                if x.filters.is_empty() {
+                    "-".to_string()
+                } else {
+                    x.filters.iter().map(|f| hex(f)).collect::<Vec<_>>().join(",")
+                },
+                x.container_port,
+                opt(&x.dockerfile),
+                opt(&x.context),
+                opt(&x.target),
+                opt(&x.health_path),
+                x.at_ms
+            ) + &x.settings.as_ref().map(|v| format!("\t{}", hex(v))).unwrap_or_default()
+        }
         GitRecord::Removed(x) => format!(
             "gitdrop\t1\t{}\t{}\t{}\t{}\t{}\t{}",
             x.name,
@@ -710,7 +715,10 @@ pub fn decode(f: &[&str]) -> Result<GitRecord, String> {
                 context: unopt(f[15])?,
                 target: unopt(f[16])?,
                 health_path: unopt(f[17])?,
-                settings: f.get(19).map(|v| unhex(v).ok_or("the settings are not valid")).transpose()?,
+                settings: f
+                    .get(19)
+                    .map(|v| unhex(v).ok_or("the settings are not valid"))
+                    .transpose()?,
                 at_ms: n(f[18], "time")?,
             };
             rec.validate()?;

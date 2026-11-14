@@ -15,11 +15,11 @@ use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, 
 use crate::attribution::{route_of, PathProof};
 use crate::buildx_run::{run_build, BuildRequest, BuildRunError, SecretFiles, StdFileProbe};
 use crate::confine::{confine, confine_generated, Source};
-use crate::plan::BuildPlan;
 use crate::dockerfile::required_images;
 use crate::forwarder::HostListenerCheck;
 use crate::guest::{check_guest_free, GuestDiskProbe};
 use crate::ignore::{always_sent, IgnoreRules};
+use crate::plan::BuildPlan;
 use crate::preflight::{context_size_with, DfProbe, DiskProbe};
 use crate::probe::{
     BindProbe, ContainerBaseline, ContainerProbe, HttpTransport, PortProbe, ResponseMarker,
@@ -400,8 +400,14 @@ impl<T: HttpTransport> DockerBackend<T> {
             .unwrap_or(&self.cfg.context_dir);
         match &self.cfg.plan {
             Some(plan) => {
-                let args: Vec<String> = self.cfg.build_args.iter().map(|(k, _)| k.clone()).collect();
-                let secrets: Vec<String> = self.cfg.build_secrets.iter().map(|(k, _)| k.clone()).collect();
+                let args: Vec<String> =
+                    self.cfg.build_args.iter().map(|(k, _)| k.clone()).collect();
+                let secrets: Vec<String> = self
+                    .cfg
+                    .build_secrets
+                    .iter()
+                    .map(|(k, _)| k.clone())
+                    .collect();
                 let text = plan.dockerfile(self.cfg.container_port, &args, &secrets);
                 confine_generated(root, &self.cfg.context_dir, text)
             }
@@ -1293,7 +1299,9 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         for img in &images {
             if self.cfg.plan.is_some() {
                 // A generated build names its own base image (see `plan`); the builder fetches it when absent.
-                io.log.push_line(&format!("base image {img}: generated build, fetched by the builder if not cached"));
+                io.log.push_line(&format!(
+                    "base image {img}: generated build, fetched by the builder if not cached"
+                ));
                 continue;
             }
             match self
@@ -1375,7 +1383,9 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         if self.cfg.plan.is_some() {
             if let Err(e) = write_generated(&snap.dockerfile, &src.dockerfile_text) {
                 let _ = snapshot::remove(&snap, &self.cfg.scratch_dir);
-                return Err(StepError::new(format!("cannot write the generated Dockerfile: {e}")));
+                return Err(StepError::new(format!(
+                    "cannot write the generated Dockerfile: {e}"
+                )));
             }
             io.log.push_line(&format!(
                 "generated Dockerfile for {} ({}): private to this build, nothing written to your project",

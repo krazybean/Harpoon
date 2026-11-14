@@ -637,8 +637,17 @@ impl DockerApi {
     }
 
     /// `GET /containers/{id}/json`, parsed but not interpreted. Read-only. `None` when Docker has no such container.
-    pub fn container_inspect_json(&self, id_or_name: &str, left: Duration) -> Result<Option<Json>, ApiError> {
-        let r = self.call("GET", &format!("/containers/{}/json", enc(id_or_name)), None, left)?;
+    pub fn container_inspect_json(
+        &self,
+        id_or_name: &str,
+        left: Duration,
+    ) -> Result<Option<Json>, ApiError> {
+        let r = self.call(
+            "GET",
+            &format!("/containers/{}/json", enc(id_or_name)),
+            None,
+            left,
+        )?;
         match r.status {
             200 => Ok(Some(parse(&r, "container inspect")?)),
             404 => Ok(None),
@@ -649,7 +658,12 @@ impl DockerApi {
     /// `GET /containers/{id}/stats?stream=false`: one sample (Docker takes about a second to produce the
     /// previous-sample half). Read-only. `None` when Docker has no such container.
     pub fn container_stats_json(&self, id: &str, left: Duration) -> Result<Option<Json>, ApiError> {
-        let r = self.call("GET", &format!("/containers/{}/stats?stream=false", enc(id)), None, left)?;
+        let r = self.call(
+            "GET",
+            &format!("/containers/{}/stats?stream=false", enc(id)),
+            None,
+            left,
+        )?;
         match r.status {
             200 => Ok(Some(parse(&r, "container stats")?)),
             404 => Ok(None),
@@ -834,7 +848,10 @@ impl DockerApi {
             return Err(Self::unexpected("build cache prune", &r));
         }
         let j = parse(&r, "build cache prune")?;
-        Ok(j.get("SpaceReclaimed").and_then(Json::as_i64).unwrap_or(0).max(0) as u64)
+        Ok(j.get("SpaceReclaimed")
+            .and_then(Json::as_i64)
+            .unwrap_or(0)
+            .max(0) as u64)
     }
 
     /// At most `tail` lines and `max_bytes` bytes, demultiplexed to text.

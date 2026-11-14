@@ -228,7 +228,10 @@ pub fn detect_source(dir: &str) -> Result<String, String> {
         ("start", opt(&d.start)),
         ("devStart", opt(&d.dev_start)),
         ("suggestedPort", Json::Num(f64::from(d.suggested_port))),
-        ("notes", Json::Arr(d.notes.iter().map(|n| s(n.clone())).collect())),
+        (
+            "notes",
+            Json::Arr(d.notes.iter().map(|n| s(n.clone())).collect()),
+        ),
     ])
     .to_json())
 }

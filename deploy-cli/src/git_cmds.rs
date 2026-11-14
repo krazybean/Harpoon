@@ -1142,8 +1142,9 @@ fn run_source(
         // Holding the writer lock proves no other process is running a deployment, so one still marked running
         // was cut off (this marks it interrupted; Docker is untouched). Otherwise it would block every later
         // deployment until someone ran `recover`, and the cutover safeguards still see an unconfirmed cutover.
-        let (mut j, restored) = store::open_writer_recovered(rt, kind_of(rt, p).map_err(|f| f.message)?, now_ms())
-            .map_err(|f| f.message)?;
+        let (mut j, restored) =
+            store::open_writer_recovered(rt, kind_of(rt, p).map_err(|f| f.message)?, now_ms())
+                .map_err(|f| f.message)?;
         // A source record names its repository and replay refuses one for a repository that is not registered, so
         // this is the one place a removal could otherwise make the journal unreadable. Under the writer lock the
         // registration is either exactly the one this deployment was prepared from, or nothing is recorded.
@@ -1212,7 +1213,11 @@ fn run_source(
     // environment would otherwise resolve none of them (no build secrets, no runtime configuration).
     opt(
         "environment",
-        &Some(repo.environment.clone().unwrap_or_else(|| "production".into())),
+        &Some(
+            repo.environment
+                .clone()
+                .unwrap_or_else(|| "production".into()),
+        ),
     );
     for f in FORWARD_VALUES {
         if let Some(v) = p.value(f) {
@@ -1261,7 +1266,11 @@ fn run_source(
                     let _ = writeln!(out, "  cleanup: removed {} container(s), {} image(s) of earlier releases and failed attempts; the serving release, volumes and build cache were not touched", t.containers, t.images);
                 }
                 Err(f) => {
-                    let _ = writeln!(out, "  note: cleanup of earlier artifacts was skipped: {}", f.message.lines().next().unwrap_or(""));
+                    let _ = writeln!(
+                        out,
+                        "  note: cleanup of earlier artifacts was skipped: {}",
+                        f.message.lines().next().unwrap_or("")
+                    );
                 }
             }
         }
