@@ -46,6 +46,9 @@ HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/cli-parity-test.sh
 say "Run lifecycle isolation regression suite (private namespace, fake engine)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-lifecycle-isolation.sh
 
+say "Run guest stale-runtime regression (init text, sandboxed)"
+bash tools/guest-builder/regression-guest-stale-runtime.sh
+
 say "Run config precedence regression (private namespace, no VM)"
 HARPOON_BIN="$ROOT/harpoon/build/harpoon" sh harpoon/regression-config-precedence.sh
 

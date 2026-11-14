@@ -764,6 +764,10 @@ find /run /var/run -maxdepth 2 2>&1 | grep -E "docker|containerd" | head -n 20 |
 # Ensure no stale sockets/PIDs remain (do not kill arbitrary PIDs)
 rm -f /run/docker.sock /var/run/docker.sock /run/docker.pid /var/run/docker.pid /run/containerd/containerd.sock /var/run/docker/containerd.sock 2>&1 | tee /dev/hvc0 >/dev/null || true
 rm -f /run/containerd/containerd.sock 2>&1 | tee /dev/hvc0 >/dev/null || true
+# /var/run is a real directory on the persistent root (not a link to the tmpfs /run), so a hard stop of the host leaves docker's
+# exec-root behind. libcontainerd refuses to start containerd while containerd.pid names a live pid, and boot pids repeat almost
+# exactly, so the next boot's dockerd died with "failed to save daemon pid to disk: process with PID N is still running".
+rm -f /var/run/docker/containerd/containerd.pid 2>&1 | tee /dev/hvc0 >/dev/null || true
 echo "HARPOON_DOCKERD_START" > /dev/hvc0
 rm -f /var/run/docker.sock
 # Docker default bridge, iptables true, ip-masq true, userland-proxy true (required for -p) plus explicit DNS (fixes VZNAT DHCP 192.168.64.1)
