@@ -12,6 +12,7 @@
 //!   trigger-driven execution (`watch`, `git-run`) closed: Gate U has not passed.
 
 mod args;
+mod cleanup;
 mod commands;
 mod config_cmds;
 mod git_cmds;
@@ -203,4 +204,34 @@ pub fn run_with(args: &[String], gate: &Gate, svc: &mut Services) -> Outcome {
             stderr: format!("{}\n", f.message),
         },
     }
+}
+
+/// What Harpoon detects for the project in `dir`, as one JSON object for the desktop's registration form. Read-only:
+/// nothing is built, written or sent. A folder that has its own Dockerfile reports `hasDockerfile` and nothing else.
+pub fn detect_source(dir: &str) -> Result<String, String> {
+    use harpoon_deploy_docker::json::{obj, s, Json};
+    let path = std::path::Path::new(dir);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(format!("{dir} is not an absolute folder path"));
+    }
+    if std::fs::symlink_metadata(path.join("Dockerfile")).is_ok() {
+        return Ok(obj(vec![("hasDockerfile", Json::Bool(true))]).to_json());
+    }
+    let d = harpoon_deploy_docker::plan::detect(path)?;
+    let opt = |v: &Option<String>| v.as_ref().map_or(Json::Null, |x| s(x.clone()));
+    Ok(obj(vec![
+        ("hasDockerfile", Json::Bool(false)),
+        ("framework", s(d.framework.clone())),
+        ("baseImage", s(d.base_image.clone())),
+        ("install", s(d.install.clone())),
+        ("build", opt(&d.build)),
+        ("start", opt(&d.start)),
+        ("devStart", opt(&d.dev_start)),
+        ("suggestedPort", Json::Num(f64::from(d.suggested_port))),
+        (
+            "notes",
+            Json::Arr(d.notes.iter().map(|n| s(n.clone())).collect()),
+        ),
+    ])
+    .to_json())
 }

@@ -419,6 +419,9 @@ pub struct RepoRec {
     pub context: Option<String>,
     pub target: Option<String>,
     pub health_path: Option<String>,
+    /// Source-deployment settings, canonical JSON (see `harpoon_deploy_docker::plan::Settings`); opaque here.
+    /// Recorded as an optional trailing field, so a registration without any is byte-identical to before.
+    pub settings: Option<String>,
     pub at_ms: u64,
 }
 
@@ -480,6 +483,13 @@ impl RepoRec {
         }
         if self.container_port == 0 {
             return Err("a container port is required".into());
+        }
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.len() > 8192 || s.contains('\0'))
+        {
+            return Err("the deployment settings are too large".into());
         }
         for s in [&self.username, &self.project, &self.environment].into_iter().flatten() {
             token("a name", s)?;
@@ -603,30 +613,32 @@ fn unopt(s: &str) -> Result<Option<String>, String> {
 
 pub fn encode(r: &GitRecord) -> String {
     let body = match r {
-        GitRecord::Repo(x) => format!(
-            "gitrepo\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            x.name,
-            hex(&x.url),
-            opt(&x.username),
-            x.cred.as_str(),
-            opt(&x.known_host),
-            x.webhook.map(WebhookKind::as_str).unwrap_or("-"),
-            x.app,
-            opt(&x.project),
-            opt(&x.environment),
-            hex(&x.branch),
-            if x.filters.is_empty() {
-                "-".to_string()
-            } else {
-                x.filters.iter().map(|f| hex(f)).collect::<Vec<_>>().join(",")
-            },
-            x.container_port,
-            opt(&x.dockerfile),
-            opt(&x.context),
-            opt(&x.target),
-            opt(&x.health_path),
-            x.at_ms
-        ),
+        GitRecord::Repo(x) => {
+            format!(
+                "gitrepo\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                x.name,
+                hex(&x.url),
+                opt(&x.username),
+                x.cred.as_str(),
+                opt(&x.known_host),
+                x.webhook.map(WebhookKind::as_str).unwrap_or("-"),
+                x.app,
+                opt(&x.project),
+                opt(&x.environment),
+                hex(&x.branch),
+                if x.filters.is_empty() {
+                    "-".to_string()
+                } else {
+                    x.filters.iter().map(|f| hex(f)).collect::<Vec<_>>().join(",")
+                },
+                x.container_port,
+                opt(&x.dockerfile),
+                opt(&x.context),
+                opt(&x.target),
+                opt(&x.health_path),
+                x.at_ms
+            ) + &x.settings.as_ref().map(|v| format!("\t{}", hex(v))).unwrap_or_default()
+        }
         GitRecord::Removed(x) => format!(
             "gitdrop\t1\t{}\t{}\t{}\t{}\t{}\t{}",
             x.name,
@@ -670,7 +682,7 @@ pub fn decode(f: &[&str]) -> Result<GitRecord, String> {
     }
     match f[0] {
         "gitrepo" => {
-            if f.len() != 19 {
+            if f.len() != 19 && f.len() != 20 {
                 return bad("a repository record has the wrong number of fields");
             }
             let filters = if f[12] == "-" {
@@ -703,6 +715,10 @@ pub fn decode(f: &[&str]) -> Result<GitRecord, String> {
                 context: unopt(f[15])?,
                 target: unopt(f[16])?,
                 health_path: unopt(f[17])?,
+                settings: f
+                    .get(19)
+                    .map(|v| unhex(v).ok_or("the settings are not valid"))
+                    .transpose()?,
                 at_ms: n(f[18], "time")?,
             };
             rec.validate()?;
@@ -914,8 +930,22 @@ mod tests {
             context: None,
             target: Some("release".into()),
             health_path: Some("/health".into()),
+            settings: None,
             at_ms: 5,
         }
+    }
+
+    #[test]
+    fn settings_are_an_optional_trailing_field_and_old_records_stay_byte_identical() {
+        let mut r = repo();
+        let old = encode(&GitRecord::Repo(Box::new(r.clone())));
+        assert_eq!(old.matches('\t').count(), 19); // crc + 19 fields, as before settings existed
+        r.settings = Some(r#"{"start":"npm start"}"#.into());
+        let new = encode(&GitRecord::Repo(Box::new(r.clone())));
+        assert!(new.len() > old.len());
+        let body = new.split_once('\t').unwrap().1;
+        let f: Vec<&str> = body.split('\t').collect();
+        assert_eq!(decode(&f).unwrap(), GitRecord::Repo(Box::new(r)));
     }
 
     #[test]

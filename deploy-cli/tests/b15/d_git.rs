@@ -1998,6 +1998,140 @@ fn a_refused_edit_changes_nothing() {
 }
 
 #[test]
+fn clearing_the_dockerfile_is_persisted_and_keeps_everything_else() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(
+        &add_repo(
+            &t,
+            &kc,
+            "shop",
+            &url(&repo),
+            APP,
+            &["--dockerfile", "Dockerfile"],
+        ),
+        0,
+    );
+    let at = registered_ms(&t, "shop");
+    assert_eq!(
+        restored(&t).git.repos["shop"].dockerfile.as_deref(),
+        Some("Dockerfile")
+    );
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        at,
+        &[
+            "--clear-dockerfile",
+            "--settings",
+            r#"{"start":"npm start","network":"n_default"}"#,
+        ],
+    );
+    assert_exit(&o, 0);
+    let r = restored(&t).git.repos["shop"].clone();
+    assert_eq!(r.dockerfile, None);
+    assert_eq!(r.app.to_string(), APP);
+    assert!(r.settings.as_deref().unwrap().contains("n_default"));
+    // clearing and naming a path together is a usage error; clearing what is already clear is "nothing to change"
+    let at = registered_ms(&t, "shop");
+    assert_exit(
+        &update(
+            &t,
+            &kc,
+            "shop",
+            at,
+            &["--clear-dockerfile", "--dockerfile", "x"],
+        ),
+        2,
+    );
+    assert_exit(&update(&t, &kc, "shop", at, &["--clear-dockerfile"]), 6);
+}
+
+#[test]
+fn a_registration_without_an_environment_deploys_with_the_production_variables_the_ui_stores() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                &format!("app:{APP}@production"),
+                "--name",
+                "MODE",
+                "--value",
+                "prod",
+            ],
+        ),
+        0,
+    );
+    let o = sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]);
+    assert!(o.stdout.contains("MODE"), "{}", o.stdout);
+}
+
+/// A deployment of `APP` whose process was cut off after its preliminary check: still `running` in the journal.
+fn seed_cut_off(t: &T, cutover_begun: bool) -> DeploymentId {
+    let app: ApplicationId = APP.parse().unwrap();
+    let dep: DeploymentId = "dep_00000000000000000000000077".parse().unwrap();
+    let mut d = Deployment::new(dep.clone(), app, Trigger::Cli, 5_000_000_000_000);
+    d.transition(DeploymentStatus::Queued, 5_000_000_000_001)
+        .unwrap();
+    d.transition(DeploymentStatus::Running, 5_000_000_000_002)
+        .unwrap();
+    if cutover_begun {
+        d.begin_cutover(5_000_000_000_003).unwrap();
+    }
+    let _h = holding();
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    j.persist(&d).unwrap();
+    dep
+}
+
+#[test]
+fn a_cut_off_deployment_is_marked_interrupted_instead_of_blocking_the_next_one() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    assert_exit(
+        &sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]),
+        0,
+    );
+    let stale = seed_cut_off(&t, false);
+    let o = sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]);
+    assert_exit(&o, 0);
+    let after = restored(&t);
+    let d = after.deployments.iter().find(|d| d.id == stale).unwrap();
+    assert_eq!(d.status, DeploymentStatus::Interrupted);
+}
+
+#[test]
+fn a_refusal_inside_git_deploy_reaches_the_error_text_the_desktop_shows() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    assert_exit(
+        &sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]),
+        0,
+    );
+    seed_cut_off(&t, true);
+    let o = sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]);
+    assert_exit(&o, 6);
+    assert!(o.stderr.contains("cutover"), "stderr was: {:?}", o.stderr);
+}
+
+#[test]
 fn an_edit_made_from_a_stale_view_is_refused_and_does_not_overwrite_the_newer_one() {
     let t = T::new();
     let kc = MemorySecretStore::new();

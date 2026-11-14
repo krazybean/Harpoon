@@ -14,15 +14,16 @@ use harpoon_deploy::ledger::{
 use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
-use harpoon_deploy_docker::api::DockerApi;
+use harpoon_deploy_docker::api::{DockerApi, Limits};
 use harpoon_deploy_docker::attribution::HostGuestProof;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
-use harpoon_deploy_docker::confine::{confine, Source};
+use harpoon_deploy_docker::confine::{confine, confine_generated, Source};
 use harpoon_deploy_docker::dockerfile::required_images;
 use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::ignore::{always_sent, IgnoreRules};
+use harpoon_deploy_docker::plan::{BuildPlan, Settings};
 use harpoon_deploy_docker::preflight::context_size_with;
 use harpoon_deploy_journal::{writer_lock_status, LockStatus, Restored};
 use std::collections::BTreeSet;
@@ -66,6 +67,8 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
         "cleanup-image" => cleanup_image(p, out),
+        "cleanup-releases" => crate::cleanup::cleanup_cmd(p, out),
+        "prune-build-cache" => crate::cleanup::prune_cache_cmd(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),
     }
 }
@@ -180,8 +183,31 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
             .ok_or_else(|| Fail::config("--health-timeout-secs must be 1..=600"))?;
         cfg.health.startup_deadline_ms = secs * 1000;
     }
-    let src =
-        confine(&project, &context, &cfg.dockerfile).map_err(|e| Fail::config(e.to_string()))?;
+    let settings = match p.value("settings") {
+        Some(t) => Settings::parse(t).map_err(Fail::config)?,
+        None => Settings::default(),
+    };
+    if settings.kind == Some(harpoon_deploy_docker::plan::Kind::Job) {
+        return Err(Fail::refused(
+            "this registration is set to run as a Job, which Harpoon does not execute yet (a Job has no port or health check, and succeeds when it exits 0). Nothing was built. Change it to a Service to deploy.",
+        ));
+    }
+    cfg.network = settings.network.clone();
+    // No per-application caps; the VM's own memory, CPU and disk safeguards still apply.
+    cfg.limits = Limits::UNLIMITED;
+    // No Dockerfile named and none in the context: Harpoon detects the project and renders one privately.
+    let generated = p.value("dockerfile").is_none()
+        && std::fs::symlink_metadata(context.join("Dockerfile")).is_err();
+    let src = if generated {
+        let detected = harpoon_deploy_docker::plan::detect(&context).map_err(Fail::config)?;
+        let plan = BuildPlan::resolve(detected, &settings).map_err(Fail::config)?;
+        let text = plan.dockerfile(port, &[], &[]);
+        cfg.plan = Some(plan);
+        confine_generated(&project, &context, text)
+    } else {
+        confine(&project, &context, &cfg.dockerfile)
+    }
+    .map_err(|e| Fail::config(e.to_string()))?;
     let images = required_images(&src.dockerfile_text).map_err(|e| Fail::config(e.to_string()))?;
     let rules = src
         .ignore
@@ -344,7 +370,7 @@ fn retained_image_notices(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
     v
 }
 
-fn unfinished(deps: &[Deployment]) -> Vec<String> {
+pub(crate) fn unfinished(deps: &[Deployment]) -> Vec<String> {
     deps.iter()
         .filter(|d| !d.status.is_terminal())
         .map(|d| {
@@ -1298,13 +1324,18 @@ fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     }
     let _ = writeln!(
         out,
-        "base images (local only, never pulled): {}{}",
+        "base images ({}): {}{}",
+        if s.cfg.plan.is_some() {
+            "generated build: the builder fetches an image that is not cached"
+        } else {
+            "local only, never pulled"
+        },
         if s.images.is_empty() {
             "none".to_string()
         } else {
             s.images.iter().cloned().collect::<Vec<_>>().join(", ")
         },
-        if socket.is_none() {
+        if socket.is_none() && s.cfg.plan.is_none() {
             " — presence not checked"
         } else {
             ""
@@ -1360,7 +1391,16 @@ fn plan(p: &Parsed, gate: &Gate, out: &mut String) -> R {
     );
     let _ = writeln!(
         out,
-        "limits: 256 MiB memory, 0.5 CPU, 64 PIDs, no swap, no restart policy, no volumes"
+        "limits: {}, no restart policy, no volumes{}",
+        if s.cfg.limits == Limits::UNLIMITED {
+            "no per-application memory, CPU or process caps (the VM's own safeguards apply)"
+        } else {
+            "256 MiB memory, 0.5 CPU, 64 PIDs, no swap"
+        },
+        s.cfg
+            .network
+            .as_ref()
+            .map_or(String::new(), |n| format!(", joins Docker network {n}"))
     );
     let _ = writeln!(
         out,
@@ -1480,7 +1520,7 @@ fn recover(p: &Parsed, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ reconcile
 
-fn describe(a: &Action) -> String {
+pub(crate) fn describe(a: &Action) -> String {
     match a {
         Action::Remove {
             entry,
@@ -1530,7 +1570,11 @@ fn describe(a: &Action) -> String {
     }
 }
 
-fn docker_backend(p: &Parsed, rt: &Runtime, socket: &Path) -> Result<DockerBackend, Fail> {
+pub(crate) fn docker_backend(
+    p: &Parsed,
+    rt: &Runtime,
+    socket: &Path,
+) -> Result<DockerBackend, Fail> {
     let resources = p.value("resources-dir").ok_or_else(|| {
         Fail::config(
             "--resources-dir DIR is required (the bundled-resources directory holding Buildx)",
@@ -1716,7 +1760,15 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         .map_err(|e| Fail::failed(e.to_string()))?;
     // Configuration and secrets, resolved and fetched before the journal is written to, anything is
     // built, or Docker is contacted: a missing or inaccessible secret stops the run here.
-    let mut prep = config_cmds::prepare(p, svc, &restored.config, &d.application_id, &s.env, &[])?;
+    let mut prep = config_cmds::prepare(
+        p,
+        svc,
+        &restored.config,
+        &d.application_id,
+        &s.env,
+        &[],
+        s.cfg.plan.as_ref().map(|x| x.identity()).as_deref(),
+    )?;
     journal
         .config(&prep.snapshot(&d.id, &d.application_id))
         .map_err(journal_config_err)?;
@@ -2010,6 +2062,7 @@ pub(crate) fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Str
         &d.application_id,
         &s.env,
         &previous_secrets,
+        s.cfg.plan.as_ref().map(|x| x.identity()).as_deref(),
     )?;
     journal
         .config(&prep.snapshot(&d.id, &d.application_id))

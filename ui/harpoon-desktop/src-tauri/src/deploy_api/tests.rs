@@ -274,6 +274,7 @@ fn adding_a_repository_records_it_and_deploying_it_is_refused_by_the_gate() {
         context: None,
         target: None,
         health_path: Some("/healthz".into()),
+        settings: None,
         username: None,
         known_host: None,
         webhook: None,
@@ -599,6 +600,8 @@ mod runtime {
             DeployOp::Restore {
                 deployment: "dep_x".into(),
             },
+            DeployOp::CleanupReleases { apply: true },
+            DeployOp::PruneBuildCache { apply: true },
         ] {
             for gate in [Gate::shipping(), OPEN] {
                 // not confirmed (Cancel never reaches here at all; an absent confirmation is the same as none)
@@ -625,6 +628,15 @@ mod runtime {
                 assert!(!a.contains(&"--confirm-cutover".to_string()), "{a:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_cleanup_preview_never_carries_apply_and_applying_does() {
+        let preview = args_of(&DeployOp::CleanupReleases { apply: false }, &Gate::shipping(), Ok(info())).unwrap();
+        assert_eq!(preview[0], "cleanup-releases");
+        assert!(!preview.contains(&"--apply".to_string()) && !has_auth(&preview), "{preview:?}");
+        let applied = args_with(&DeployOp::CleanupReleases { apply: true }, &CONFIRMED, &Gate::shipping(), Ok(info())).unwrap();
+        assert!(applied.contains(&"--apply".to_string()) && has_auth(&applied), "{applied:?}");
     }
 
     #[test]
@@ -926,6 +938,7 @@ fn a_failed_first_registration_leaves_a_store_that_still_reads_as_missing() {
         context: None,
         target: None,
         health_path: None,
+        settings: None,
         username: None,
         known_host: None,
         webhook: None,
@@ -958,6 +971,7 @@ fn add_named(name: &str, url: &str) -> DeployOp {
         context: None,
         target: None,
         health_path: None,
+        settings: None,
         username: None,
         known_host: None,
         webhook: None,
@@ -1071,6 +1085,7 @@ mod held {
             context: None,
             target: None,
             health_path: None,
+            settings: None,
             username: None,
             known_host: None,
             webhook: None,
@@ -1505,6 +1520,7 @@ mod external {
                 context: None,
                 target: None,
                 health_path: None,
+                settings: None,
                 username: None,
                 known_host: None,
                 webhook: None,
@@ -2256,4 +2272,35 @@ fn an_authorized_runtime_removes_a_never_deployed_application_and_the_engine_dec
     let after = snapshot(&dir, 3);
     assert!(after.repos.is_empty() && after.apps.is_empty(), "a never-deployed application disappears from the list");
     assert!(kc.accounts().is_empty(), "no Keychain access");
+}
+
+mod metrics_dto {
+    use super::*;
+    use harpoon_deploy_docker::metrics::{Identity, Outcome, Reading, Sample};
+
+    fn identity(running: bool) -> Identity {
+        Identity { id: "abc".into(), name: "hp".into(), running, started_at: "2026-11-14T00:00:00Z".into(), restart_count: Some(1), labels: vec![], memory_limit: None }
+    }
+
+    #[test]
+    fn every_outcome_maps_to_exactly_one_state_and_never_invents_a_figure() {
+        let ok = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(true), sample: Some(Sample { cpu_percent: Some(0.0), mem_raw: Some(10), net_rx: Some(0), ..Default::default() }) }))), 5);
+        assert_eq!((ok.state, ok.cpu_percent, ok.mem_raw, ok.net_rx, ok.net_tx, ok.mem_working_set, ok.restart_count, ok.sampled_ms), ("ok", Some(0.0), Some(10), Some(0), None, None, Some(1), 5));
+        let stopped = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(false), sample: None }))), 5);
+        assert_eq!((stopped.state, stopped.cpu_percent, stopped.container_id.as_deref()), ("stopped", None, Some("abc")));
+        let running_without_stats = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(true), sample: None }))), 5);
+        assert_eq!(running_without_stats.state, "unavailable");
+        assert_eq!(metrics_dto(Ok(Outcome::Absent), 5).state, "absent");
+        let foreign = metrics_dto(Ok(Outcome::NotOwned("label".into())), 5);
+        assert_eq!((foreign.state, foreign.container_id, foreign.cpu_percent), ("not-owned", None, None));
+        assert!(foreign.detail.unwrap().contains("Nothing was read"));
+        let down = metrics_dto(Err("socket gone".into()), 5);
+        assert_eq!((down.state, down.detail.as_deref()), ("unavailable", Some("socket gone")));
+    }
+
+    #[test]
+    fn request_names_are_restricted_to_what_docker_names_use() {
+        for good in ["hp-dep_1", "app_01ABC", "a.b-c_d"] { assert!(name_ok(good), "{good}"); }
+        for bad in ["", "a b", "a/b", "a;b", "../x", &"x".repeat(201)] { assert!(!name_ok(bad), "{bad}"); }
+    }
 }

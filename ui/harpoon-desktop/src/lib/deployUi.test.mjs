@@ -1,0 +1,88 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { copyText, visibleLogLines } from "./deployUi.ts";
+
+test("visibleLogLines matches the exact text shown by the log panel", () => {
+  const lines = [{ kind: "", text: "build started" }, { kind: "", text: "DATABASE ready" }, { kind: "", text: "done" }];
+  assert.deepEqual(visibleLogLines(lines, " database ").map((line) => line.text), ["DATABASE ready"]);
+  assert.deepEqual(visibleLogLines(lines, "").map((line) => line.text), lines.map((line) => line.text));
+});
+
+test("copyText preserves the selected log text and reports clipboard failures", async () => {
+  const copied = [];
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async (text) => copied.push(text) } } });
+  await copyText("one\ntwo");
+  assert.deepEqual(copied, ["one\ntwo"]);
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => { throw new Error("denied"); } } } });
+  // a refused async write falls back to the selection copy; with no document either, the failure is reported
+  await assert.rejects(() => copyText("secret-free log"), /clipboard is unavailable/);
+});
+
+test("copyText falls back to the selection copy when the async clipboard refuses", async () => {
+  const made = [];
+  const area = { style: {}, setAttribute() {}, select() {}, remove() {}, set value(v) { made.push(v); } };
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => { throw new Error("NotAllowedError"); } } } });
+  globalThis.document = { createElement: () => area, body: { appendChild() {} }, execCommand: (c) => c === "copy" };
+  try { await copyText("line1\nline2"); } finally { delete globalThis.document; }
+  assert.deepEqual(made, ["line1\nline2"]);
+});
+
+test("the release card holds a native-capture thumbnail (never an iframe) beside the details, with the status badge on the right", async () => {
+  const { readFileSync } = await import("node:fs");
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(screens, /<iframe|credentialless/);
+  assert.doesNotMatch(screens, /function DeploymentPreview|dp-preview/, "the standalone preview panel is gone");
+  const thumb = screens.slice(screens.indexOf("function PreviewThumb"), screens.indexOf("export function DeploymentPills"));
+  assert.match(thumb, /c\.engine\.preview\(url\)/);
+  assert.match(thumb, /Enlarge deployment preview/);
+  assert.match(thumb, /Refresh/);
+  assert.match(thumb, /Open app/);
+  // thumbnail, details, then the actions, all in the one hero card; no status checkmark (the pill says it)
+  const hero = screens.slice(screens.indexOf('className="dp-panel__body dp-hero"'), screens.indexOf('<div className="dp-tabs"'));
+  assert.ok(hero.indexOf("<PreviewThumb") < hero.indexOf("dp-hero__state") && hero.indexOf("dp-hero__state") < hero.indexOf("dp-actions"));
+  assert.doesNotMatch(hero, /heroIcon|className=\{`big /);
+  // Refresh is an overlay on the thumbnail, a sibling of the enlarge button so its click cannot bubble into Enlarge
+  assert.match(thumb, /dp-thumb__refresh/);
+  const enlarge = thumb.slice(thumb.indexOf('className="dp-thumb__img"'), thumb.indexOf("</button>", thumb.indexOf('className="dp-thumb__img"')));
+  assert.doesNotMatch(enlarge, /capture\(|dp-thumb__refresh/);
+  const hook = readFileSync(new URL("../hooks/useDeployEngine.ts", import.meta.url), "utf8");
+  assert.match(hook, /invoke<string>\("deploy_preview", \{ url \}\)/);
+});
+
+test("the thumbnail appears only for a running release whose final check passed", async () => {
+  const { previewReady } = await import("./previewGate.ts"); // a failed import fails the test
+  const mk = (over = {}) => ({ currentReleaseId: "r1", address: { status: "running" }, deployments: [{ releaseId: "r1", steps: [{ name: "final_check", status: "succeeded" }], ageMin: 0 }], ...over });
+  assert.equal(previewReady(true, mk(), true), true);
+  assert.equal(previewReady(true, mk(), false), false, "not running");
+  assert.equal(previewReady(false, mk(), true), false, "no engine");
+  assert.equal(previewReady(true, mk({ address: { status: "stopped" } }), true), false, "address not running");
+  assert.equal(previewReady(true, mk({ currentReleaseId: "r2" }), true), false, "latest deployment is not the serving release");
+  assert.equal(previewReady(true, mk({ deployments: [{ releaseId: "r1", steps: [{ name: "final_check", status: "failed" }], ageMin: 0 }] }), true), false, "final check did not pass");
+});
+
+test("a release whose image was cleaned up is restored by an explicitly labelled rebuild, never a silent rollback", async () => {
+  const { readFileSync } = await import("node:fs");
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
+  assert.match(screens, /imageRetained === false \? \(\{ kind: "rebuild", label: "Rebuild & Restore…" \}/);
+  assert.match(screens, /Roll back…/, "an image-backed release keeps the Roll back label");
+  assert.match(engine, /imageRetained: d\.resources\.some\(\(r\) => r\.kind === "image" && r\.state === "created"\)/);
+  const rebuild = dialogs.slice(dialogs.indexOf('dialog.kind === "rebuild"'), dialogs.indexOf('dialog.kind === "unlock-help"'));
+  assert.match(rebuild, /not an instant rollback/);
+  assert.match(rebuild, /op: "deploy", repo: app\.name, commit: rel\.commit/);
+  assert.match(rebuild, /no recorded Git commit/);
+  assert.match(rebuild, /working folder is never touched/);
+  assert.match(rebuild, /deployConfirmation\(\{ replacing: !!app\.currentReleaseId, cutoverAcknowledged: acked \}\)/);
+});
+
+test("only a running step spins; an abandoned one is shown as stopped, never as endless progress", async () => {
+  const { readFileSync } = await import("node:fs");
+  const parts = readFileSync(new URL("../views/deploy/parts.tsx", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../views/deploy/deploy.css", import.meta.url), "utf8");
+  assert.match(parts, /case "running": return <ArrowCounterClockwise [^>]*className="dp-spin"/);
+  for (const other of ["succeeded", "failed", "warning", "skipped"]) assert.doesNotMatch(parts.slice(parts.indexOf("function stepIcon"), parts.indexOf("const STEP_CLASS")).split("\n").filter((l) => l.includes(`"${other}"`)).join(""), /dp-spin/);
+  assert.match(engine, /if \(abandoned\) for \(const s of steps\) if \(s\.status === "running"\) \{ s\.status = "warning"/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.dp-spin \{ animation: none; \} \}/);
+});

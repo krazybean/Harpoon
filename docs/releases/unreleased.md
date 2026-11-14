@@ -4,6 +4,45 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### Source deployments: a repository without a Dockerfile builds from a recipe Harpoon generates (2.0.1 work, not released)
+
+- **Detection.** When a registration names no Dockerfile and the checkout has none, Harpoon detects an npm project (`package.json`;
+  `npm ci` with a lockfile) or a Python one (pip or uv only) and renders a Dockerfile for that one build. It exists only in the private
+  build snapshot, never in the project folder. Other package managers are refused with a reason, not guessed.
+- **Settings.** Install, build and start commands, Production or Development style, and a Docker network are stored with the registration
+  (an optional trailing field on `gitrepo`; a registration without settings is byte-identical to before) and shown in the Build panel. Jobs are
+  not implemented and are refused rather than run as Services.
+- **Secrets stay out of the image.** Build-flagged secrets are BuildKit secret mounts on the install and build commands only.
+- **No per-application caps.** New containers no longer get 256 MiB / 0.5 CPU / 64 PIDs; the VM's own safeguards still apply. A Node install
+  and build run with a 2 GiB heap bound (`ARG`, build time only).
+- **Pulls.** A generated build's base image (`node:<major>-slim`, `python:<version>-slim`) is fetched by the builder when it is not cached. A Dockerfile build still refuses a base image that is not local.
+- **Release-aware cleanup.** `cleanup-releases` (dry run by default) removes the stopped containers, port leases and images of releases that no
+  longer serve, and the retained images of failed deployments, each by its recorded id with the ownership labels re-checked, and journals
+  every removal. It never touches the release serving now (or the image that release pins), an unfinished or cancelled deployment, volumes,
+  networks, build cache or other applications. A deployment run through `git-deploy` runs it when it ends; a failure there is a note, never a
+  failed deployment. Reclaim Unused Space lists the same items first and removes them only after confirmation, and reports the guest's measured
+  free space before and after. `prune-build-cache` (dry run by default) is Docker's own prune of unused BuildKit cache, separately confirmed.
+- **Rebuild & Restore.** A release whose image was cleaned up is restored by rebuilding its recorded commit in a private checkout through the
+  normal deploy and cutover (current build settings and Variables apply, so the result can differ from the original). The Roll back button
+  keeps its meaning for a release whose image is still present.
+- **Preview.** An app whose Content-Security-Policy includes `upgrade-insecure-requests` cannot load its scripts and styles in WebKit over http, even on
+  loopback. Its private capture goes through a loopback-only, GET-only, cookie-free relay (`hpcapture://`) that removes only that one directive from
+  what the capture window sees and refuses redirects off the app's own host; the app's real headers and what ordinary visitors get are untouched. The
+  capture waits for a drawn, settled frame, refuses a blank one, runs one window at a time and closes it on success and failure.
+
+### Deployments: the Metrics tab shows the serving container's real measurements (2.0.1 work, not released)
+
+- The tab replaces its placeholder with CPU, memory, network and uptime for the container the journal says is serving, read
+  from Docker's own API through the existing socket (`GET /containers/{id}/json` and `/stats`; nothing is spawned, nothing
+  is changed). Before any measurement the container must carry Harpoon's labels for this application and deployment and
+  match the recorded container id; a container that merely has the recorded name is never measured.
+- Figures Docker does not provide stay empty rather than zero. CPU is a percent of one core (it can exceed 100% on several
+  cores). Memory excludes the page cache when Docker reports it, and a percentage appears only when the container has its
+  own memory limit. Rates need two samples of the same run; a counter reset or a restart gives none.
+- Sampling is about every 3 seconds, only while the tab is open and the window visible. A reading older than about 10
+  seconds is shown as stale, not current. Up to 10 minutes of history is kept in memory for the session only; it resets when
+  the serving container changes. No telemetry is stored.
+
 ### VM-backed tests run under a deadline and a watchdog (test tooling only)
 
 Scripts that boot or drive a real VM now re-run under `tools/vm-test-guard.py`: wall-clock deadline, preflight and 15 s sampling of

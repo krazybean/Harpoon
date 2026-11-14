@@ -81,9 +81,6 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 /* ---- release hero ------------------------------------------------------------------------ */
 .dp-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
 .dp-hero__state { display: flex; align-items: center; gap: 12px; }
-.dp-hero__state .big { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: var(--success-bg); color: var(--success); border: 1px solid #14532D; }
-.dp-hero__state .big svg { width: 20px; height: 20px; }
-.dp-hero__state .big.err { background: var(--error-bg); color: var(--error); border-color: #7F1D1D; } .dp-hero__state .big.warn { background: var(--warning-bg); color: var(--warning); border-color: #78350F; } .dp-hero__state .big.info { background: var(--info-bg); color: var(--info-fg); border-color: #0C4A6E; } .dp-hero__state .big.idle { background: var(--panel-header); color: var(--text-secondary); border-color: var(--border); }
 .dp-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 
 /* ---- tables ----------------------------------------------------------------------------------- */
@@ -167,7 +164,6 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 }
 @container dp (max-width: 780px) {
   .dp-grid--3, .dp-grid--2 { grid-template-columns: minmax(0, 1fr); }
-  .dp-hero { grid-template-columns: minmax(0, 1fr); } .dp-actions { justify-content: flex-start; }
   .hide-compact { display: none !important; }
   .dp-banner { flex-wrap: wrap; } .dp-banner__actions { margin-left: 30px; justify-content: flex-start; }
   .dp-kv { grid-template-columns: 96px minmax(0, 1fr); }
@@ -190,9 +186,8 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-card > .dp-row > b { flex: 1 1 8ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dp-card .dp-muted, .dp-card .dp-env { overflow-wrap: anywhere; min-width: 0; }
 .dp-hero__state > div:not(.big) { min-width: 0; }
-.dp-hero__state b, .dp-hero__state .mono { overflow-wrap: anywhere; }
+.dp-hero__state b, .dp-hero__state .mono { overflow-wrap: break-word; }
 .dp-actions { flex-wrap: wrap; min-width: 0; }
-.dp-hero__state .big { flex: 0 0 auto; }
 .dp-banner > div:not(.dp-banner__actions) { min-width: 0; overflow-wrap: anywhere; }
 .dp-banner__actions { flex: 0 0 auto; }
 .dp-panel__head { flex-wrap: wrap; row-gap: 6px; min-width: 0; }
@@ -225,3 +220,67 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-address__note { flex-basis: 100%; font-size: 11px; }
 .dp-address[data-status="stopped"] .dp-address__url, .dp-address[data-status="unavailable"] .dp-address__url { color: var(--text-secondary); }
 .dp-address[data-status="conflict"] { border-color: var(--warning); }
+/* release card: [thumbnail] [details] [status badge over actions] */
+.dp-hero { position: relative; }
+.dp-hero[data-thumb] { grid-template-columns: 220px minmax(0, 1fr) auto; align-items: start; }
+.dp-actions--end { justify-content: flex-end; }
+/* The release card answers to its own width, not the window's: the sidebar and the pane padding change what is left.
+   Wide: [thumbnail] [details] [actions]. Medium: [thumbnail] [details], actions on their own row. Narrow: one column. */
+.dp-herocard { container: hero / inline-size; }
+.dp-hero__state { min-width: 0; }
+@container hero (max-width: 1099px) {
+  .dp-hero { grid-template-columns: minmax(0, 1fr); }
+  .dp-hero[data-thumb] { grid-template-columns: 220px minmax(0, 1fr); }
+  .dp-hero .dp-actions--end { grid-column: 1 / -1; justify-content: flex-start; }
+}
+@container hero (max-width: 639px) {
+  .dp-hero, .dp-hero[data-thumb] { grid-template-columns: minmax(0, 1fr); }
+  .dp-thumb { width: min(320px, 100%); }
+}
+.dp-thumb { position: relative; width: 220px; max-width: 100%; min-width: 0; }
+.dp-thumb__refresh { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px; border: 1px solid rgba(255,255,255,.55); background: rgba(16,18,24,.78); color: #fff; cursor: pointer; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
+.dp-thumb__refresh:hover:not(:disabled) { background: rgba(16,18,24,.92); } .dp-thumb__refresh:disabled { cursor: progress; opacity: .85; }
+.dp-thumb__refresh:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 1px; }
+.dp-spin { animation: dp-spin 1s linear infinite; } @keyframes dp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dp-spin { animation: none; } }
+.dp-thumb__img { box-sizing: border-box; display: block; width: 100%; aspect-ratio: 16 / 10; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: #101218; overflow: hidden; cursor: zoom-in; }
+.dp-thumb__img img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.dp-thumb__img:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }
+.dp-thumb__none { cursor: default; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px; text-align: center; font-size: 11px; color: var(--text-secondary); overflow: hidden; }
+.dp-thumb__none span { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.dp-lightbox__img { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+
+/* Progressive disclosure: evidence stays one click away. */
+.dp-disclosure { margin-top: 10px; }
+.dp-disclosure > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; color: var(--text-secondary); font-size: 12px; font-weight: 600; list-style: none; border-radius: 6px; }
+.dp-disclosure > summary::-webkit-details-marker { display: none; }
+.dp-disclosure > summary::before { content: ""; flex: none; width: 6px; height: 6px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.dp-disclosure[open] > summary::before { transform: rotate(45deg); }
+.dp-disclosure > summary:hover { color: var(--text-primary); }
+.dp-disclosure > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.dp-disclosure__body { padding-top: 8px; }
+.dp-panel--disclosure > .dp-disclosure { margin: 0; }
+.dp-panel--disclosure > .dp-disclosure > summary { padding: 10px 14px; }
+.dp-panel--disclosure > .dp-disclosure > summary .dp-h2 { margin: 0; }
+.dp-panel--disclosure > .dp-disclosure > .dp-disclosure__body { padding: 0; border-top: 1px solid var(--border); }
+@media (prefers-reduced-motion: reduce) { .dp-disclosure > summary::before { transition: none; } }
+
+/* Settings sections: an icon that says what the section is, and a restrained danger zone. */
+.dp-sec { display: flex; align-items: center; gap: 8px; }
+.dp-sec svg { flex: none; color: var(--text-secondary); }
+.dp-secdesc { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.dp-panel--danger { border-color: rgba(255,111,111,.4); background: rgba(255,111,111,.04); }
+.dp-panel--danger .dp-panel__head { border-bottom-color: rgba(255,111,111,.25); }
+.dp-panel--danger .dp-h2, .dp-panel--danger .dp-sec svg { color: var(--error-fg); }
+
+/* Metrics */
+.dp-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.dp-mcard__big { display: block; margin-bottom: 8px; color: var(--text-primary); font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
+.dp-mcard--stale { opacity: .55; }
+.dp-trend { margin: 0; min-width: 0; }
+.dp-trend figcaption { margin-bottom: 4px; font-size: 11px; }
+.dp-trend svg { display: block; width: 100%; height: 56px; border-bottom: 1px solid var(--border); }
+.dp-trend path { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.dp-trend__none { font-size: 11px; }
+@media (max-width: 1099px) { .dp-grid--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 639px) { .dp-grid--4 { grid-template-columns: minmax(0, 1fr); } }

@@ -1224,12 +1224,17 @@ dependencies = [
 name = "harpoon-desktop"
 version = "2.0.0"
 dependencies = [
+ "block2",
  "harpoon-deploy",
  "harpoon-deploy-cli",
  "harpoon-deploy-docker",
  "harpoon-deploy-journal",
  "harpoon-deploy-keychain",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",

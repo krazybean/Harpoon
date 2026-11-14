@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
@@ -10,6 +10,24 @@ import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
 import { Banner } from "./parts.tsx";
+import { SourceSettingsFields } from "./SourceSettings.tsx";
+import { NO_SETTINGS, hasSettings, settingsJson, settingsProblem, type SourceDetection, type SourceSettings } from "../../lib/sourceSettings.ts";
+
+/** Detection for a local folder (read-only) and the Docker networks that exist, for the settings form. */
+function useSourceInsight(c: Ctx, folder: string | null) {
+  const [detection, setDetection] = useState<SourceDetection | null>(null);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const [networks, setNetworks] = useState<string[]>([]);
+  useEffect(() => { void c.engine!.networks().then(setNetworks); }, []);
+  useEffect(() => {
+    setDetection(null); setDetectError(null);
+    if (!folder) return;
+    let live = true;
+    c.engine!.detect(folder).then((d) => { if (live) setDetection(d); }, (e) => { if (live) setDetectError(String(e)); });
+    return () => { live = false; };
+  }, [folder]);
+  return { detection, detectError, networks };
+}
 
 function Dialog({ title, sub, wide, onClose, children, footer }: { title: string; sub?: string; wide?: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -28,7 +46,7 @@ function Dialog({ title, sub, wide, onClose, children, footer }: { title: string
 /** Shown in every dialog whose confirmation lets Harpoon change real Docker state. Cancel never sends anything. */
 const LiveNote = () => (
   <Banner tone="warn" icon={<Warning size={18} />} title="Confirming changes real Docker state">
-    Harpoon will build images and start or stop containers in your Harpoon VM and publish them on this Mac's loopback address only. It touches only what it created and labelled, and prunes nothing. Cancel changes nothing.
+    Harpoon will build images and start or stop containers in your Harpoon VM and publish them on this Mac's loopback address only. It touches only what it created and labelled. When a deployment ends it also removes the stopped containers and images of earlier releases and failed attempts that it created (the release now serving, your volumes and Docker\u2019s build cache are never touched), so an older release is later restored by rebuilding it. Cancel changes nothing.
   </Banner>
 );
 
@@ -132,6 +150,35 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
           <Row icon={<Pause size={14} />}>{c.engine ? "Git triggers for this application will be" : "Automatic deployments for this application will be"} <b>paused</b> until you resume them. New commits are held, not discarded.</Row>
         </Plan>
         <Banner tone="warn" title="Application rollback only">{ROLLBACK_WARNING.replace("Application rollback only. ", "")}</Banner>
+      </Dialog>
+    );
+  }
+
+  if (dialog.kind === "rebuild") {
+    const rel = app.releases.find((r) => r.id === dialog.releaseId);
+    const repo = c.state.engine?.repos.find((r) => r.app === app.id);
+    if (!rel) return null;
+    const why = !c.engine ? "Rebuild & Restore needs the Harpoon engine." : gate ?? (!repo ? "No repository is registered for this application, so there is no source to rebuild from." : !rel.commit ? "This release has no recorded Git commit, so it cannot be rebuilt." : null);
+    const ackKey = `rebuild:${rel.id}`;
+    const acked = ack === ackKey;
+    return (
+      <Dialog title={`Rebuild & Restore ${rel.id}`} sub={`${rel.revision.message} · ${rel.revision.sha}`} onClose={close}
+        footer={<button className="btn btn--primary" disabled={!!why || !acked || busy} title={why ?? (acked ? undefined : "Tick the acknowledgement to switch releases")} data-testid="rebuild-and-switch"
+          onClick={() => { const confirmation = deployConfirmation({ replacing: !!app.currentReleaseId, cutoverAcknowledged: acked }); if (!confirmation) return; act({ op: "deploy", repo: app.name, commit: rel.commit }, () => c.setRoute({ screen: "app", tab: "logs" }), confirmation); }}><ArrowCounterClockwise size={14} /> Rebuild and switch</button>}>
+        {why && <Banner tone="info" title="Not available">{why}</Banner>}
+        <LiveNote />
+        <Banner tone="warn" title="This rebuilds the application; it is not an instant rollback">The old image was removed to save disk space. Harpoon builds commit <span className="mono">{(rel.commit ?? rel.revision.sha).slice(0, 12)}</span> again from your repository in a private copy (your working folder is never touched), so it takes as long as a normal deployment.</Banner>
+        <Plan>
+          <Row icon={<Cube size={14} />}>Build that commit with the repository's <b>current</b> build settings and the Variables <b>as they are now</b>. If they changed since {rel.id} was built{rel.secrets.length ? ` (it pinned ${rel.secrets.map((s) => `${s.name}@v${s.version}`).join(", ")})` : ""}, or a base image or dependency moved, the result can differ from the original.</Row>
+          <Row icon={<Check size={14} />}>Run the preliminary health check on a temporary port. <b>{app.currentReleaseId ?? "The current release"} keeps running</b> until the new build is ready.</Row>
+          <Row icon={<Warning size={14} />}><b>Brief interruption expected</b> when releases switch, with the usual single bounded attempt to bring {app.currentReleaseId ?? "the current release"} back if the restored one fails.</Row>
+          <Row icon={<Info size={14} />}>If the commit is no longer in the repository, or a secret or file it needs is missing, nothing is built or stopped and the reason is shown.</Row>
+        </Plan>
+        <label className="dp-ack" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 10 }}>
+          <input type="checkbox" checked={acked} onChange={(e) => setAck(e.target.checked ? ackKey : null)} style={{ marginTop: 3 }} />
+          <span><b>Switch releases.</b> {CUTOVER_ACKNOWLEDGEMENT}</span>
+        </label>
+        <Banner tone="warn" title="Application restore only">{ROLLBACK_WARNING.replace("Application rollback only. ", "")}</Banner>
       </Dialog>
     );
   }
@@ -327,22 +374,24 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   const [location, setLocation] = useState("");
   const [branch, setBranch] = useState("main");
   const [port, setPort] = useState("3000");
-  const [dockerfile, setDockerfile] = useState("Dockerfile");
+  const [dockerfile, setDockerfile] = useState("");
   const [health, setHealth] = useState("/");
+  const [settings, setSettings] = useState<SourceSettings>(NO_SETTINGS);
   const [project, setProject] = useState("");
   const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
   const [picking, setPicking] = useState(false);
   const folderUrl = kind === "folder" ? fileUrlFor(location.trim()) : null;
   const url = kind === "folder" ? folderUrl ?? "" : location;
-  const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || folderUrl !== null);
+  const valid = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && location.trim() !== "" && Number(port) > 0 && Number(port) < 65536 && (kind === "git" || folderUrl !== null) && settingsProblem(settings) === null;
   const [submitting, setSubmitting] = useState(false);
   const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
+  const { detection, detectError, networks } = useSourceInsight(c, kind === "folder" && folderUrl !== null ? location.trim() : null);
   const submit = async () => {
     setSubmitting(true);
     setOutcome(null);
     try {
-      const r = await c.engine!.run({ op: "add-repo", name, url, project: project || null, branch: branch || null, filters: [], containerPort: Number(port), dockerfile: dockerfile || null, context: null, target: null, healthPath: health || null, username: username || null, knownHost: null, webhook: null, app: null, environment: null });
+      const r = await c.engine!.run({ op: "add-repo", name, url, project: project || null, branch: branch || null, filters: [], containerPort: Number(port), dockerfile: dockerfile || null, context: null, target: null, healthPath: health || null, settings: hasSettings(settings) ? settingsJson(settings) : null, username: username || null, knownHost: null, webhook: null, app: null, environment: null });
       // a token is handed to the Keychain through standard input, never kept here
       const secret = r.ok && username && token ? await c.engine!.run({ op: "repo-secret", name, kind: "token", value: token }) : null;
       if (r.ok) setToken("");
@@ -370,11 +419,13 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
           {kind === "folder" && location.trim() !== "" && folderUrl === null ? <small style={{ color: "var(--error-fg)" }}>Enter an absolute folder path (starting with /, without . or .. parts).</small> : null}</div>
         <div className="dp-field"><label>Branch</label><input className="dp-input" value={branch} onChange={(e) => setBranch(e.target.value)} /></div>
         <div className="dp-field"><label>Container port</label><input className="dp-input" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} /></div>
-        <div className="dp-field"><label>Dockerfile</label><input className="dp-input" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} /></div>
+        <div className="dp-field"><label>Dockerfile (optional)</label><input className="dp-input" value={dockerfile} placeholder="Detected: yours if present, otherwise generated" onChange={(e) => setDockerfile(e.target.value)} /></div>
         <div className="dp-field"><label>Health check path</label><input className="dp-input" value={health} onChange={(e) => setHealth(e.target.value)} /></div>
         <div className="dp-field"><label>Project (optional)</label><input className="dp-input" value={project} onChange={(e) => setProject(e.target.value)} /></div>
         {kind === "git" && <div className="dp-field"><label>Username (private HTTPS only)</label><input className="dp-input" autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} /></div>}
       </div>
+      {kind === "git" ? <Banner tone="info" title="Build settings">Harpoon detects how to build a repository without a Dockerfile when you deploy it. Override any command below.</Banner> : null}
+      <SourceSettingsFields value={settings} onChange={setSettings} detection={detection} detectError={detectError} networks={networks} />
       {kind === "git" && username && <div className="dp-field"><label htmlFor="rtok">Access token</label><input id="rtok" className="dp-input" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} /><small>Stored in the macOS Keychain. Never shown again.</small></div>}
       <Plan>
         <Row icon={<Check size={14} />}>Record <b>{name || "the repository"}</b> ({kind === "git" ? "Git" : "local"}) tracking <span className="mono">{branch || "its default branch"}</span></Row>
@@ -456,6 +507,8 @@ function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: 
   const [submitting, setSubmitting] = useState(false);
   const [outcome, setOutcome] = useState<RegistrationOutcome | null>(null);
   const [picking, setPicking] = useState(false);
+  const editFolder = form.kind === "folder" ? fileUrlFor(form.location.trim()) : null;
+  const { detection, detectError, networks } = useSourceInsight(c, editFolder ? form.location.trim() : null);
   const set = (patch: Partial<RegistrationForm>) => setForm((f) => ({ ...f, ...patch }));
   const edit = registrationEdit(base, form, ack);
   const saved = outcome?.ok === true;
@@ -484,9 +537,10 @@ function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: 
             {form.kind === "folder" ? <button type="button" className="btn btn--secondary" disabled={picking || saved} onClick={() => { setPicking(true); c.engine!.pickFolder().then((p) => { if (p) set({ location: p }); }, () => {}).finally(() => setPicking(false)); }}><FolderSimple size={14} /> Choose…</button> : null}</div></div>
         <div className="dp-field"><label htmlFor="ebr">Branch</label><input id="ebr" className="dp-input" value={form.branch} readOnly={saved} onChange={(e) => set({ branch: e.target.value })} /></div>
         <div className="dp-field"><label htmlFor="epo">Container port</label><input id="epo" className="dp-input" inputMode="numeric" value={form.port} readOnly={saved} onChange={(e) => set({ port: e.target.value.replace(/\D/g, "") })} /></div>
-        <div className="dp-field"><label htmlFor="edf">Dockerfile</label><input id="edf" className="dp-input" value={form.dockerfile} placeholder="Dockerfile" readOnly={saved} onChange={(e) => set({ dockerfile: e.target.value })} /></div>
+        <div className="dp-field"><label htmlFor="edf">Dockerfile</label><input id="edf" className="dp-input" value={form.dockerfile} placeholder="None: build from detection" readOnly={saved} onChange={(e) => set({ dockerfile: e.target.value })} /><small>Clear this to let Harpoon detect how to build the folder. Nothing is written to your repository.</small></div>
         <div className="dp-field"><label htmlFor="ehp">Health check path</label><input id="ehp" className="dp-input" value={form.health} placeholder="/" readOnly={saved} onChange={(e) => set({ health: e.target.value })} /></div>
       </div>
+      <SourceSettingsFields value={form.settings} onChange={(settings) => set({ settings })} detection={detection} detectError={detectError} networks={networks} readOnly={saved} />
       {edit.problem && !saved ? <small style={{ color: "var(--error-fg)" }}>{edit.problem}</small> : null}
       {base.credential !== "none" && <Banner tone="info" icon={<Key size={18} />} title="This repository has a saved credential">It stays with this repository's destination: the same host, port and protocol (https, http or ssh). The path can change, but not where requests go. To use another destination, add a new repository.</Banner>}
       {hasHistory && !saved && <label className="dp-row" style={{ gap: 8, alignItems: "flex-start" }}><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /><span>This application already has deployments. They keep the source they were built from; the next deployment will use these values.</span></label>}

@@ -75,8 +75,11 @@ jobs:
           if grep -rnE 'env::var|DOCKER_HOST|DOCKER_CONTEXT|Command::new' src; then
             echo "the CLI must not read the environment or spawn processes" >&2; exit 1
           fi
-          if grep -rnE '(system|containers|images|volumes|networks|builder)/prune|[A-Za-z_]prune([^A-Za-z]|$)|(^|[^A-Za-z])prune_[a-z]|(^|[^A-Za-z_])prune[[:space:]]*\(|force=true' src; then
-            echo "the CLI must not call a prune endpoint or force a removal" >&2; exit 1
+          # The separately confirmed prune-build-cache command is the one deliberate exception:
+          # it calls Docker's non-all BuildKit-cache prune and never touches releases.
+          if grep -rnE '(system|containers|images|volumes|networks|builder)/prune|[A-Za-z_]prune([^A-Za-z]|$)|(^|[^A-Za-z])prune_[a-z]|(^|[^A-Za-z_])prune[[:space:]]*\(|force=true' src \
+            | grep -vE 'prune-build-cache|prune_cache_cmd|prune_build_cache'; then
+            echo "the CLI must not call an unapproved prune endpoint or force a removal" >&2; exit 1
           fi
 
       - name: No fault-injection or crash controls in production deploy sources

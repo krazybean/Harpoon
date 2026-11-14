@@ -24,6 +24,7 @@ fn registration(at_ms: u64) -> RepoRec {
         context: None,
         target: None,
         health_path: None,
+        settings: None,
         at_ms,
     }
 }

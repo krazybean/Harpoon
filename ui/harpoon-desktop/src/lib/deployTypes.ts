@@ -69,6 +69,10 @@ export type Release = {
   ageMin: number;
   /** Pinned secret versions only — never values. */
   secrets: { name: string; version: number }[];
+  /** Engine mode: the full Git commit the release was built from, when one was recorded. */
+  commit?: string;
+  /** Engine mode: whether the release's image is still recorded as present. False means the old image-based rollback is no longer possible; it can be rebuilt from `commit`. */
+  imageRetained?: boolean;
 };
 
 export type HeldEvent = { id: string; revision: Revision; ageMin: number; /** Engine mode: the full revision, which a resume decision needs. */ revisionFull?: string; /** Engine mode: `held`, or `selected` (chosen by a resume; nothing has run yet). */ status?: string; /** Engine mode: where it came from (`poll`, `poll-late`, `github`, `gitlab`, `ci`). */ source?: string; /** Engine mode: when it was recorded, in epoch milliseconds. */ receivedMs?: number };
@@ -115,7 +119,7 @@ export type Observation = { kind: ObservationKind; recorded: string; observed: s
 
 /** Where a configuration value comes from. A value is shown only with its origin; with none, it is "Not recorded". */
 export type ConfigFact = { value: string | null; from: "registration" | "journal" | "docker" | "none"; detail?: string };
-export type ConfigFactKey = "source" | "branch" | "dockerfile" | "context" | "target" | "containerPort" | "hostPort" | "healthCheck" | "replacement" | "image";
+export type ConfigFactKey = "source" | "branch" | "dockerfile" | "context" | "target" | "buildSettings" | "network" | "containerPort" | "hostPort" | "healthCheck" | "replacement" | "image";
 export type ConfigFacts = Record<ConfigFactKey, ConfigFact>;
 
 /** Filled in by the port-exposure logic: what Docker reports for the container beside what is actually listening on this Mac. */
@@ -174,7 +178,7 @@ export type EngineMeta = {
   /** Runtimes attached read-only by path (engine mode). */
   externals: { id: string; path: string; format: string; store: string; error: string | null }[];
 };
-export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; /** "none", "token" or "sshkey" */ credential: string; /** The version of this registration; an edit names the one it was based on. */ registeredMs: number; seen: { refName: string; commit: string; atMs: number }[] };
+export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; /** Source-deployment settings (JSON) chosen at registration, if any. */ settings: string | null; /** "none", "token" or "sshkey" */ credential: string; /** The version of this registration; an edit names the one it was based on. */ registeredMs: number; seen: { refName: string; commit: string; atMs: number }[] };
 
 export type DeployState = {
   /** Engine mode only ever uses `loading` (nothing loaded yet) and `empty`/`healthy` (a loaded snapshot with/without apps). */

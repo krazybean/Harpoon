@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
+import { NO_SETTINGS } from "./sourceSettings.ts";
 import { dialogKeptOnListChange } from "../views/deploy/context.ts";
 import { removalBackup, NO_NEW_BACKUP_NOTE, EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
@@ -126,6 +127,11 @@ test("recorded step logs: withheld output is stated, truncation is stated, text 
   assert.match(lines[0].text, /earlier output was cut/);
   assert.deepEqual(lines.slice(1, 3).map((l) => [l.kind, l.text]), [["", "ok"], ["err", "error: boom"]]);
   assert.match(lines.at(-1).text, /withheld/);
+});
+
+test("the real Logs tab selects a recorded deployment even though engine rows have no simulated buildLog", () => {
+  const view = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(view, /const target = live \?\? app\.deployments\[0\] \?\? null/);
 });
 
 test("observed Docker state parses names and treats a non-answer as unknown", () => {
@@ -473,7 +479,7 @@ test("the Add repository dialog waits for the engine, keeps its input on failure
 const REPO = { name: "shop", url: "file:///Users/me/Harpoon%20Hello", app: "app_1", project: null, branch: "main", containerPort: 3000, dockerfile: null, healthPath: null, credential: "none", registeredMs: 1234, seen: [] };
 
 test("the edit form starts from the registration, shows a folder as its path and invents no default", () => {
-  assert.deepEqual(registrationFormOf(REPO), { kind: "folder", location: "/Users/me/Harpoon Hello", branch: "main", dockerfile: "", port: "3000", health: "" });
+  assert.deepEqual(registrationFormOf(REPO), { kind: "folder", location: "/Users/me/Harpoon Hello", branch: "main", dockerfile: "", port: "3000", health: "", settings: NO_SETTINGS });
   assert.equal(registrationFormOf({ ...REPO, url: "https://git.example.com/a/b.git" }).kind, "git");
 });
 
@@ -497,7 +503,7 @@ test("an edit never carries a name, an application, a credential or a runtime, a
 test("a form that cannot be sent says why instead of sending something else", () => {
   const form = registrationFormOf({ ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" });
   const r = { ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" };
-  assert.match(registrationEdit(r, { ...form, dockerfile: "" }, false).problem, /Dockerfile path cannot be cleared/);
+  { const e = registrationEdit(r, { ...form, dockerfile: "" }, false); assert.equal(e.problem, null); assert.equal(e.op.dockerfile, ""); assert.match(e.changed[0], /cleared/); }
   assert.match(registrationEdit(r, { ...form, health: " " }, false).problem, /Health check path cannot be cleared/);
   assert.match(registrationEdit(r, { ...form, location: "relative/dir" }, false).problem, /absolute folder path/);
   assert.match(registrationEdit(r, { ...form, branch: " " }, false).problem, /branch is required/);
@@ -529,7 +535,7 @@ test("the Edit registration dialog only edits: version captured at open, history
   const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
   assert.match(ctx, /MUTATING_DIALOGS[^\n]*"edit-registration"/);
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit registration/);
+  assert.match(screens, /const editable = !app\.external && c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\);[\s\S]{0,300}Edit configuration/);
   assert.doesNotMatch(screens, /register the repository again/);
 });
 
@@ -573,7 +579,7 @@ test("without a registered repository the Git-based actions are disabled with th
   assert.match(screens, /Retry deployment<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
   assert.match(screens, /Redeploy this revision<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
   // rollback and recovery use canAct, so a source-less application can still be rolled back
-  assert.match(screens, /Roll back\u2026<\/>, \{ disabled: !canAct \|\| !prod \|\| !rollbackTarget/);
+  assert.match(screens, /"Roll back\u2026"\}<\/>, \{ disabled: !canAct \|\| !prod \|\| !rollbackTarget/);
   // the disconnected application says so on its card and page
   assert.match(screens, /app\.disconnected \? <Tag>Source disconnected<\/Tag>/);
   assert.match(screens, /title="Source disconnected"/);

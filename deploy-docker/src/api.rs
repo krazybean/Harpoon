@@ -151,6 +151,15 @@ impl Limits {
     };
 }
 
+impl Limits {
+    /// No per-application cap (Docker reads 0 as unlimited). The VM's own memory, CPU and disk safeguards still apply.
+    pub const UNLIMITED: Limits = Limits {
+        memory_bytes: 0,
+        nano_cpus: 0,
+        pids: 0,
+    };
+}
+
 pub struct CreateSpec<'a> {
     pub image: &'a str,
     pub labels: &'a [(String, String)],
@@ -158,6 +167,8 @@ pub struct CreateSpec<'a> {
     pub container_port: u16,
     pub host_port: u16,
     pub limits: Limits,
+    /// A user-defined network to join instead of Docker's default bridge.
+    pub network: Option<&'a str>,
 }
 
 impl CreateSpec<'_> {
@@ -165,7 +176,7 @@ impl CreateSpec<'_> {
     /// policy, swap disabled (`MemorySwap == Memory`), default network.
     pub fn body(&self) -> Json {
         let port_key = format!("{}/tcp", self.container_port);
-        obj(vec![
+        let mut body = obj(vec![
             ("Image", s(self.image)),
             (
                 "Labels",
@@ -201,7 +212,15 @@ impl CreateSpec<'_> {
                     ),
                 ]),
             ),
-        ])
+        ]);
+        if let (Some(net), Json::Obj(top)) = (self.network, &mut body) {
+            for (k, v) in top.iter_mut() {
+                if let (true, Json::Obj(hc)) = (k == "HostConfig", v) {
+                    hc.push(("NetworkMode".to_string(), s(net)));
+                }
+            }
+        }
+        body
     }
 }
 
@@ -617,6 +636,41 @@ impl DockerApi {
         }
     }
 
+    /// `GET /containers/{id}/json`, parsed but not interpreted. Read-only. `None` when Docker has no such container.
+    pub fn container_inspect_json(
+        &self,
+        id_or_name: &str,
+        left: Duration,
+    ) -> Result<Option<Json>, ApiError> {
+        let r = self.call(
+            "GET",
+            &format!("/containers/{}/json", enc(id_or_name)),
+            None,
+            left,
+        )?;
+        match r.status {
+            200 => Ok(Some(parse(&r, "container inspect")?)),
+            404 => Ok(None),
+            _ => Err(Self::unexpected("container inspect", &r)),
+        }
+    }
+
+    /// `GET /containers/{id}/stats?stream=false`: one sample (Docker takes about a second to produce the
+    /// previous-sample half). Read-only. `None` when Docker has no such container.
+    pub fn container_stats_json(&self, id: &str, left: Duration) -> Result<Option<Json>, ApiError> {
+        let r = self.call(
+            "GET",
+            &format!("/containers/{}/stats?stream=false", enc(id)),
+            None,
+            left,
+        )?;
+        match r.status {
+            200 => Ok(Some(parse(&r, "container stats")?)),
+            404 => Ok(None),
+            _ => Err(Self::unexpected("container stats", &r)),
+        }
+    }
+
     pub fn container_inspect(
         &self,
         id_or_name: &str,
@@ -767,6 +821,39 @@ impl DockerApi {
         }
     }
 
+    /// `GET /system/df`: bytes of BuildKit cache in total and the part nothing is using (what a prune would remove).
+    pub fn build_cache_usage(&self, left: Duration) -> Result<(u64, u64), ApiError> {
+        let r = self.call("GET", "/system/df", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("disk usage", &r));
+        }
+        let j = parse(&r, "disk usage")?;
+        let entries = j.get("BuildCache").and_then(Json::as_array).unwrap_or(&[]);
+        let (mut total, mut free) = (0u64, 0u64);
+        for e in entries {
+            let size = e.get("Size").and_then(Json::as_i64).unwrap_or(0).max(0) as u64;
+            total += size;
+            if !e.get("InUse").and_then(Json::as_bool).unwrap_or(false) {
+                free += size;
+            }
+        }
+        Ok((total, free))
+    }
+
+    /// `POST /build/prune`: removes BuildKit cache nothing is using (what `docker builder prune` does without `--all`
+    /// and without touching images, containers or volumes). Returns the bytes Docker says it freed.
+    pub fn prune_build_cache(&self, left: Duration) -> Result<u64, ApiError> {
+        let r = self.call("POST", "/build/prune?all=false", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("build cache prune", &r));
+        }
+        let j = parse(&r, "build cache prune")?;
+        Ok(j.get("SpaceReclaimed")
+            .and_then(Json::as_i64)
+            .unwrap_or(0)
+            .max(0) as u64)
+    }
+
     /// At most `tail` lines and `max_bytes` bytes, demultiplexed to text.
     pub fn logs(
         &self,
@@ -900,4 +987,27 @@ fn published_of(j: &Json) -> Result<Vec<Published>, ApiError> {
         (a.container_port, &a.proto, a.host_port).cmp(&(b.container_port, &b.proto, b.host_port))
     });
     Ok(out)
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    #[test]
+    fn network_is_sent_only_when_chosen() {
+        let spec = |network| CreateSpec {
+            image: "sha256:x",
+            labels: &[],
+            env: &[],
+            container_port: 3000,
+            host_port: 40000,
+            limits: Limits::UNLIMITED,
+            network,
+        };
+        let plain = spec(None).body().to_json();
+        assert!(!plain.contains("NetworkMode"));
+        let joined = spec(Some("proj_default")).body().to_json();
+        assert!(joined.contains("\"NetworkMode\":\"proj_default\""));
+        assert!(joined.contains("\"Memory\":0") && joined.contains("\"PidsLimit\":0"));
+    }
 }

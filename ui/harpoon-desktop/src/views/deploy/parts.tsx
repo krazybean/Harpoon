@@ -4,6 +4,7 @@ import { ArrowCounterClockwise, Check, Copy, Info, Pause, Warning, X, CaretRight
 import type { LogLine, StepRecord } from "../../lib/deployTypes.ts";
 import type { Tone } from "../../lib/deployPresentation.ts";
 import { EVIDENCE_NOTE, stepLabel } from "../../lib/deployPresentation.ts";
+import { visibleLogLines } from "../../lib/deployUi.ts";
 
 const PILL: Record<Tone, string> = { ok: "dp-pill--ok", err: "dp-pill--err", warn: "dp-pill--warn", info: "dp-pill--info", neutral: "" };
 
@@ -40,6 +41,11 @@ export function Ident({ value, shown, copy = false }: { value: string; shown?: s
   );
 }
 
+/** Detail that is kept but not shown until asked for: a native <details>, so Enter/Space and focus come from the browser. */
+export function Disclosure({ summary, children, open }: { summary: ReactNode; children: ReactNode; open?: boolean }) {
+  return <details className="dp-disclosure" open={open}><summary>{summary}</summary><div className="dp-disclosure__body">{children}</div></details>;
+}
+
 export function Evidence({ children }: { children?: ReactNode }) {
   return <span className="dp-evidence"><Info size={12} />{children ?? EVIDENCE_NOTE}</span>;
 }
@@ -50,7 +56,7 @@ function stepIcon(status: StepRecord["status"]) {
     case "failed": return <X size={12} weight="bold" />;
     case "warning": return <Warning size={12} weight="bold" />;
     case "skipped": return <CaretRight size={12} />;
-    case "running": return <ArrowCounterClockwise size={12} />;
+    case "running": return <ArrowCounterClockwise size={12} className="dp-spin" aria-hidden="true" />;
     default: return null;
   }
 }
@@ -62,7 +68,7 @@ export function Steps({ steps }: { steps: StepRecord[] }) {
       {steps.map((s) => (
         <div className={`dp-step dp-step--${STEP_CLASS[s.status]}`} key={s.name} role="listitem" aria-label={`${stepLabel(s.name)}: ${s.status}`}>
           <div className="dp-step__ico">{stepIcon(s.status)}</div>
-          <div><b>{stepLabel(s.name)}</b><small>{s.note || (s.status === "pending" ? "waiting" : "")}</small></div>
+          <div><b>{stepLabel(s.name)}</b><small>{s.note || (s.status === "pending" ? "waiting" : s.status === "running" ? "in progress · its log is recorded when the step ends" : "")}</small></div>
           <time>{s.durationLabel}</time>
         </div>
       ))}
@@ -80,7 +86,7 @@ function LogText({ text }: { text: string }) {
 export function LogPanel({ lines, bar, filter = "", follow = false, label }: { lines: LogLine[]; bar?: ReactNode; filter?: string; follow?: boolean; label: string }) {
   const body = useRef<HTMLDivElement>(null);
   useEffect(() => { if (follow && body.current) body.current.scrollTop = body.current.scrollHeight; }, [lines.length, follow]);
-  const shown = filter ? lines.filter((l) => l.text.toLowerCase().includes(filter.toLowerCase())) : lines;
+  const shown = visibleLogLines(lines, filter);
   return (
     <div className="dp-log" role="log" aria-label={label}>
       <div className="dp-log__bar">{bar}</div>

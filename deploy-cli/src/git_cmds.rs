@@ -254,6 +254,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         context: p.value("context").map(str::to_string),
         target: p.value("target").map(str::to_string),
         health_path: p.value("health-path").map(str::to_string),
+        settings: settings_flag(p)?.flatten(),
         at_ms: now_ms(),
     };
     rec.validate().map_err(Fail::usage)?;
@@ -302,6 +303,16 @@ fn verification_line(out: &mut String, verified: &Option<String>, branch: &str) 
     };
 }
 
+/// `--settings JSON`: `None` when the flag is absent, `Some(None)` when it names no setting (clears them),
+/// otherwise the canonical text that is stored.
+fn settings_flag(p: &Parsed) -> Result<Option<Option<String>>, Fail> {
+    let Some(text) = p.value("settings") else {
+        return Ok(None);
+    };
+    let s = harpoon_deploy_docker::plan::Settings::parse(text).map_err(Fail::usage)?;
+    Ok(Some((!s.is_empty()).then(|| s.canonical())))
+}
+
 /// Change a registration's source, branch, Dockerfile path, container port or health path. It appends one
 /// new `gitrepo` record (the latest wins, as for `repo-add`), so history is never rewritten: every
 /// deployment keeps the `gitsrc` record it was started with. The name, the application and the credential
@@ -343,6 +354,15 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
         }
     };
     // The same rules `deploy` applies, so an edit cannot store a value that deploy would refuse.
+    if p.switch("clear-dockerfile") {
+        if p.value("dockerfile").is_some() {
+            return Err(Fail::usage(
+                "--clear-dockerfile and --dockerfile cannot be used together",
+            ));
+        }
+        set("Dockerfile", rec.dockerfile.is_some());
+        rec.dockerfile = None;
+    }
     if let Some(d) = value("dockerfile")? {
         if !harpoon_deploy_docker::confine::plain_relative(&d) || d.chars().any(char::is_control) {
             return Err(Fail::refused(format!(
@@ -366,6 +386,10 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
             .ok_or_else(|| Fail::usage("--container-port is not a port number"))?;
         set("container port", port != rec.container_port);
         rec.container_port = port;
+    }
+    if let Some(new) = settings_flag(p)? {
+        set("deployment settings", new != rec.settings);
+        rec.settings = new;
     }
     if changed.is_empty() {
         return Err(Fail::refused(format!(
@@ -1115,8 +1139,12 @@ fn run_source(
         .map_err(|e| format!("cannot generate an id: {e}"))?;
     {
         // the source is durable before anything is built
-        let (mut j, restored) = store::open_writer(rt, kind_of(rt, p).map_err(|f| f.message)?)
-            .map_err(|f| f.message)?;
+        // Holding the writer lock proves no other process is running a deployment, so one still marked running
+        // was cut off (this marks it interrupted; Docker is untouched). Otherwise it would block every later
+        // deployment until someone ran `recover`, and the cutover safeguards still see an unconfirmed cutover.
+        let (mut j, restored) =
+            store::open_writer_recovered(rt, kind_of(rt, p).map_err(|f| f.message)?, now_ms())
+                .map_err(|f| f.message)?;
         // A source record names its repository and replay refuses one for a repository that is not registered, so
         // this is the one place a removal could otherwise make the journal unreadable. Under the writer lock the
         // registration is either exactly the one this deployment was prepared from, or nothing is recorded.
@@ -1179,8 +1207,18 @@ fn run_source(
     opt("context", &repo.context);
     opt("target", &repo.target);
     opt("health-path", &repo.health_path);
+    opt("settings", &repo.settings);
     opt("project", &repo.project);
-    opt("environment", &repo.environment);
+    // The Variables screen stores an application's values under `@production`; a registration that names no
+    // environment would otherwise resolve none of them (no build secrets, no runtime configuration).
+    opt(
+        "environment",
+        &Some(
+            repo.environment
+                .clone()
+                .unwrap_or_else(|| "production".into()),
+        ),
+    );
     for f in FORWARD_VALUES {
         if let Some(v) = p.value(f) {
             a.push(format!("--{f}"));
@@ -1218,6 +1256,25 @@ fn run_source(
         let _ = writeln!(out, "  {l}");
     }
     drop(ws);
+    // Superseded and abandoned artifacts are removed once the run has ended. A failure here is a note, never a
+    // failed deployment: the code above is what the deployment itself returned.
+    if !p.switch("simulate") && commands::authorized(p).is_ok() {
+        if let Ok(Some(sock)) = commands::socket_flag(p) {
+            let mut note = String::new();
+            match crate::cleanup::run(p, rt, &sock, true, &mut note) {
+                Ok(t) => {
+                    let _ = writeln!(out, "  cleanup: removed {} container(s), {} image(s) of earlier releases and failed attempts; the serving release, volumes and build cache were not touched", t.containers, t.images);
+                }
+                Err(f) => {
+                    let _ = writeln!(
+                        out,
+                        "  note: cleanup of earlier artifacts was skipped: {}",
+                        f.message.lines().next().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
     let exists = store::read_restored(rt)
         .ok()
         .flatten()
@@ -1248,7 +1305,17 @@ pub fn git_deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String)
             ))
         }
     };
+    let start = out.len();
     match run_source(p, gate, svc, &rt, &repo, sel, "manual", None, out) {
+        // The engine's own refusal is written to the output; a caller that shows only the error would see nothing.
+        Ok(r) if r.code == exit::REFUSED => Err(Fail::refused(
+            out[start..]
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("source: "))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )),
         Ok(r) => Ok(r.code),
         Err(m) => Err(Fail::failed(format!("nothing was deployed: {m}"))),
     }
@@ -1770,6 +1837,7 @@ mod tests {
             context: None,
             target: None,
             health_path: None,
+            settings: None,
             at_ms,
         }
     }

@@ -162,7 +162,8 @@ test("the Configuration panel shows only what was recorded, each value with its 
   const m = await mountView(engine);
   await m.render(stateOf(matching));
   await openExternalApp(m);
-  const panel = find(m.host, "section.dp-panel", "Configuration");
+  // the Overview shows values only; each value with its origin is in the disclosure
+  const panel = find(m.host, "section.dp-panel", "Configuration").querySelector("details");
   const row = (label) => dd(panel, label).textContent.replace(/\s+/g, " ").trim();
   assert.equal(row("Source"), "Not recorded");
   assert.equal(row("Build file"), "Not recorded");
@@ -319,7 +320,7 @@ test("Resources & health do not call a running container 'no running container' 
   const m = await mountView(engine);
   await m.render(stateOf(matching));
   await openExternalApp(m);
-  const panel = find(m.host, "section.dp-panel", "Resources & health");
+  const panel = find(m.host, "section.dp-panel", "Resource figures");
   assert.doesNotMatch(panel.textContent, /No running container/);
   assert.match(panel.textContent, /Per-container resource figures are not collected on this screen/);
   assert.ok(find(panel, ".dp-pill", "Final check passed (recorded)"));
@@ -328,7 +329,7 @@ test("Resources & health do not call a running container 'no running container' 
   const gone = await mountView(engine);
   await gone.render(stateOf({}));
   await openExternalApp(gone);
-  assert.match(find(gone.host, "section.dp-panel", "Resources & health").textContent, /No running container/, "and when there really is none, it still says so");
+  assert.match(find(gone.host, "section.dp-panel", "Resource figures").textContent, /No running container/, "and when there really is none, it still says so");
   await gone.unmount();
 });
 
