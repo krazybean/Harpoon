@@ -795,3 +795,17 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .artifact-group[data-expanded="true"] .artifact-chevron { transform: rotate(45deg); }
 .artifact-group__body { padding: 8px 12px 12px; border-top: 1px solid var(--border); }
 @media (prefers-reduced-motion: reduce) { .artifact-group, .artifact-chevron { transition: none; } }
+
+/* Cleanup confirmation body. Red only for tiles that delete Docker objects; amber is journal reconciliation, green protected. */
+.cleanup-impact { display: grid; gap: 12px; }
+.cleanup-impact__head { margin-bottom: 4px; color: var(--text-secondary); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.cleanup-impact__head--protected { color: var(--success-fg); }
+.cleanup-impact__apps, .cleanup-impact__list, .cleanup-impact__records ul { margin: 0; padding: 0; list-style: none; }
+.cleanup-impact__apps li { overflow-wrap: anywhere; color: var(--text-primary); }
+.cleanup-impact__tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.cleanup-impact__tiles .artifact-metric__n { font-size: 20px; }
+.artifact-metric--remove { border-color: rgba(248,113,113,.35); border-left-color: var(--error); background: rgba(248,113,113,.07); }
+.artifact-metric--remove .artifact-metric__n { color: var(--error-fg); }
+.cleanup-impact__list li { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; color: var(--text-primary); }
+.cleanup-impact__records ul { max-height: 160px; overflow: auto; display: grid; gap: 6px; margin-top: 6px; }
+.cleanup-impact__records li { overflow-wrap: anywhere; }

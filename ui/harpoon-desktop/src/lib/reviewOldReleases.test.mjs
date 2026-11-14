@@ -20,12 +20,12 @@ const mock = join(out, "tauri-core.js");
 writeFileSync(mock, "export const invoke = (...a) => globalThis.__invoke(...a);");
 const outfile = join(out, "card.mjs");
 await build({
-  entryPoints: [new URL("../components/DiskReclaimCard.tsx", import.meta.url).pathname], outfile, bundle: true, format: "esm", platform: "node", logLevel: "silent",
+  stdin: { resolveDir: new URL("../components/", import.meta.url).pathname, loader: "ts", contents: 'export * from "./DiskReclaimCard.tsx"; export { ConfirmDialogHost } from "./ConfirmDialog.tsx";' }, outfile, bundle: true, format: "esm", platform: "node", logLevel: "silent",
   external: ["react", "react-dom"], alias: { "@tauri-apps/api/core": mock }, jsx: "automatic",
 });
 const React = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { DockerArtifacts } = await import(pathToFileURL(outfile).href);
+const { DockerArtifacts, ConfirmDialogHost } = await import(pathToFileURL(outfile).href);
 const { act } = React;
 
 const item = (o) => "item: " + JSON.stringify({ app: "app_1", appName: "collectiv", environment: "production", deployment: "dep_01ABCDEF", createdMs: 1, status: "Succeeded", commit: "abc1234", kind: "image", name: "harpoon/x:1", verdict: "ready", reason: "superseded", detail: "", physical: true, ...o });
@@ -37,7 +37,7 @@ async function mount(handler) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
-  await act(async () => root.render(React.createElement(DockerArtifacts, { enabled: true, onDone: () => {} })));
+  await act(async () => root.render(React.createElement(React.Fragment, null, React.createElement(DockerArtifacts, { enabled: true, onDone: () => {} }), React.createElement(ConfirmDialogHost))));
   const button = () => [...host.querySelectorAll("button")].find((b) => b.textContent.startsWith("Review old") || b.textContent === "Looking…");
   const click = (b) => act(async () => { b.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
   return { host, calls, button, click, dialog: () => document.querySelector('[role="dialog"]'), unmount: () => act(async () => root.unmount()) };
@@ -227,5 +227,92 @@ test("viewing, expanding and toggling details never invokes a cleanup", async ()
   await m.click([...m.host.querySelectorAll("button")].find((b) => b.textContent === "Expand all") ?? toggle(m, "Collectiv"));
   assert.ok(m.calls.every((a) => a.op.apply === false));
   assert.equal(m.calls.length, 1);
+  await m.unmount();
+});
+
+// ---- the confirmation dialog ----
+const ready = (app, name, kind, n) => [app, name, "ready", kind, n];
+const confirmOf = async (spec, answer) => {
+  const m = await mount(async (a) => (a.op.apply ? { ok: true, summary: "", hint: "", detail: "reclaimed-containers: 0\nreclaimed-images: 0" } : lines(spec)));
+  await m.click(m.button());
+  const primary = [...m.host.querySelectorAll(".dialog-actions button")].find((b) => /^(Reconcile|Remove|Review cleanup)/.test(b.textContent));
+  await m.click(primary);
+  return m;
+};
+const dlg = () => document.querySelector('[role="dialog"]');
+const tile = (label) => [...dlg().querySelectorAll(".artifact-metric")].find((t) => t.textContent.includes(label));
+
+test("journal-only confirmation: 16 records, no Docker deletion, no rollback warning, not red", async () => {
+  const m = await confirmOf([["a1", "Collectiv", "reconcile", "container", 12], ["a1", "Collectiv", "reconcile", "port-lease", 3], ["a1", "Collectiv", "reconcile", "image", 1], ["a1", "Collectiv", "protected", "image", 2], ["a2", "juancastro.me", "protected", "image", 2]]);
+  const d = dlg();
+  assert.match(d.querySelector("#confirm-action-title").textContent, /Reconcile 16 records/);
+  assert.match(tile("Journal records to reconcile").textContent, /^16/);
+  assert.match(tile("Docker containers to remove").textContent, /^0/);
+  assert.match(tile("Docker images to remove").textContent, /^0/);
+  assert.match(tile("Protected resources").textContent, /^4/);
+  assert.match(d.textContent, /No Docker objects will be deleted/);
+  assert.match(d.textContent, /frees no Docker disk space/);
+  assert.doesNotMatch(d.textContent, /rolled back|Image sizes are shared/);
+  assert.ok(!d.querySelector(".artifact-metric--remove"), "no red tile");
+  assert.ok(!d.querySelector(".btn--destructive"), "confirm button is not red");
+  assert.deepEqual([...d.querySelectorAll(".cleanup-impact__apps li")].map((l) => l.textContent), ["Collectiv · Production"], "protected-only application is not affected");
+  assert.match(d.textContent, /Stale port reservations3/);
+  assert.match(d.textContent, /References to already-removed containers12/);
+  assert.match(d.textContent, /References to already-removed images1/);
+  assert.match(d.textContent, /Persistent volumes are never touched/);
+  assert.match(d.textContent, /Deployment history stays/);
+  await m.unmount();
+});
+
+test("Docker removal confirmations name the objects, the rollback impact and a red action", async () => {
+  for (const [spec, label, containers, images] of [[[ready("a", "A", "container", 2)], "Remove 2 Docker artifacts", 2, 0], [[ready("a", "A", "image", 1)], "Remove 1 Docker artifact", 0, 1]]) {
+    const m = await confirmOf(spec);
+    const d = dlg();
+    assert.match(d.querySelector("#confirm-action-title").textContent, new RegExp(label));
+    assert.match(tile("Docker containers to remove").textContent, new RegExp(`^${containers}`));
+    assert.match(tile("Docker images to remove").textContent, new RegExp(`^${images}`));
+    assert.match(d.textContent, /will be deleted/);
+    assert.match(d.textContent, /cannot be predicted/);
+    assert.equal(/rolled back/.test(d.textContent), images > 0, "rollback note only when an image is deleted");
+    assert.ok(d.querySelector(".btn--destructive"));
+    assert.ok(d.querySelector(".artifact-metric--remove"));
+    await m.unmount();
+  }
+});
+
+test("a mixed operation shows both counts separately and an explicit label", async () => {
+  const m = await confirmOf([ready("a", "A", "image", 3), ["a", "A", "reconcile", "container", 5], ["b", "B", "reconcile", "port-lease", 1], ["c", "C", "protected", "image", 1]]);
+  const d = dlg();
+  assert.match(d.querySelector("#confirm-action-title").textContent, /Remove 3 Docker objects and reconcile 6 records/);
+  assert.match(tile("Journal records to reconcile").textContent, /^6/);
+  assert.match(tile("Docker images to remove").textContent, /^3/);
+  assert.deepEqual([...d.querySelectorAll(".cleanup-impact__apps li")].map((l) => l.textContent.split(" ·")[0]), ["A", "B"], "multiple affected applications, no protected-only one");
+  await m.unmount();
+});
+
+test("affected records are behind a disclosure; opening it, Cancel, Escape and the backdrop run nothing", async () => {
+  for (const how of ["cancel", "escape", "scrim"]) {
+    const m = await confirmOf([["a", "A", "reconcile", "container", 2]]);
+    const d = dlg();
+    const details = d.querySelector("details");
+    assert.equal(details.open, false);
+    details.open = true;
+    assert.match(details.textContent, /dep_/);
+    assert.equal(document.activeElement.textContent, "Cancel", "focus starts on the safe button");
+    if (how === "cancel") await m.click([...d.querySelectorAll("button")].find((b) => b.textContent === "Cancel"));
+    if (how === "escape") await act(async () => { d.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    if (how === "scrim") await m.click(document.querySelector(".dialog-scrim"));
+    assert.equal(dlg(), null, how);
+    assert.ok(m.calls.every((a) => a.op.apply === false), `${how}: no cleanup ran`);
+    await m.unmount();
+  }
+});
+
+test("only the confirm button runs the cleanup, once, with the live-changes confirmation", async () => {
+  const m = await confirmOf([["a", "A", "reconcile", "container", 2]]);
+  assert.equal(m.calls.length, 1, "opening the dialog ran nothing");
+  await m.click([...dlg().querySelectorAll("button")].find((b) => b.textContent === "Reconcile 2 records"));
+  assert.equal(m.calls.length, 2);
+  assert.deepEqual(m.calls[1], { op: { op: "cleanup-releases", apply: true }, confirmation: { liveChanges: true, cutover: false } });
   await m.unmount();
 });

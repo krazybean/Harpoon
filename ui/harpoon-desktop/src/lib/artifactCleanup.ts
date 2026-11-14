@@ -139,6 +139,29 @@ export function cleanupActionLabel(r: CleanupReport): string | null {
   return `Review cleanup (${d + j} items)`;
 }
 
+/** The confirm button's label: it names what changes, and keeps Docker deletion and journal reconciliation apart. */
+export function confirmLabel(r: CleanupReport): string {
+  const { dockerObjects: d, journalOnly: j } = inventorySummary(r);
+  const records = `${j} record${j === 1 ? "" : "s"}`;
+  if (d === 0) return `Reconcile ${records}`;
+  const objects = `${d} Docker ${j === 0 ? "artifact" : "object"}${d === 1 ? "" : "s"}`;
+  return j === 0 ? `Remove ${objects}` : `Remove ${objects} and reconcile ${records}`;
+}
+
+/** What the operation changes, by category, straight from the engine's verdicts. Protected-only applications are not "affected". */
+export function impactBreakdown(r: CleanupReport) {
+  const n = (v: Verdict, k: Kind) => r.items.filter((i) => i.verdict === v && i.kind === k).length;
+  return {
+    stalePortLeases: n("reconcile", "port-lease"),
+    goneContainers: n("reconcile", "container"),
+    goneImages: n("reconcile", "image"),
+    removeContainers: n("ready", "container"),
+    removeImages: n("ready", "image"),
+    records: r.items.filter((i) => i.verdict === "ready" || i.verdict === "reconcile"),
+    applications: groupByApplication(r).filter((g) => g.ready.containers + g.ready.images + g.reconcile > 0).map((g) => ({ title: g.title, environment: g.environment })),
+  };
+}
+
 /** The collapsed row's one-line counts for an application. */
 export function groupCounts(g: CleanupGroup): string {
   const remove = g.ready.containers + g.ready.images;

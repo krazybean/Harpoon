@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import { formatSize, parseDiskCapacity, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { DiskCapacity, ExpansionState, ReclaimResult } from "../lib/diskCapacity";
-import { cleanupActionLabel, freedSummary, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
+import { cleanupActionLabel, confirmLabel, impactBreakdown, freedSummary, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CacheReport, CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
@@ -49,16 +49,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
   const apply = async () => {
     if (!plan || nothingToClean(plan)) return;
     const sum = operationSummary(plan);
-    const parts = [
-      `Applications affected: ${sum.apps.join(", ")}.`,
-      `Docker objects Harpoon will remove: ${sum.containers} container${sum.containers === 1 ? "" : "s"} and ${sum.images} image${sum.images === 1 ? "" : "s"}.`,
-      `Journal records that only need reconciling: ${sum.journalOnly}. Their objects are already gone, so this frees no disk space.`,
-      `Protected and left alone: ${sum.protectedCount} (running releases${sum.review ? `; ${sum.review} more need review` : ""}). Persistent volumes are never touched.`,
-      "Harpoon cannot tell beforehand how much disk space this frees, because images share layers. It measures the guest's free space afterwards.",
-      "A release whose image is removed can no longer be rolled back to instantly; it can be rebuilt from its recorded commit.",
-    ];
-    const verb = sum.containers + sum.images === 0 ? "Reconcile journal records" : sum.journalOnly === 0 ? "Remove Docker artifacts" : "Clean up old releases";
-    if (!(await confirmAction(parts.join("\n\n"), verb))) return;
+    if (!(await confirmAction(<CleanupImpact report={plan} />, confirmLabel(plan), sum.containers + sum.images > 0))) return;
     setBusy("apply"); setError(null);
     try {
       const r = await call(true);
@@ -112,6 +103,47 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       {done && <div role="status">{done.message}<div className="text-meta">{freedSummary(done.report, formatSize)}</div></div>}
       {error && <div role="alert" style={{ color: "var(--error-fg)", whiteSpace: "pre-wrap" }}>{error}</div>}
       <BuildCache enabled={enabled} onDone={onDone} />
+    </div>
+  );
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The confirmation's body: who is affected, exact counts per category, what stays protected, and whether Docker objects are deleted. */
+export function CleanupImpact({ report }: { report: CleanupReport }) {
+  const sum = operationSummary(report);
+  const b = impactBreakdown(report);
+  const docker = sum.containers + sum.images > 0;
+  const rows: [string, number][] = [
+    ["Stale port reservations", b.stalePortLeases], ["References to already-removed containers", b.goneContainers], ["References to already-removed images", b.goneImages],
+    ["Docker containers to delete", b.removeContainers], ["Docker images to delete", b.removeImages],
+  ];
+  return (
+    <div className="cleanup-impact">
+      <div>
+        <div className="cleanup-impact__head">Affected applications</div>
+        <ul className="cleanup-impact__apps">{b.applications.map((a) => <li key={a.title}><b>{a.title}</b>{a.environment ? ` · ${a.environment === "production" ? "Production" : a.environment}` : ""}</li>)}</ul>
+      </div>
+      <div className="cleanup-impact__tiles">
+        <div className="artifact-metric artifact-metric--eligible"><b className="artifact-metric__n">{sum.journalOnly}</b><div className="artifact-metric__label">Journal records to reconcile</div></div>
+        <div className={`artifact-metric${sum.containers ? " artifact-metric--remove" : ""}`}><b className="artifact-metric__n">{sum.containers}</b><div className="artifact-metric__label">Docker containers to remove</div></div>
+        <div className={`artifact-metric${sum.images ? " artifact-metric--remove" : ""}`}><b className="artifact-metric__n">{sum.images}</b><div className="artifact-metric__label">Docker images to remove</div></div>
+        <div className="artifact-metric artifact-metric--protected"><b className="artifact-metric__n">{sum.protectedCount}</b><div className="artifact-metric__label">Protected resources</div></div>
+      </div>
+      <div>
+        <div className="cleanup-impact__head">Changes</div>
+        <ul className="cleanup-impact__list">{rows.filter(([, n]) => n > 0).map(([label, n]) => <li key={label}><span>{label}</span><b>{n}</b></li>)}</ul>
+        <div className="text-meta">{docker ? `${plural(sum.containers + sum.images, "Docker object")} will be deleted. Image sizes are shared between images, so the disk space freed cannot be predicted; it is measured afterwards.` : "No Docker objects will be deleted. Reconciling journal records frees no Docker disk space."}</div>
+        {docker && sum.images > 0 && <div className="text-meta">A release whose image is deleted can no longer be rolled back to instantly; it can be rebuilt from its recorded commit.</div>}
+        <details className="cleanup-impact__records">
+          <summary className="text-meta">Show affected records ({b.records.length})</summary>
+          <ul>{b.records.map((i) => <li key={`${i.deployment}/${i.kind}/${i.name}`} className="text-meta mono">{reasonLabel(i)}<br />{i.kind} {i.name} · {i.deployment}</li>)}</ul>
+        </details>
+      </div>
+      <div>
+        <div className="cleanup-impact__head cleanup-impact__head--protected">Protected</div>
+        <div className="text-meta">The running release and the image it is built from stay in place{sum.protectedCount ? ` (${plural(sum.protectedCount, "protected resource")})` : ""}. Persistent volumes are never touched. Deployment history stays in the journal.{sum.review ? ` ${plural(sum.review, "item")} needing review ${sum.review === 1 ? "is" : "are"} left alone.` : ""}</div>
+      </div>
     </div>
   );
 }

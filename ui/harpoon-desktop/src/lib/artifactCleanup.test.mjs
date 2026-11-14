@@ -56,9 +56,7 @@ test("the confirmation counts Docker objects, journal-only records and protected
   assert.equal(removable(MIXED).length, 3);
   assert.equal(reconcilable(MIXED).length, 2);
   const src = readFileSync(new URL("../components/DiskReclaimCard.tsx", import.meta.url), "utf8");
-  assert.match(src, /frees no disk space/);
-  assert.match(src, /cannot tell beforehand how much disk space this frees/);
-  assert.match(src, /Persistent volumes are never touched/);
+  // the confirmation's wording is exercised by the component tests in reviewOldReleases.test.mjs
   assert.doesNotMatch(src, /\bMB\b.*estimate|nominal/i);
 });
 
