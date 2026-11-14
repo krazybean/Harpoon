@@ -154,6 +154,35 @@ export function DeployDialogs({ c, dialog }: { c: Ctx; dialog: DialogState }) {
     );
   }
 
+  if (dialog.kind === "rebuild") {
+    const rel = app.releases.find((r) => r.id === dialog.releaseId);
+    const repo = c.state.engine?.repos.find((r) => r.app === app.id);
+    if (!rel) return null;
+    const why = !c.engine ? "Rebuild & Restore needs the Harpoon engine." : gate ?? (!repo ? "No repository is registered for this application, so there is no source to rebuild from." : !rel.commit ? "This release has no recorded Git commit, so it cannot be rebuilt." : null);
+    const ackKey = `rebuild:${rel.id}`;
+    const acked = ack === ackKey;
+    return (
+      <Dialog title={`Rebuild & Restore ${rel.id}`} sub={`${rel.revision.message} · ${rel.revision.sha}`} onClose={close}
+        footer={<button className="btn btn--primary" disabled={!!why || !acked || busy} title={why ?? (acked ? undefined : "Tick the acknowledgement to switch releases")} data-testid="rebuild-and-switch"
+          onClick={() => { const confirmation = deployConfirmation({ replacing: !!app.currentReleaseId, cutoverAcknowledged: acked }); if (!confirmation) return; act({ op: "deploy", repo: app.name, commit: rel.commit }, () => c.setRoute({ screen: "app", tab: "logs" }), confirmation); }}><ArrowCounterClockwise size={14} /> Rebuild and switch</button>}>
+        {why && <Banner tone="info" title="Not available">{why}</Banner>}
+        <LiveNote />
+        <Banner tone="warn" title="This rebuilds the application; it is not an instant rollback">The old image was removed to save disk space. Harpoon builds commit <span className="mono">{(rel.commit ?? rel.revision.sha).slice(0, 12)}</span> again from your repository in a private copy (your working folder is never touched), so it takes as long as a normal deployment.</Banner>
+        <Plan>
+          <Row icon={<Cube size={14} />}>Build that commit with the repository's <b>current</b> build settings and the Variables <b>as they are now</b>. If they changed since {rel.id} was built{rel.secrets.length ? ` (it pinned ${rel.secrets.map((s) => `${s.name}@v${s.version}`).join(", ")})` : ""}, or a base image or dependency moved, the result can differ from the original.</Row>
+          <Row icon={<Check size={14} />}>Run the preliminary health check on a temporary port. <b>{app.currentReleaseId ?? "The current release"} keeps running</b> until the new build is ready.</Row>
+          <Row icon={<Warning size={14} />}><b>Brief interruption expected</b> when releases switch, with the usual single bounded attempt to bring {app.currentReleaseId ?? "the current release"} back if the restored one fails.</Row>
+          <Row icon={<Info size={14} />}>If the commit is no longer in the repository, or a secret or file it needs is missing, nothing is built or stopped and the reason is shown.</Row>
+        </Plan>
+        <label className="dp-ack" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 10 }}>
+          <input type="checkbox" checked={acked} onChange={(e) => setAck(e.target.checked ? ackKey : null)} style={{ marginTop: 3 }} />
+          <span><b>Switch releases.</b> {CUTOVER_ACKNOWLEDGEMENT}</span>
+        </label>
+        <Banner tone="warn" title="Application restore only">{ROLLBACK_WARNING.replace("Application rollback only. ", "")}</Banner>
+      </Dialog>
+    );
+  }
+
   if (dialog.kind === "unlock-help") {
     return (
       <Dialog title="Unlocking the Keychain" sub={c.engine ? "Harpoon could not use your login Keychain." : "Simulated help — Harpoon does not touch your real Keychain here."} onClose={close}

@@ -280,6 +280,7 @@ function appsFrom(snap: EngineSnapshot, observed: Observed, hostListeners: HostL
     const releases: Release[] = a.deployments.filter((d) => d.release).map((d) => ({
       id: d.release!, deploymentId: d.id, image: d.pin?.imageTag ?? d.resources.find((r) => r.kind === "image")?.name ?? "", revision: revisionOf(d), ageMin: min(d.finishedMs ?? d.createdMs, now),
       secrets: (d.pin?.secrets ?? []).map((s) => ({ name: s.name, version: s.version })),
+      commit: d.source?.commit || undefined, imageRetained: d.resources.some((r) => r.kind === "image" && r.state === "created"),
     })).sort((x, y) => x.ageMin - y.ageMin);
     const sv = a.serving;
     const observation = correlate(a, observed, hostListeners) ?? undefined;

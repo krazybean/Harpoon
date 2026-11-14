@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Info, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
-import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
+import type { AppAddress, AppModel, Deployment, Env, LogLine, Release } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
   EVIDENCE_NOTE, formatAge, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
@@ -20,6 +20,8 @@ const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?:
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
 );
 const connected = (c: Ctx) => c.runtime === "connected";
+/** A release whose image was cleaned up cannot be rolled back to; it is restored by rebuilding its recorded commit. */
+const restoreOf = (r: Release) => r.imageRetained === false ? ({ kind: "rebuild", label: "Rebuild & Restore…" } as const) : ({ kind: "rollback", label: "Roll back…" } as const);
 /** Why a live action is disabled in the real-engine mode (the shipping gate), or undefined. */
 const gated = (c: Ctx) => (c.engine ? liveBlock(c.state) ?? undefined : undefined);
 const SIM_ONLY = "Simulated Deployments only models Production release state. Switch to Production to use this action.";
@@ -192,7 +194,7 @@ export function AppScreen({ c }: { c: Ctx }) {
       {!ext && att && <Banner tone={att.tone} title={att.title}
         actions={<>
           {down && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !canAct || !prod, title: prodOnly })}
-          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rollbackTarget.id }), `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !canAct || !prod, title: prodOnly })}
+          {down && rollbackTarget && btn("btn--secondary", () => c.open({ kind: restoreOf(rollbackTarget).kind, releaseId: rollbackTarget.id }), restoreOf(rollbackTarget).kind === "rebuild" ? `Rebuild & Restore ${rollbackTarget.deploymentId}` : `Roll back to ${rollbackTarget.deploymentId}`, { disabled: !canAct || !prod, title: prodOnly })}
           {latest && btn("btn--secondary", () => c.setRoute({ screen: "dep", depId: latest.id }), `Inspect ${latest.id}`)}
         </>}>{att.text}</Banner>}
       {!ext && paused && (ok || c.engine) && (
@@ -232,7 +234,7 @@ export function AppScreen({ c }: { c: Ctx }) {
         <div className="dp-actions dp-actions--end" data-tour="recovery-actions">
           {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canBuild || !prod, title: buildWhy })}
           {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canBuild || !prod || !app.releases.length, title: buildWhy })}
-          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
+          {btn("btn--secondary", () => rollbackTarget && c.open({ kind: restoreOf(rollbackTarget).kind, releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> {rollbackTarget ? restoreOf(rollbackTarget).label : "Roll back…"}</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
           {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !canAct || !prod || !app.previews.length, title: ext ? EXT_REASON : c.engine ? NO_PREVIEWS : prodOnly })}
         </div>
       </div></div>
@@ -714,7 +716,7 @@ export function DeploymentScreen({ c }: { c: Ctx }) {
         <div className="dp-actions">
           {r?.outcome === "restore_failed" && btn("btn--primary", () => c.open({ kind: "recover" }), <><ArrowCounterClockwise size={14} /> Retry recovery</>, { disabled: !ok, title: why })}
           {(d.status === "failed" || d.status === "interrupted") && btn("btn--primary", () => c.open({ kind: "retry", depId: d.id }), <><ArrowsClockwise size={14} /> Retry deployment</>, { disabled: !ok || noSource, title: noSource ? NO_SOURCE_REASON : why })}
-          {canRollback && btn("btn--secondary", () => c.open({ kind: "rollback", releaseId: rel!.id }), <><ArrowCounterClockwise size={14} /> Roll back to {rel!.id}</>, { disabled: !ok, title: why })}
+          {canRollback && btn("btn--secondary", () => c.open({ kind: restoreOf(rel!).kind, releaseId: rel!.id }), <><ArrowCounterClockwise size={14} /> {restoreOf(rel!).kind === "rebuild" ? "Rebuild & Restore" : "Roll back to"} {rel!.id}</>, { disabled: !ok, title: why })}
           {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><RocketLaunch size={14} /> Redeploy this revision</>, { disabled: !ok || noSource, title: noSource ? NO_SOURCE_REASON : why })}
         </div>
       </div>

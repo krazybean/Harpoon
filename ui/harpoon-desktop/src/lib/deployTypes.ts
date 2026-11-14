@@ -69,6 +69,10 @@ export type Release = {
   ageMin: number;
   /** Pinned secret versions only — never values. */
   secrets: { name: string; version: number }[];
+  /** Engine mode: the full Git commit the release was built from, when one was recorded. */
+  commit?: string;
+  /** Engine mode: whether the release's image is still recorded as present. False means the old image-based rollback is no longer possible; it can be rebuilt from `commit`. */
+  imageRetained?: boolean;
 };
 
 export type HeldEvent = { id: string; revision: Revision; ageMin: number; /** Engine mode: the full revision, which a resume decision needs. */ revisionFull?: string; /** Engine mode: `held`, or `selected` (chosen by a resume; nothing has run yet). */ status?: string; /** Engine mode: where it came from (`poll`, `poll-late`, `github`, `gitlab`, `ci`). */ source?: string; /** Engine mode: when it was recorded, in epoch milliseconds. */ receivedMs?: number };

@@ -9,6 +9,7 @@ export type DialogState =
   | { kind: "deploy" | "redeploy" | "promote" }
   | { kind: "retry"; depId: string }
   | { kind: "rollback"; releaseId: string }
+  | { kind: "rebuild"; releaseId: string }
   | { kind: "resume" }
   | { kind: "unlock-help" }
   | { kind: "recover" }
@@ -38,9 +39,9 @@ export type Ctx = {
 };
 
 /** Dialogs that start or change Production state; the simulation models Production only. */
-const PRODUCTION_ONLY: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume"];
+const PRODUCTION_ONLY: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "rebuild", "recover", "resume"];
 /** Dialogs that change something. None may open for an application from a runtime attached read-only. */
-export const MUTATING_DIALOGS: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "recover", "resume", "variable", "edit-registration", "remove-registration", "remove-application"];
+export const MUTATING_DIALOGS: DialogState["kind"][] = ["deploy", "redeploy", "promote", "retry", "rollback", "rebuild", "recover", "resume", "variable", "edit-registration", "remove-registration", "remove-application"];
 /** Dialogs that report the removal of the very application they are about, which is why it is no longer listed while they are open. */
 export const REMOVAL_DIALOGS: DialogState["kind"][] = ["remove-registration", "remove-application"];
 /**

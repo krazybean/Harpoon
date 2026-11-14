@@ -58,3 +58,19 @@ test("the thumbnail appears only for a running release whose final check passed"
   assert.equal(previewReady({ engine: {} }, app, false), false);
   assert.equal(previewReady({}, app, true), false);
 });
+
+test("a release whose image was cleaned up is restored by an explicitly labelled rebuild, never a silent rollback", async () => {
+  const { readFileSync } = await import("node:fs");
+  const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  const dialogs = readFileSync(new URL("../views/deploy/Dialogs.tsx", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
+  assert.match(screens, /imageRetained === false \? \(\{ kind: "rebuild", label: "Rebuild & Restore…" \}/);
+  assert.match(screens, /Roll back…/, "an image-backed release keeps the Roll back label");
+  assert.match(engine, /imageRetained: d\.resources\.some\(\(r\) => r\.kind === "image" && r\.state === "created"\)/);
+  const rebuild = dialogs.slice(dialogs.indexOf('dialog.kind === "rebuild"'), dialogs.indexOf('dialog.kind === "unlock-help"'));
+  assert.match(rebuild, /not an instant rollback/);
+  assert.match(rebuild, /op: "deploy", repo: app\.name, commit: rel\.commit/);
+  assert.match(rebuild, /no recorded Git commit/);
+  assert.match(rebuild, /working folder is never touched/);
+  assert.match(rebuild, /deployConfirmation\(\{ replacing: !!app\.currentReleaseId, cutoverAcknowledged: acked \}\)/);
+});

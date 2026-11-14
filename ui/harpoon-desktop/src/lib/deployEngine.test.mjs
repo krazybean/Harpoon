@@ -579,7 +579,7 @@ test("without a registered repository the Git-based actions are disabled with th
   assert.match(screens, /Retry deployment<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
   assert.match(screens, /Redeploy this revision<\/>, \{ disabled: !ok \|\| noSource, title: noSource \? NO_SOURCE_REASON : why \}/);
   // rollback and recovery use canAct, so a source-less application can still be rolled back
-  assert.match(screens, /Roll back\u2026<\/>, \{ disabled: !canAct \|\| !prod \|\| !rollbackTarget/);
+  assert.match(screens, /"Roll back\u2026"\}<\/>, \{ disabled: !canAct \|\| !prod \|\| !rollbackTarget/);
   // the disconnected application says so on its card and page
   assert.match(screens, /app\.disconnected \? <Tag>Source disconnected<\/Tag>/);
   assert.match(screens, /title="Source disconnected"/);
