@@ -19,19 +19,30 @@ import type { OpResult } from "../lib/deployEngine";
  * is removed until the summary is confirmed. Running releases, volumes, networks and other applications' images are
  * never in the operation, and Docker's own cache is handled separately below.
  */
-function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone: () => void }) {
+export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState<"review" | "apply" | null>(null);
   const [plan, setPlan] = useState<CleanupReport | null>(null);
   const [done, setDone] = useState<{ report: CleanupReport; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [clean, setClean] = useState(false);
+  const inFlight = useRef(false);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (clean) closeRef.current?.focus(); }, [clean]);
   const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "cleanup-releases", apply: true }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "cleanup-releases", apply: false } });
   const review = async () => {
-    setBusy("review"); setError(null); setDone(null); setPlan(null);
+    if (inFlight.current) return; // a second click before the first answer must not start a second request
+    inFlight.current = true;
+    setBusy("review"); setError(null); setDone(null); setPlan(null); setClean(false);
     try {
       const r = await call(false);
       if (!r.ok) setError(r.hint || r.summary || "The engine could not list what can be cleaned up.");
-      else setPlan(parseCleanup(r.detail));
-    } catch (e) { setError(String(e)); } finally { setBusy(null); }
+      else {
+        const p = parseCleanup(r.detail);
+        setPlan(p);
+        // An empty inventory is an answer, so it gets a dialog; items needing review are listed below instead.
+        if (nothingToClean(p) && operationSummary(p).review === 0) setClean(true);
+      }
+    } catch (e) { setError(`Could not list old releases: ${String(e)}`); } finally { inFlight.current = false; setBusy(null); }
   };
   const apply = async () => {
     if (!plan || nothingToClean(plan)) return;
@@ -63,6 +74,16 @@ function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone: () => 
         <button className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Looking…" : "Review old releases…"}</button>
         {plan && sum && !nothingToClean(plan) && <button className="btn btn--secondary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : "Review and clean up…"}</button>}
       </div>
+      {busy === "review" && <div role="status" className="text-meta">Looking for old releases…</div>}
+      {clean && (
+        <div className="dialog-scrim" role="presentation" onClick={() => setClean(false)}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="clean-title" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") setClean(false); }}>
+            <div id="clean-title" className="dialog-title">Everything is clean</div>
+            <div className="dialog-body">No obsolete deployment artifacts were found. Running releases and persistent volumes remain protected, and nothing was changed.</div>
+            <div className="dialog-actions"><button ref={closeRef} className="btn btn--secondary" onClick={() => setClean(false)}>Close</button></div>
+          </div>
+        </div>
+      )}
       {plan && nothingToClean(plan) && <div role="status" className="text-meta">Nothing to clean up: only what is serving now is left{sum && sum.review ? `, and ${sum.review} item${sum.review === 1 ? "" : "s"} need${sum.review === 1 ? "s" : ""} review below` : ""}.</div>}
       {plan && sum && (
         <div role="region" aria-label="Cleanup candidates by application" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
