@@ -41,6 +41,11 @@ export function Ident({ value, shown, copy = false }: { value: string; shown?: s
   );
 }
 
+/** Detail that is kept but not shown until asked for: a native <details>, so Enter/Space and focus come from the browser. */
+export function Disclosure({ summary, children, open }: { summary: ReactNode; children: ReactNode; open?: boolean }) {
+  return <details className="dp-disclosure" open={open}><summary>{summary}</summary><div className="dp-disclosure__body">{children}</div></details>;
+}
+
 export function Evidence({ children }: { children?: ReactNode }) {
   return <span className="dp-evidence"><Info size={12} />{children ?? EVIDENCE_NOTE}</span>;
 }

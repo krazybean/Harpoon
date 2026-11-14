@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Info, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Hammer, Heartbeat, Info, Key, Lock, Pause, Play, Plugs, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
 import type { AppAddress, AppModel, Deployment, Env, LogLine, Release } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
@@ -10,7 +10,7 @@ import { RUNTIME_LOG } from "../../lib/deployMock.ts";
 import { displayUrl, hasNoSource, liveBlock, applicationRemovalBlock, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON } from "../../lib/deployEngine.ts";
 import type { Ctx, Tab } from "./context.ts";
 import { imageParts } from "../../lib/imageName.ts";
-import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
+import { Banner, Disclosure, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
 import { describeExposure } from "../../lib/portExposure.ts";
 import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
 import { copyText, visibleLogLines } from "../../lib/deployUi.ts";
@@ -330,6 +330,9 @@ function Fact({ fact, image = false }: { fact: ConfigFact; image?: boolean }) {
 }
 const FACT_ROWS: [string, ConfigFactKey][] = [["Source", "source"], ["Branch", "branch"], ["Build file", "dockerfile"], ["Container port", "containerPort"], ["Host port", "hostPort"], ["Health check", "healthCheck"], ["Replacement", "replacement"], ["Image", "image"]];
 
+/** The Overview shows these; every fact, with its origin, is behind "Where each value came from". */
+const SUMMARY_FACTS: ConfigFactKey[] = ["source", "branch", "containerPort", "healthCheck"];
+
 const OBS_LABEL: Record<NonNullable<AppModel["observation"]>["kind"], [string, "ok" | "warn" | "err" | "neutral"]> = {
   match: ["Matches Docker", "ok"], unverified: ["Running, ownership unchecked", "warn"], stopped: ["Recorded, not running", "warn"],
   absent: ["Recorded, not in Docker", "err"], mismatch: ["Does not match Docker", "err"], unknown: ["Cannot compare", "neutral"],
@@ -344,8 +347,8 @@ function ObservationPanel({ app }: { app: AppModel }) {
   const exp = o.port ? describeExposure(o.port) : null;
   const journal = app.external ? (app.external.format === "legacy" ? "the legacy journal.wal" : "the SQLite journal") : "Harpoon's journal";
   return (
-    <section className="dp-panel">
-      <div className="dp-panel__head"><h2 className="dp-h2">Recorded vs observed</h2><span className="dp-spacer" /><Pill tone={tone}>{label}</Pill></div>
+    <section className="dp-panel dp-panel--disclosure">
+      <Disclosure open={o.kind !== "match"} summary={<><h2 className="dp-h2">Recorded vs observed</h2><Pill tone={tone}>{label}</Pill></>}>
       <div className="dp-panel__body">
         <dl className="dp-kv">
           <dt>Recorded</dt><dd>{o.recorded}<div className="dp-faint">from {journal}: what was done, not what is true now</div></dd>
@@ -360,6 +363,7 @@ function ObservationPanel({ app }: { app: AppModel }) {
         ) : null}
         {o.notes.length ? <ul className="dp-muted" style={{ margin: "10px 0 0", paddingLeft: 18 }}>{o.notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
       </div>
+      </Disclosure>
     </section>
   );
 }
@@ -377,23 +381,26 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             <div className="dp-panel__head"><h2 className="dp-h2">Latest deployment</h2><span className="dp-spacer" />{btn("btn--secondary", () => c.setRoute({ screen: "dep", depId: L.id }), "Inspect", { sm: true })}</div>
             <div className="dp-panel__body">
               <div className="dp-row dp-row--wrap" style={{ marginBottom: 10 }}>
-                <b>{L.id}</b><DeploymentPills d={L} /><span className="mono dp-muted">{L.revision.sha}</span><span className="dp-muted">{L.revision.message}</span>
+                <DeploymentPills d={L} /><span className="mono dp-muted">{L.revision.sha}</span><span className="dp-muted">{L.revision.message}</span>
                 <span className="dp-spacer" /><span className="dp-faint">{formatAge(L.ageMin)} · {L.durationLabel} · {L.trigger}</span>
               </div>
               {L.failure && <p className="dp-muted" style={{ margin: "0 0 10px" }}>{L.failure}</p>}
               <Steps steps={L.steps} />
               {!c.engine && L.recovery?.outcome === "in_progress" && <div className="dp-bar dp-bar--live" style={{ marginTop: 6 }} role="progressbar" aria-valuenow={23} aria-valuemax={60}><i style={{ width: "38%" }} /></div>}
+              <Disclosure summary="Deployment details">
+                <dl className="dp-kv"><dt>Deployment</dt><dd><Ident value={L.id} copy /></dd><dt>Release</dt><dd>{L.releaseId ? <Ident value={L.releaseId} copy /> : "none (no image was produced)"}</dd><dt>Trigger</dt><dd>{L.trigger}</dd><dt>Duration</dt><dd>{L.durationLabel}</dd></dl>
+              </Disclosure>
             </div>
           </section>
         )}
         <section className="dp-panel">
-          <div className="dp-panel__head"><h2 className="dp-h2">Resources &amp; health</h2><span className="dp-spacer" /><Evidence>Evidence, not a guarantee</Evidence></div>
+          <div className="dp-panel__head"><h2 className="dp-h2">Health</h2><span className="dp-spacer" /><Evidence>Evidence, not a guarantee</Evidence></div>
           <div className="dp-panel__body">
-            <ResourceBlock c={c} app={app} />
-            <div className="dp-row dp-row--wrap" style={{ marginTop: 12 }}>
+            <div className="dp-row dp-row--wrap">
               {c.engine ? <HealthPill app={app} running={st.kind === "running" || st.kind === "building"} down={st.kind === "down"} /> : <Pill tone={st.kind === "running" || st.kind === "building" ? "ok" : st.kind === "down" ? "err" : "warn"}>Health · {st.kind === "running" || st.kind === "building" ? "healthy" : st.kind === "down" ? "down" : "unknown"}</Pill>}
               <span className="dp-muted" style={{ fontSize: 12 }}>{st.live ? (st.kind === "running" || st.kind === "building" ? (c.engine ? healthEvidence(app) : "Docker HEALTHCHECK healthy · HTTP /healthz 200 (2 ms) — simulated") : "No running container") : "Not known while Harpoon is not connected."}</span>
             </div>
+            <Disclosure summary="Resource figures"><ResourceBlock c={c} app={app} /></Disclosure>
           </div>
         </section>
         {app.observation ? <ObservationPanel app={app} /> : null}
@@ -405,6 +412,8 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             {c.engine ? <Pill tone={a.state === "paused" ? "warn" : "neutral"} icon={a.state === "paused" ? <Pause size={11} /> : undefined}>{a.state === "paused" ? "Paused" : "Manual"}</Pill> : !ok ? <Pill icon={<Pause size={11} />}>Not running</Pill> : <Pill tone={a.state === "paused" ? "warn" : "ok"} icon={a.state === "paused" ? <Pause size={11} /> : <Check size={11} />}>{a.state === "paused" ? "Paused" : "Active"}</Pill>}
           </div>
           <div className="dp-panel__body">
+            <div>{c.engine ? (a.state === "paused" ? pauseText(app) : "Attended: Harpoon checks for new commits when you ask it to.") : !ok ? "Not watching — automatic deployment only runs while Harpoon is running" : a.state === "paused" ? pauseText(app) : "Watching for pushes"}{a.held.length ? <> <b>{a.held.length} held event{a.held.length === 1 ? "" : "s"}.</b></> : null}</div>
+            <Disclosure summary="Automation details">
             <dl className="dp-kv">
               <dt>Trigger</dt><dd>{c.engine ? <>Attended: Harpoon checks <code>origin/{app.settings.productionBranch}</code> when you ask it to</> : <>Poll <code>origin/{app.settings.productionBranch}</code> every {app.settings.pollSeconds} s</>}</dd>
               <dt>Mode</dt><dd>{c.engine ? "Manual check. Harpoon looks for new commits only when you press Check for new commits; it does not poll in the background." : "Attended — runs while Harpoon is open"}</dd>
@@ -412,18 +421,22 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
               {c.engine && (a.selected?.length ?? 0) > 0 ? <><dt>Selected</dt><dd>{a.selected!.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> <span className="dp-faint">chosen, not yet run · {formatAge(h.ageMin)}</span></div>)}</dd></> : null}
               <dt>Held events</dt><dd>{a.held.length ? a.held.map((h) => <div key={h.id}><span className="mono">{h.revision.sha}</span> {h.revision.message} <span className="dp-faint">{formatAge(h.ageMin)}{h.status ? ` · ${h.status === "selected" ? "selected, not yet run" : h.status}` : ""}</span></div>) : "None"}</dd>
             </dl>
+            <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>{c.engine ? "Nothing is polled or deployed in the background, and unattended deployment is not offered. Commits you find are recorded as held events; deploying one is a separate, attended step." : "Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered."}</p>
+            </Disclosure>
             {c.engine && app.settings.productionBranch ? <div style={{ marginTop: 12 }}>{btn("btn--secondary", () => void c.engine!.run({ op: "poll" }), <><ArrowsClockwise size={14} /> Check for new commits</>, { disabled: c.engine.busy, title: "Looks for new commits and queues them. It does not deploy.", sm: true })}</div> : null}
             {c.engine && (a.held.length > 0 || (a.selected?.length ?? 0) > 0 || a.state === "paused") ? <div style={{ marginTop: 12 }}>{btn(a.held.length || a.state === "paused" ? "btn--primary" : "btn--secondary", () => c.open({ kind: "resume" }), <>{a.held.length ? `Review held events (${a.held.length})` : (a.selected?.length ?? 0) > 0 ? "Review selected commit" : "Review pause"}…</>, { disabled: c.route.env !== "production" })}</div> : null}
             {!c.engine && a.state === "paused" && ok && <div style={{ marginTop: 12 }}>{btn("btn--primary", () => c.open({ kind: "resume" }), <><Play size={14} /> Review &amp; resume…</>, { disabled: c.route.env !== "production", title: c.route.env !== "production" ? SIM_ONLY : undefined })}</div>}
-            <p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>{c.engine ? "Nothing is polled or deployed in the background, and unattended deployment is not offered. Commits you find are recorded as held events; deploying one is a separate, attended step." : "Automation is attended-only: nothing is deployed unless Harpoon is open and you act. Unattended deployment is not offered."}</p>
           </div>
         </section>
         )}
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Configuration</h2><span className="dp-spacer" />{app.external ? null : btn("btn--secondary", () => c.setRoute({ tab: "settings" }), c.engine ? "View settings" : "Edit", { sm: true })}</div>
           {c.engine && app.facts ? <div className="dp-panel__body"><dl className="dp-kv">
+            {FACT_ROWS.filter(([, k]) => SUMMARY_FACTS.includes(k) && (k !== "branch" || app.facts![k].value)).map(([label, k]) => <Fragment key={k}><dt>{label}</dt><dd>{app.facts![k].value === null ? <span className="dp-muted">Not recorded</span> : <span className="dp-fact__value">{app.facts![k].value}</span>}</dd></Fragment>)}
+          </dl>
+          <Disclosure summary="Where each value came from"><dl className="dp-kv">
             {FACT_ROWS.filter(([, k]) => k !== "branch" || app.facts![k].value).map(([label, k]) => <Fragment key={k}><dt>{label}</dt><dd><Fact fact={app.facts![k]} image={k === "image"} /></dd></Fragment>)}
-          </dl><p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Each value shows where it was recorded. A value nothing recorded says so; it is never filled in with a default.</p></div> : <div className="dp-panel__body"><dl className="dp-kv">
+          </dl><p className="dp-faint" style={{ fontSize: 11, margin: "10px 0 0" }}>Each value shows where it was recorded. A value nothing recorded says so; it is never filled in with a default.</p></Disclosure></div> : <div className="dp-panel__body"><dl className="dp-kv">
             <dt>Source</dt><dd>{app.source.kind} · {app.source.label}</dd><dt>Build</dt><dd>Dockerfile <code>{app.settings.dockerfile}</code></dd>
             <dt>Port</dt><dd>{app.settings.port ?? "—"} → {app.url.replace("http://", "")}</dd><dt>Health check</dt><dd>{app.settings.healthCheck}</dd>
             <dt>Replacement</dt><dd>stop old → start new (brief interruption, reported)</dd><dt>Retention</dt><dd>current + {app.settings.keepReleases} earlier releases</dd>
@@ -643,26 +656,40 @@ function VariablesTab({ c, app }: { c: Ctx; app: AppModel }) {
   );
 }
 
+/** A Settings group: an icon that says what it is, a one-line description, then its fields. */
+function SettingsSection({ icon, title, about, danger, children }: { icon: ReactNode; title: string; about: string; danger?: boolean; children: ReactNode }) {
+  return (
+    <section className={`dp-panel${danger ? " dp-panel--danger" : ""}`}>
+      <div className="dp-panel__head"><h2 className="dp-h2 dp-sec"><span aria-hidden="true" style={{ display: "inline-flex" }}>{icon}</span>{title}</h2></div>
+      <div className="dp-panel__body dp-col"><p className="dp-secdesc">{about}</p>{children}</div>
+    </section>
+  );
+}
+
 function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const appRemovalBlock = applicationRemovalBlock(c.state.engine, app);
   const f = (label: string, value: string, hint?: string) => <div className="dp-field" key={label}><label>{label}</label><input className="dp-input" title={value} defaultValue={value} readOnly aria-readonly="true" />{hint ? <small>{hint}</small> : null}</div>;
   const fact = (label: string, k: ConfigFactKey) => { const x = app.facts![k]; return f(label, x.value ?? "Not recorded", x.value === null ? undefined : `${FACT_FROM[x.from]}${x.detail ? ` (${x.detail})` : ""}`); };
   if (c.engine && app.facts) {
+    const editable = !app.external && c.state.engine?.repos.some((r) => r.app === app.id);
+    const edit = editable ? <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit configuration…</button></div> : null;
     return (
       <div className="dp-grid dp-grid--2">
-        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Build</h2></div><div className="dp-panel__body dp-col">
-          {fact("Dockerfile", "dockerfile")}{fact("Build settings", "buildSettings")}{fact("Docker network", "network")}{fact("Build context", "context")}{fact("Target stage", "target")}{fact("Image", "image")}
-          {app.external || !c.state.engine?.repos.some((r) => r.app === app.id) ? null : <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit configuration…</button></div>}</div></section>
-        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Deployment</h2></div><div className="dp-panel__body dp-col">
-          {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}{fact("Health check", "healthCheck")}{fact("Replacement", "replacement")}</div></section>
-        <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Source</h2></div><div className="dp-panel__body dp-col">
+        <SettingsSection icon={<Hammer size={16} />} title="Build configuration" about="How the image is built from your source.">
+          {fact("Dockerfile", "dockerfile")}{fact("Build settings", "buildSettings")}{fact("Build context", "context")}{fact("Target stage", "target")}{fact("Image", "image")}{edit}</SettingsSection>
+        <SettingsSection icon={<RocketLaunch size={16} />} title="Deployment configuration" about="How a new release replaces the running one.">
+          {fact("Replacement", "replacement")}{fact("Docker network", "network")}</SettingsSection>
+        <SettingsSection icon={<GitBranch size={16} />} title="Source repository" about="Where new commits come from. Harpoon looks only when you ask.">
           {fact("Source", "source")}{fact("Branch", "branch")}
-          {app.external || !c.state.engine?.repos.some((r) => r.app === app.id) ? null : <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit configuration…</button> <button className="btn btn--destructive" disabled={!!c.engine?.busy || !c.state.engine?.gate.gitRemoval} title={c.state.engine?.gate.gitRemoval ? "Disconnect this repository from the application. The application and its history stay." : REMOVAL_CLOSED_REASON} onClick={() => c.open({ kind: "remove-registration" })}><Trash size={14} /> Remove registration…</button></div>}
-          {app.external ? null : <div className="dp-evidence"><Warning size={12} />New commits are found only when you press Check for new commits. Unattended deployment is not offered.</div>}</div></section>
-        {app.external ? null : <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Danger zone</h2></div><div className="dp-panel__body dp-col">
-          <p className="dp-muted" style={{ margin: 0 }}>Removing an application that was never deployed retires it from Harpoon's active list. It does not purge historical journal records or stored credentials, and no container, image or volume is deleted. An application that has been deployed cannot be removed yet.</p>
+          {editable ? <div><button className="btn btn--secondary" disabled={!!c.engine?.busy} onClick={() => c.open({ kind: "edit-registration" })}><PencilSimple size={14} /> Edit configuration…</button> <button className="btn btn--destructive" disabled={!!c.engine?.busy || !c.state.engine?.gate.gitRemoval} title={c.state.engine?.gate.gitRemoval ? "Disconnect this repository from the application. The application and its history stay." : REMOVAL_CLOSED_REASON} onClick={() => c.open({ kind: "remove-registration" })}><Trash size={14} /> Remove registration…</button></div> : null}
+          {app.external ? null : <div className="dp-evidence"><Warning size={12} />New commits are found only when you press Check for new commits. Unattended deployment is not offered.</div>}</SettingsSection>
+        <SettingsSection icon={<Plugs size={16} />} title="Network and ports" about="The port your app listens on in the container, and the loopback port Harpoon publishes it on.">
+          {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}</SettingsSection>
+        <SettingsSection icon={<Heartbeat size={16} />} title="Health checks" about="The path Harpoon requests before it switches traffic to a new release.">
+          {fact("Health check", "healthCheck")}</SettingsSection>
+        {app.external ? null : <SettingsSection danger icon={<Warning size={16} />} title="Dangerous operations" about="Removing an application that was never deployed retires it from Harpoon's active list. It does not purge historical journal records or stored credentials, and no container, image or volume is deleted. An application that has been deployed cannot be removed yet.">
           <div><button className="btn btn--destructive" disabled={!!c.engine?.busy || !!appRemovalBlock} title={appRemovalBlock ?? "Retire this never-deployed application from Harpoon's active list."} onClick={() => c.open({ kind: "remove-application" })}><Trash size={14} /> Remove application…</button></div>
-          {appRemovalBlock && <div className="dp-evidence"><Info size={12} />{appRemovalBlock}</div>}</div></section>}
+          {appRemovalBlock && <div className="dp-evidence"><Info size={12} />{appRemovalBlock}</div>}</SettingsSection>}
         <p className="dp-faint" style={{ gridColumn: "1 / -1", fontSize: 11 }}>{app.external ? "Read-only. These are the values that the external journal (and Docker, where marked) shows; nothing here can be changed from Harpoon." : "Read-only. These are the values the repository registration and the journal recorded. Use Edit registration to change the source, branch, Dockerfile path, container port or health check path; it records a new version and deploys nothing."}</p>
       </div>
     );

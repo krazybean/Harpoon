@@ -535,7 +535,7 @@ test("the Edit registration dialog only edits: version captured at open, history
   const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
   assert.match(ctx, /MUTATING_DIALOGS[^\n]*"edit-registration"/);
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit configuration/);
+  assert.match(screens, /const editable = !app\.external && c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\);[\s\S]{0,300}Edit configuration/);
   assert.doesNotMatch(screens, /register the repository again/);
 });
 
