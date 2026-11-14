@@ -354,6 +354,15 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
         }
     };
     // The same rules `deploy` applies, so an edit cannot store a value that deploy would refuse.
+    if p.switch("clear-dockerfile") {
+        if p.value("dockerfile").is_some() {
+            return Err(Fail::usage(
+                "--clear-dockerfile and --dockerfile cannot be used together",
+            ));
+        }
+        set("Dockerfile", rec.dockerfile.is_some());
+        rec.dockerfile = None;
+    }
     if let Some(d) = value("dockerfile")? {
         if !harpoon_deploy_docker::confine::plain_relative(&d) || d.chars().any(char::is_control) {
             return Err(Fail::refused(format!(

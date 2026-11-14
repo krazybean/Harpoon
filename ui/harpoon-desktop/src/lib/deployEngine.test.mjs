@@ -498,7 +498,7 @@ test("an edit never carries a name, an application, a credential or a runtime, a
 test("a form that cannot be sent says why instead of sending something else", () => {
   const form = registrationFormOf({ ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" });
   const r = { ...REPO, dockerfile: "Dockerfile", healthPath: "/healthz" };
-  assert.match(registrationEdit(r, { ...form, dockerfile: "" }, false).problem, /Dockerfile path cannot be cleared/);
+  { const e = registrationEdit(r, { ...form, dockerfile: "" }, false); assert.equal(e.problem, null); assert.equal(e.op.dockerfile, ""); assert.match(e.changed[0], /cleared/); }
   assert.match(registrationEdit(r, { ...form, health: " " }, false).problem, /Health check path cannot be cleared/);
   assert.match(registrationEdit(r, { ...form, location: "relative/dir" }, false).problem, /absolute folder path/);
   assert.match(registrationEdit(r, { ...form, branch: " " }, false).problem, /branch is required/);
@@ -530,7 +530,7 @@ test("the Edit registration dialog only edits: version captured at open, history
   const ctx = readFileSync(new URL("../views/deploy/context.ts", import.meta.url), "utf8");
   assert.match(ctx, /MUTATING_DIALOGS[^\n]*"edit-registration"/);
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit registration/);
+  assert.match(screens, /app\.external \|\| !c\.state\.engine\?\.repos\.some\(\(r\) => r\.app === app\.id\) \? null : <div><button[\s\S]{0,200}Edit configuration/);
   assert.doesNotMatch(screens, /register the repository again/);
 });
 

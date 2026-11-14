@@ -606,10 +606,12 @@ export function registrationEdit(r: EngineRepo, f: RegistrationForm, confirm: bo
   const branch = f.branch.trim();
   if (!branch) return fail("A branch is required.");
   if (branch !== r.branch) { op.branch = branch; changed.push("branch"); }
-  for (const [label, key, now, was] of [["Dockerfile path", "dockerfile", f.dockerfile.trim(), r.dockerfile ?? ""], ["Health check path", "healthPath", f.health.trim(), r.healthPath ?? ""]] as const) {
-    if (!now && was) return fail(`${label} cannot be cleared; enter the path to use.`);
-    if (now && now !== was) { op[key] = now; changed.push(label.toLowerCase()); }
-  }
+  // clearing the Dockerfile is deliberate: the next deployment builds from detection (an empty string is the engine's "clear")
+  const dockerfile = f.dockerfile.trim();
+  if (dockerfile !== (r.dockerfile ?? "")) { op.dockerfile = dockerfile; changed.push(dockerfile ? "dockerfile path" : "dockerfile (cleared: build from detection)"); }
+  const health = f.health.trim();
+  if (!health && r.healthPath) return fail("Health check path cannot be cleared; enter the path to use.");
+  if (health && health !== (r.healthPath ?? "")) { op.healthPath = health; changed.push("health check path"); }
   const port = Number(f.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return fail("The container port must be a number from 1 to 65535.");
   if (port !== r.containerPort) { op.containerPort = port; changed.push("container port"); }

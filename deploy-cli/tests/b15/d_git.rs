@@ -1998,6 +1998,36 @@ fn a_refused_edit_changes_nothing() {
 }
 
 #[test]
+fn clearing_the_dockerfile_is_persisted_and_keeps_everything_else() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(
+        &add_repo(&t, &kc, "shop", &url(&repo), APP, &["--dockerfile", "Dockerfile"]),
+        0,
+    );
+    let at = registered_ms(&t, "shop");
+    assert_eq!(restored(&t).git.repos["shop"].dockerfile.as_deref(), Some("Dockerfile"));
+    let o = update(
+        &t,
+        &kc,
+        "shop",
+        at,
+        &["--clear-dockerfile", "--settings", r#"{"start":"npm start","network":"n_default"}"#],
+    );
+    assert_exit(&o, 0);
+    let r = restored(&t).git.repos["shop"].clone();
+    assert_eq!(r.dockerfile, None);
+    assert_eq!(r.app.to_string(), APP);
+    assert!(r.settings.as_deref().unwrap().contains("n_default"));
+    // clearing and naming a path together is a usage error; clearing what is already clear is "nothing to change"
+    let at = registered_ms(&t, "shop");
+    assert_exit(&update(&t, &kc, "shop", at, &["--clear-dockerfile", "--dockerfile", "x"]), 2);
+    assert_exit(&update(&t, &kc, "shop", at, &["--clear-dockerfile"]), 6);
+}
+
+#[test]
 fn an_edit_made_from_a_stale_view_is_refused_and_does_not_overwrite_the_newer_one() {
     let t = T::new();
     let kc = MemorySecretStore::new();

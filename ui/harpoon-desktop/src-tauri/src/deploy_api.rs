@@ -1298,6 +1298,10 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             ]);
             opt(&mut a, "url", url);
             opt(&mut a, "branch", branch);
+            // an empty Dockerfile is an explicit clear (`opt` would drop it): build from detection instead
+            if dockerfile.as_deref() == Some("") {
+                a.push("--clear-dockerfile".into());
+            }
             opt(&mut a, "dockerfile", dockerfile);
             opt(&mut a, "health-path", health_path);
             // "{}" is how the form clears every setting: an empty value would be dropped by `opt`

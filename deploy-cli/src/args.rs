@@ -154,7 +154,7 @@ const SPECS: &[Spec] = &[
             "settings",
             "git-timeout-secs",
         ],
-        switches: &["simulate", "confirm-change"],
+        switches: &["simulate", "confirm-change", "clear-dockerfile"],
     },
     Spec {
         command: "repo-remove",
