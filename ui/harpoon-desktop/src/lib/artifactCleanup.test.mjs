@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseCleanup, nothingToClean, freedSummary } from "./artifactCleanup.ts";
+import { parseCleanup, nothingToClean, freedSummary, parseCache } from "./artifactCleanup.ts";
 
 const DRY = `cleanup of Harpoon-owned artifacts — dry run: nothing will be changed
 protected: deployment dep_B (serves now)
@@ -26,4 +26,11 @@ test("freed space is the guest filesystem's own before/after, never a sum of ima
   const size = (b) => `${b}B`;
   assert.equal(freedSummary(applied, size), "Guest free space: 1000B before, 4000B after (+3000B).");
   assert.match(freedSummary(parseCleanup("guest-free: not measurable"), size), /could not be measured/);
+});
+
+test("the build cache report carries Docker's figure and the guest's measured free space separately", () => {
+  assert.deepEqual(parseCache("build-cache-reclaimable-bytes: 1250"), { reclaimable: 1250, reclaimed: null, guestFreeBefore: null, guestFreeAfter: null });
+  const done = parseCache("build-cache-reclaimed-bytes: 1250\nguest-free-before-bytes: 10\nguest-free-after-bytes: 20");
+  assert.equal(done.reclaimed, 1250);
+  assert.equal(done.guestFreeAfter - done.guestFreeBefore, 10);
 });

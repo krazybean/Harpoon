@@ -102,6 +102,8 @@ pub struct St {
     /// What `GET /info` reports: (hostname, data root, kernel version); all empty = defaults.
     pub info: (String, String, String),
     pub unexpected: Vec<Req>,
+    /// BuildKit cache entries as `(size, in use)`.
+    pub build_cache: Vec<(u64, bool)>,
     seq: usize,
 }
 
@@ -508,6 +510,15 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
     let seg: Vec<&str> = p.trim_start_matches('/').split('/').collect();
     match (method, seg.as_slice()) {
         ("GET", ["_ping"]) => (200, "OK".into()),
+        ("GET", ["system", "df"]) => {
+            let entries: Vec<String> = s.build_cache.iter().map(|(n, u)| format!("{{\"Size\":{n},\"InUse\":{u}}}")).collect();
+            (200, format!("{{\"BuildCache\":[{}]}}", entries.join(",")))
+        }
+        ("POST", ["build", "prune"]) => {
+            let freed: u64 = s.build_cache.iter().filter(|(_, u)| !*u).map(|(n, _)| *n).sum();
+            s.build_cache.retain(|(_, u)| *u);
+            (200, format!("{{\"CachesDeleted\":[],\"SpaceReclaimed\":{freed}}}"))
+        }
         ("GET", ["info"]) => {
             let (name, root, kernel) = if s.info.0.is_empty() {
                 (

@@ -97,10 +97,7 @@ pub(crate) fn run(p: &Parsed, rt: &Runtime, socket: &Path, apply: bool, out: &mu
     let mut ledger = restored.ledger.clone();
     let mut tidied = Tidied::default();
     // Docker's image sizes share layers and are not additive, so what was freed is what the guest filesystem reports.
-    let guest_free = || -> Option<u64> {
-        let mgmt = p.value("mgmt-socket")?;
-        MgmtDfProbe::new(socket, mgmt, Duration::from_secs(10)).measure().ok().map(|(free, _)| free)
-    };
+    let guest_free = || guest_free(p, socket);
     let free_before = guest_free();
 
     // 1. containers and port leases of those deployments
@@ -192,6 +189,50 @@ pub(crate) fn run(p: &Parsed, rt: &Runtime, socket: &Path, apply: bool, out: &mu
         }
     }
     Ok(tidied)
+}
+
+/// Free bytes on the guest filesystem through the management channel, when the caller gave one and it answers.
+fn guest_free(p: &Parsed, socket: &Path) -> Option<u64> {
+    let mgmt = p.value("mgmt-socket")?;
+    MgmtDfProbe::new(socket, mgmt, Duration::from_secs(10)).measure().ok().map(|(free, _)| free)
+}
+
+/// `prune-build-cache`: removes BuildKit cache nothing is using, through Docker's own prune call (what `docker builder
+/// prune` does without `--all`). The cache is not something Harpoon records, so there is nothing to journal; what is
+/// reported is Docker's figure and the guest filesystem's measured free space before and after. Later builds are slower
+/// until the cache is rebuilt. Dry run by default; `--apply` needs the live-changes authorization.
+pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        crate::commands::authorized(p)?;
+    }
+    let socket = crate::commands::socket_flag(p)?
+        .ok_or_else(|| Fail::runtime("prune-build-cache needs an explicit --docker-socket PATH; nothing is assumed about the runtime"))?;
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused("this is a simulated runtime; there is nothing real to prune"));
+    }
+    let api = harpoon_deploy_docker::api::DockerApi::new(&socket, Duration::from_secs(30));
+    let runtime_err = |e: harpoon_deploy_docker::api::ApiError| Fail::runtime(format!("cannot reach Docker at {}: {e}\nNothing was changed.", socket.display()));
+    let (total, unused) = api.build_cache_usage(Duration::from_secs(30)).map_err(runtime_err)?;
+    let _ = writeln!(out, "build cache: {total} bytes in all, {unused} bytes not in use. A prune removes only the unused part; images, containers and volumes are not touched, and later builds are slower until the cache fills again.");
+    let _ = writeln!(out, "build-cache-reclaimable-bytes: {unused}");
+    if !apply {
+        let _ = writeln!(out, "dry run: nothing was changed. Add --apply and --{}=… to carry this out.", crate::AUTH_FLAG);
+        return Ok(exit::OK);
+    }
+    let before = guest_free(p, &socket);
+    let freed = api.prune_build_cache(Duration::from_secs(300)).map_err(|e| Fail::failed(format!("Docker did not complete the prune: {e}")))?;
+    let _ = writeln!(out, "build-cache-reclaimed-bytes: {freed}");
+    match (before, guest_free(p, &socket)) {
+        (Some(b), Some(a)) => {
+            let _ = writeln!(out, "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}");
+        }
+        _ => {
+            let _ = writeln!(out, "guest-free: not measurable (the management channel did not answer)");
+        }
+    }
+    Ok(exit::OK)
 }
 
 /// `cleanup-releases`: dry run by default; `--apply` needs the live-changes authorization.

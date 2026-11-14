@@ -786,6 +786,36 @@ impl DockerApi {
         }
     }
 
+    /// `GET /system/df`: bytes of BuildKit cache in total and the part nothing is using (what a prune would remove).
+    pub fn build_cache_usage(&self, left: Duration) -> Result<(u64, u64), ApiError> {
+        let r = self.call("GET", "/system/df", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("disk usage", &r));
+        }
+        let j = parse(&r, "disk usage")?;
+        let entries = j.get("BuildCache").and_then(Json::as_array).unwrap_or(&[]);
+        let (mut total, mut free) = (0u64, 0u64);
+        for e in entries {
+            let size = e.get("Size").and_then(Json::as_i64).unwrap_or(0).max(0) as u64;
+            total += size;
+            if !e.get("InUse").and_then(Json::as_bool).unwrap_or(false) {
+                free += size;
+            }
+        }
+        Ok((total, free))
+    }
+
+    /// `POST /build/prune`: removes BuildKit cache nothing is using (what `docker builder prune` does without `--all`
+    /// and without touching images, containers or volumes). Returns the bytes Docker says it freed.
+    pub fn prune_build_cache(&self, left: Duration) -> Result<u64, ApiError> {
+        let r = self.call("POST", "/build/prune?all=false", None, left)?;
+        if r.status != 200 {
+            return Err(Self::unexpected("build cache prune", &r));
+        }
+        let j = parse(&r, "build cache prune")?;
+        Ok(j.get("SpaceReclaimed").and_then(Json::as_i64).unwrap_or(0).max(0) as u64)
+    }
+
     /// At most `tail` lines and `max_bytes` bytes, demultiplexed to text.
     pub fn logs(
         &self,

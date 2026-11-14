@@ -16,6 +16,17 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 - **No per-application caps.** New containers no longer get 256 MiB / 0.5 CPU / 64 PIDs; the VM's own safeguards still apply. A Node install
   and build run with a 2 GiB heap bound (`ARG`, build time only).
 - **Pulls.** A generated build's base image (`node:<major>-slim`, `python:<version>-slim`) is fetched by the builder when it is not cached. A Dockerfile build still refuses a base image that is not local.
+- **Release-aware cleanup.** `cleanup-releases` (dry run by default) removes the stopped containers, port leases and images of releases that no
+  longer serve, and the retained images of failed deployments, each by its recorded id with the ownership labels re-checked, and journals
+  every removal. It never touches the release serving now (or the image that release pins), an unfinished or cancelled deployment, volumes,
+  networks, build cache or other applications. A deployment run through `git-deploy` runs it when it ends; a failure there is a note, never a
+  failed deployment. Reclaim Unused Space lists the same items first and removes them only after confirmation, and reports the guest's measured
+  free space before and after. `prune-build-cache` (dry run by default) is Docker's own prune of unused BuildKit cache, separately confirmed.
+- **Rebuild & Restore.** A release whose image was cleaned up is restored by rebuilding its recorded commit in a private checkout through the
+  normal deploy and cutover (current build settings and Variables apply, so the result can differ from the original). The Roll back button
+  keeps its meaning for a release whose image is still present.
+- **Preview.** Apps whose Content-Security-Policy includes `upgrade-insecure-requests` cannot load their scripts and styles in WebKit over http,
+  even on loopback; the preview says so instead of timing out. The capture also waits for a drawn, settled frame and refuses a blank one.
 
 ### VM-backed tests run under a deadline and a watchdog (test tooling only)
 

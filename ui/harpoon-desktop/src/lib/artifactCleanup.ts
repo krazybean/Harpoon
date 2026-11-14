@@ -40,3 +40,11 @@ export function freedSummary(r: CleanupReport, size: (bytes: number) => string):
   const d = r.guestFreeAfter - r.guestFreeBefore;
   return `Guest free space: ${size(r.guestFreeBefore)} before, ${size(r.guestFreeAfter)} after (${d >= 0 ? "+" : "−"}${size(Math.abs(d))}).`;
 }
+
+export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null };
+
+/** The engine's `prune-build-cache` report. Docker's reclaimed figure is shown as Docker's; the guest's own free space is the measured change. */
+export function parseCache(detail: string): CacheReport {
+  const n = (key: string) => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith(`${key}:`)); const v = l ? Number(l.slice(key.length + 1)) : NaN; return Number.isFinite(v) ? v : null; };
+  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes") };
+}

@@ -1169,6 +1169,12 @@ pub enum DeployOp {
         #[serde(default)]
         apply: bool,
     },
+    /// Remove BuildKit cache nothing is using. `apply: false` only reports its size.
+    #[serde(rename_all = "camelCase")]
+    PruneBuildCache {
+        #[serde(default)]
+        apply: bool,
+    },
     #[serde(rename_all = "camelCase")]
     Poll {
         repo: Option<String>,
@@ -1407,6 +1413,13 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "commit", commit);
             (a, vec![])
         }
+        DeployOp::PruneBuildCache { apply } => {
+            let mut a = s(&["prune-build-cache"]);
+            if *apply {
+                a.push("--apply".into());
+            }
+            (a, vec![])
+        }
         DeployOp::CleanupReleases { apply } => {
             let mut a = s(&["cleanup-releases"]);
             if *apply {
@@ -1580,7 +1593,7 @@ pub fn process_command(pid: u32) -> Option<String> {
 fn needs_runtime(op: &DeployOp) -> bool {
     matches!(
         op,
-        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. } | DeployOp::CleanupReleases { .. }
+        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. } | DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }
     )
 }
 

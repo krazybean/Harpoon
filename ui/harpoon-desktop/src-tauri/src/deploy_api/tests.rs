@@ -601,6 +601,7 @@ mod runtime {
                 deployment: "dep_x".into(),
             },
             DeployOp::CleanupReleases { apply: true },
+            DeployOp::PruneBuildCache { apply: true },
         ] {
             for gate in [Gate::shipping(), OPEN] {
                 // not confirmed (Cancel never reaches here at all; an absent confirmation is the same as none)

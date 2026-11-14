@@ -347,6 +347,11 @@ const SPECS: &[Spec] = &[
         switches: &["apply"],
     },
     Spec {
+        command: "prune-build-cache",
+        values: &["runtime-dir", "docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address", AUTH_FLAG],
+        switches: &["apply"],
+    },
+    Spec {
         command: "cleanup-releases",
         // the desktop hands every Docker-touching command the same runtime coordinates; only the management socket is used
         values: &["runtime-dir", "docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address", AUTH_FLAG],
@@ -494,6 +499,7 @@ COMMANDS
   config-diff     names, scopes, flags and secret versions that differ: --from DEP [--to DEP] (default: what would apply now); never values
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
+  prune-build-cache remove the BuildKit cache nothing is using (Docker's own prune, no --all; dry run by default; --apply). Later builds are slower
   cleanup-releases remove the stopped containers, port leases and images of releases that no longer serve and of failed deployments, each by its recorded id and re-verified labels (dry run by default; --apply). Never touches the serving release, volumes, networks or build cache
   cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)
   inventory       read-only listing of containers, images, volumes, port mappings and host listeners (no --runtime-dir)

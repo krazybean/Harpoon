@@ -158,3 +158,32 @@ fn an_image_the_serving_release_pins_is_kept_even_when_an_older_deployment_recor
     assert!(image_present(&t, &old_i), "{}", o.stdout);
     assert!(o.stdout.contains("the serving release pins this image"), "{}", o.stdout);
 }
+
+fn cache_args(t: &T, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = ["prune-build-cache", "--docker-socket"].iter().map(|s| s.to_string()).collect();
+    v.push(t.socket());
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v
+}
+
+#[test]
+fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused_part_goes() {
+    let t = T::new();
+    t.docker_runtime();
+    t.h.docker.with(|s| s.build_cache = vec![(1_000, false), (500, true), (250, false)]);
+    // a dry run reports the reclaimable size and sends no prune
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("build-cache-reclaimable-bytes: 1250"), "{}", o.stdout);
+    assert!(t.h.docker.requests().iter().all(|r| r.method != "POST"), "a dry run prunes nothing");
+    // applying without the authorization is refused before Docker is asked to change anything
+    let refused = go(&t, &SHIPPING, &cache_args(&t, &["--apply"]));
+    assert_ne!(refused.code, 0, "{}", refused.stdout);
+    assert!(t.h.docker.requests().iter().all(|r| r.method != "POST"));
+    // applied: Docker prunes, the in-use entry stays, and nothing but the cache is touched
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("build-cache-reclaimed-bytes: 1250"), "{}", o.stdout);
+    assert_eq!(t.h.docker.with(|s| s.build_cache.clone()), vec![(500, true)]);
+    assert!(t.h.docker.requests().iter().all(|r| r.method != "DELETE"), "no image or container was removed");
+}

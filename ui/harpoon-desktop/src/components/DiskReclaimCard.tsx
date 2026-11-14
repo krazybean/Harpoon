@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import { formatSize, parseDiskCapacity, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { DiskCapacity, ExpansionState, ReclaimResult } from "../lib/diskCapacity";
-import { freedSummary, nothingToClean, parseCleanup } from "../lib/artifactCleanup";
-import type { CleanupReport } from "../lib/artifactCleanup";
+import { freedSummary, nothingToClean, parseCache, parseCleanup } from "../lib/artifactCleanup";
+import type { CacheReport, CleanupReport } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
 /**
@@ -60,6 +60,39 @@ function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone: () => 
         </ul>
       )}
       {done && <div role="status">{done.message}<div className="text-meta">{freedSummary(done.report, formatSize)}</div></div>}
+      {error && <div role="alert" style={{ color: "var(--error-fg)", whiteSpace: "pre-wrap" }}>{error}</div>}
+      <BuildCache enabled={enabled} onDone={onDone} />
+    </div>
+  );
+}
+
+/** BuildKit's layer cache: separate from images, never pruned automatically, and only after its own confirmation. */
+function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState<"check" | "prune" | null>(null);
+  const [size, setSize] = useState<number | null>(null);
+  const [done, setDone] = useState<CacheReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "prune-build-cache", apply: true }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "prune-build-cache", apply: false } });
+  const check = async () => {
+    setBusy("check"); setError(null); setDone(null);
+    try { const r = await call(false); if (!r.ok) setError(r.hint || r.summary); else setSize(parseCache(r.detail).reclaimable); }
+    catch (e) { setError(String(e)); } finally { setBusy(null); }
+  };
+  const prune = async () => {
+    if (!(await confirmAction(`Harpoon will ask Docker to delete ${size !== null ? `about ${formatSize(size)} of ` : ""}BuildKit cache that nothing is using.\n\nImages, containers and volumes are not touched. The next builds will be slower while the cache fills again.`, "Prune build cache"))) return;
+    setBusy("prune"); setError(null);
+    try { const r = await call(true); if (!r.ok) setError(r.hint || r.summary); else { setDone(parseCache(r.detail)); setSize(null); } }
+    catch (e) { setError(String(e)); } finally { setBusy(null); onDone(); }
+  };
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="text-meta">Build cache speeds up rebuilds. Deleting it frees space but makes the next builds slower.</div>
+      <div className="dialog-actions">
+        <button className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={check}>{busy === "check" ? "Checking…" : "Check build cache"}</button>
+        {size !== null && size > 0 && <button className="btn btn--secondary" disabled={busy !== null} onClick={prune}>{busy === "prune" ? "Pruning…" : `Prune ${formatSize(size)}…`}</button>}
+      </div>
+      {size === 0 && <div role="status" className="text-meta">No unused build cache.</div>}
+      {done && <div role="status">Docker reports {formatSize(done.reclaimed ?? 0)} of build cache removed.<div className="text-meta">{freedSummary({ actions: [], protectedCount: 0, kept: [], containers: 0, images: 0, guestFreeBefore: done.guestFreeBefore, guestFreeAfter: done.guestFreeAfter }, formatSize)}</div></div>}
       {error && <div role="alert" style={{ color: "var(--error-fg)", whiteSpace: "pre-wrap" }}>{error}</div>}
     </div>
   );

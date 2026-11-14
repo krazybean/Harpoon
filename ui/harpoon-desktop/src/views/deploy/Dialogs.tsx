@@ -46,7 +46,7 @@ function Dialog({ title, sub, wide, onClose, children, footer }: { title: string
 /** Shown in every dialog whose confirmation lets Harpoon change real Docker state. Cancel never sends anything. */
 const LiveNote = () => (
   <Banner tone="warn" icon={<Warning size={18} />} title="Confirming changes real Docker state">
-    Harpoon will build images and start or stop containers in your Harpoon VM and publish them on this Mac's loopback address only. It touches only what it created and labelled, and prunes nothing. Cancel changes nothing.
+    Harpoon will build images and start or stop containers in your Harpoon VM and publish them on this Mac's loopback address only. It touches only what it created and labelled. When a deployment ends it also removes the stopped containers and images of earlier releases and failed attempts that it created (the release now serving, your volumes and Docker\u2019s build cache are never touched), so an older release is later restored by rebuilding it. Cancel changes nothing.
   </Banner>
 );
 
