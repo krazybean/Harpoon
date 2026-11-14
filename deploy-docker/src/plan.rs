@@ -414,6 +414,11 @@ impl BuildPlan {
             .collect();
         let mut out = String::new();
         out.push_str(&format!("FROM {}\nWORKDIR /app\n", self.detected.base_image));
+        // Bounds the Node heap for install and build only (an ARG is not part of the image's runtime environment),
+        // so one build cannot take the whole guest from the engine's own services. `--build-arg NODE_OPTIONS` overrides.
+        if self.detected.language == Language::Node && !build_args.iter().any(|a| a == "NODE_OPTIONS") {
+            out.push_str("ARG NODE_OPTIONS=--max-old-space-size=2048\n");
+        }
         for a in build_args {
             out.push_str(&format!("ARG {a}\n"));
         }
@@ -489,7 +494,7 @@ mod tests {
         let d = tmp("plain", &[("package.json", r#"{"scripts":{"start":"node a.js"}}"#)]);
         let plan = BuildPlan::resolve(detect(&d).unwrap(), &Settings::default()).unwrap();
         let df = plan.dockerfile(8080, &["A".into()], &[]);
-        assert!(df.starts_with("FROM node:22-slim\nWORKDIR /app\nARG A\nCOPY package.json package-lock.json* ./\nRUN npm install\nCOPY . .\n"));
+        assert!(df.starts_with("FROM node:22-slim\nWORKDIR /app\nARG NODE_OPTIONS=--max-old-space-size=2048\nARG A\nCOPY package.json package-lock.json* ./\nRUN npm install\nCOPY . .\n"));
         assert!(!df.contains("npm run build"));
     }
 
