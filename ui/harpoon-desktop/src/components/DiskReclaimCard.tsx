@@ -79,7 +79,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       </div>
       <div className="dialog-actions">
         <button className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Looking…" : "Review old releases…"}</button>
-        {plan && actionLabel && <button className="btn btn--secondary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : actionLabel}</button>}
+        {plan && actionLabel && <button className="btn btn--primary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : actionLabel}</button>}
       </div>
       {busy === "review" && <div role="status" className="text-meta">Looking for old releases…</div>}
       {clean && (
@@ -94,16 +94,16 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       {plan && nothingToClean(plan) && <div role="status" className="text-meta">Nothing to clean up: only what is serving now is left{sum && sum.review ? `, and ${sum.review} item${sum.review === 1 ? "" : "s"} need${sum.review === 1 ? "s" : ""} review below` : ""}.</div>}
       {plan && inv && (
         <div role="region" aria-label="Cleanup candidates by application" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8 }}>
-            {([["Total artifacts", inv.total], ["Eligible for cleanup", inv.eligible], ["Protected", inv.protectedCount]] as const).map(([label, n]) => (
-              <div key={label} className="panel" style={{ padding: 10 }}><div className="text-meta">{label}</div><b style={{ fontSize: 20 }}>{n}</b></div>
+          <div className="artifact-metrics">
+            {([["Total artifacts", inv.total, "all records", ""], ["Eligible for cleanup", inv.eligible, "can be cleaned", " artifact-metric--eligible"], ["Protected", inv.protectedCount, "left alone", " artifact-metric--protected"]] as const).map(([label, n, note, tone]) => (
+              <div key={label} className={`artifact-metric${tone}`}><div className="artifact-metric__label">{label}</div><b className="artifact-metric__n">{n}</b><div className="artifact-metric__note">{note}</div></div>
             ))}
           </div>
           <div className="text-meta">{inv.dockerObjects} Docker object{inv.dockerObjects === 1 ? "" : "s"} to remove · {inv.journalOnly} journal record{inv.journalOnly === 1 ? "" : "s"} to reconcile · {inv.review} need review. Reconciling journal records frees no Docker disk space; disk savings cannot be estimated before removal, and the measured change is shown afterwards.</div>
           {groups.length > 1 && (
-            <div className="dialog-actions" style={{ justifyContent: "flex-start" }}>
-              <button className="btn btn--secondary" onClick={() => setOpen(new Set(groups.map((g) => g.key)))}>Expand all</button>
-              <button className="btn btn--secondary" onClick={() => setOpen(new Set())}>Collapse all</button>
+            <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
+              <button type="button" className="artifact-link" onClick={() => setOpen(new Set(groups.map((g) => g.key)))}>Expand all</button>
+              <button type="button" className="artifact-link" onClick={() => setOpen(new Set())}>Collapse all</button>
             </div>
           )}
           {groups.map((g) => <ArtifactGroup key={g.key} g={g} expanded={open.has(g.key)} onToggle={() => toggle(g.key)} />)}
@@ -122,16 +122,18 @@ const VERDICT_PILL: Record<Verdict, string> = { ready: "dp-pill--ok", reconcile:
 function ArtifactGroup({ g, expanded, onToggle }: { g: CleanupGroup; expanded: boolean; onToggle: () => void }) {
   const id = `artifact-group-${g.key}`;
   return (
-    <section className="panel" style={{ padding: 10, minWidth: 0 }} aria-label={g.title}>
+    <section className="artifact-group" data-expanded={expanded} data-tone={g.ready.containers + g.ready.images + g.reconcile > 0 ? "eligible" : "protected"} aria-label={g.title}>
       <button type="button" aria-expanded={expanded} aria-controls={id} onClick={onToggle} className="artifact-toggle">
-        <span style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-          <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
-          <b style={{ overflowWrap: "anywhere" }}>{g.title}</b>
-          {g.environment && <span className="text-meta">· {g.environment === "production" ? "Production" : g.environment}</span>}
+        <span className="artifact-chevron" aria-hidden="true" />
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+            <b style={{ overflowWrap: "anywhere" }}>{g.title}</b>
+            {g.environment && <span className="text-meta">· {g.environment === "production" ? "Production" : g.environment}</span>}
+          </span>
+          <span className="text-meta" style={{ display: "block" }}>{groupCounts(g)}</span>
         </span>
-        <span className="text-meta" style={{ display: "block" }}>{groupCounts(g)}</span>
       </button>
-      {expanded && <div id={id}>
+      {expanded && <div id={id} className="artifact-group__body">
       {g.unassociated && <div className="text-meta">Harpoon's journal does not say which application these belong to, so none is guessed.</div>}
       <ul style={{ listStyle: "none", margin: "6px 0 0", padding: 0, display: "grid", gap: 6 }}>
         {g.items.map((i) => (

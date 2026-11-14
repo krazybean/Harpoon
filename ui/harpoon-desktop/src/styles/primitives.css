@@ -769,6 +769,29 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .expansion-progress__stage--active { opacity: 1; font-weight: 600; }
 .expansion-progress__stage--done { opacity: 0.85; }
 
-/* Docker Artifacts: an application row that expands; a plain button so Enter/Space and the focus ring come from the browser. */
-.artifact-toggle { all: unset; display: block; width: 100%; box-sizing: border-box; cursor: pointer; border-radius: 6px; }
-.artifact-toggle:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }
+/* Docker Artifacts. Tones come from the existing tokens and are never the only cue: every tile carries a word, every group a chevron. */
+.artifact-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.artifact-metric { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-card); background: var(--panel); }
+.artifact-metric__label { color: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.artifact-metric__n { display: block; margin: 2px 0; color: var(--text-primary); font-size: 24px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.artifact-metric__note { color: var(--text-tertiary); font-size: 10px; }
+.artifact-metric--eligible { border-color: rgba(242,201,76,.28); border-left-color: var(--warning); background: rgba(242,201,76,.06); }
+.artifact-metric--eligible .artifact-metric__n { color: var(--warning-fg); }
+.artifact-metric--protected { border-color: rgba(83,209,138,.28); border-left-color: var(--success); background: rgba(83,209,138,.06); }
+.artifact-metric--protected .artifact-metric__n { color: var(--success-fg); }
+.artifact-link { all: unset; cursor: pointer; padding: 6px 4px; color: var(--text-secondary); font-size: 11px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.artifact-link:hover { color: var(--text-primary); }
+.artifact-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+
+.artifact-group { min-width: 0; border: 1px solid var(--border-strong); border-left-width: 3px; border-radius: var(--radius-card); background: var(--panel-header); box-shadow: 0 2px 6px rgba(0,0,0,.25); transition: border-color .15s, background-color .15s; }
+.artifact-group[data-tone="eligible"] { border-left-color: var(--warning); }
+.artifact-group[data-tone="protected"] { border-left-color: var(--success); }
+.artifact-group:hover { background: var(--panel-elevated); }
+.artifact-group[data-expanded="true"] { background: var(--panel); border-color: var(--text-tertiary); box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+.artifact-toggle { all: unset; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; min-height: 48px; padding: 8px 12px; cursor: pointer; border-radius: var(--radius-card); }
+.artifact-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.artifact-chevron { flex: none; width: 7px; height: 7px; border-right: 2px solid var(--text-secondary); border-bottom: 2px solid var(--text-secondary); transform: rotate(-45deg); transition: transform .15s; }
+.artifact-group:hover .artifact-chevron, .artifact-toggle:focus-visible .artifact-chevron { border-color: var(--text-primary); }
+.artifact-group[data-expanded="true"] .artifact-chevron { transform: rotate(45deg); }
+.artifact-group__body { padding: 8px 12px 12px; border-top: 1px solid var(--border); }
+@media (prefers-reduced-motion: reduce) { .artifact-group, .artifact-chevron { transition: none; } }
