@@ -636,6 +636,27 @@ impl DockerApi {
         }
     }
 
+    /// `GET /containers/{id}/json`, parsed but not interpreted. Read-only. `None` when Docker has no such container.
+    pub fn container_inspect_json(&self, id_or_name: &str, left: Duration) -> Result<Option<Json>, ApiError> {
+        let r = self.call("GET", &format!("/containers/{}/json", enc(id_or_name)), None, left)?;
+        match r.status {
+            200 => Ok(Some(parse(&r, "container inspect")?)),
+            404 => Ok(None),
+            _ => Err(Self::unexpected("container inspect", &r)),
+        }
+    }
+
+    /// `GET /containers/{id}/stats?stream=false`: one sample (Docker takes about a second to produce the
+    /// previous-sample half). Read-only. `None` when Docker has no such container.
+    pub fn container_stats_json(&self, id: &str, left: Duration) -> Result<Option<Json>, ApiError> {
+        let r = self.call("GET", &format!("/containers/{}/stats?stream=false", enc(id)), None, left)?;
+        match r.status {
+            200 => Ok(Some(parse(&r, "container stats")?)),
+            404 => Ok(None),
+            _ => Err(Self::unexpected("container stats", &r)),
+        }
+    }
+
     pub fn container_inspect(
         &self,
         id_or_name: &str,

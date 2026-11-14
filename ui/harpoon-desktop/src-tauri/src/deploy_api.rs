@@ -2007,6 +2007,88 @@ pub async fn deploy_op(
     .map_err(|e| format!("background task failed: {e}"))
 }
 
+// ------------------------------------------------------------------ container metrics (read-only)
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsRequest {
+    pub app: String,
+    pub deployment: String,
+    pub container: String,
+    pub container_id: Option<String>,
+}
+
+/// One measurement of the serving container, or the reason there is none. `state` is exactly one of
+/// `ok`, `stopped`, `absent`, `not-owned`, `unavailable`; every figure is absent unless Docker provided it.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsDto {
+    pub state: &'static str,
+    pub detail: Option<String>,
+    pub sampled_ms: u64,
+    pub container_id: Option<String>,
+    pub started_at: Option<String>,
+    pub restart_count: Option<u64>,
+    pub cpu_percent: Option<f64>,
+    pub cpus: Option<u64>,
+    pub mem_raw: Option<u64>,
+    pub mem_cache: Option<u64>,
+    pub mem_working_set: Option<u64>,
+    pub mem_limit: Option<u64>,
+    pub net_rx: Option<u64>,
+    pub net_tx: Option<u64>,
+    pub pids: Option<u64>,
+}
+
+fn name_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 200 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+pub fn metrics_dto(outcome: Result<harpoon_deploy_docker::metrics::Outcome, String>, now_ms: u64) -> MetricsDto {
+    use harpoon_deploy_docker::metrics::Outcome;
+    let base = MetricsDto { sampled_ms: now_ms, ..Default::default() };
+    match outcome {
+        Err(e) => MetricsDto { state: "unavailable", detail: Some(e), ..base },
+        Ok(Outcome::Absent) => MetricsDto { state: "absent", detail: Some("Docker has no container with the recorded name.".into()), ..base },
+        Ok(Outcome::NotOwned(why)) => MetricsDto { state: "not-owned", detail: Some(format!("A container has the recorded name, but it is not the serving release's container: {why}. Nothing was read from it.")), ..base },
+        Ok(Outcome::Reading(r)) => {
+            let base = MetricsDto { container_id: Some(r.identity.id.clone()), started_at: Some(r.identity.started_at.clone()).filter(|s| !s.is_empty()), restart_count: r.identity.restart_count, mem_limit: r.identity.memory_limit, ..base };
+            if !r.identity.running { return MetricsDto { state: "stopped", ..base }; }
+            match r.sample {
+                None => MetricsDto { state: "unavailable", detail: Some("Docker returned no statistics for the running container.".into()), ..base },
+                Some(s) => MetricsDto { state: "ok", cpu_percent: s.cpu_percent, cpus: s.cpus, mem_working_set: s.mem_working_set(), mem_raw: s.mem_raw, mem_cache: s.mem_cache, net_rx: s.net_rx, net_tx: s.net_tx, pids: s.pids, ..base },
+            }
+        }
+    }
+}
+
+/// Read-only: Docker's inspect and stats for the one container the journal says is serving, after its labels (and
+/// recorded id) prove it. It takes no engine lock, so a deployment in progress is never delayed by it, and it runs
+/// off the UI thread with a bounded timeout. Nothing but figures leaves this function: no environment, no logs.
+#[tauri::command]
+pub async fn deploy_metrics(app: tauri::AppHandle, request: MetricsRequest) -> Result<MetricsDto, String> {
+    if !name_ok(&request.container) || !name_ok(&request.app) || !name_ok(&request.deployment) || request.container_id.as_deref().is_some_and(|i| !name_ok(i.trim_start_matches("sha256:"))) {
+        return Err("invalid metrics request".into());
+    }
+    use tauri::Manager;
+    let home = app.path().home_dir().map_err(|e| format!("no home directory: {e}"))?;
+    let env = environment(&home)?;
+    let resources = bundled_resources(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let outcome = (|| {
+            let info = discover_runtime(&env.support, &env.mgmt_socket, &resources, &process_command)?;
+            let info = match &env.namespace { Some(ns) => confine_to_namespace(info, ns)?, None => info };
+            let wait = std::time::Duration::from_secs(6);
+            let api = harpoon_deploy_docker::api::DockerApi::new(&info.docker_socket, wait);
+            harpoon_deploy_docker::metrics::read(&api, &request.container, &request.app, &request.deployment, request.container_id.as_deref(), wait).map_err(|e| e.to_string())
+        })();
+        metrics_dto(outcome, now)
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))
+}
+
 // ------------------------------------------------------------------ host listeners (effective exposure)
 
 /// One TCP listener on this Mac, as `lsof` reports it. This is what is actually bound on the host, as opposed to

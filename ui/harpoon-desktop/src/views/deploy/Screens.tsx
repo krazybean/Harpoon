@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Hammer, Heartbeat, Info, Key, Lock, Pause, Play, Plugs, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
 import type { AppAddress, AppModel, Deployment, Env, LogLine, Release } from "../../lib/deployTypes.ts";
@@ -16,6 +16,8 @@ import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
 import { copyText, visibleLogLines } from "../../lib/deployUi.ts";
 import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 import { previewReady } from "../../lib/previewGate.ts";
+import type { Target } from "../../lib/containerMetrics.ts";
+import { ContainerMetrics } from "./ContainerMetrics.tsx";
 
 const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?: boolean; sm?: boolean; title?: string } = {}) => (
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
@@ -598,8 +600,12 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
 
 function MetricsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const st = appStatus(app, c.runtime);
+  const rel = releaseById(app, app.currentReleaseId);
+  const dep = rel ? app.deployments.find((d) => d.id === rel.deploymentId) : undefined;
+  const target = useMemo<Target | null>(() => (c.engine && st.live && rel && app.containerName ? { app: app.id, deployment: rel.deploymentId, container: app.containerName, containerId: dep?.recorded?.find((r) => r.kind === "container" && r.name === app.containerName)?.id ?? null } : null), [c.engine, st.live, rel, app.id, app.containerName, dep]);
+  if (c.engine && target) return <ContainerMetrics fetchOnce={c.engine.metrics} target={target} />;
+  if (c.engine) return <div className="dp-panel dp-empty"><h2>{st.live ? "No serving container" : "Not connected"}</h2><p>{st.live ? "No release of this application is recorded as serving from a running container, so there is nothing to measure. Harpoon does not estimate missing data." : "Harpoon is not connected, so nothing here can be current."}</p></div>;
   if (!st.live || !app.resources || !app.currentReleaseId) {
-    if (c.engine) return <div className="dp-panel dp-empty"><h2>{st.live ? "Resource charts are not part of this build" : "Not connected"}</h2><p>{st.live ? "Harpoon records deployments and health evidence; it does not chart resources here. Per-container figures are in Containers, and nothing is estimated." : "Harpoon is not connected, so nothing here can be current."}</p>{st.live && c.openContainers ? <button className="btn btn--secondary" onClick={() => c.openContainers!()}>Open Containers</button> : null}</div>;
     return <div className="dp-panel dp-empty"><h2>{st.live ? "No running container" : "Not connected"}</h2><p>{st.live ? "Resource charts need a running container. Harpoon does not estimate missing data." : "Harpoon is not connected, so resource charts and health checks are unavailable. Nothing here is shown as live."}</p></div>;
   }
   const r = app.resources;

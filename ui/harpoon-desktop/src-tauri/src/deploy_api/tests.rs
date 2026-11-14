@@ -2273,3 +2273,34 @@ fn an_authorized_runtime_removes_a_never_deployed_application_and_the_engine_dec
     assert!(after.repos.is_empty() && after.apps.is_empty(), "a never-deployed application disappears from the list");
     assert!(kc.accounts().is_empty(), "no Keychain access");
 }
+
+mod metrics_dto {
+    use super::*;
+    use harpoon_deploy_docker::metrics::{Identity, Outcome, Reading, Sample};
+
+    fn identity(running: bool) -> Identity {
+        Identity { id: "abc".into(), name: "hp".into(), running, started_at: "2026-11-14T00:00:00Z".into(), restart_count: Some(1), labels: vec![], memory_limit: None }
+    }
+
+    #[test]
+    fn every_outcome_maps_to_exactly_one_state_and_never_invents_a_figure() {
+        let ok = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(true), sample: Some(Sample { cpu_percent: Some(0.0), mem_raw: Some(10), net_rx: Some(0), ..Default::default() }) }))), 5);
+        assert_eq!((ok.state, ok.cpu_percent, ok.mem_raw, ok.net_rx, ok.net_tx, ok.mem_working_set, ok.restart_count, ok.sampled_ms), ("ok", Some(0.0), Some(10), Some(0), None, None, Some(1), 5));
+        let stopped = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(false), sample: None }))), 5);
+        assert_eq!((stopped.state, stopped.cpu_percent, stopped.container_id.as_deref()), ("stopped", None, Some("abc")));
+        let running_without_stats = metrics_dto(Ok(Outcome::Reading(Box::new(Reading { identity: identity(true), sample: None }))), 5);
+        assert_eq!(running_without_stats.state, "unavailable");
+        assert_eq!(metrics_dto(Ok(Outcome::Absent), 5).state, "absent");
+        let foreign = metrics_dto(Ok(Outcome::NotOwned("label".into())), 5);
+        assert_eq!((foreign.state, foreign.container_id, foreign.cpu_percent), ("not-owned", None, None));
+        assert!(foreign.detail.unwrap().contains("Nothing was read"));
+        let down = metrics_dto(Err("socket gone".into()), 5);
+        assert_eq!((down.state, down.detail.as_deref()), ("unavailable", Some("socket gone")));
+    }
+
+    #[test]
+    fn request_names_are_restricted_to_what_docker_names_use() {
+        for good in ["hp-dep_1", "app_01ABC", "a.b-c_d"] { assert!(name_ok(good), "{good}"); }
+        for bad in ["", "a b", "a/b", "a;b", "../x", &"x".repeat(201)] { assert!(!name_ok(bad), "{bad}"); }
+    }
+}

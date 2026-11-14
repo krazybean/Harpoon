@@ -30,6 +30,19 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
   what the capture window sees and refuses redirects off the app's own host; the app's real headers and what ordinary visitors get are untouched. The
   capture waits for a drawn, settled frame, refuses a blank one, runs one window at a time and closes it on success and failure.
 
+### Deployments: the Metrics tab shows the serving container's real measurements (2.0.1 work, not released)
+
+- The tab replaces its placeholder with CPU, memory, network and uptime for the container the journal says is serving, read
+  from Docker's own API through the existing socket (`GET /containers/{id}/json` and `/stats`; nothing is spawned, nothing
+  is changed). Before any measurement the container must carry Harpoon's labels for this application and deployment and
+  match the recorded container id; a container that merely has the recorded name is never measured.
+- Figures Docker does not provide stay empty rather than zero. CPU is a percent of one core (it can exceed 100% on several
+  cores). Memory excludes the page cache when Docker reports it, and a percentage appears only when the container has its
+  own memory limit. Rates need two samples of the same run; a counter reset or a restart gives none.
+- Sampling is about every 3 seconds, only while the tab is open and the window visible. A reading older than about 10
+  seconds is shown as stale, not current. Up to 10 minutes of history is kept in memory for the session only; it resets when
+  the serving container changes. No telemetry is stored.
+
 ### VM-backed tests run under a deadline and a watchdog (test tooling only)
 
 Scripts that boot or drive a real VM now re-run under `tools/vm-test-guard.py`: wall-clock deadline, preflight and 15 s sampling of

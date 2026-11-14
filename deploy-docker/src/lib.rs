@@ -15,6 +15,7 @@ pub mod guest;
 pub mod http;
 pub mod ignore;
 pub mod json;
+pub mod metrics;
 pub mod plan;
 pub mod preflight;
 pub mod probe;

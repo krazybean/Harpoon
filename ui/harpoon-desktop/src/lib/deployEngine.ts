@@ -96,6 +96,8 @@ export type EngineApi = {
   clearLast: () => void;
   stepLogs: (deploymentId: string) => Promise<LogLine[]>;
   runtimeLogs: (container: string) => Promise<LogLine[]>;
+  /** One read-only measurement of the serving container (Metrics tab). Absent in the simulation. */
+  metrics?: (target: import("./containerMetrics.ts").Target) => Promise<import("./containerMetrics.ts").MetricsDto>;
 };
 
 export const SCHEMA = 1;
