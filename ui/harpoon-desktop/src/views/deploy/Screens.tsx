@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Info, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
 import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
@@ -14,6 +14,7 @@ import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps,
 import { describeExposure } from "../../lib/portExposure.ts";
 import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
 import { copyText, visibleLogLines } from "../../lib/deployUi.ts";
+import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 
 const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?: boolean; sm?: boolean; title?: string } = {}) => (
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
@@ -172,6 +173,7 @@ export function AppScreen({ c }: { c: Ctx }) {
 
   const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : st.kind === "idle" ? <Cube size={20} /> : <Check size={20} />;
   const heroClass = heroClassFor(st.kind);
+  const thumb = previewReady(c, app, st.kind === "running");
   const lastKnown = app.lastKnownReleaseId;
   const subline = st.kind === "unknown"
     ? `Last known: ${lastKnown ? `running release ${lastKnown}` : "no release"}. Harpoon is ${c.runtime === "stopped" ? "stopped" : "not ready"}, so the current state is not known.`
@@ -213,9 +215,9 @@ export function AppScreen({ c }: { c: Ctx }) {
           {app.automation.held.map((h) => h.revision.sha).slice(0, 3).join(", ")}{app.automation.held.length > 3 ? ", …" : ""} — recorded, not deployed. Review them to dismiss or select one.
         </Banner>
       )}
-      <div className="dp-panel" data-tour="app-status"><div className="dp-panel__body dp-hero">
+      <div className="dp-panel" data-tour="app-status"><div className="dp-panel__body dp-hero" data-thumb={thumb || undefined}>
+        {thumb ? <PreviewThumb c={c} url={app.address!.url} /> : null}
         <div className="dp-hero__state">
-          <div className={`big ${heroClass}`} style={{ width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>{heroIcon}</div>
           <div>
             <div className="dp-row dp-row--wrap">
               <Pill tone={st.tone} live={st.kind === "recovering"}>{st.label}</Pill>
@@ -229,11 +231,14 @@ export function AppScreen({ c }: { c: Ctx }) {
             {app.address ? <AddressBar a={app.address} openUrl={c.openUrl} /> : null}
           </div>
         </div>
-        <div className="dp-actions" data-tour="recovery-actions">
+        <div className="dp-hero__side">
+        <div className={`big ${heroClass}`} role="img" aria-label={st.label} title={st.label} style={{ width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>{heroIcon}</div>
+        <div className="dp-actions dp-actions--end" data-tour="recovery-actions">
           {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canBuild || !prod, title: buildWhy })}
           {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canBuild || !prod || !app.releases.length, title: buildWhy })}
           {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
           {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !canAct || !prod || !app.previews.length, title: ext ? EXT_REASON : c.engine ? NO_PREVIEWS : prodOnly })}
+        </div>
         </div>
       </div></div>
       <div className="dp-tabs" role="tablist">
@@ -383,9 +388,6 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             </div>
           </section>
         )}
-        {c.engine && st.kind === "running" && app.address?.status === "running" && L?.releaseId === app.currentReleaseId && L.steps.some((step) => step.name === "final_check" && step.status === "succeeded")
-          ? <DeploymentPreview c={c} app={app} />
-          : null}
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Resources &amp; health</h2><span className="dp-spacer" /><Evidence>Evidence, not a guarantee</Evidence></div>
           <div className="dp-panel__body">
@@ -434,10 +436,19 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
   );
 }
 
-function DeploymentPreview({ c, app }: { c: Ctx; app: AppModel }) {
-  const [expanded, setExpanded] = useState(false);
+/** A preview is taken only of a running release whose final health check passed; anything else has nothing true to show. */
+export function previewReady(c: Ctx, app: AppModel, running: boolean): boolean {
+  const L = latestDeployment(app);
+  return !!c.engine && running && app.address?.status === "running" && !!L && L.releaseId === app.currentReleaseId && L.steps.some((step) => step.name === "final_check" && step.status === "succeeded");
+}
+
+/**
+ * The release card's thumbnail: a native, private capture of the running app (see preview.rs). Refresh takes a new one;
+ * clicking the image enlarges it. A failed capture is shown here and affects nothing else.
+ */
+function PreviewThumb({ c, url }: { c: Ctx; url: string }) {
+  const [big, setBig] = useState(false);
   const [shot, setShot] = useState<{ src: string | null; error: string | null; loading: boolean }>({ src: null, error: null, loading: false });
-  const url = app.address!.url;
   const capture = useCallback(() => {
     if (!c.engine) { setShot({ src: null, error: "Previews need the Harpoon desktop engine.", loading: false }); return () => {}; }
     let on = true;
@@ -446,18 +457,29 @@ function DeploymentPreview({ c, app }: { c: Ctx; app: AppModel }) {
     return () => { on = false; };
   }, [c.engine, url]);
   useEffect(() => capture(), [capture]);
+  const refresh = <button className="btn btn--ghost btn--sm" disabled={shot.loading} onClick={() => void capture()}><ArrowsClockwise size={12} /> {shot.loading ? "Capturing…" : "Refresh"}</button>;
   return (
-    <section className={`dp-panel dp-preview ${expanded ? "dp-preview--expanded" : ""}`}>
-      <div className="dp-panel__head"><div><h2 className="dp-h2">Deployment preview</h2><div className="dp-faint">A fresh, private capture of the running app · nothing is stored</div></div><span className="dp-spacer" />
-        <button className="btn btn--secondary btn--sm" disabled={shot.loading} onClick={() => void capture()}><ArrowsClockwise size={14} /> {shot.loading ? "Capturing…" : "Refresh"}</button>
-        <button className="btn btn--secondary btn--sm" onClick={() => setExpanded((v) => !v)}>{expanded ? <ArrowsIn size={14} /> : <ArrowsOut size={14} />} {expanded ? "Reduce" : "Enlarge"}</button>
-        <button className="btn btn--secondary btn--sm" onClick={() => c.openUrl?.(url)}><ArrowSquareOut size={14} /> Open app</button>
+    <div className="dp-thumb">
+      {shot.src
+        ? <button type="button" className="dp-thumb__img" onClick={() => setBig(true)} aria-label="Enlarge deployment preview" title="Enlarge preview"><img alt="Deployed application preview" src={shot.src} /></button>
+        : <div className="dp-thumb__img dp-thumb__none" aria-busy={shot.loading} title={shot.error ?? undefined}>{shot.error ? <><b>Preview unavailable</b><span>{shot.error}</span></> : <span>Capturing the page…</span>}</div>}
+      {refresh}
+      {big && shot.src ? <PreviewLightbox src={shot.src} url={url} c={c} refresh={refresh} close={() => setBig(false)} /> : null}
+    </div>
+  );
+}
+
+function PreviewLightbox({ src, url, c, refresh, close }: { src: string; url: string; c: Ctx; refresh: ReactNode; close: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogFocus(ref, close);
+  return (
+    <div className="dp-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+      <div className="dp-dialog dp-dialog--wide" role="dialog" aria-modal="true" aria-label="Deployment preview" ref={ref}>
+        <div className="dp-dialog__head"><h2>Deployment preview</h2><p>A private capture of the running app, with no cookies or saved sign-in. Nothing is stored.</p></div>
+        <div className="dp-dialog__body"><img className="dp-lightbox__img" alt="Deployed application preview, enlarged" src={src} /></div>
+        <div className="dp-dialog__foot">{refresh}<span className="dp-spacer" /><button className="btn btn--secondary" onClick={() => c.openUrl?.(url)}><ArrowSquareOut size={14} /> Open app</button><button className="btn btn--primary" onClick={close}>Close</button></div>
       </div>
-      <div className="dp-preview__frame" data-unavailable={!shot.src || undefined} aria-busy={shot.loading}>
-        {shot.src ? <img alt="Deployed application preview" src={shot.src} /> : shot.error ? <div className="dp-empty"><h3>Preview unavailable</h3><p>{shot.error} Open the app to inspect it directly.</p></div> : <div className="dp-empty"><p>Capturing the page…</p></div>}
-      </div>
-      <p className="dp-faint dp-preview__note">Taken in a separate private web view with no cookies or saved sign-in. It never affects deployment status.</p>
-    </section>
+    </div>
   );
 }
 

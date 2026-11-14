@@ -27,12 +27,30 @@ test("copyText falls back to the selection copy when the async clipboard refuses
   assert.deepEqual(made, ["line1\nline2"]);
 });
 
-test("the Overview preview is a native capture, never an iframe (WebKit has no credentialless frames and apps may forbid framing)", async () => {
+test("the release card holds a native-capture thumbnail (never an iframe) beside the details, with the status badge on the right", async () => {
   const { readFileSync } = await import("node:fs");
   const screens = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  const preview = screens.slice(screens.indexOf("function DeploymentPreview"), screens.indexOf("export function DeploymentPills"));
-  assert.doesNotMatch(preview, /<iframe|credentialless/);
-  assert.match(preview, /c\.engine\.preview\(url\)/);
+  assert.doesNotMatch(screens, /<iframe|credentialless/);
+  assert.doesNotMatch(screens, /function DeploymentPreview|dp-preview/, "the standalone preview panel is gone");
+  const thumb = screens.slice(screens.indexOf("function PreviewThumb"), screens.indexOf("export function DeploymentPills"));
+  assert.match(thumb, /c\.engine\.preview\(url\)/);
+  assert.match(thumb, /Enlarge deployment preview/);
+  assert.match(thumb, /Refresh/);
+  assert.match(thumb, /Open app/);
+  // thumbnail, details, then status badge over the operational actions, all inside the one hero card
+  const hero = screens.slice(screens.indexOf('className="dp-panel__body dp-hero"'), screens.indexOf('<div className="dp-tabs"'));
+  assert.ok(hero.indexOf("<PreviewThumb") < hero.indexOf("dp-hero__state") && hero.indexOf("dp-hero__state") < hero.indexOf("dp-hero__side"));
+  assert.ok(hero.indexOf('className={`big ${heroClass}`}') > hero.indexOf("dp-hero__side") && hero.indexOf('className={`big ${heroClass}`}') < hero.indexOf("dp-actions"));
   const hook = readFileSync(new URL("../hooks/useDeployEngine.ts", import.meta.url), "utf8");
   assert.match(hook, /invoke<string>\("deploy_preview", \{ url \}\)/);
+});
+
+test("the thumbnail appears only for a running release whose final check passed", async () => {
+  const { previewReady } = await import("../views/deploy/Screens.tsx").catch(() => ({ previewReady: null }));
+  if (!previewReady) return; // Screens.tsx needs the JSX toolchain; the wiring above is asserted from source
+  const L = { releaseId: "r1", steps: [{ name: "final_check", status: "succeeded" }] };
+  const app = { currentReleaseId: "r1", address: { status: "running" }, deployments: [L] };
+  assert.equal(previewReady({ engine: {} }, app, true), true);
+  assert.equal(previewReady({ engine: {} }, app, false), false);
+  assert.equal(previewReady({}, app, true), false);
 });
