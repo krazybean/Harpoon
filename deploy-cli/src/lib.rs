@@ -12,6 +12,7 @@
 //!   trigger-driven execution (`watch`, `git-run`) closed: Gate U has not passed.
 
 mod args;
+mod cleanup;
 mod commands;
 mod config_cmds;
 mod git_cmds;

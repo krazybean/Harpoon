@@ -1251,6 +1251,21 @@ fn run_source(
         let _ = writeln!(out, "  {l}");
     }
     drop(ws);
+    // Superseded and abandoned artifacts are removed once the run has ended. A failure here is a note, never a
+    // failed deployment: the code above is what the deployment itself returned.
+    if !p.switch("simulate") && commands::authorized(p).is_ok() {
+        if let Ok(Some(sock)) = commands::socket_flag(p) {
+            let mut note = String::new();
+            match crate::cleanup::run(p, rt, &sock, true, &mut note) {
+                Ok(t) => {
+                    let _ = writeln!(out, "  cleanup: removed {} container(s), {} image(s) of earlier releases and failed attempts; the serving release, volumes and build cache were not touched", t.containers, t.images);
+                }
+                Err(f) => {
+                    let _ = writeln!(out, "  note: cleanup of earlier artifacts was skipped: {}", f.message.lines().next().unwrap_or(""));
+                }
+            }
+        }
+    }
     let exists = store::read_restored(rt)
         .ok()
         .flatten()

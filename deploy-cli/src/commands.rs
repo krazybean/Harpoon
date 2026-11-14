@@ -67,6 +67,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
         "cleanup-image" => cleanup_image(p, out),
+        "cleanup-releases" => crate::cleanup::cleanup_cmd(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),
     }
 }
@@ -368,7 +369,7 @@ fn retained_image_notices(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
     v
 }
 
-fn unfinished(deps: &[Deployment]) -> Vec<String> {
+pub(crate) fn unfinished(deps: &[Deployment]) -> Vec<String> {
     deps.iter()
         .filter(|d| !d.status.is_terminal())
         .map(|d| {
@@ -1515,7 +1516,7 @@ fn recover(p: &Parsed, out: &mut String) -> R {
 
 // ------------------------------------------------------------------ reconcile
 
-fn describe(a: &Action) -> String {
+pub(crate) fn describe(a: &Action) -> String {
     match a {
         Action::Remove {
             entry,
@@ -1565,7 +1566,7 @@ fn describe(a: &Action) -> String {
     }
 }
 
-fn docker_backend(p: &Parsed, rt: &Runtime, socket: &Path) -> Result<DockerBackend, Fail> {
+pub(crate) fn docker_backend(p: &Parsed, rt: &Runtime, socket: &Path) -> Result<DockerBackend, Fail> {
     let resources = p.value("resources-dir").ok_or_else(|| {
         Fail::config(
             "--resources-dir DIR is required (the bundled-resources directory holding Buildx)",
