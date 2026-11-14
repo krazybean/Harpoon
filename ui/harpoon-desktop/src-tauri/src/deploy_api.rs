@@ -163,6 +163,8 @@ pub struct RepoDto {
     pub context: Option<String>,
     pub target: Option<String>,
     pub health_path: Option<String>,
+    /// Source-deployment settings (canonical JSON), when any were chosen.
+    pub settings: Option<String>,
     /// The version of this registration (when it was last recorded). An edit names the one it was based on.
     pub registered_ms: u64,
     pub seen: Vec<SeenDto>,
@@ -642,6 +644,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
             context: repo.context.clone(),
             target: repo.target.clone(),
             health_path: repo.health_path.clone(),
+            settings: repo.settings.clone(),
             registered_ms: repo.at_ms,
             seen: r
                 .git
@@ -1084,6 +1087,7 @@ pub enum DeployOp {
         context: Option<String>,
         target: Option<String>,
         health_path: Option<String>,
+        settings: Option<String>,
         username: Option<String>,
         known_host: Option<String>,
         webhook: Option<String>,
@@ -1117,6 +1121,7 @@ pub enum DeployOp {
         dockerfile: Option<String>,
         container_port: Option<u16>,
         health_path: Option<String>,
+        settings: Option<String>,
         #[serde(default)]
         confirm_change: bool,
     },
@@ -1239,6 +1244,7 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             context,
             target,
             health_path,
+            settings,
             username,
             known_host,
             webhook,
@@ -1264,6 +1270,7 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "context", context);
             opt(&mut a, "target", target);
             opt(&mut a, "health-path", health_path);
+            opt(&mut a, "settings", settings);
             opt(&mut a, "username", username);
             opt(&mut a, "known-host", known_host);
             opt(&mut a, "webhook", webhook);
@@ -1279,6 +1286,7 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             dockerfile,
             container_port,
             health_path,
+            settings,
             confirm_change,
         } => {
             let mut a = s(&[
@@ -1292,6 +1300,11 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "branch", branch);
             opt(&mut a, "dockerfile", dockerfile);
             opt(&mut a, "health-path", health_path);
+            // "{}" is how the form clears every setting: an empty value would be dropped by `opt`
+            if let Some(v) = settings {
+                a.push("--settings".into());
+                a.push(v.clone());
+            }
             if let Some(p) = container_port {
                 a.push("--container-port".into());
                 a.push(p.to_string());
@@ -2057,6 +2070,14 @@ pub fn parse_picked_folder(out: &str) -> Option<String> {
     let p = out.trim_end_matches(['\n', '\r']);
     let p = if p.len() > 1 { p.trim_end_matches('/') } else { p };
     (p.starts_with('/') && !p.chars().any(|c| c.is_control())).then(|| p.to_string())
+}
+
+/// What Harpoon detects for a folder (framework, install/build/start commands, a suggested port), read-only.
+#[tauri::command]
+pub async fn deploy_detect(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || harpoon_deploy_cli::detect_source(&path))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// The standard macOS folder picker with a fixed AppleScript (nothing from the app is interpolated into
