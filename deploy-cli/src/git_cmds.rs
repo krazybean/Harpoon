@@ -1205,7 +1205,12 @@ fn run_source(
     opt("health-path", &repo.health_path);
     opt("settings", &repo.settings);
     opt("project", &repo.project);
-    opt("environment", &repo.environment);
+    // The Variables screen stores an application's values under `@production`; a registration that names no
+    // environment would otherwise resolve none of them (no build secrets, no runtime configuration).
+    opt(
+        "environment",
+        &Some(repo.environment.clone().unwrap_or_else(|| "production".into())),
+    );
     for f in FORWARD_VALUES {
         if let Some(v) = p.value(f) {
             a.push(format!("--{f}"));

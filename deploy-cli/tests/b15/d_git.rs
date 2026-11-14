@@ -2028,6 +2028,25 @@ fn clearing_the_dockerfile_is_persisted_and_keeps_everything_else() {
 }
 
 #[test]
+fn a_registration_without_an_environment_deploys_with_the_production_variables_the_ui_stores() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let gt = Tmp::new();
+    let (repo, _, _) = fixture(&gt.0);
+    assert_exit(&add_repo(&t, &kc, "shop", &url(&repo), APP, &[]), 0);
+    assert_exit(
+        &sim(
+            &t,
+            &kc,
+            &["config-set", "--scope", &format!("app:{APP}@production"), "--name", "MODE", "--value", "prod"],
+        ),
+        0,
+    );
+    let o = sim(&t, &kc, &["git-deploy", "--repo", "shop", "--simulate"]);
+    assert!(o.stdout.contains("MODE"), "{}", o.stdout);
+}
+
+#[test]
 fn an_edit_made_from_a_stale_view_is_refused_and_does_not_overwrite_the_newer_one() {
     let t = T::new();
     let kc = MemorySecretStore::new();
