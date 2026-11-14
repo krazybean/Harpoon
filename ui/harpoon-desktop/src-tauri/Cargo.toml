@@ -32,3 +32,9 @@ objc2-web-kit = { version = "0.3", default-features = false, features = ["std", 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Xcode 27's ld emits proc-macro dylibs that dyld refuses to load ("mis-aligned LINKEDIT string pool")
+# when chained fixups (any MACOSX_DEPLOYMENT_TARGET >= 12, which Tauri exports) meet rustc's default
+# debuginfo strip, so every universal/arm64 release build died with E0463. Build-time-only: shipped binaries keep release stripping.
+[profile.release.build-override]
+strip = "none"
