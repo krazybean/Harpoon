@@ -74,3 +74,14 @@ test("a release whose image was cleaned up is restored by an explicitly labelled
   assert.match(rebuild, /working folder is never touched/);
   assert.match(rebuild, /deployConfirmation\(\{ replacing: !!app\.currentReleaseId, cutoverAcknowledged: acked \}\)/);
 });
+
+test("only a running step spins; an abandoned one is shown as stopped, never as endless progress", async () => {
+  const { readFileSync } = await import("node:fs");
+  const parts = readFileSync(new URL("../views/deploy/parts.tsx", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("./deployEngine.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../views/deploy/deploy.css", import.meta.url), "utf8");
+  assert.match(parts, /case "running": return <ArrowCounterClockwise [^>]*className="dp-spin"/);
+  for (const other of ["succeeded", "failed", "warning", "skipped"]) assert.doesNotMatch(parts.slice(parts.indexOf("function stepIcon"), parts.indexOf("const STEP_CLASS")).split("\n").filter((l) => l.includes(`"${other}"`)).join(""), /dp-spin/);
+  assert.match(engine, /if \(abandoned\) for \(const s of steps\) if \(s\.status === "running"\) \{ s\.status = "warning"/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.dp-spin \{ animation: none; \} \}/);
+});

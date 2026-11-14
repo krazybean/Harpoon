@@ -51,7 +51,7 @@ function stepIcon(status: StepRecord["status"]) {
     case "failed": return <X size={12} weight="bold" />;
     case "warning": return <Warning size={12} weight="bold" />;
     case "skipped": return <CaretRight size={12} />;
-    case "running": return <ArrowCounterClockwise size={12} />;
+    case "running": return <ArrowCounterClockwise size={12} className="dp-spin" aria-hidden="true" />;
     default: return null;
   }
 }
@@ -63,7 +63,7 @@ export function Steps({ steps }: { steps: StepRecord[] }) {
       {steps.map((s) => (
         <div className={`dp-step dp-step--${STEP_CLASS[s.status]}`} key={s.name} role="listitem" aria-label={`${stepLabel(s.name)}: ${s.status}`}>
           <div className="dp-step__ico">{stepIcon(s.status)}</div>
-          <div><b>{stepLabel(s.name)}</b><small>{s.note || (s.status === "pending" ? "waiting" : "")}</small></div>
+          <div><b>{stepLabel(s.name)}</b><small>{s.note || (s.status === "pending" ? "waiting" : s.status === "running" ? "in progress · its log is recorded when the step ends" : "")}</small></div>
           <time>{s.durationLabel}</time>
         </div>
       ))}
