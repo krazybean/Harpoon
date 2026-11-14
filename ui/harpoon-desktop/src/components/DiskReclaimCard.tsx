@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import { formatSize, parseDiskCapacity, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { DiskCapacity, ExpansionState, ReclaimResult } from "../lib/diskCapacity";
-import { freedSummary, groupByApplication, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
+import { cleanupActionLabel, freedSummary, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CacheReport, CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
@@ -25,6 +25,8 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
   const [done, setDone] = useState<{ report: CleanupReport; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clean, setClean] = useState(false);
+  // Which application groups are open. Kept across refreshes: a new inventory only changes the rows inside.
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const inFlight = useRef(false);
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (clean) closeRef.current?.focus(); }, [clean]);
@@ -55,7 +57,8 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       "Harpoon cannot tell beforehand how much disk space this frees, because images share layers. It measures the guest's free space afterwards.",
       "A release whose image is removed can no longer be rolled back to instantly; it can be rebuilt from its recorded commit.",
     ];
-    if (!(await confirmAction(parts.join("\n\n"), "Clean up old releases"))) return;
+    const verb = sum.containers + sum.images === 0 ? "Reconcile journal records" : sum.journalOnly === 0 ? "Remove Docker artifacts" : "Clean up old releases";
+    if (!(await confirmAction(parts.join("\n\n"), verb))) return;
     setBusy("apply"); setError(null);
     try {
       const r = await call(true);
@@ -64,6 +67,10 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
     } catch (e) { setError(String(e)); } finally { setBusy(null); onDone(); }
   };
   const sum = plan ? operationSummary(plan) : null;
+  const inv = plan ? inventorySummary(plan) : null;
+  const groups = plan ? groupByApplication(plan) : [];
+  const actionLabel = plan ? cleanupActionLabel(plan) : null;
+  const toggle = (key: string) => setOpen((o) => { const n = new Set(o); if (!n.delete(key)) n.add(key); return n; });
   return (
     <div style={{ marginBottom: 12 }}>
       <div className="text-panel-title">Docker artifacts</div>
@@ -72,7 +79,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       </div>
       <div className="dialog-actions">
         <button className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Looking…" : "Review old releases…"}</button>
-        {plan && sum && !nothingToClean(plan) && <button className="btn btn--secondary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : "Review and clean up…"}</button>}
+        {plan && actionLabel && <button className="btn btn--secondary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : actionLabel}</button>}
       </div>
       {busy === "review" && <div role="status" className="text-meta">Looking for old releases…</div>}
       {clean && (
@@ -85,10 +92,21 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
         </div>
       )}
       {plan && nothingToClean(plan) && <div role="status" className="text-meta">Nothing to clean up: only what is serving now is left{sum && sum.review ? `, and ${sum.review} item${sum.review === 1 ? "" : "s"} need${sum.review === 1 ? "s" : ""} review below` : ""}.</div>}
-      {plan && sum && (
+      {plan && inv && (
         <div role="region" aria-label="Cleanup candidates by application" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
-          <div className="text-meta">{sum.containers + sum.images} Docker object{sum.containers + sum.images === 1 ? "" : "s"} to remove ({sum.containers} container{sum.containers === 1 ? "" : "s"}, {sum.images} image{sum.images === 1 ? "" : "s"}) · {sum.journalOnly} journal record{sum.journalOnly === 1 ? "" : "s"} to reconcile (no disk space) · {sum.protectedCount} protected · {sum.review} need review. Disk savings cannot be estimated before removal; the measured change is shown afterwards.</div>
-          {groupByApplication(plan).map((g) => <ArtifactGroup key={g.key} g={g} />)}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8 }}>
+            {([["Total artifacts", inv.total], ["Eligible for cleanup", inv.eligible], ["Protected", inv.protectedCount]] as const).map(([label, n]) => (
+              <div key={label} className="panel" style={{ padding: 10 }}><div className="text-meta">{label}</div><b style={{ fontSize: 20 }}>{n}</b></div>
+            ))}
+          </div>
+          <div className="text-meta">{inv.dockerObjects} Docker object{inv.dockerObjects === 1 ? "" : "s"} to remove · {inv.journalOnly} journal record{inv.journalOnly === 1 ? "" : "s"} to reconcile · {inv.review} need review. Reconciling journal records frees no Docker disk space; disk savings cannot be estimated before removal, and the measured change is shown afterwards.</div>
+          {groups.length > 1 && (
+            <div className="dialog-actions" style={{ justifyContent: "flex-start" }}>
+              <button className="btn btn--secondary" onClick={() => setOpen(new Set(groups.map((g) => g.key)))}>Expand all</button>
+              <button className="btn btn--secondary" onClick={() => setOpen(new Set())}>Collapse all</button>
+            </div>
+          )}
+          {groups.map((g) => <ArtifactGroup key={g.key} g={g} expanded={open.has(g.key)} onToggle={() => toggle(g.key)} />)}
         </div>
       )}
       {done && <div role="status">{done.message}<div className="text-meta">{freedSummary(done.report, formatSize)}</div></div>}
@@ -100,22 +118,20 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
 
 const VERDICT_PILL: Record<Verdict, string> = { ready: "dp-pill--ok", reconcile: "dp-pill--info", protected: "", review: "dp-pill--warn" };
 
-/** One application's candidates: the headline counts, one plain row per artifact, and the engine's raw detail behind a disclosure. */
-function ArtifactGroup({ g }: { g: CleanupGroup }) {
-  const bits = [
-    g.ready.containers ? `${g.ready.containers} stopped container${g.ready.containers === 1 ? "" : "s"}` : "",
-    g.ready.images ? `${g.ready.images} unused image${g.ready.images === 1 ? "" : "s"}` : "",
-    g.reconcile ? `${g.reconcile} journal record${g.reconcile === 1 ? "" : "s"} to reconcile` : "",
-    g.protectedCount ? `${g.protectedCount} protected` : "",
-    g.review ? `${g.review} to review` : "",
-  ].filter(Boolean);
+/** One application: a collapsed row with its counts; expanding lists one plain row per artifact, the engine's raw detail behind a disclosure. */
+function ArtifactGroup({ g, expanded, onToggle }: { g: CleanupGroup; expanded: boolean; onToggle: () => void }) {
+  const id = `artifact-group-${g.key}`;
   return (
-    <section className="panel" style={{ padding: 10 }} aria-label={g.title}>
-      <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-        <b>{g.title}</b>
-        {g.environment && <span className="text-meta">{g.environment === "production" ? "Production" : g.environment}</span>}
-        <span className="text-meta">{bits.join(" · ")}</span>
-      </div>
+    <section className="panel" style={{ padding: 10, minWidth: 0 }} aria-label={g.title}>
+      <button type="button" aria-expanded={expanded} aria-controls={id} onClick={onToggle} className="artifact-toggle">
+        <span style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+          <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+          <b style={{ overflowWrap: "anywhere" }}>{g.title}</b>
+          {g.environment && <span className="text-meta">· {g.environment === "production" ? "Production" : g.environment}</span>}
+        </span>
+        <span className="text-meta" style={{ display: "block" }}>{groupCounts(g)}</span>
+      </button>
+      {expanded && <div id={id}>
       {g.unassociated && <div className="text-meta">Harpoon's journal does not say which application these belong to, so none is guessed.</div>}
       <ul style={{ listStyle: "none", margin: "6px 0 0", padding: 0, display: "grid", gap: 6 }}>
         {g.items.map((i) => (
@@ -137,6 +153,7 @@ function ArtifactGroup({ g }: { g: CleanupGroup }) {
           </li>
         ))}
       </ul>
+      </div>}
     </section>
   );
 }

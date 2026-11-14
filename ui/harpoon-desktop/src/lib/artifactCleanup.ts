@@ -123,6 +123,32 @@ export function operationSummary(r: CleanupReport) {
   return { containers, images, journalOnly, protectedCount: r.items.filter((i) => i.verdict === "protected").length, review: r.items.filter((i) => i.verdict === "review").length, apps };
 }
 
+/** The inventory headline: every item is counted once, as eligible (the engine would remove it or reconcile its journal record), protected, or needing review. */
+export function inventorySummary(r: CleanupReport) {
+  const o = operationSummary(r);
+  const dockerObjects = o.containers + o.images;
+  return { total: r.items.length, eligible: dockerObjects + o.journalOnly, protectedCount: o.protectedCount, review: o.review, dockerObjects, journalOnly: o.journalOnly };
+}
+
+/** The primary action says what it will do; null when nothing is eligible. */
+export function cleanupActionLabel(r: CleanupReport): string | null {
+  const { dockerObjects: d, journalOnly: j } = inventorySummary(r);
+  if (d + j === 0) return null;
+  if (d === 0) return `Reconcile ${j} record${j === 1 ? "" : "s"}`;
+  if (j === 0) return `Remove ${d} Docker artifact${d === 1 ? "" : "s"}`;
+  return `Review cleanup (${d + j} items)`;
+}
+
+/** The collapsed row's one-line counts for an application. */
+export function groupCounts(g: CleanupGroup): string {
+  const remove = g.ready.containers + g.ready.images;
+  const eligible = remove + g.reconcile;
+  const head = eligible === 0 ? "0 eligible"
+    : remove && g.reconcile ? `${eligible} eligible (${remove} to remove, ${g.reconcile} to reconcile)`
+    : remove ? `${remove} eligible to remove` : `${g.reconcile} eligible for reconciliation`;
+  return [head, g.protectedCount ? `${g.protectedCount} protected` : "", g.review ? `${g.review} to review` : ""].filter(Boolean).join(" · ");
+}
+
 /** The change in guest free space, in words, or why none can be given. Docker's image sizes share layers, so they are never summed. */
 export function freedSummary(r: Pick<CleanupReport, "guestFreeBefore" | "guestFreeAfter">, size: (bytes: number) => string): string {
   if (r.guestFreeBefore === null || r.guestFreeAfter === null) return "The guest's free space could not be measured, so no figure is given.";

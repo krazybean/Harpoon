@@ -768,3 +768,7 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .expansion-progress__stage { margin: 2px 0; opacity: 0.55; }
 .expansion-progress__stage--active { opacity: 1; font-weight: 600; }
 .expansion-progress__stage--done { opacity: 0.85; }
+
+/* Docker Artifacts: an application row that expands; a plain button so Enter/Space and the focus ring come from the browser. */
+.artifact-toggle { all: unset; display: block; width: 100%; box-sizing: border-box; cursor: pointer; border-radius: 6px; }
+.artifact-toggle:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }
