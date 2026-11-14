@@ -15,6 +15,7 @@ import { describeExposure } from "../../lib/portExposure.ts";
 import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
 import { copyText, visibleLogLines } from "../../lib/deployUi.ts";
 import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
+import { previewReady } from "../../lib/previewGate.ts";
 
 const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?: boolean; sm?: boolean; title?: string } = {}) => (
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
@@ -173,7 +174,7 @@ export function AppScreen({ c }: { c: Ctx }) {
   const canBuild = canAct && !noSource;
   const buildWhy = noSource ? NO_SOURCE_REASON : prodOnly;
 
-  const thumb = previewReady(c, app, st.kind === "running");
+  const thumb = previewReady(!!c.engine, app, st.kind === "running");
   const lastKnown = app.lastKnownReleaseId;
   const subline = st.kind === "unknown"
     ? `Last known: ${lastKnown ? `running release ${lastKnown}` : "no release"}. Harpoon is ${c.runtime === "stopped" ? "stopped" : "not ready"}, so the current state is not known.`
@@ -215,7 +216,7 @@ export function AppScreen({ c }: { c: Ctx }) {
           {app.automation.held.map((h) => h.revision.sha).slice(0, 3).join(", ")}{app.automation.held.length > 3 ? ", …" : ""} — recorded, not deployed. Review them to dismiss or select one.
         </Banner>
       )}
-      <div className="dp-panel" data-tour="app-status"><div className="dp-panel__body dp-hero" data-thumb={thumb || undefined}>
+      <div className="dp-panel dp-herocard" data-tour="app-status"><div className="dp-panel__body dp-hero" data-thumb={thumb || undefined}>
         {thumb ? <PreviewThumb c={c} url={app.address!.url} /> : null}
         <div className="dp-hero__state">
           <div>
@@ -431,12 +432,6 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
       </div>
     </div>
   );
-}
-
-/** A preview is taken only of a running release whose final health check passed; anything else has nothing true to show. */
-export function previewReady(c: Ctx, app: AppModel, running: boolean): boolean {
-  const L = latestDeployment(app);
-  return !!c.engine && running && app.address?.status === "running" && !!L && L.releaseId === app.currentReleaseId && L.steps.some((step) => step.name === "final_check" && step.status === "succeeded");
 }
 
 /**

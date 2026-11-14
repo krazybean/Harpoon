@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// Only the loopback gateway or a published port on this Mac: this must never fetch an arbitrary address.
-fn loopback_target(url: &str) -> Result<tauri::Url, String> {
+pub(crate) fn loopback_target(url: &str) -> Result<tauri::Url, String> {
     let u: tauri::Url = url.parse().map_err(|_| "The application address is not a valid URL.".to_string())?;
     let host = u.host_str().unwrap_or("");
     let local = host == "localhost" || host == "127.0.0.1" || host == "harpoon.localhost" || host.ends_with(".harpoon.localhost");
@@ -86,23 +86,18 @@ fn csp_upgrades(headers: &str) -> bool {
     })
 }
 
-/// `upgrade-insecure-requests` makes WebKit rewrite the page's own http subresources (scripts, styles, fonts) to https,
-/// which a plain-http local app cannot answer, even on loopback (Chrome exempts localhost; WebKit does not). The page
-/// then never loads properly in a WKWebView, so it is reported up front instead of timing out or showing a blank or
-/// unstyled picture. The app's headers are not touched. Best effort: `false` when the app cannot be asked.
-fn app_upgrades_insecure_requests(u: &tauri::Url) -> bool {
+/// The response headers of `HEAD <path>` on the app, or `None` when it does not answer. Plain http to loopback only.
+fn probe_headers(u: &tauri::Url) -> Option<String> {
     use std::io::{Read, Write};
     use std::net::{TcpStream, ToSocketAddrs};
-    let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default()) else { return false };
+    let (host, port) = (u.host_str()?, u.port_or_known_default()?);
     // `*.localhost` is loopback by definition (RFC 6761); the system resolver does not always say so
     let target = if host == "localhost" || host.ends_with(".localhost") { "127.0.0.1" } else { host };
-    let Some(addr) = (target, port).to_socket_addrs().ok().and_then(|mut a| a.next()) else { return false };
-    let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) else { return false };
+    let addr = (target, port).to_socket_addrs().ok()?.next()?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
     let req = format!("HEAD {} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: Harpoon-preview\r\nConnection: close\r\n\r\n", u.path());
-    if s.write_all(req.as_bytes()).is_err() {
-        return false;
-    }
+    s.write_all(req.as_bytes()).ok()?;
     // the headers may arrive in several writes; read until they end, the peer closes, or 16 KiB
     let mut buf = Vec::new();
     let mut chunk = [0u8; 2048];
@@ -112,18 +107,41 @@ fn app_upgrades_insecure_requests(u: &tauri::Url) -> bool {
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    csp_upgrades(text.split("\r\n\r\n").next().unwrap_or(""))
+    (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).split("\r\n\r\n").next().unwrap_or("").to_string())
 }
 
 /// `data:image/png;base64,…` of the page at `url`, or the reason none could be made.
 #[tauri::command]
 pub async fn deploy_preview(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let target = loopback_target(&url)?;
-    if app_upgrades_insecure_requests(&target) {
-        return Err("This app's Content-Security-Policy includes upgrade-insecure-requests. WebKit applies it even to http://localhost, so the app's scripts and styles cannot load in a private preview (Chrome exempts localhost). Harpoon does not alter your app's headers; use Open app to see it.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || capture(&app, target)).await.map_err(|e| format!("background task failed: {e}"))?
+    // An app that sends `upgrade-insecure-requests` cannot load its own scripts and styles in WebKit over http, even on
+    // loopback. Its private capture goes through the loopback relay instead (see capture_proxy.rs), which removes only
+    // that directive from what this one window sees. Ordinary visitors never touch the relay.
+    let Some(headers) = probe_headers(&target) else {
+        return Err(format!("The application did not answer at {url}. Check that it is running, then Refresh."));
+    };
+    let target = if csp_upgrades(&headers) { relayed(&target)? } else { target };
+    tauri::async_runtime::spawn_blocking(move || {
+        // one capture window at a time: a quick switch between applications queues instead of piling windows up
+        let _one = CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+        capture(&app, target)
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
+}
+
+static CAPTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Labels of any capture windows still open (there are none between captures).
+pub fn open_capture_windows(app: &tauri::AppHandle) -> Vec<String> {
+    use tauri::Manager;
+    app.webview_windows().into_keys().filter(|l| l.starts_with("preview-")).collect()
+}
+
+/// The same address on the capture relay's scheme.
+fn relayed(u: &tauri::Url) -> Result<tauri::Url, String> {
+    let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default()) else { return Err("The application address has no host or port.".into()) };
+    format!("{}://{host}:{port}{}", crate::capture_proxy::SCHEME, u.path()).parse().map_err(|_| "The application address could not be relayed.".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]

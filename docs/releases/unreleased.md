@@ -25,8 +25,10 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 - **Rebuild & Restore.** A release whose image was cleaned up is restored by rebuilding its recorded commit in a private checkout through the
   normal deploy and cutover (current build settings and Variables apply, so the result can differ from the original). The Roll back button
   keeps its meaning for a release whose image is still present.
-- **Preview.** Apps whose Content-Security-Policy includes `upgrade-insecure-requests` cannot load their scripts and styles in WebKit over http,
-  even on loopback; the preview says so instead of timing out. The capture also waits for a drawn, settled frame and refuses a blank one.
+- **Preview.** An app whose Content-Security-Policy includes `upgrade-insecure-requests` cannot load its scripts and styles in WebKit over http, even on
+  loopback. Its private capture goes through a loopback-only, GET-only, cookie-free relay (`hpcapture://`) that removes only that one directive from
+  what the capture window sees and refuses redirects off the app's own host; the app's real headers and what ordinary visitors get are untouched. The
+  capture waits for a drawn, settled frame, refuses a blank one, runs one window at a time and closes it on success and failure.
 
 ### VM-backed tests run under a deadline and a watchdog (test tooling only)
 

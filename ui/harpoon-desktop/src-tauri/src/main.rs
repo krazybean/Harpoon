@@ -16,6 +16,7 @@ mod context_discovery;
 mod cli_path;
 mod bootstrap;
 mod compose_import;
+mod capture_proxy;
 mod preview;
 mod deploy_api;
 mod namespace;
@@ -1423,6 +1424,7 @@ fn open_app_url(url: String) -> Result<(), String> {
 fn main() {
     let shell_manager = std::sync::Arc::new(shell::ShellManager::new());
     let builder = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol(capture_proxy::SCHEME, |_ctx, request, responder| capture_proxy::handle(request, responder))
         .manage(shell_manager.clone())
         .setup(|app| {
             // an unusable test namespace is fatal: the app must never fall back to the production runtime
@@ -1436,10 +1438,15 @@ fn main() {
                     let (url, out) = (url.to_string(), out.to_string());
                     tauri::async_runtime::spawn(async move {
                         let r = preview::deploy_preview(handle.clone(), url).await;
-                        let code = match r {
+                        let mut code = match r {
                             Ok(uri) => { let _ = std::fs::write(&out, uri); 0 }
                             Err(e) => { eprintln!("preview selftest: {e}"); 1 }
                         };
+                        // success or failure, no capture window may be left behind
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let left = preview::open_capture_windows(&handle);
+                        eprintln!("preview selftest: open capture windows after: {}", left.len());
+                        if !left.is_empty() { code = 3; }
                         handle.exit(code);
                     });
                     return Ok(());

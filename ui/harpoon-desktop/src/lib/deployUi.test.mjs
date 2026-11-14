@@ -50,13 +50,14 @@ test("the release card holds a native-capture thumbnail (never an iframe) beside
 });
 
 test("the thumbnail appears only for a running release whose final check passed", async () => {
-  const { previewReady } = await import("../views/deploy/Screens.tsx").catch(() => ({ previewReady: null }));
-  if (!previewReady) return; // Screens.tsx needs the JSX toolchain; the wiring above is asserted from source
-  const L = { releaseId: "r1", steps: [{ name: "final_check", status: "succeeded" }] };
-  const app = { currentReleaseId: "r1", address: { status: "running" }, deployments: [L] };
-  assert.equal(previewReady({ engine: {} }, app, true), true);
-  assert.equal(previewReady({ engine: {} }, app, false), false);
-  assert.equal(previewReady({}, app, true), false);
+  const { previewReady } = await import("./previewGate.ts"); // a failed import fails the test
+  const mk = (over = {}) => ({ currentReleaseId: "r1", address: { status: "running" }, deployments: [{ releaseId: "r1", steps: [{ name: "final_check", status: "succeeded" }], ageMin: 0 }], ...over });
+  assert.equal(previewReady(true, mk(), true), true);
+  assert.equal(previewReady(true, mk(), false), false, "not running");
+  assert.equal(previewReady(false, mk(), true), false, "no engine");
+  assert.equal(previewReady(true, mk({ address: { status: "stopped" } }), true), false, "address not running");
+  assert.equal(previewReady(true, mk({ currentReleaseId: "r2" }), true), false, "latest deployment is not the serving release");
+  assert.equal(previewReady(true, mk({ deployments: [{ releaseId: "r1", steps: [{ name: "final_check", status: "failed" }], ageMin: 0 }] }), true), false, "final check did not pass");
 });
 
 test("a release whose image was cleaned up is restored by an explicitly labelled rebuild, never a silent rollback", async () => {
