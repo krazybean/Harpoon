@@ -593,7 +593,7 @@ function SettingsTab({ c, app }: { c: Ctx; app: AppModel }) {
     return (
       <div className="dp-grid dp-grid--2">
         <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Build</h2></div><div className="dp-panel__body dp-col">
-          {fact("Dockerfile", "dockerfile")}{fact("Build context", "context")}{fact("Target stage", "target")}{fact("Image", "image")}</div></section>
+          {fact("Dockerfile", "dockerfile")}{fact("Build settings", "buildSettings")}{fact("Docker network", "network")}{fact("Build context", "context")}{fact("Target stage", "target")}{fact("Image", "image")}</div></section>
         <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Deployment</h2></div><div className="dp-panel__body dp-col">
           {fact("Container port", "containerPort")}{fact("Host port", "hostPort")}{fact("Health check", "healthCheck")}{fact("Replacement", "replacement")}</div></section>
         <section className="dp-panel"><div className="dp-panel__head"><h2 className="dp-h2">Source</h2></div><div className="dp-panel__body dp-col">

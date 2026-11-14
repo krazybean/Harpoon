@@ -185,6 +185,11 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
         Some(t) => Settings::parse(t).map_err(Fail::config)?,
         None => Settings::default(),
     };
+    if settings.kind == Some(harpoon_deploy_docker::plan::Kind::Job) {
+        return Err(Fail::refused(
+            "this registration is set to run as a Job, which Harpoon does not execute yet (a Job has no port or health check, and succeeds when it exits 0). Nothing was built. Change it to a Service to deploy.",
+        ));
+    }
     cfg.network = settings.network.clone();
     // No per-application caps; the VM's own memory, CPU and disk safeguards still apply.
     cfg.limits = Limits::UNLIMITED;

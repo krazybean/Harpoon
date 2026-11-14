@@ -10,6 +10,7 @@
 //  * Secrets are names, ids and versions. Values are never in the snapshot.
 // Strip-types friendly: no enums, no parameter properties.
 import { exposureOf, parseDockerPorts, type HostListeners, type PortMapping } from "./portExposure.ts";
+import { parseSettings, sameSettings, settingsJson, settingsProblem, type SourceDetection, type SourceSettings } from "./sourceSettings.ts";
 import type {
   AppAddress, AppModel, Automation, ConfigFact, ConfigFacts, Deployment, DeployState, Observation, ObservationCheck, EngineMeta, HeldEvent, KeychainState, LogLine, PauseReason, Project, RecoveryOutcome,
   EngineRepo, Release, Revision, RestoreReason, StepName, StepRecord, StepStatus, Trigger, Variable, VariableScope, VariableUse,
@@ -41,7 +42,7 @@ export type SnapApp = {
 };
 export type SnapRepo = {
   name: string; url: string; app: string; project: string | null; environment: string | null; branch: string; filters: string[]; credential: string; webhook: string | null;
-  containerPort: number; dockerfile: string | null; context: string | null; target: string | null; healthPath: string | null; registeredMs: number; seen: { refName: string; commit: string; atMs: number }[];
+  containerPort: number; dockerfile: string | null; context: string | null; target: string | null; healthPath: string | null; settings?: string | null; registeredMs: number; seen: { refName: string; commit: string; atMs: number }[];
 };
 export type SnapDefinition = { scope: string; name: string; kind: string; build: boolean; runtime: boolean; value: string | null; secretId: string | null; version: number | null; atMs: number };
 export type SnapSource = { kind: "own" | "external"; path: string; journalFormat: "sqlite" | "legacy" | "none"; readOnly: boolean };
@@ -80,6 +81,10 @@ export type EngineApi = {
   clearNotice: () => void;
   /** The macOS folder picker; null when cancelled. */
   pickFolder: () => Promise<string | null>;
+  /** Read-only: what Harpoon detects for a folder (framework, install/build/start commands). Rejects with the reason. */
+  detect: (path: string) => Promise<SourceDetection>;
+  /** Names of the Docker networks that exist, for the network choice. Empty when Docker cannot be asked. */
+  networks: () => Promise<string[]>;
   /** Attach a runtime read-only by path (validated by the backend). Never changes it. */
   attachRuntime: (path: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Forgets only the remembered reference; the folder and its files are never touched. */
@@ -187,7 +192,7 @@ export function engineMeta(snap: EngineSnapshot | null, loadError: string | null
   return {
     generatedMs: snap?.generatedMs ?? 0, store: snap?.store ?? "missing", storeError: snap?.storeError ?? null, writerHeld: snap?.writerHeld ?? false,
     gate: snap?.gate ?? { liveDeploy: false, liveReplacement: false, reason: "The deployment engine has not answered yet." },
-    repos: (snap?.repos ?? []).map((r) => ({ name: r.name, url: r.url, app: r.app, project: r.project, branch: r.branch, containerPort: r.containerPort, dockerfile: r.dockerfile, healthPath: r.healthPath, credential: r.credential, registeredMs: r.registeredMs, seen: r.seen })),
+    repos: (snap?.repos ?? []).map((r) => ({ name: r.name, url: r.url, app: r.app, project: r.project, branch: r.branch, containerPort: r.containerPort, dockerfile: r.dockerfile, healthPath: r.healthPath, settings: r.settings ?? null, credential: r.credential, registeredMs: r.registeredMs, seen: r.seen })),
     loadError, stale,
     externals: externals.map((x, i) => ({ id: `ext${i}`, path: x.path, format: x.snapshot?.source.journalFormat ?? "none", store: x.snapshot?.store ?? "missing", error: x.error ?? x.snapshot?.storeError ?? null })),
   };
@@ -219,6 +224,16 @@ export function addressOf(a: SnapApp, router: SnapRouter | undefined, running: b
  * journal). A value nothing recorded stays `null` and is shown as "Not recorded": no default, placeholder or guess
  * is ever presented as history.
  */
+const settingsOf = (repo: SnapRepo | null) => parseSettings(repo?.settings);
+
+/** The recipe a repository without a Dockerfile is built with: the registered overrides, else what detection finds at deploy time. */
+function settingsFact(repo: SnapRepo | null): ConfigFact {
+  if (!repo || repo.dockerfile) return NOT;
+  const s = settingsOf(repo);
+  const parts = [s.install && `install: ${s.install}`, s.build && `build: ${s.build}`, s.start && `start: ${s.start}`, s.style === "development" && "development style"].filter(Boolean);
+  return { value: parts.length ? parts.join(" · ") : "Detected from the repository when deployed", from: "registration", detail: "no Dockerfile named; Harpoon builds from its own private recipe if the repository has none" };
+}
+
 function factsOf(a: SnapApp, repo: SnapRepo | null, servDep: SnapDeployment | undefined, row: ObservedContainer | undefined, leasePort: number | null): ConfigFacts {
   const latest = a.deployments[a.deployments.length - 1];
   const pin = servDep?.pin ?? [...a.deployments].reverse().find((d) => d.pin)?.pin ?? null;
@@ -240,6 +255,8 @@ function factsOf(a: SnapApp, repo: SnapRepo | null, servDep: SnapDeployment | un
   return {
     source: repo ? { value: `${displayUrl(repo.url)}`, from: "registration" } : a.disconnected ? { value: `Disconnected (was ${displayUrl(a.disconnected.url)})`, from: "journal", detail: `repository ${a.disconnected.name} was removed` } : src ? { value: `${displayUrl(src.url)} @ ${src.commit.slice(0, 7)}`, from: "journal", detail: "recorded with the deployment" } : NOT,
     branch: reg(repo?.branch), dockerfile: reg(repo?.dockerfile), context: reg(repo?.context), target: reg(repo?.target),
+    buildSettings: settingsFact(repo),
+    network: settingsOf(repo).network ? { value: settingsOf(repo).network, from: "registration" } : NOT,
     containerPort,
     hostPort: a.serving?.hostPort != null ? { value: String(a.serving.hostPort), from: "journal", detail: "pinned in the release configuration" } : leasePort ? { value: String(leasePort), from: "journal", detail: "recorded port lease" } : NOT,
     healthCheck: healthPath ? { value: `HTTP GET ${healthPath}`, from: "journal", detail: "pinned in the release configuration" } : repo?.healthPath ? { value: `HTTP GET ${repo.healthPath}`, from: "registration" } : NOT,
@@ -565,12 +582,12 @@ export function registrationOutcome(r: OpResult, token?: OpResult | null): Regis
 
 // ------------------------------------------------------------------ editing a registration
 
-export type RegistrationForm = { kind: "git" | "folder"; location: string; branch: string; dockerfile: string; port: string; health: string };
+export type RegistrationForm = { kind: "git" | "folder"; location: string; branch: string; dockerfile: string; port: string; health: string; settings: SourceSettings };
 export type RegistrationEdit = { op: Record<string, unknown> | null; changed: string[]; problem: string | null };
 
 /** The form as the registration stands: a local folder is shown as its path, and an unset value stays empty (never a made-up default). */
 export function registrationFormOf(r: EngineRepo): RegistrationForm {
-  return { kind: r.url.startsWith("file://") ? "folder" : "git", location: displayUrl(r.url), branch: r.branch, dockerfile: r.dockerfile ?? "", port: String(r.containerPort), health: r.healthPath ?? "" };
+  return { kind: r.url.startsWith("file://") ? "folder" : "git", location: displayUrl(r.url), branch: r.branch, dockerfile: r.dockerfile ?? "", port: String(r.containerPort), health: r.healthPath ?? "", settings: parseSettings(r.settings) };
 }
 
 /**
@@ -596,6 +613,9 @@ export function registrationEdit(r: EngineRepo, f: RegistrationForm, confirm: bo
   const port = Number(f.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return fail("The container port must be a number from 1 to 65535.");
   if (port !== r.containerPort) { op.containerPort = port; changed.push("container port"); }
+  const problem = settingsProblem(f.settings);
+  if (problem) return fail(problem);
+  if (!sameSettings(parseSettings(r.settings), f.settings)) { op.settings = settingsJson(f.settings); changed.push("build settings"); }
   return changed.length ? { op, changed, problem: null } : { op: null, changed: [], problem: null };
 }
 

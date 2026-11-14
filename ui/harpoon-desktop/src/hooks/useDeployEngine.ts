@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { parseDetection } from "../lib/sourceSettings.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HostListeners } from "../lib/portExposure.ts";
 import { announceHeld, externalOpProblem, logLines, observedFrom, toDeployState, type EngineApi, type ExternalInput, type EngineSnapshot, type LastResult, type LiveConfirmation, type NewHeld, type Observed, type OpResult, type StepLog } from "../lib/deployEngine.ts";
@@ -101,6 +102,11 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
     } catch (e) { setExternalsError(String(e)); }
   }, []);
   const pickFolder = useCallback(async () => invoke<string | null>("deploy_pick_folder"), []);
+  const detect = useCallback(async (path: string) => parseDetection(await invoke<string>("deploy_detect", { path })), []);
+  const networks = useCallback(async () => {
+    try { return (await invoke<{ Name?: string }[]>("list_networks")).map((n) => n.Name ?? "").filter((n) => n && !["bridge", "host", "none"].includes(n)); }
+    catch { return []; }
+  }, []);
   const clearNotice = useCallback(() => setNotice([]), []);
   const stepLogs = useCallback(async (id: string) => logLines(await invoke<StepLog[]>("deploy_step_logs", { deployment: id })), []);
   const runtimeLogs = useCallback(async (container: string) => {
@@ -112,7 +118,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals, hostListeners }), [snap, observed, keychain, loadError, stale, externals, hostListeners]);
   // Docker could not be asked although the VM says it is up: do not claim to know the current state.
   const runtime: RuntimeState = realRuntime === "connected" && observed === null && snap != null ? "docker-not-ready" : realRuntime;
-  const api: EngineApi = useMemo(() => ({ testNamespace, run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs }), [testNamespace, run, refresh, busy, last, notice, clearNotice, pickFolder, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs]);
+  const api: EngineApi = useMemo(() => ({ testNamespace, run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, detect, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs }), [testNamespace, run, refresh, busy, last, notice, clearNotice, pickFolder, detect, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs]);
   return { state, runtime, api };
 }
 

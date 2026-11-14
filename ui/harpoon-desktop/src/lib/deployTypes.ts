@@ -115,7 +115,7 @@ export type Observation = { kind: ObservationKind; recorded: string; observed: s
 
 /** Where a configuration value comes from. A value is shown only with its origin; with none, it is "Not recorded". */
 export type ConfigFact = { value: string | null; from: "registration" | "journal" | "docker" | "none"; detail?: string };
-export type ConfigFactKey = "source" | "branch" | "dockerfile" | "context" | "target" | "containerPort" | "hostPort" | "healthCheck" | "replacement" | "image";
+export type ConfigFactKey = "source" | "branch" | "dockerfile" | "context" | "target" | "buildSettings" | "network" | "containerPort" | "hostPort" | "healthCheck" | "replacement" | "image";
 export type ConfigFacts = Record<ConfigFactKey, ConfigFact>;
 
 /** Filled in by the port-exposure logic: what Docker reports for the container beside what is actually listening on this Mac. */
@@ -174,7 +174,7 @@ export type EngineMeta = {
   /** Runtimes attached read-only by path (engine mode). */
   externals: { id: string; path: string; format: string; store: string; error: string | null }[];
 };
-export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; /** "none", "token" or "sshkey" */ credential: string; /** The version of this registration; an edit names the one it was based on. */ registeredMs: number; seen: { refName: string; commit: string; atMs: number }[] };
+export type EngineRepo = { name: string; url: string; app: string; project: string | null; branch: string; containerPort: number; dockerfile: string | null; healthPath: string | null; /** Source-deployment settings (JSON) chosen at registration, if any. */ settings: string | null; /** "none", "token" or "sshkey" */ credential: string; /** The version of this registration; an edit names the one it was based on. */ registeredMs: number; seen: { refName: string; commit: string; atMs: number }[] };
 
 export type DeployState = {
   /** Engine mode only ever uses `loading` (nothing loaded yet) and `empty`/`healthy` (a loaded snapshot with/without apps). */

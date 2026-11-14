@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { appStatus } from "./deployStore.ts";
+import { NO_SETTINGS } from "./sourceSettings.ts";
 import { dialogKeptOnListChange } from "../views/deploy/context.ts";
 import { removalBackup, NO_NEW_BACKUP_NOTE, EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
 
@@ -473,7 +474,7 @@ test("the Add repository dialog waits for the engine, keeps its input on failure
 const REPO = { name: "shop", url: "file:///Users/me/Harpoon%20Hello", app: "app_1", project: null, branch: "main", containerPort: 3000, dockerfile: null, healthPath: null, credential: "none", registeredMs: 1234, seen: [] };
 
 test("the edit form starts from the registration, shows a folder as its path and invents no default", () => {
-  assert.deepEqual(registrationFormOf(REPO), { kind: "folder", location: "/Users/me/Harpoon Hello", branch: "main", dockerfile: "", port: "3000", health: "" });
+  assert.deepEqual(registrationFormOf(REPO), { kind: "folder", location: "/Users/me/Harpoon Hello", branch: "main", dockerfile: "", port: "3000", health: "", settings: NO_SETTINGS });
   assert.equal(registrationFormOf({ ...REPO, url: "https://git.example.com/a/b.git" }).kind, "git");
 });
 
