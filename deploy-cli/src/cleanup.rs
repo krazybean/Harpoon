@@ -26,6 +26,8 @@ use harpoon_deploy::serving::serving_release;
 use harpoon_deploy::state::DeploymentStatus;
 use harpoon_deploy::time::SystemClock;
 use harpoon_deploy_docker::backend::ImageVerdict;
+use harpoon_deploy_docker::guest::MgmtDfProbe;
+use std::time::Duration;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -94,6 +96,12 @@ pub(crate) fn run(p: &Parsed, rt: &Runtime, socket: &Path, apply: bool, out: &mu
     })?;
     let mut ledger = restored.ledger.clone();
     let mut tidied = Tidied::default();
+    // Docker's image sizes share layers and are not additive, so what was freed is what the guest filesystem reports.
+    let guest_free = || -> Option<u64> {
+        let mgmt = p.value("mgmt-socket")?;
+        MgmtDfProbe::new(socket, mgmt, Duration::from_secs(10)).measure().ok().map(|(free, _)| free)
+    };
+    let free_before = guest_free();
 
     // 1. containers and port leases of those deployments
     let actions: Vec<Action> = ledger_plan(&ledger, &observed, &scope)
@@ -173,6 +181,16 @@ pub(crate) fn run(p: &Parsed, rt: &Runtime, socket: &Path, apply: bool, out: &mu
     let verb = if apply { "removed" } else { "would remove" };
     let _ = writeln!(out, "cleanup: {verb} {} container(s), release {} port lease(s), {verb} {} image(s). Volumes, networks, build cache and other applications' artifacts are never touched.", tidied.containers, tidied.leases, tidied.images);
     let _ = writeln!(out, "reclaimed-containers: {}\nreclaimed-images: {}", tidied.containers, tidied.images);
+    if apply {
+        match (free_before, guest_free()) {
+            (Some(b), Some(a)) => {
+                let _ = writeln!(out, "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}");
+            }
+            _ => {
+                let _ = writeln!(out, "guest-free: not measurable (the management channel did not answer)");
+            }
+        }
+    }
     Ok(tidied)
 }
 

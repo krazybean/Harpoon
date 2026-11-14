@@ -600,6 +600,7 @@ mod runtime {
             DeployOp::Restore {
                 deployment: "dep_x".into(),
             },
+            DeployOp::CleanupReleases { apply: true },
         ] {
             for gate in [Gate::shipping(), OPEN] {
                 // not confirmed (Cancel never reaches here at all; an absent confirmation is the same as none)
@@ -626,6 +627,15 @@ mod runtime {
                 assert!(!a.contains(&"--confirm-cutover".to_string()), "{a:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_cleanup_preview_never_carries_apply_and_applying_does() {
+        let preview = args_of(&DeployOp::CleanupReleases { apply: false }, &Gate::shipping(), Ok(info())).unwrap();
+        assert_eq!(preview[0], "cleanup-releases");
+        assert!(!preview.contains(&"--apply".to_string()) && !has_auth(&preview), "{preview:?}");
+        let applied = args_with(&DeployOp::CleanupReleases { apply: true }, &CONFIRMED, &Gate::shipping(), Ok(info())).unwrap();
+        assert!(applied.contains(&"--apply".to_string()) && has_auth(&applied), "{applied:?}");
     }
 
     #[test]

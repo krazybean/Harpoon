@@ -348,7 +348,8 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         command: "cleanup-releases",
-        values: &["runtime-dir", "docker-socket", "resources-dir", AUTH_FLAG],
+        // the desktop hands every Docker-touching command the same runtime coordinates; only the management socket is used
+        values: &["runtime-dir", "docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address", AUTH_FLAG],
         switches: &["apply"],
     },
     Spec {

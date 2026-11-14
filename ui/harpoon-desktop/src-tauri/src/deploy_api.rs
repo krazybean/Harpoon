@@ -1163,6 +1163,12 @@ pub enum DeployOp {
     RunQueue {
         repo: Option<String>,
     },
+    /// Remove superseded and abandoned Harpoon-owned containers, port leases and images. `apply: false` only lists them.
+    #[serde(rename_all = "camelCase")]
+    CleanupReleases {
+        #[serde(default)]
+        apply: bool,
+    },
     #[serde(rename_all = "camelCase")]
     Poll {
         repo: Option<String>,
@@ -1401,6 +1407,13 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             opt(&mut a, "commit", commit);
             (a, vec![])
         }
+        DeployOp::CleanupReleases { apply } => {
+            let mut a = s(&["cleanup-releases"]);
+            if *apply {
+                a.push("--apply".into());
+            }
+            (a, vec![])
+        }
         DeployOp::RunQueue { repo } => {
             let mut a = s(&["git-run"]);
             opt(&mut a, "repo", repo);
@@ -1567,7 +1580,7 @@ pub fn process_command(pid: u32) -> Option<String> {
 fn needs_runtime(op: &DeployOp) -> bool {
     matches!(
         op,
-        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. }
+        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. } | DeployOp::CleanupReleases { .. }
     )
 }
 
@@ -1576,6 +1589,7 @@ fn gate_open_for(op: &DeployOp, gate: &Gate) -> bool {
     match op {
         DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } => gate.live_deploy_enabled,
         DeployOp::Rollback { .. } | DeployOp::Restore { .. } => gate.live_replacement_enabled,
+        // cleanup has no gate of its own: a dry run changes nothing and applying needs the person's live confirmation
         _ => true,
     }
 }
