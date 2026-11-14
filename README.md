@@ -2,13 +2,52 @@
 
 *Containers, under control.*
 
-A native macOS workspace for managing Docker-compatible containers, Compose stacks, networks, and development environments without Docker Desktop. Harpoon uses Apple's `Virtualization.framework` and a minimal Linux VM while keeping Docker Engine authoritative for container workloads.
+**A lightweight, Docker-compatible local runtime with source-to-deployment workflows for macOS.**
+
+A native macOS workspace for managing Docker-compatible containers, Compose stacks, networks, and development environments without Docker Desktop, and for deploying applications from source onto that same local runtime. Harpoon uses Apple's `Virtualization.framework` and a minimal Linux VM while keeping Docker Engine authoritative for container workloads.
+
 [![Release](https://img.shields.io/github/v/release/krazybean/Harpoon)](https://github.com/krazybean/Harpoon/releases/latest)
 [![CodeQL](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml/badge.svg)](https://github.com/krazybean/Harpoon/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/krazybean/Harpoon/badge)](https://securityscorecards.dev/viewer/?uri=github.com/krazybean/Harpoon)
 [![License](https://img.shields.io/github/license/krazybean/Harpoon)](https://github.com/krazybean/Harpoon/blob/main/LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://github.com/krazybean/Harpoon)
 
+![Harpoon Deployments overview: a running release with a captured preview of the application, its local URL and the stages of the latest deployment](assets/screenshots/deployments-overview.png)
+
+*Deployments → Overview for an application deployed from a local Git repository: the running release with a captured preview of the app, its local address, and the latest deployment's stages (source, build, preliminary check, cutover, final check) with the recorded health evidence.*
+
+> **Release status.** The container runtime and desktop workspace are in the [v2.0.0-rc.3 testing prerelease](#downloads-stable-versus-testing). The source-deployment features shown above (generated build recipes, Metrics, release-aware cleanup, the redesigned Overview and Settings) are 2.0.1 work on the `feat/2.0.1-source-deployments` branch and are **not in any published release**. The screenshots on this page were taken from a development build of that branch. See [unreleased changes](docs/releases/unreleased.md).
+
+## Key capabilities
+
+**Container runtime**
+
+- A lightweight VM-backed Docker Engine, reachable through a standard Docker context (`docker --context harpoon`), without Docker Desktop.
+- Container, image, volume and network management in the desktop app, plus Compose stacks.
+- Network topology and diagnostics (`harpoon doctor`, the Diagnostics view, read-only discovery of other Docker/Podman endpoints).
+- Disk management: grow-only root disk, a confirmed "Reclaim unused space", and confirmed cleanup of old deployment artifacts and build cache.
+
+**Application deployments** (2.0.1 branch; everything runs locally on this Mac)
+
+- Deploy an application from a Git repository registered with Harpoon, or from a local checkout. With no Dockerfile, Harpoon renders a build recipe for npm (`package.json`) and Python (pip or uv) projects; other layouts are refused with a reason, not guessed.
+- Build and runtime configuration per application, environment variables, and secrets kept in the macOS Keychain (write-only in the UI; build secrets are BuildKit secret mounts, not image layers).
+- Health-checked cutover: a preliminary check before traffic moves and a final check after, with automatic restoration of the previous release if the cutover fails.
+- Deployment history, rollback, and "Rebuild & Restore" for a release whose image was cleaned up.
+- Live container metrics: real Docker measurements (CPU, memory, network totals, uptime) for the serving container only, with a bounded, session-only, in-memory history.
+- Application previews: a private screenshot of the running app on the release card. (Per-branch preview environments are not available.)
+
+Deployments are attended: a person starts each one, and live changes need an explicit confirmation. Harpoon does not deploy on push, host applications in the cloud, or deploy to other machines, and makes no availability guarantees. See [Known Limitations](#known-limitations--v01-scope).
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Metrics tab: CPU, memory, network and uptime of the serving container](assets/screenshots/deployments-metrics.png) | ![Network topology of containers and Docker networks](assets/screenshots/networks-topology.png) |
+| **Container metrics.** CPU, memory (page cache excluded), cumulative network and uptime for the serving container from Docker's own statistics, not the VM. History is bounded to 10 minutes and kept in memory for the session. | **Network topology.** Running containers attached to Docker networks, from Docker's data. Animated links mean attachment, not measured traffic. |
+| ![A Compose project workspace with its containers and a cluster-shell prototype](assets/screenshots/containers-compose-detail.png) | |
+| **Compose workspace.** Stack status, networks and volumes, a container's published port with the Mac-side listener, and the CSSH cluster-shell prototype. | |
+
+**[Explore all Harpoon screenshots](assets/screenshots/README.md)**
 
 Harpoon runs ordinary Docker development workloads on macOS without requiring Docker Desktop. The host runtime owns the macOS↔Linux boundary; Docker Engine, containerd, and BuildKit remain inside the guest.
 
@@ -69,17 +108,9 @@ Source builds remain available for contributors: `bash harpoon/build.sh` (see [B
 
 ## Desktop workspace
 
-The Tauri/React desktop app is a client of the Harpoon runtime. These captures were committed on 2026-10-17, before rc.2 and rc.3; they have not been re-checked against the rc.3 build, so they may not match it exactly:
+The Tauri/React desktop app is a client of the Harpoon runtime. The [screenshots above](#screenshots) and the [full gallery](assets/screenshots/README.md) were captured from a development build of the 2.0.1 feature branch, not from the rc.3 DMG, so the rc.3 app may differ.
 
-| Stacks | Network topology |
-|---|---|
-| ![Stacks](docs/ui/assets/harpoon-2/screenshots/stacks.jpg) | ![Network topology](docs/ui/assets/harpoon-2/screenshots/network-topology.jpg) |
-
-| Container details | CSSH cluster shell |
-|---|---|
-| ![Container details](docs/ui/assets/harpoon-2/screenshots/container-details.jpg) | ![CSSH cluster shell](docs/ui/assets/harpoon-2/screenshots/cssh.jpg) |
-
-The workspace also includes Overview, Quake Shell, and read-only Context Discovery surfaces, and a Deployments area (live deployment is closed in the current builds; history, releases, configuration and logs are readable). Their current behavior and acceptance status are documented in [the UI notes](docs/ui/README.md), [Context Discovery](docs/context-discovery.md), and [the Harpoon 2 roadmap](docs/roadmap.md). The older images under `docs/ui` remain visual references, not runtime screenshots.
+The workspace also includes Overview, Quake Shell, and read-only Context Discovery surfaces, and a Deployments area. Their current behavior and acceptance status are documented in [the UI notes](docs/ui/README.md), [Context Discovery](docs/context-discovery.md), and [the Harpoon 2 roadmap](docs/roadmap.md). The older images under `docs/ui` remain visual references, not runtime screenshots.
 
 ## Harpoon 2.0 RC capabilities
 
@@ -209,7 +240,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 - **Platform:** Apple Silicon with ARM64 Linux guests is the supported 2.0 release target and the only tested platform. The universal DMG packages Intel binaries and an x86_64 guest, but Intel guest boot has not been verified, so Intel is experimental and unsupported. Windows/Linux hosts are unsupported. Podman/rootless is not a 2.0 gate.
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
 - **Distribution signing:** the v2.0.0-rc.3 DMG is Developer ID signed, notarized and stapled. Earlier prereleases and source builds are ad-hoc signed (`com.apple.security.virtualization`) and are not notarized.
-- **Deployments:** attended live deployment, replacement, rollback and restore are open in shipping builds, each started by a person and each needing the explicit `--authorize-live-docker-changes` confirmation (the desktop asks first). Unattended execution of queued Git events, registration removal and application removal are closed.
+- **Deployments:** attended live deployment, replacement, rollback and restore are open in shipping builds, each started by a person and each needing the explicit `--authorize-live-docker-changes` confirmation (the desktop asks first). Unattended execution of queued Git events, registration removal and application removal are closed. Deployments run on this Mac only: there is no cloud hosting, multi-machine deployment, push-triggered deployment, per-branch preview or Development environment, and no availability guarantee. The source-deployment features on the 2.0.1 branch are not in a published release.
 - **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
 - **Disk:** 2 GiB template + 4 GiB sparse default `harpoon-root.img` (provisional; APFS clone-aware, grown on request via `harpoon disk expand` or `harpoon disk resize`; existing disks keep their size). Bounded at ~962 MiB–1.0 GiB allocated; `growable` was rejected intentionally.
 - **Network/FS:** explicit `127.0.0.1` HostIp binding deferred ( `0.0.0.0` → `127.0.0.1` is the safe default); `inotify` host→guest not propagated (documented).
@@ -227,7 +258,9 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 | [Architecture](docs/architecture.md) | Components, boundaries, data flows |
 | [Results](docs/results/) | Validation evidence (M13–M18, R1, D1) |
 | [Resources](docs/resources.md) | Resource usage and diet limits |
-| [UI](docs/ui/README.md) | Screenshots and visual-language notes |
+| [UI](docs/ui/README.md) | Visual-language notes and design references |
+| [Screenshot gallery](assets/screenshots/README.md) | Current desktop screenshots, by area |
+| [Unreleased changes](docs/releases/unreleased.md) | Source-deployment and other work not yet released |
 
 ## Status
 
