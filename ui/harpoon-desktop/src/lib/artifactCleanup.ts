@@ -1,13 +1,22 @@
 // The engine's `cleanup-releases` report, read for the Reclaim Unused Space card. The engine states every removal
 // before and after it happens; this only turns that text into numbers and lines the card can show.
 
+// What the engine decided for each artifact, as `item: {json}` lines. The engine resolves ownership from the journal
+// (registered repository, else the removal record that disconnected it, else nothing), so nothing here guesses it.
+
+export type Verdict = "ready" | "reconcile" | "protected" | "review";
+export type Kind = "container" | "image" | "port-lease";
+
+export type CleanupItem = {
+  app: string; appName: string | null; environment: string | null;
+  deployment: string; createdMs: number | null; status: string; commit: string | null;
+  kind: Kind; name: string; verdict: Verdict; reason: string; detail: string;
+  /** Whether Docker holds the object now. `null` for a port reservation, which is only a journal entry. */
+  physical: boolean | null;
+};
+
 export type CleanupReport = {
-  /** What would be (or was) removed, one engine line each. */
-  actions: string[];
-  /** Deployments the cleanup never touches (the release serving now and whatever owns its container). */
-  protectedCount: number;
-  /** Artifacts that were left alone, with the engine's reason. */
-  kept: string[];
+  items: CleanupItem[];
   containers: number;
   images: number;
   /** Guest filesystem free space around an applied cleanup, when the management channel could measure it. */
@@ -15,27 +24,107 @@ export type CleanupReport = {
   guestFreeAfter: number | null;
 };
 
+const VERDICTS: Verdict[] = ["ready", "reconcile", "protected", "review"];
+const KINDS: Kind[] = ["container", "image", "port-lease"];
+
+function itemOf(raw: unknown): CleanupItem | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  const str = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : null);
+  const verdict = str("verdict") as Verdict | null;
+  const kind = str("kind") as Kind | null;
+  if (!verdict || !kind || !VERDICTS.includes(verdict) || !KINDS.includes(kind) || !str("deployment") || !str("app")) return null;
+  return {
+    app: str("app")!, appName: str("appName"), environment: str("environment"),
+    deployment: str("deployment")!, createdMs: typeof o.createdMs === "number" ? o.createdMs : null, status: str("status") ?? "unknown", commit: str("commit"),
+    kind, name: str("name") ?? "", verdict, reason: str("reason") ?? "", detail: str("detail") ?? "",
+    physical: typeof o.physical === "boolean" ? o.physical : null,
+  };
+}
+
 export function parseCleanup(detail: string): CleanupReport {
   const lines = detail.split("\n").map((l) => l.trim()).filter(Boolean);
   const num = (key: string) => { const l = lines.find((x) => x.startsWith(`${key}:`)); return l ? Number(l.slice(key.length + 1)) : 0; };
   const bytes = (key: string) => { const l = lines.find((x) => x.startsWith(`${key}:`)); const n = l ? Number(l.slice(key.length + 1)) : NaN; return Number.isFinite(n) ? n : null; };
-  const isAction = (l: string) => /^(would: )?(remove (container|image) |release port lease |.* is not in the runtime)/.test(l);
-  return {
-    actions: lines.filter(isAction).map((l) => l.replace(/^would: /, "")),
-    protectedCount: lines.filter((l) => l.startsWith("protected:")).length,
-    kept: lines.filter((l) => l.startsWith("kept:")).map((l) => l.slice(5).trim()),
-    containers: num("reclaimed-containers"),
-    images: num("reclaimed-images"),
-    guestFreeBefore: bytes("guest-free-before-bytes"),
-    guestFreeAfter: bytes("guest-free-after-bytes"),
-  };
+  const items: CleanupItem[] = [];
+  for (const l of lines) {
+    if (!l.startsWith("item: ")) continue;
+    try { const it = itemOf(JSON.parse(l.slice(6))); if (it) items.push(it); } catch { /* a malformed line is skipped, never guessed at */ }
+  }
+  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes") };
 }
 
-/** Whether there is anything to remove (a dry run lists it; an applied run reports counts). */
-export const nothingToClean = (r: CleanupReport): boolean => r.actions.length === 0 && r.containers === 0 && r.images === 0;
+/** What a person can act on: Docker objects to remove, and journal records that only need reconciling. */
+export const removable = (r: CleanupReport): CleanupItem[] => r.items.filter((i) => i.verdict === "ready");
+export const reconcilable = (r: CleanupReport): CleanupItem[] => r.items.filter((i) => i.verdict === "reconcile");
+export const nothingToClean = (r: CleanupReport): boolean => removable(r).length === 0 && reconcilable(r).length === 0;
+
+export const UNASSOCIATED = "Unassociated artifacts";
+export const shortDeployment = (id: string): string => `dep…${id.slice(-6)}`;
+
+export type CleanupGroup = {
+  key: string;
+  title: string;
+  environment: string | null;
+  unassociated: boolean;
+  items: CleanupItem[];
+  ready: { containers: number; images: number };
+  reconcile: number;
+  protectedCount: number;
+  review: number;
+};
+
+/** Groups by the application the journal says owns each artifact; an artifact with no known owner goes to one "Unassociated" group. */
+export function groupByApplication(r: CleanupReport): CleanupGroup[] {
+  const groups = new Map<string, CleanupGroup>();
+  for (const it of r.items) {
+    const unassociated = it.appName === null;
+    const key = unassociated ? "unassociated" : it.app;
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, title: unassociated ? UNASSOCIATED : it.appName!, environment: unassociated ? null : it.environment, unassociated, items: [], ready: { containers: 0, images: 0 }, reconcile: 0, protectedCount: 0, review: 0 };
+      groups.set(key, g);
+    }
+    g.items.push(it);
+    if (it.verdict === "ready") { if (it.kind === "container") g.ready.containers++; else if (it.kind === "image") g.ready.images++; }
+    else if (it.verdict === "reconcile") g.reconcile++;
+    else if (it.verdict === "protected") g.protectedCount++;
+    else g.review++;
+  }
+  // applications with something to act on first, the unassociated group last
+  return [...groups.values()].sort((a, b) => Number(a.unassociated) - Number(b.unassociated) || (b.ready.containers + b.ready.images + b.reconcile) - (a.ready.containers + a.ready.images + a.reconcile) || a.title.localeCompare(b.title));
+}
+
+export const STATUS_LABEL: Record<Verdict, string> = { ready: "Ready to remove", reconcile: "Journal reconciliation", protected: "Protected", review: "Needs review" };
+
+/** One plain sentence for why an artifact is (or is not) eligible, from the engine's own reason code. */
+export function reasonLabel(i: CleanupItem): string {
+  const what = i.kind === "container" ? "container" : i.kind === "image" ? "image" : "port reservation";
+  switch (i.reason) {
+    case "superseded": return i.kind === "container" ? "Stopped container from an older deployment" : "Unused image from a previous release";
+    case "failed-attempt": return i.kind === "container" ? "Container left by a failed deployment" : "Image kept from a failed deployment";
+    case "already-absent": return i.kind === "container" ? "Container already removed; journal needs reconciliation" : "Image already removed; journal needs reconciliation";
+    case "stale-port-lease": return "Stale port reservation";
+    case "serving-release": return `Serving now: this ${what} belongs to the running release`;
+    case "serving-pins-image": return "Image the running release is built from";
+    case "shared-with-protected": return "Image retained because a protected deployment still references it";
+    case "nothing-proven-serving": return `No release of this application is recorded as serving, so its ${what} is left alone`;
+    default: return i.detail ? `Needs review: ${i.detail}` : "Needs review";
+  }
+}
+
+/** The "what will happen" counts for the confirmation. Docker's image sizes share layers, so no byte estimate is ever given. */
+export function operationSummary(r: CleanupReport) {
+  const ready = removable(r);
+  const containers = ready.filter((i) => i.kind === "container").length;
+  const images = ready.filter((i) => i.kind === "image").length;
+  const journalOnly = reconcilable(r).length;
+  const apps = [...new Set(r.items.filter((i) => i.verdict === "ready" || i.verdict === "reconcile").map((i) => i.appName ?? UNASSOCIATED))];
+  return { containers, images, journalOnly, protectedCount: r.items.filter((i) => i.verdict === "protected").length, review: r.items.filter((i) => i.verdict === "review").length, apps };
+}
 
 /** The change in guest free space, in words, or why none can be given. Docker's image sizes share layers, so they are never summed. */
-export function freedSummary(r: CleanupReport, size: (bytes: number) => string): string {
+export function freedSummary(r: Pick<CleanupReport, "guestFreeBefore" | "guestFreeAfter">, size: (bytes: number) => string): string {
   if (r.guestFreeBefore === null || r.guestFreeAfter === null) return "The guest's free space could not be measured, so no figure is given.";
   const d = r.guestFreeAfter - r.guestFreeBefore;
   return `Guest free space: ${size(r.guestFreeBefore)} before, ${size(r.guestFreeAfter)} after (${d >= 0 ? "+" : "−"}${size(Math.abs(d))}).`;

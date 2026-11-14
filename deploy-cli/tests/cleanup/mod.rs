@@ -187,3 +187,147 @@ fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused
     assert_eq!(t.h.docker.with(|s| s.build_cache.clone()), vec![(500, true)]);
     assert!(t.h.docker.requests().iter().all(|r| r.method != "DELETE"), "no image or container was removed");
 }
+
+// ---------------------------------------------------------------- ownership and classification
+
+use harpoon_deploy::git::{CredKind, GitRecord, RepoRec, SelectorKind, SourceRec};
+use harpoon_deploy_docker::json::Json;
+
+/// The application's registration and a recorded source (commit) for each of its deployments.
+fn register(t: &T, w: &W, name: &str) {
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    // the registration must precede the source records that name it, but the journal already holds the deployments
+    j.git(&GitRecord::Repo(Box::new(RepoRec {
+        name: name.into(),
+        url: "https://git.example.com/acme/shop.git".into(),
+        username: None,
+        cred: CredKind::None,
+        known_host: None,
+        webhook: None,
+        app: w.app.clone(),
+        project: None,
+        environment: None,
+        branch: "main".into(),
+        filters: vec![],
+        container_port: 8080,
+        dockerfile: None,
+        context: None,
+        target: None,
+        health_path: None,
+        settings: None,
+        at_ms: 5,
+    })))
+    .unwrap();
+    for (dep, sha) in [(&w.old, "aaaaaaa1111111111111111111111111111111aa"), (&w.serving, "bbbbbbb2222222222222222222222222222222bb")] {
+        j.git(&GitRecord::Source(SourceRec {
+            deployment: dep.clone(),
+            repo: name.into(),
+            url: "https://git.example.com/acme/shop.git".into(),
+            selector: SelectorKind::Branch,
+            requested: "main".into(),
+            commit: sha.into(),
+            trigger: "manual".into(),
+            delivery: None,
+            at_ms: 6,
+        }))
+        .unwrap();
+    }
+}
+
+fn items(stdout: &str) -> Vec<Json> {
+    stdout.lines().filter_map(|l| l.strip_prefix("item: ")).map(|l| Json::parse(l).expect("an item line is JSON")).collect()
+}
+fn field<'a>(j: &'a Json, k: &str) -> &'a str {
+    j.get(k).and_then(Json::as_str).unwrap_or("")
+}
+fn find<'a>(all: &'a [Json], dep: &DeploymentId, kind: &str) -> &'a Json {
+    all.iter().find(|i| field(i, "deployment") == dep.as_str() && field(i, "kind") == kind).unwrap_or_else(|| panic!("no {kind} item for {dep}: {all:?}"))
+}
+
+#[test]
+fn every_item_names_its_application_release_and_a_grounded_verdict() {
+    let t = T::new();
+    let w = world(&t);
+    register(&t, &w, "shop");
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.record(&intent(&w.app, &w.old, ResourceKind::PortLease, "38000", Disposition::RemoveOnFailure)).unwrap();
+        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000")).unwrap();
+    }
+    let o = go(&t, &SHIPPING, &args(&t, &[]));
+    assert_exit(&o, 0);
+    let all = items(&o.stdout);
+    let old_c = find(&all, &w.old, "container");
+    assert_eq!((field(old_c, "verdict"), field(old_c, "reason"), field(old_c, "appName"), field(old_c, "commit")), ("ready", "superseded", "shop", "aaaaaaa"));
+    assert_eq!(field(old_c, "environment"), "production");
+    assert_eq!(old_c.get("physical"), Some(&Json::Bool(true)));
+    let lease = find(&all, &w.old, "port-lease");
+    assert_eq!((field(lease, "verdict"), field(lease, "reason")), ("reconcile", "stale-port-lease"));
+    assert_eq!(lease.get("physical"), Some(&Json::Null), "a lease has no Docker object, and is not said to");
+    let failed = find(&all, &w.failed, "image");
+    assert_eq!((field(failed, "verdict"), field(failed, "reason")), ("ready", "failed-attempt"));
+    // the serving release is listed as protected, with the reason
+    let srv = find(&all, &w.serving, "container");
+    assert_eq!((field(srv, "verdict"), field(srv, "reason"), field(srv, "commit")), ("protected", "serving-release", "bbbbbbb"));
+    assert_eq!(find(&all, &w.serving, "image").get("verdict").and_then(Json::as_str), Some("protected"));
+}
+
+#[test]
+fn an_application_without_metadata_is_unassociated_never_guessed() {
+    let t = T::new();
+    let w = world(&t); // no registration at all
+    let all = items(&go(&t, &SHIPPING, &args(&t, &[])).stdout);
+    let c = find(&all, &w.old, "container");
+    assert_eq!(c.get("appName"), Some(&Json::Null));
+    assert_eq!(c.get("environment"), Some(&Json::Null));
+    assert_eq!(c.get("commit"), Some(&Json::Null));
+    assert_eq!(field(c, "app"), w.app.as_str(), "the journal's own application id is still given");
+}
+
+#[test]
+fn a_dry_run_judges_images_as_the_apply_will_after_the_containers_and_leases_are_released() {
+    let t = T::new();
+    let w = world(&t);
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.record(&intent(&w.app, &w.old, ResourceKind::PortLease, "38000", Disposition::RemoveOnFailure)).unwrap();
+        j.record(&receipt(&w.old, ResourceKind::PortLease, "38000", "38000")).unwrap();
+    }
+    let dry = go(&t, &SHIPPING, &args(&t, &[]));
+    assert!(!dry.stdout.contains("still has unreleased resources"), "the dry run must not hold an image back for a record the same run releases:\n{}", dry.stdout);
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    assert!(dry.stdout.contains(&format!("(id {old_i}) of {}", w.old)), "{}", dry.stdout);
+    // one apply does all of it, and a second has nothing left (idempotent)
+    let applied = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert_exit(&applied, 0);
+    assert!(!image_present(&t, &old_i));
+    let again = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert_exit(&again, 0);
+    assert!(items(&again.stdout).iter().all(|i| field(i, "verdict") == "protected"), "{}", again.stdout);
+}
+
+#[test]
+fn objects_docker_no_longer_has_are_reconciliation_not_removal() {
+    let t = T::new();
+    let w = world(&t);
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    t.h.docker.with(|s| {
+        s.containers.retain(|c| c.id != old_c);
+        s.images.retain(|i| i.id != old_i);
+    });
+    let dry = go(&t, &SHIPPING, &args(&t, &[]));
+    let all = items(&dry.stdout);
+    for kind in ["container", "image"] {
+        let i = find(&all, &w.old, kind);
+        assert_eq!((field(i, "verdict"), field(i, "reason")), ("reconcile", "already-absent"), "{kind}");
+        assert_eq!(i.get("physical"), Some(&Json::Bool(false)));
+    }
+    // only the failed deployment's image is physically present; the absent container and image claim nothing
+    assert!(dry.stdout.contains("reclaimed-containers: 0") && dry.stdout.contains("reclaimed-images: 1"), "{}", dry.stdout);
+    let applied = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert_exit(&applied, 0);
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    assert!(r.ledger.entries().iter().filter(|e| e.deployment == w.old).all(|e| e.is_released()), "the journal no longer lists them");
+    let deletes = t.h.docker.requests().iter().filter(|r| r.method == "DELETE").count();
+    assert_eq!(deletes, 1, "only the failed deployment's present image is deleted; nothing absent is");
+}
