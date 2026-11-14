@@ -37,10 +37,14 @@ test("the release card holds a native-capture thumbnail (never an iframe) beside
   assert.match(thumb, /Enlarge deployment preview/);
   assert.match(thumb, /Refresh/);
   assert.match(thumb, /Open app/);
-  // thumbnail, details, then status badge over the operational actions, all inside the one hero card
+  // thumbnail, details, then the actions, all in the one hero card; no status checkmark (the pill says it)
   const hero = screens.slice(screens.indexOf('className="dp-panel__body dp-hero"'), screens.indexOf('<div className="dp-tabs"'));
-  assert.ok(hero.indexOf("<PreviewThumb") < hero.indexOf("dp-hero__state") && hero.indexOf("dp-hero__state") < hero.indexOf("dp-hero__side"));
-  assert.ok(hero.indexOf('className={`big ${heroClass}`}') > hero.indexOf("dp-hero__side") && hero.indexOf('className={`big ${heroClass}`}') < hero.indexOf("dp-actions"));
+  assert.ok(hero.indexOf("<PreviewThumb") < hero.indexOf("dp-hero__state") && hero.indexOf("dp-hero__state") < hero.indexOf("dp-actions"));
+  assert.doesNotMatch(hero, /heroIcon|className=\{`big /);
+  // Refresh is an overlay on the thumbnail, a sibling of the enlarge button so its click cannot bubble into Enlarge
+  assert.match(thumb, /dp-thumb__refresh/);
+  const enlarge = thumb.slice(thumb.indexOf('className="dp-thumb__img"'), thumb.indexOf("</button>", thumb.indexOf('className="dp-thumb__img"')));
+  assert.doesNotMatch(enlarge, /capture\(|dp-thumb__refresh/);
   const hook = readFileSync(new URL("../hooks/useDeployEngine.ts", import.meta.url), "utf8");
   assert.match(hook, /invoke<string>\("deploy_preview", \{ url \}\)/);
 });

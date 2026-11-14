@@ -4,7 +4,7 @@ import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, Arrows
 import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
-  EVIDENCE_NOTE, formatAge, heroClassFor, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
+  EVIDENCE_NOTE, formatAge, reasonLabel, recoveryHeadline, recoveryLabel, recoveryTone, statusLabel, statusTone,
 } from "../../lib/deployPresentation.ts";
 import { RUNTIME_LOG } from "../../lib/deployMock.ts";
 import { displayUrl, hasNoSource, liveBlock, applicationRemovalBlock, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON } from "../../lib/deployEngine.ts";
@@ -171,8 +171,6 @@ export function AppScreen({ c }: { c: Ctx }) {
   const canBuild = canAct && !noSource;
   const buildWhy = noSource ? NO_SOURCE_REASON : prodOnly;
 
-  const heroIcon = st.kind === "down" ? <Warning size={20} /> : st.kind === "recovering" ? <ArrowCounterClockwise size={20} /> : st.kind === "unknown" ? <Question size={20} /> : st.kind === "idle" ? <Cube size={20} /> : <Check size={20} />;
-  const heroClass = heroClassFor(st.kind);
   const thumb = previewReady(c, app, st.kind === "running");
   const lastKnown = app.lastKnownReleaseId;
   const subline = st.kind === "unknown"
@@ -231,14 +229,11 @@ export function AppScreen({ c }: { c: Ctx }) {
             {app.address ? <AddressBar a={app.address} openUrl={c.openUrl} /> : null}
           </div>
         </div>
-        <div className="dp-hero__side">
-        <div className={`big ${heroClass}`} role="img" aria-label={st.label} title={st.label} style={{ width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>{heroIcon}</div>
         <div className="dp-actions dp-actions--end" data-tour="recovery-actions">
           {btn("btn--primary", () => c.open({ kind: "deploy" }), <><RocketLaunch size={14} /> Deploy</>, { disabled: !canBuild || !prod, title: buildWhy })}
           {btn("btn--secondary", () => c.open({ kind: "redeploy" }), <><ArrowsClockwise size={14} /> Redeploy</>, { disabled: !canBuild || !prod || !app.releases.length, title: buildWhy })}
           {btn("btn--secondary", () => rollbackTarget && c.open({ kind: "rollback", releaseId: rollbackTarget.id }), <><ArrowCounterClockwise size={14} /> Roll back…</>, { disabled: !canAct || !prod || !rollbackTarget || recovering || !!c.state.job, title: prodOnly })}
           {btn("btn--secondary", () => c.open({ kind: "promote" }), <><ArrowUp size={14} /> Promote…</>, { disabled: !canAct || !prod || !app.previews.length, title: ext ? EXT_REASON : c.engine ? NO_PREVIEWS : prodOnly })}
-        </div>
         </div>
       </div></div>
       <div className="dp-tabs" role="tablist">
@@ -457,13 +452,15 @@ function PreviewThumb({ c, url }: { c: Ctx; url: string }) {
     return () => { on = false; };
   }, [c.engine, url]);
   useEffect(() => capture(), [capture]);
-  const refresh = <button className="btn btn--ghost btn--sm" disabled={shot.loading} onClick={() => void capture()}><ArrowsClockwise size={12} /> {shot.loading ? "Capturing…" : "Refresh"}</button>;
+  const refresh = <button type="button" className="btn btn--ghost btn--sm" disabled={shot.loading} onClick={() => void capture()}><ArrowsClockwise size={12} /> {shot.loading ? "Capturing…" : "Refresh"}</button>;
+  // a sibling of the enlarge button (not inside it), so a click here can never also enlarge
+  const refreshOverlay = <button type="button" className="dp-thumb__refresh" disabled={shot.loading} onClick={() => void capture()} aria-label={shot.loading ? "Capturing preview" : "Refresh preview"} title={shot.loading ? "Capturing…" : "Refresh preview"}><ArrowsClockwise size={14} className={shot.loading ? "dp-spin" : undefined} /></button>;
   return (
     <div className="dp-thumb">
       {shot.src
         ? <button type="button" className="dp-thumb__img" onClick={() => setBig(true)} aria-label="Enlarge deployment preview" title="Enlarge preview"><img alt="Deployed application preview" src={shot.src} /></button>
         : <div className="dp-thumb__img dp-thumb__none" aria-busy={shot.loading} title={shot.error ?? undefined}>{shot.error ? <><b>Preview unavailable</b><span>{shot.error}</span></> : <span>Capturing the page…</span>}</div>}
-      {refresh}
+      {refreshOverlay}
       {big && shot.src ? <PreviewLightbox src={shot.src} url={url} c={c} refresh={refresh} close={() => setBig(false)} /> : null}
     </div>
   );

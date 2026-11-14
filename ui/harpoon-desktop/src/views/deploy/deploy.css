@@ -81,9 +81,6 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 /* ---- release hero ------------------------------------------------------------------------ */
 .dp-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
 .dp-hero__state { display: flex; align-items: center; gap: 12px; }
-.dp-hero .big { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: var(--success-bg); color: var(--success); border: 1px solid #14532D; }
-.dp-hero .big svg { width: 20px; height: 20px; }
-.dp-hero .big.err { background: var(--error-bg); color: var(--error); border-color: #7F1D1D; } .dp-hero .big.warn { background: var(--warning-bg); color: var(--warning); border-color: #78350F; } .dp-hero .big.info { background: var(--info-bg); color: var(--info-fg); border-color: #0C4A6E; } .dp-hero .big.idle { background: var(--panel-header); color: var(--text-secondary); border-color: var(--border); }
 .dp-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 
 /* ---- tables ----------------------------------------------------------------------------------- */
@@ -168,7 +165,7 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 @container dp (max-width: 780px) {
   .dp-grid--3, .dp-grid--2 { grid-template-columns: minmax(0, 1fr); }
   .dp-hero, .dp-hero[data-thumb] { grid-template-columns: minmax(0, 1fr); } .dp-actions--end { justify-content: flex-start; }
-  .dp-hero__side { flex-direction: row-reverse; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; } .dp-thumb { width: min(320px, 100%); }
+  .dp-thumb { width: min(320px, 100%); }
   .hide-compact { display: none !important; }
   .dp-banner { flex-wrap: wrap; } .dp-banner__actions { margin-left: 30px; justify-content: flex-start; }
   .dp-kv { grid-template-columns: 96px minmax(0, 1fr); }
@@ -193,7 +190,6 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-hero__state > div:not(.big) { min-width: 0; }
 .dp-hero__state b, .dp-hero__state .mono { overflow-wrap: anywhere; }
 .dp-actions { flex-wrap: wrap; min-width: 0; }
-.dp-hero .big { flex: 0 0 auto; }
 .dp-banner > div:not(.dp-banner__actions) { min-width: 0; overflow-wrap: anywhere; }
 .dp-banner__actions { flex: 0 0 auto; }
 .dp-panel__head { flex-wrap: wrap; row-gap: 6px; min-width: 0; }
@@ -229,9 +225,13 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 /* release card: [thumbnail] [details] [status badge over actions] */
 .dp-hero { position: relative; }
 .dp-hero[data-thumb] { grid-template-columns: 220px minmax(0, 1fr) auto; align-items: start; }
-.dp-hero__side { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; min-width: 0; }
 .dp-actions--end { justify-content: flex-end; }
-.dp-thumb { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 220px; max-width: 100%; min-width: 0; }
+.dp-thumb { position: relative; width: 220px; max-width: 100%; min-width: 0; }
+.dp-thumb__refresh { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px; border: 1px solid rgba(255,255,255,.55); background: rgba(16,18,24,.78); color: #fff; cursor: pointer; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
+.dp-thumb__refresh:hover:not(:disabled) { background: rgba(16,18,24,.92); } .dp-thumb__refresh:disabled { cursor: progress; opacity: .85; }
+.dp-thumb__refresh:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 1px; }
+.dp-spin { animation: dp-spin 1s linear infinite; } @keyframes dp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dp-spin { animation: none; } }
 .dp-thumb__img { display: block; width: 100%; aspect-ratio: 16 / 10; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: #101218; overflow: hidden; cursor: zoom-in; }
 .dp-thumb__img img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
 .dp-thumb__img:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }
