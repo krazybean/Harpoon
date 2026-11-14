@@ -486,7 +486,7 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
   const live = app.deployments.find((d) => d.status === "running");
-  const target = live ?? app.deployments.find((d) => d.buildLog.length) ?? null;
+  const target = live ?? app.deployments[0] ?? null;
   const runtimeOk = connected(c) && !!app.currentReleaseId;
   const rec = useStepLog(c, c.engine && which === "build" && !app.external ? target?.id ?? null : null);
   const [rt, setRt] = useState<{ lines: LogLine[]; error: string | null }>({ lines: [], error: null });

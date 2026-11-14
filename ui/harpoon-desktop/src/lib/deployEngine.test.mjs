@@ -129,6 +129,11 @@ test("recorded step logs: withheld output is stated, truncation is stated, text 
   assert.match(lines.at(-1).text, /withheld/);
 });
 
+test("the real Logs tab selects a recorded deployment even though engine rows have no simulated buildLog", () => {
+  const view = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
+  assert.match(view, /const target = live \?\? app\.deployments\[0\] \?\? null/);
+});
+
 test("observed Docker state parses names and treats a non-answer as unknown", () => {
   const row = { id: "abc", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1" }, ports: [38000], mappings: [{ hostIp: "127.0.0.1", hostPort: 38000, containerPort: 8080, proto: "tcp" }] };
   assert.deepEqual(observedFrom([{ Names: "/a,b", ID: "abc", State: "Running", Labels: "io.harpoon.managed=true,io.harpoon.app=app_1", Ports: "127.0.0.1:38000->8080/tcp" }]), { a: row, b: row });
