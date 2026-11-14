@@ -1139,7 +1139,10 @@ fn run_source(
         .map_err(|e| format!("cannot generate an id: {e}"))?;
     {
         // the source is durable before anything is built
-        let (mut j, restored) = store::open_writer(rt, kind_of(rt, p).map_err(|f| f.message)?)
+        // Holding the writer lock proves no other process is running a deployment, so one still marked running
+        // was cut off (this marks it interrupted; Docker is untouched). Otherwise it would block every later
+        // deployment until someone ran `recover`, and the cutover safeguards still see an unconfirmed cutover.
+        let (mut j, restored) = store::open_writer_recovered(rt, kind_of(rt, p).map_err(|f| f.message)?, now_ms())
             .map_err(|f| f.message)?;
         // A source record names its repository and replay refuses one for a repository that is not registered, so
         // this is the one place a removal could otherwise make the journal unreadable. Under the writer lock the
@@ -1278,7 +1281,17 @@ pub fn git_deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String)
             ))
         }
     };
+    let start = out.len();
     match run_source(p, gate, svc, &rt, &repo, sel, "manual", None, out) {
+        // The engine's own refusal is written to the output; a caller that shows only the error would see nothing.
+        Ok(r) if r.code == exit::REFUSED => Err(Fail::refused(
+            out[start..]
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("source: "))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )),
         Ok(r) => Ok(r.code),
         Err(m) => Err(Fail::failed(format!("nothing was deployed: {m}"))),
     }
