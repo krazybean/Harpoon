@@ -4,6 +4,7 @@ import { ArrowCounterClockwise, Check, Copy, Info, Pause, Warning, X, CaretRight
 import type { LogLine, StepRecord } from "../../lib/deployTypes.ts";
 import type { Tone } from "../../lib/deployPresentation.ts";
 import { EVIDENCE_NOTE, stepLabel } from "../../lib/deployPresentation.ts";
+import { visibleLogLines } from "../../lib/deployUi.ts";
 
 const PILL: Record<Tone, string> = { ok: "dp-pill--ok", err: "dp-pill--err", warn: "dp-pill--warn", info: "dp-pill--info", neutral: "" };
 
@@ -80,7 +81,7 @@ function LogText({ text }: { text: string }) {
 export function LogPanel({ lines, bar, filter = "", follow = false, label }: { lines: LogLine[]; bar?: ReactNode; filter?: string; follow?: boolean; label: string }) {
   const body = useRef<HTMLDivElement>(null);
   useEffect(() => { if (follow && body.current) body.current.scrollTop = body.current.scrollHeight; }, [lines.length, follow]);
-  const shown = filter ? lines.filter((l) => l.text.toLowerCase().includes(filter.toLowerCase())) : lines;
+  const shown = visibleLogLines(lines, filter);
   return (
     <div className="dp-log" role="log" aria-label={label}>
       <div className="dp-log__bar">{bar}</div>

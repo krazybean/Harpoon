@@ -1,6 +1,6 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, Copy, Cube, FolderSimple, GitBranch, Info, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowsClockwise, ArrowSquareOut, ArrowUp, ArrowsOut, ArrowsIn, Copy, Cube, FolderSimple, GitBranch, Info, Key, Lock, Pause, Play, Plus, Question, RocketLaunch, Trash, Warning, Check, PencilSimple } from "@phosphor-icons/react";
 import type { AppAddress, AppModel, Deployment, Env, LogLine } from "../../lib/deployTypes.ts";
 import { appStatus, appsNeedingAttention, attention, latestDeployment, recoveryInProgress, releaseById } from "../../lib/deployStore.ts";
 import {
@@ -13,6 +13,7 @@ import { imageParts } from "../../lib/imageName.ts";
 import { Banner, Dot, Evidence, Ident, LogPanel, PausedIcon, Pill, Spark, Steps, Tag } from "./parts.tsx";
 import { describeExposure } from "../../lib/portExposure.ts";
 import type { ConfigFact, ConfigFactKey } from "../../lib/deployTypes.ts";
+import { copyText, visibleLogLines } from "../../lib/deployUi.ts";
 
 const btn = (cls: string, onClick: () => void, label: ReactNode, o: { disabled?: boolean; sm?: boolean; title?: string } = {}) => (
   <button className={`btn ${cls} ${o.sm ? "btn--sm" : ""}`} onClick={onClick} disabled={o.disabled} title={o.title}>{label}</button>
@@ -382,6 +383,9 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
             </div>
           </section>
         )}
+        {c.engine && st.kind === "running" && app.address?.status === "running" && L?.releaseId === app.currentReleaseId && L.steps.some((step) => step.name === "final_check" && step.status === "succeeded")
+          ? <DeploymentPreview c={c} app={app} />
+          : null}
         <section className="dp-panel">
           <div className="dp-panel__head"><h2 className="dp-h2">Resources &amp; health</h2><span className="dp-spacer" /><Evidence>Evidence, not a guarantee</Evidence></div>
           <div className="dp-panel__body">
@@ -427,6 +431,33 @@ function OverviewTab({ c, app }: { c: Ctx; app: AppModel }) {
         </section>
       </div>
     </div>
+  );
+}
+
+function DeploymentPreview({ c, app }: { c: Ctx; app: AppModel }) {
+  const [expanded, setExpanded] = useState(false);
+  const [shot, setShot] = useState<{ src: string | null; error: string | null; loading: boolean }>({ src: null, error: null, loading: false });
+  const url = app.address!.url;
+  const capture = useCallback(() => {
+    if (!c.engine) { setShot({ src: null, error: "Previews need the Harpoon desktop engine.", loading: false }); return () => {}; }
+    let on = true;
+    setShot((s) => ({ ...s, error: null, loading: true }));
+    c.engine.preview(url).then((src) => on && setShot({ src, error: null, loading: false }), (e) => on && setShot({ src: null, error: String(e), loading: false }));
+    return () => { on = false; };
+  }, [c.engine, url]);
+  useEffect(() => capture(), [capture]);
+  return (
+    <section className={`dp-panel dp-preview ${expanded ? "dp-preview--expanded" : ""}`}>
+      <div className="dp-panel__head"><div><h2 className="dp-h2">Deployment preview</h2><div className="dp-faint">A fresh, private capture of the running app · nothing is stored</div></div><span className="dp-spacer" />
+        <button className="btn btn--secondary btn--sm" disabled={shot.loading} onClick={() => void capture()}><ArrowsClockwise size={14} /> {shot.loading ? "Capturing…" : "Refresh"}</button>
+        <button className="btn btn--secondary btn--sm" onClick={() => setExpanded((v) => !v)}>{expanded ? <ArrowsIn size={14} /> : <ArrowsOut size={14} />} {expanded ? "Reduce" : "Enlarge"}</button>
+        <button className="btn btn--secondary btn--sm" onClick={() => c.openUrl?.(url)}><ArrowSquareOut size={14} /> Open app</button>
+      </div>
+      <div className="dp-preview__frame" data-unavailable={!shot.src || undefined} aria-busy={shot.loading}>
+        {shot.src ? <img alt="Deployed application preview" src={shot.src} /> : shot.error ? <div className="dp-empty"><h3>Preview unavailable</h3><p>{shot.error} Open the app to inspect it directly.</p></div> : <div className="dp-empty"><p>Capturing the page…</p></div>}
+      </div>
+      <p className="dp-faint dp-preview__note">Taken in a separate private web view with no cookies or saved sign-in. It never affects deployment status.</p>
+    </section>
   );
 }
 
@@ -485,6 +516,8 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
   const [which, setWhich] = useState<"build" | "runtime">("build");
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
+  const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
+  const [copyError, setCopyError] = useState<string | null>(null);
   const live = app.deployments.find((d) => d.status === "running");
   const target = live ?? app.deployments[0] ?? null;
   const runtimeOk = connected(c) && !!app.currentReleaseId;
@@ -500,6 +533,14 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [which, runtimeOk, app.containerName]);
   const lines: LogLine[] = c.engine ? (which === "build" ? rec.lines : runtimeOk ? rt.lines : []) : which === "build" ? target?.buildLog ?? [] : runtimeOk ? RUNTIME_LOG : [];
+  const shownLines = visibleLogLines(lines, filter);
+  const copyLogs = async () => {
+    setCopyError(null);
+    if (!shownLines.length) { setCopyState("err"); setCopyError(filter.trim() ? "No log lines match the filter, so there is nothing to copy." : "There are no log lines to copy yet."); window.setTimeout(() => { setCopyState("idle"); setCopyError(null); }, 2400); return; }
+    try { await copyText(shownLines.map((line) => line.text).join("\n")); setCopyState("ok"); }
+    catch { setCopyState("err"); setCopyError("macOS did not allow Harpoon to write to the clipboard. Select the log text and press Cmd+C instead."); }
+    window.setTimeout(() => { setCopyState("idle"); setCopyError(null); }, 2400);
+  };
   const bar = (
     <>
       <div className="dp-seg"><button aria-pressed={which === "build"} onClick={() => setWhich("build")}>Build{live ? <span className="dp-pill dp-pill--info dp-pill--live" style={{ height: 16 }}>live</span> : null}</button><button aria-pressed={which === "runtime"} onClick={() => setWhich("runtime")}>Application</button></div>
@@ -507,7 +548,8 @@ function LogsTab({ c, app }: { c: Ctx; app: AppModel }) {
       <label className="dp-muted"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> Follow</label>
       <span className="dp-spacer" />
       <span className="dp-faint">{c.engine ? (which === "build" ? `${target?.id ?? "no deployment"} · recorded when the step ended (evidence of that run)` : "current output from Docker's log store for the container") : which === "build" ? `${target?.id ?? "no deployment"} · stored with the deployment record (simulated)` : "live from Docker (simulated)"}</span>
-      <button className="btn btn--secondary btn--sm" onClick={() => void navigator.clipboard?.writeText(lines.map((l) => l.text).join("\n"))}><Copy size={14} /> Copy</button>
+      <button className="btn btn--secondary btn--sm" onClick={() => void copyLogs()}>{copyState === "ok" ? <Check size={14} /> : <Copy size={14} />} {copyState === "ok" ? "Copied" : copyState === "err" ? "Copy failed" : "Copy"}</button>
+      {copyError ? <span className="dp-warnline" role="status">{copyError}</span> : null}
     </>
   );
   return (

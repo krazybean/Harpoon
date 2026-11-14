@@ -225,3 +225,8 @@ button.dp-card:hover { border-color: var(--border-strong); transform: translateY
 .dp-address__note { flex-basis: 100%; font-size: 11px; }
 .dp-address[data-status="stopped"] .dp-address__url, .dp-address[data-status="unavailable"] .dp-address__url { color: var(--text-secondary); }
 .dp-address[data-status="conflict"] { border-color: var(--warning); }
+.dp-preview__frame { min-height: 300px; background: #101218; overflow: hidden; }
+.dp-preview__frame img { display: block; width: 100%; max-height: 420px; object-fit: cover; object-position: top; }
+.dp-preview--expanded .dp-preview__frame img { max-height: none; }
+.dp-preview__frame[data-unavailable="true"] { display: grid; place-items: center; }
+.dp-preview__note { margin: 8px 14px 0; font-size: 11px; }

@@ -83,6 +83,8 @@ export type EngineApi = {
   pickFolder: () => Promise<string | null>;
   /** Read-only: what Harpoon detects for a folder (framework, install/build/start commands). Rejects with the reason. */
   detect: (path: string) => Promise<SourceDetection>;
+  /** A PNG data URI of the running app's page, captured natively in a private, non-persistent web view (never stored). Rejects with the reason. */
+  preview: (url: string) => Promise<string>;
   /** Names of the Docker networks that exist, for the network choice. Empty when Docker cannot be asked. */
   networks: () => Promise<string[]>;
   /** Attach a runtime read-only by path (validated by the backend). Never changes it. */

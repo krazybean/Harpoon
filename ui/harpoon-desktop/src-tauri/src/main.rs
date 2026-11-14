@@ -16,6 +16,7 @@ mod context_discovery;
 mod cli_path;
 mod bootstrap;
 mod compose_import;
+mod preview;
 mod deploy_api;
 mod namespace;
 mod app_router;
@@ -1426,6 +1427,24 @@ fn main() {
         .setup(|app| {
             // an unusable test namespace is fatal: the app must never fall back to the production runtime
             let namespaced = namespace::active()?.is_some();
+            // Debug builds only, and only inside a test namespace: `HARPOON_PREVIEW_SELFTEST=<url> <out.png>` takes one page
+            // capture, writes it and exits, so the native capture can be checked in a real WebView without clicking.
+            #[cfg(debug_assertions)]
+            if let (true, Ok(spec)) = (namespaced, std::env::var("HARPOON_PREVIEW_SELFTEST")) {
+                let handle = app.handle().clone();
+                if let Some((url, out)) = spec.split_once(' ') {
+                    let (url, out) = (url.to_string(), out.to_string());
+                    tauri::async_runtime::spawn(async move {
+                        let r = preview::deploy_preview(handle.clone(), url).await;
+                        let code = match r {
+                            Ok(uri) => { let _ = std::fs::write(&out, uri); 0 }
+                            Err(e) => { eprintln!("preview selftest: {e}"); 1 }
+                        };
+                        handle.exit(code);
+                    });
+                    return Ok(());
+                }
+            }
             if let Ok(dir) = deploy_api::data_root(app.handle()) {
                 // installing the `harpoon` command-line tool changes the user's PATH setup; never from a test namespace
                 if !namespaced {
@@ -1445,7 +1464,7 @@ fn main() {
             list_volumes, inspect_volume, remove_volume,
             list_networks, inspect_network, remove_network,
             context_discovery::discover_contexts,
-            deploy_api::deploy_snapshot, deploy_api::external_runtimes, deploy_api::external_runtime_add, deploy_api::external_runtime_remove, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder, deploy_api::deploy_detect, deploy_api::host_tcp_listeners,
+            deploy_api::deploy_snapshot, deploy_api::external_runtimes, deploy_api::external_runtime_add, deploy_api::external_runtime_remove, deploy_api::deploy_step_logs, deploy_api::deploy_op, deploy_api::deploy_pick_folder, deploy_api::deploy_detect, preview::deploy_preview, deploy_api::host_tcp_listeners,
             get_counts, open_app_url, namespace::test_namespace,
             start_runtime_refresh_worker, stop_runtime_refresh_worker,
             start_resource_sampler, stop_resource_sampler,
