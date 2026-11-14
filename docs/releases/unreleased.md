@@ -4,6 +4,19 @@ Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any publis
 
 ## Behavior changes
 
+### Source deployments: a repository without a Dockerfile builds from a recipe Harpoon generates (2.0.1 work, not released)
+
+- **Detection.** When a registration names no Dockerfile and the checkout has none, Harpoon detects an npm project (`package.json`;
+  `npm ci` with a lockfile) or a Python one (pip or uv only) and renders a Dockerfile for that one build. It exists only in the private
+  build snapshot, never in the project folder. Other package managers are refused with a reason, not guessed.
+- **Settings.** Install, build and start commands, Production or Development style, and a Docker network are stored with the registration
+  (an optional trailing field on `gitrepo`; a registration without settings is byte-identical to before) and shown in the Build panel. Jobs are
+  not implemented and are refused rather than run as Services.
+- **Secrets stay out of the image.** Build-flagged secrets are BuildKit secret mounts on the install and build commands only.
+- **No per-application caps.** New containers no longer get 256 MiB / 0.5 CPU / 64 PIDs; the VM's own safeguards still apply. A Node install
+  and build run with a 2 GiB heap bound (`ARG`, build time only).
+- **Pulls.** A generated build's base image (`node:<major>-slim`, `python:<version>-slim`) is fetched by the builder when it is not cached. A Dockerfile build still refuses a base image that is not local.
+
 ### VM-backed tests run under a deadline and a watchdog (test tooling only)
 
 Scripts that boot or drive a real VM now re-run under `tools/vm-test-guard.py`: wall-clock deadline, preflight and 15 s sampling of

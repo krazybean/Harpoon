@@ -222,10 +222,9 @@ fn node_major(engines: Option<&str>, nvmrc: Option<&str>) -> u32 {
 
 fn detect_node(dir: &Path, pkg: &str) -> Result<Detected, String> {
     let j = Json::parse(pkg).map_err(|e| format!("package.json is not valid JSON: {}", e.0))?;
-    if exists(dir, "pnpm-lock.yaml") || exists(dir, "yarn.lock") || exists(dir, "bun.lockb") || exists(dir, "bun.lock") {
-        if !exists(dir, "package-lock.json") {
-            return Err("this project uses a package manager other than npm; Harpoon builds npm projects only (add a Dockerfile, or an npm package-lock.json)".into());
-        }
+    let other_manager = ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"].iter().any(|f| exists(dir, f));
+    if other_manager && !exists(dir, "package-lock.json") {
+        return Err("this project uses a package manager other than npm; Harpoon builds npm projects only (add a Dockerfile, or an npm package-lock.json)".into());
     }
     let scripts = j.get("scripts");
     let script = |n: &str| scripts.and_then(|s| s.get(n)).and_then(Json::as_str).is_some();
