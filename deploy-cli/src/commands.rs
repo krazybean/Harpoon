@@ -14,11 +14,12 @@ use harpoon_deploy::ledger::{
 use harpoon_deploy::ports::{self, Occupancy, Purpose};
 use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome, Trigger};
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
-use harpoon_deploy_docker::api::DockerApi;
+use harpoon_deploy_docker::api::{DockerApi, Limits};
 use harpoon_deploy_docker::attribution::HostGuestProof;
 use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
-use harpoon_deploy_docker::confine::{confine, Source};
+use harpoon_deploy_docker::confine::{confine, confine_generated, Source};
+use harpoon_deploy_docker::plan::{BuildPlan, Settings};
 use harpoon_deploy_docker::dockerfile::required_images;
 use harpoon_deploy_docker::forwarder::{listeners_in_range, LsofCheck};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
@@ -180,8 +181,26 @@ fn source_cfg(p: &Parsed, rt: &Runtime, socket: &Path, need_port: bool) -> Resul
             .ok_or_else(|| Fail::config("--health-timeout-secs must be 1..=600"))?;
         cfg.health.startup_deadline_ms = secs * 1000;
     }
-    let src =
-        confine(&project, &context, &cfg.dockerfile).map_err(|e| Fail::config(e.to_string()))?;
+    let settings = match p.value("settings") {
+        Some(t) => Settings::parse(t).map_err(Fail::config)?,
+        None => Settings::default(),
+    };
+    cfg.network = settings.network.clone();
+    // No per-application caps; the VM's own memory, CPU and disk safeguards still apply.
+    cfg.limits = Limits::UNLIMITED;
+    // No Dockerfile named and none in the context: Harpoon detects the project and renders one privately.
+    let generated = p.value("dockerfile").is_none()
+        && std::fs::symlink_metadata(context.join("Dockerfile")).is_err();
+    let src = if generated {
+        let detected = harpoon_deploy_docker::plan::detect(&context).map_err(Fail::config)?;
+        let plan = BuildPlan::resolve(detected, &settings).map_err(Fail::config)?;
+        let text = plan.dockerfile(port, &[], &[]);
+        cfg.plan = Some(plan);
+        confine_generated(&project, &context, text)
+    } else {
+        confine(&project, &context, &cfg.dockerfile)
+    }
+    .map_err(|e| Fail::config(e.to_string()))?;
     let images = required_images(&src.dockerfile_text).map_err(|e| Fail::config(e.to_string()))?;
     let rules = src
         .ignore
@@ -1716,7 +1735,7 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         .map_err(|e| Fail::failed(e.to_string()))?;
     // Configuration and secrets, resolved and fetched before the journal is written to, anything is
     // built, or Docker is contacted: a missing or inaccessible secret stops the run here.
-    let mut prep = config_cmds::prepare(p, svc, &restored.config, &d.application_id, &s.env, &[])?;
+    let mut prep = config_cmds::prepare(p, svc, &restored.config, &d.application_id, &s.env, &[], s.cfg.plan.as_ref().map(|x| x.identity()).as_deref())?;
     journal
         .config(&prep.snapshot(&d.id, &d.application_id))
         .map_err(journal_config_err)?;
@@ -2010,6 +2029,7 @@ pub(crate) fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Str
         &d.application_id,
         &s.env,
         &previous_secrets,
+        s.cfg.plan.as_ref().map(|x| x.identity()).as_deref(),
     )?;
     journal
         .config(&prep.snapshot(&d.id, &d.application_id))

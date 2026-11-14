@@ -14,7 +14,8 @@
 use crate::api::{ApiError, ContainerInfo, CreateOutcome, CreateSpec, DockerApi, Limits};
 use crate::attribution::{route_of, PathProof};
 use crate::buildx_run::{run_build, BuildRequest, BuildRunError, SecretFiles, StdFileProbe};
-use crate::confine::{confine, Source};
+use crate::confine::{confine, confine_generated, Source};
+use crate::plan::BuildPlan;
 use crate::dockerfile::required_images;
 use crate::forwarder::HostListenerCheck;
 use crate::guest::{check_guest_free, GuestDiskProbe};
@@ -108,6 +109,11 @@ pub struct DockerConfig {
     /// until the evidence listed in `DEPLOY_B11_RECOVERY.md` exists. Tests turn it on against a
     /// simulated Docker only.
     pub enable_replacement: bool,
+    /// Set when the repository has no Dockerfile: the recipe Harpoon renders into a private Dockerfile for this
+    /// build. `dockerfile` is then unused and nothing is written into the user's workspace.
+    pub plan: Option<BuildPlan>,
+    /// A user-defined Docker network (a Compose project's, for example) the container joins; `None` keeps Docker's default.
+    pub network: Option<String>,
 }
 
 impl DockerConfig {
@@ -145,6 +151,8 @@ impl DockerConfig {
             log_tail_lines: 200,
             log_max_bytes: 256 * 1024,
             enable_replacement: false,
+            plan: None,
+            network: None,
         }
     }
 }
@@ -390,8 +398,16 @@ impl<T: HttpTransport> DockerBackend<T> {
             .project_root
             .as_deref()
             .unwrap_or(&self.cfg.context_dir);
-        confine(root, &self.cfg.context_dir, &self.cfg.dockerfile)
-            .map_err(|e| StepError::new(e.to_string()))
+        match &self.cfg.plan {
+            Some(plan) => {
+                let args: Vec<String> = self.cfg.build_args.iter().map(|(k, _)| k.clone()).collect();
+                let secrets: Vec<String> = self.cfg.build_secrets.iter().map(|(k, _)| k.clone()).collect();
+                let text = plan.dockerfile(self.cfg.container_port, &args, &secrets);
+                confine_generated(root, &self.cfg.context_dir, text)
+            }
+            None => confine(root, &self.cfg.context_dir, &self.cfg.dockerfile),
+        }
+        .map_err(|e| StepError::new(e.to_string()))
     }
 
     fn occupancy(
@@ -528,6 +544,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             container_port: lease.container_port,
             host_port: lease.host_port,
             limits,
+            network: self.cfg.network.as_deref(),
         };
         match self
             .api
@@ -1078,6 +1095,18 @@ enum Verified {
     Ok(ContainerInfo),
 }
 
+fn write_generated(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()
+}
+
 fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
@@ -1262,6 +1291,11 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             .ping(b.left("pinging Docker")?)
             .map_err(|e| api_err("Docker is not reachable on the configured socket", e))?;
         for img in &images {
+            if self.cfg.plan.is_some() {
+                // A generated build names its own base image (see `plan`); the builder fetches it when absent.
+                io.log.push_line(&format!("base image {img}: generated build, fetched by the builder if not cached"));
+                continue;
+            }
             match self
                 .api
                 .image_inspect(img, b.left("checking base images")?)
@@ -1338,6 +1372,17 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
         );
         self.copy_hook = hook;
         let snap = snap.map_err(|e| StepError::new(e.to_string()))?;
+        if self.cfg.plan.is_some() {
+            if let Err(e) = write_generated(&snap.dockerfile, &src.dockerfile_text) {
+                let _ = snapshot::remove(&snap, &self.cfg.scratch_dir);
+                return Err(StepError::new(format!("cannot write the generated Dockerfile: {e}")));
+            }
+            io.log.push_line(&format!(
+                "generated Dockerfile for {} ({}): private to this build, nothing written to your project",
+                self.cfg.plan.as_ref().map_or("", |p| p.detected.framework.as_str()),
+                self.cfg.plan.as_ref().map_or_else(String::new, |p| p.identity()),
+            ));
+        }
         let result = self.build_from_snapshot(io, &b, &tag, &nonce, &lbl, &intent, &snap, &src);
         let _ = snapshot::remove(&snap, &self.cfg.scratch_dir);
         result

@@ -151,6 +151,15 @@ impl Limits {
     };
 }
 
+impl Limits {
+    /// No per-application cap (Docker reads 0 as unlimited). The VM's own memory, CPU and disk safeguards still apply.
+    pub const UNLIMITED: Limits = Limits {
+        memory_bytes: 0,
+        nano_cpus: 0,
+        pids: 0,
+    };
+}
+
 pub struct CreateSpec<'a> {
     pub image: &'a str,
     pub labels: &'a [(String, String)],
@@ -158,6 +167,8 @@ pub struct CreateSpec<'a> {
     pub container_port: u16,
     pub host_port: u16,
     pub limits: Limits,
+    /// A user-defined network to join instead of Docker's default bridge.
+    pub network: Option<&'a str>,
 }
 
 impl CreateSpec<'_> {
@@ -165,7 +176,7 @@ impl CreateSpec<'_> {
     /// policy, swap disabled (`MemorySwap == Memory`), default network.
     pub fn body(&self) -> Json {
         let port_key = format!("{}/tcp", self.container_port);
-        obj(vec![
+        let mut body = obj(vec![
             ("Image", s(self.image)),
             (
                 "Labels",
@@ -201,7 +212,15 @@ impl CreateSpec<'_> {
                     ),
                 ]),
             ),
-        ])
+        ]);
+        if let (Some(net), Json::Obj(top)) = (self.network, &mut body) {
+            for (k, v) in top.iter_mut() {
+                if let (true, Json::Obj(hc)) = (k == "HostConfig", v) {
+                    hc.push(("NetworkMode".to_string(), s(net)));
+                }
+            }
+        }
+        body
     }
 }
 
@@ -900,4 +919,27 @@ fn published_of(j: &Json) -> Result<Vec<Published>, ApiError> {
         (a.container_port, &a.proto, a.host_port).cmp(&(b.container_port, &b.proto, b.host_port))
     });
     Ok(out)
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    #[test]
+    fn network_is_sent_only_when_chosen() {
+        let spec = |network| CreateSpec {
+            image: "sha256:x",
+            labels: &[],
+            env: &[],
+            container_port: 3000,
+            host_port: 40000,
+            limits: Limits::UNLIMITED,
+            network,
+        };
+        let plain = spec(None).body().to_json();
+        assert!(!plain.contains("NetworkMode"));
+        let joined = spec(Some("proj_default")).body().to_json();
+        assert!(joined.contains("\"NetworkMode\":\"proj_default\""));
+        assert!(joined.contains("\"Memory\":0") && joined.contains("\"PidsLimit\":0"));
+    }
 }

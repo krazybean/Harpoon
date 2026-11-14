@@ -63,6 +63,7 @@ fn the_create_body_has_limits_labels_no_hostip_no_restart_and_no_swap() {
         container_port: 8080,
         host_port: 38001,
         limits: Limits::FIRST_TEST,
+        network: None,
     };
     let out = a.create_container("c1", &spec, T).unwrap();
     assert!(matches!(out, CreateOutcome::Created(_)));
@@ -108,6 +109,7 @@ fn a_name_conflict_is_reported_not_overridden() {
         container_port: 1,
         host_port: 2,
         limits: Limits::FIRST_TEST,
+        network: None,
     };
     assert!(
         matches!(a.create_container("taken", &spec, T).unwrap(), CreateOutcome::NameInUse(m) if m.contains("already in use"))
@@ -218,6 +220,7 @@ fn malformed_json_and_missing_fields_are_errors_not_guesses() {
         container_port: 1,
         host_port: 2,
         limits: Limits::FIRST_TEST,
+        network: None,
     };
     assert!(matches!(
         a.create_container("n", &spec, T),

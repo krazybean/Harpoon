@@ -254,6 +254,7 @@ pub fn repo_add(p: &Parsed, out: &mut String) -> R {
         context: p.value("context").map(str::to_string),
         target: p.value("target").map(str::to_string),
         health_path: p.value("health-path").map(str::to_string),
+        settings: settings_flag(p)?.flatten(),
         at_ms: now_ms(),
     };
     rec.validate().map_err(Fail::usage)?;
@@ -300,6 +301,16 @@ fn verification_line(out: &mut String, verified: &Option<String>, branch: &str) 
             "not verified yet: this source is first contacted by `watch`/`git-deploy`, so a wrong address or credential shows up there"
         ),
     };
+}
+
+/// `--settings JSON`: `None` when the flag is absent, `Some(None)` when it names no setting (clears them),
+/// otherwise the canonical text that is stored.
+fn settings_flag(p: &Parsed) -> Result<Option<Option<String>>, Fail> {
+    let Some(text) = p.value("settings") else {
+        return Ok(None);
+    };
+    let s = harpoon_deploy_docker::plan::Settings::parse(text).map_err(Fail::usage)?;
+    Ok(Some((!s.is_empty()).then(|| s.canonical())))
 }
 
 /// Change a registration's source, branch, Dockerfile path, container port or health path. It appends one
@@ -366,6 +377,10 @@ pub fn repo_update(p: &Parsed, out: &mut String) -> R {
             .ok_or_else(|| Fail::usage("--container-port is not a port number"))?;
         set("container port", port != rec.container_port);
         rec.container_port = port;
+    }
+    if let Some(new) = settings_flag(p)? {
+        set("deployment settings", new != rec.settings);
+        rec.settings = new;
     }
     if changed.is_empty() {
         return Err(Fail::refused(format!(
@@ -1179,6 +1194,7 @@ fn run_source(
     opt("context", &repo.context);
     opt("target", &repo.target);
     opt("health-path", &repo.health_path);
+    opt("settings", &repo.settings);
     opt("project", &repo.project);
     opt("environment", &repo.environment);
     for f in FORWARD_VALUES {
@@ -1770,6 +1786,7 @@ mod tests {
             context: None,
             target: None,
             health_path: None,
+            settings: None,
             at_ms,
         }
     }

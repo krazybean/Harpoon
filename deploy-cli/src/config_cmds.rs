@@ -417,6 +417,7 @@ pub fn prepare(
     app: &ApplicationId,
     cli_env: &[(String, String)],
     extra: &[(String, SecretRef)],
+    generated: Option<&str>,
 ) -> Result<Prepared, Fail> {
     let project = p.value("project").map(str::to_string);
     let environment = p.value("environment").map(str::to_string);
@@ -469,7 +470,7 @@ pub fn prepare(
     let runtime_env = config::runtime_env(&entries);
     let build_identity = format!(
         "dockerfile={};target={};args={};secrets={}",
-        p.value("dockerfile").unwrap_or("Dockerfile"),
+        generated.unwrap_or_else(|| p.value("dockerfile").unwrap_or("Dockerfile")),
         target.as_deref().unwrap_or("-"),
         build_args
             .iter()

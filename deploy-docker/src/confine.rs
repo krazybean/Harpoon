@@ -153,8 +153,8 @@ fn optional_inside(path: &Path, context: &Path) -> Result<Option<(PathBuf, Strin
     }
 }
 
-/// Confine `context` and `dockerfile` (a relative path inside the context) to `root`.
-pub fn confine(root: &Path, context: &Path, dockerfile: &str) -> Result<Source, ConfineError> {
+/// The canonical root and context, both directories, the context inside the root.
+fn confine_dirs(root: &Path, context: &Path) -> Result<(PathBuf, PathBuf), ConfineError> {
     let root_real = std::fs::canonicalize(root)
         .map_err(|e| ConfineError::RootMissing(root.to_path_buf(), io_text(&e)))?;
     if !root_real.is_dir() {
@@ -171,6 +171,33 @@ pub fn confine(root: &Path, context: &Path, dockerfile: &str) -> Result<Source, 
     if !ctx_real.is_dir() {
         return Err(ConfineError::ContextNotDirectory(ctx_real));
     }
+    Ok((root_real, ctx_real))
+}
+
+/// A source whose Dockerfile Harpoon generates: the text is held in memory and written only into the private build
+/// snapshot. The workspace must not already hold a file of that name, so nothing the user wrote is shadowed.
+pub fn confine_generated(root: &Path, context: &Path, text: String) -> Result<Source, ConfineError> {
+    let (root_real, ctx_real) = confine_dirs(root, context)?;
+    let wanted = ctx_real.join(crate::plan::GENERATED_DOCKERFILE);
+    if std::fs::symlink_metadata(&wanted).is_ok() {
+        return Err(ConfineError::Unreadable(
+            wanted,
+            "a file with the name Harpoon uses for its generated Dockerfile already exists".into(),
+        ));
+    }
+    let ignore = optional_inside(&ctx_real.join(".dockerignore"), &ctx_real)?;
+    Ok(Source {
+        root: root_real,
+        context: ctx_real,
+        dockerfile: wanted,
+        dockerfile_text: text,
+        ignore,
+    })
+}
+
+/// Confine `context` and `dockerfile` (a relative path inside the context) to `root`.
+pub fn confine(root: &Path, context: &Path, dockerfile: &str) -> Result<Source, ConfineError> {
+    let (root_real, ctx_real) = confine_dirs(root, context)?;
     if !plain_relative(dockerfile) {
         return Err(ConfineError::DockerfileName(dockerfile.to_string()));
     }
