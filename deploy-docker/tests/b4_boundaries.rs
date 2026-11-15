@@ -13,7 +13,7 @@ use harpoon_deploy::health::{
 use harpoon_deploy::state::*;
 use harpoon_deploy::time::SystemClock;
 use harpoon_deploy_docker::backend::{
-    preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig,
+    preliminary_name, replacement_name, serving_name, DockerBackend, DockerConfig, RestartOutcome,
 };
 use harpoon_deploy_docker::confine::{confine, ConfineError};
 use harpoon_deploy_docker::ignore::IgnoreRules;
@@ -1447,7 +1447,7 @@ fn assert_nothing_foreign_was_touched(h: &Harness, ctrs: &[(String, String)], im
         let ok = p.starts_with("/containers/create?")
             || (r.method == "POST"
                 && p.starts_with("/containers/")
-                && (p.contains("/start") || p.contains("/stop")))
+                && (p.contains("/start") || p.contains("/stop") || p.ends_with("/update")))
             || (r.method == "DELETE" && p.starts_with("/containers/"))
             || (r.method == "DELETE" && p.starts_with("/images/"));
         assert!(ok, "unsupported mutation: {} {p}", r.method);
@@ -1566,4 +1566,205 @@ fn created_containers_never_carry_mounts_binds_or_inherited_volumes() {
             assert!(!r.body.contains(forbidden), "{forbidden} in {}", r.body);
         }
     }
+}
+
+// ------------------------------------------------------------------ restart policy: only a confirmed release restarts
+
+fn updates(h: &Harness) -> Vec<String> {
+    h.docker
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/update"))
+        .map(|r| r.path)
+        .collect()
+}
+
+fn policy_of(h: &Harness, name: &str) -> String {
+    h.docker.with(|s| {
+        support::fake_docker::restart_policy_of(
+            s.containers
+                .iter()
+                .find(|c| c.name == name)
+                .expect("container exists"),
+        )
+    })
+}
+
+#[test]
+fn a_release_is_created_with_no_policy_and_gets_unless_stopped_only_once_confirmed_serving() {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let (ctrs, imgs) = foreign_world(&h);
+    let before: Vec<(String, String)> = h.docker.with(|s| {
+        s.containers
+            .iter()
+            .map(|c| (c.name.clone(), support::fake_docker::restart_policy_of(c)))
+            .collect()
+    });
+    let mut b = backend_with(&h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    assert_eq!(r.status, DeploymentStatus::Succeeded, "{:?}", h.dep.failure);
+    // every container Harpoon created was created with policy `no`: a candidate can never come back by itself
+    for c in h
+        .docker
+        .requests()
+        .iter()
+        .filter(|r| r.path.starts_with("/containers/create"))
+    {
+        assert!(
+            c.body.contains("\"RestartPolicy\":{\"Name\":\"no\"}"),
+            "{}",
+            c.body
+        );
+    }
+    // exactly one update, to the serving container, after it was started (the health check had passed)
+    let serving_id = h.docker.with(|s| {
+        s.containers
+            .iter()
+            .find(|c| c.name == serving_name(&h.dep.id))
+            .unwrap()
+            .id
+            .clone()
+    });
+    assert_eq!(
+        updates(&h),
+        vec![format!("/containers/{serving_id}/update")]
+    );
+    assert_eq!(policy_of(&h, &serving_name(&h.dep.id)), "unless-stopped");
+    let reqs = h.docker.requests();
+    let start = reqs
+        .iter()
+        .position(|r| r.path == format!("/containers/{serving_id}/start"))
+        .unwrap();
+    let upd = reqs
+        .iter()
+        .position(|r| r.path.ends_with("/update"))
+        .unwrap();
+    assert!(start < upd);
+    // bystanders keep exactly the policy they had
+    for (name, was) in before {
+        assert_eq!(policy_of(&h, &name), was, "{name}");
+    }
+    assert_nothing_foreign_was_touched(&h, &ctrs, &imgs);
+}
+
+#[test]
+fn a_release_that_fails_its_final_check_is_never_given_a_restart_policy() {
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let t = Scripted::always(Observation::Status(503));
+    *t.answers.borrow_mut() = vec![Observation::Status(200), Observation::Status(200)];
+    let mut b = backend_with(&h, t, |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    assert!(
+        updates(&h).is_empty(),
+        "a failed candidate must not be set to restart: {:?}",
+        updates(&h)
+    );
+    assert!(h.docker.with(|s| s
+        .containers
+        .iter()
+        .all(|c| support::fake_docker::restart_policy_of(c) == "no")));
+}
+
+fn owned(
+    h: &Harness,
+    name: &str,
+    running: bool,
+) -> (String, harpoon_deploy::ledger::RemoveRequest) {
+    let labels = harpoon_deploy::backend::harpoon_labels(&h.dep.application_id, &h.dep.id);
+    let id = h.docker.with(|s| s.add_container(name, labels, running));
+    let req = harpoon_deploy::ledger::RemoveRequest {
+        kind: harpoon_deploy::ledger::ResourceKind::Container,
+        id: id.clone(),
+        name: name.to_string(),
+        app: h.dep.application_id.clone(),
+        deployment: h.dep.id.clone(),
+    };
+    (id, req)
+}
+
+fn mutations(h: &Harness) -> usize {
+    h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method != "GET")
+        .count()
+}
+
+#[test]
+fn ensure_restart_policy_reports_first_then_sets_only_a_running_owned_container() {
+    let h = Harness::new();
+    let b = backend_with(&h, ok200(), |_| {});
+    let left = Duration::from_secs(5);
+    let (id, req) = owned(&h, "hp-owned", true);
+    assert_eq!(
+        b.ensure_restart_policy(&req, false, left).unwrap(),
+        RestartOutcome::WouldSet
+    );
+    assert_eq!(mutations(&h), 0, "a dry run changes nothing");
+    assert_eq!(
+        b.ensure_restart_policy(&req, true, left).unwrap(),
+        RestartOutcome::Set
+    );
+    assert_eq!(
+        h.docker.with(|s| support::fake_docker::restart_policy_of(
+            s.containers.iter().find(|c| c.id == id).unwrap()
+        )),
+        "unless-stopped"
+    );
+    assert_eq!(
+        b.ensure_restart_policy(&req, true, left).unwrap(),
+        RestartOutcome::Already
+    );
+    assert_eq!(mutations(&h), 1, "the second run changed nothing");
+}
+
+#[test]
+fn ensure_restart_policy_never_starts_a_stopped_container_or_touches_one_it_does_not_own() {
+    let h = Harness::new();
+    let b = backend_with(&h, ok200(), |_| {});
+    let left = Duration::from_secs(5);
+    // stopped now: its desired state is stopped. Not started, not updated.
+    let (id, req) = owned(&h, "hp-stopped", false);
+    assert_eq!(
+        b.ensure_restart_policy(&req, true, left).unwrap(),
+        RestartOutcome::NotRunning
+    );
+    assert_eq!(mutations(&h), 0);
+    assert!(!h
+        .docker
+        .with(|s| s.containers.iter().find(|c| c.id == id).unwrap().running));
+    // the name now belongs to something without this deployment's labels
+    let foreign = h.docker.with(|s| s.add_container("hp-taken", vec![], true));
+    let mut stale = req.clone();
+    stale.id = foreign;
+    stale.name = "hp-taken".into();
+    assert!(matches!(
+        b.ensure_restart_policy(&stale, true, left).unwrap(),
+        RestartOutcome::Refused(_)
+    ));
+    // the recorded id now names a different container than the recorded name
+    let (_, other) = owned(&h, "hp-other", true);
+    let mut swapped = other.clone();
+    swapped.name = "hp-stopped".into();
+    assert!(matches!(
+        b.ensure_restart_policy(&swapped, true, left).unwrap(),
+        RestartOutcome::Refused(_)
+    ));
+    // gone
+    let mut gone = other;
+    gone.id = "f".repeat(64);
+    assert_eq!(
+        b.ensure_restart_policy(&gone, true, left).unwrap(),
+        RestartOutcome::Absent
+    );
+    assert_eq!(
+        mutations(&h),
+        0,
+        "nothing it refused or could not find was touched"
+    );
 }

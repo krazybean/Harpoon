@@ -103,8 +103,77 @@ fn success_with_a_previous_release_records_steps_cutover_and_interruption() {
             Call::PreliminaryCheck,
             Call::StopCurrent,
             Call::StartNew,
-            Call::FinalCheck
+            Call::FinalCheck,
+            Call::ConfirmServing
         ]
+    );
+}
+
+#[test]
+fn only_a_release_confirmed_serving_is_set_to_restart_with_docker() {
+    type Script = fn(FakeBackend) -> FakeBackend;
+    let scripts: [(&str, Script, bool); 6] = [
+        (
+            "final check fails, previous restored",
+            |b| b.fail_final_check("x"),
+            true,
+        ),
+        ("start fails, previous restored", |b| b.fail_start_new("x"), true),
+        ("stop fails", |b| b.fail_stop_current("x"), true),
+        ("first deployment final check fails", |b| b.fail_final_check("x"), false),
+        ("build fails", |b| b.fail_build("x"), true),
+        ("preliminary check fails", |b| b.fail_preliminary("x"), true),
+    ];
+    for (name, script, has_previous) in scripts {
+        let mut w = World::new();
+        let mut d = w.deployment();
+        let ctx = if has_previous {
+            w.previous()
+        } else {
+            Context { previous_release: None }
+        };
+        let (mut b, mut j) = (script(FakeBackend::new(w.clock.clone())), MemoryJournal::new());
+        let r = run(&w, &mut d, &ctx, &mut b, &mut j).unwrap();
+        assert_ne!(r.status, DeploymentStatus::Succeeded, "{name}");
+        assert!(
+            !b.called(&Call::ConfirmServing),
+            "{name}: a release that did not become serving must never restart with Docker"
+        );
+    }
+    // A restored previous release is not this deployment's release either: no policy from this run.
+    let mut w = World::new();
+    let (mut d, ctx) = (w.deployment(), w.previous());
+    let (mut b, mut j) = (
+        FakeBackend::new(w.clock.clone()).fail_final_check("x"),
+        MemoryJournal::new(),
+    );
+    run(&w, &mut d, &ctx, &mut b, &mut j).unwrap();
+    assert!(b.calls.iter().any(|c| matches!(c, Call::RestorePrevious { .. })));
+    assert!(!b.called(&Call::ConfirmServing));
+}
+
+#[test]
+fn a_release_that_cannot_be_set_to_restart_still_serves_and_says_so() {
+    let mut w = World::new();
+    let (mut d, ctx) = (w.deployment(), w.previous());
+    let (mut b, mut j) = (
+        FakeBackend::new(w.clock.clone()).fail_confirm_serving("docker said no"),
+        MemoryJournal::new(),
+    );
+    let r = run(&w, &mut d, &ctx, &mut b, &mut j).unwrap();
+    assert_eq!(r.status, DeploymentStatus::Succeeded);
+    assert!(matches!(d.cutover, CutoverState::Confirmed { .. }));
+    assert!(
+        r.warnings
+            .iter()
+            .any(|m| m.contains("docker said no") && m.contains("restart-policy")),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(
+        b.calls.iter().filter(|c| matches!(c, Call::ConfirmServing)).count(),
+        1,
+        "never retried in a loop"
     );
 }
 
@@ -606,12 +675,34 @@ fn every_side_effect_is_preceded_by_a_write_that_describes_it() {
 
         let events = trace.borrow();
         let mut last_persist: Option<(Option<Step>, CutoverState)> = None;
+        let mut last_status: Option<DeploymentStatus> = None;
         let mut calls = 0;
         for e in events.iter() {
             match e {
-                Event::Persist { running, cutover, .. } => last_persist = Some((*running, *cutover)),
+                Event::Persist {
+                    running,
+                    cutover,
+                    status,
+                } => {
+                    last_persist = Some((*running, *cutover));
+                    last_status = Some(*status);
+                }
                 Event::Call(c) => {
                     calls += 1;
+                    if matches!(c, Call::ConfirmServing) {
+                        // The restart policy is set only after the success is on disk, with no step still running.
+                        assert_eq!(
+                            last_status,
+                            Some(DeploymentStatus::Succeeded),
+                            "{name}: ConfirmServing before success was written"
+                        );
+                        assert_eq!(
+                            last_persist.map(|p| p.0),
+                            Some(None),
+                            "{name}: ConfirmServing while a step was running"
+                        );
+                        continue;
+                    }
                     let (running, cutover) =
                         last_persist.unwrap_or_else(|| panic!("{name}: {c:?} ran before any write"));
                     let expected_step = match c {
@@ -620,6 +711,7 @@ fn every_side_effect_is_preceded_by_a_write_that_describes_it() {
                         Call::PreliminaryCheck => Step::PreliminaryCheck,
                         Call::StopCurrent | Call::StartNew => Step::Cutover,
                         Call::FinalCheck => Step::FinalCheck,
+                        Call::ConfirmServing => unreachable!("handled above"),
                         Call::StopNew | Call::RestorePrevious { .. } => Step::Recovery,
                     };
                     // `StopNew` after a failed *first* deployment has no recovery step; it only frees the address.

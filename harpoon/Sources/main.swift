@@ -208,13 +208,7 @@ if !cliCpusProvided && (config.cpuCount < 1 || config.cpuCount > 8) {
     }
 }
 
-log("host \(ProcessInfo.processInfo.operatingSystemVersionString) isSupported=\(VZVirtualMachine.isSupported)")
-guard VZVirtualMachine.isSupported else {
-    lifecycle.fail("Virtualization not supported")
-    fputs("Virtualization not supported on this host\n", stderr)
-    exit(3)
-}
-
+// Ownership is decided before anything else about the host: an occupied namespace is HARPOON_ALREADY_RUNNING (exit 10) even where VMs cannot run.
 let lockPath = HarpoonPaths.lockPath
 let harpoonLockFd: Int32 = open(lockPath, O_CREAT | O_RDWR, 0o600)
 if harpoonLockFd < 0 {
@@ -236,6 +230,13 @@ if flock(harpoonLockFd, LOCK_EX | LOCK_NB) != 0 {
     }
 }
 log("HARPOON_LOCK_ACQUIRED \(lockPath) fd=\(harpoonLockFd)")
+
+log("host \(ProcessInfo.processInfo.operatingSystemVersionString) isSupported=\(VZVirtualMachine.isSupported)")
+guard VZVirtualMachine.isSupported else {
+    lifecycle.fail("Virtualization not supported")
+    fputs("Virtualization not supported on this host\n", stderr)
+    exit(3)
+}
 
 config.diskURL = RuntimeConfig.provisionedRootDisk(for: config.diskURL) // first run only; an explicit --disk / HARPOON_DISK is left alone
 if let err = config.validate() {

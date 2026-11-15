@@ -23,7 +23,8 @@ for slice 1), the shipping UI. The UI stays on the mock until the slice is prove
 3. **Port ranges:** applications **38000–38999**, disposable tests **39000–39099**. Before assigning a port check (a) real
    host listeners on `127.0.0.1`, (b) existing Docker port mappings, (c) journaled leases.
 4. **First-test limits (initial test defaults, not universal application limits):** memory 256 MiB, 0.5 CPU, 64 PIDs, no
-   restart policy, build context ≤ 256 MB, startup health deadline 60 s, build deadline 10 min. A **disk-space preflight**
+   restart policy at creation (amended: a release gets `unless-stopped` only once it is confirmed serving, see
+   [Application recovery after a restart](deployment-recovery.md)), build context ≤ 256 MB, startup health deadline 60 s, build deadline 10 min. A **disk-space preflight**
    runs before the build. The engine **never prunes** anything automatically.
 5. **Port publishing** without `HostIp` (`-p PORT:CPORT`). Harpoon's host listener must stay loopback-only and the live test
    must verify LAN isolation. Rewriting Docker API create requests is deferred.

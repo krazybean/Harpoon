@@ -1056,7 +1056,18 @@ impl Run<'_> {
     fn succeed(&mut self) -> R<()> {
         let now = self.now();
         self.d.transition(DeploymentStatus::Succeeded, now)?;
-        self.save()
+        self.save()?;
+        // Only now, with the success durable: a crash before this leaves a release that does not restart by itself,
+        // never a restarting release the journal does not know serves.
+        let budget = self.cfg.budgets.cleanup_ms;
+        let (res, _) = self.exec(Step::FinalCheck, budget, |b, io| b.confirm_serving(io))?;
+        if let Err(e) = res {
+            let m = self.cfg.redactor.apply(&e.message).0;
+            self.warnings.push(format!(
+                "the release is serving, but could not be set to restart with Docker: {m}; run `restart-policy --apply` to retry"
+            ));
+        }
+        Ok(())
     }
 
     /// Best-effort stop of a new release that started but failed. A failure is kept as a
