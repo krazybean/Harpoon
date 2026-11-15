@@ -1,13 +1,13 @@
 # Docker Integration
 
-Harpoon exposes a Docker-compatible API via `unix:///tmp/harpoon-docker.sock` (0600, Unix-socket-only, no TCP). M8 adds standards-based Docker context integration so `docker --context harpoon` works without `DOCKER_HOST`.
+Harpoon exposes a Docker-compatible API via `unix:///tmp/harpoon-docker.sock` (0600, Unix-socket-only, no TCP). Its standard `harpoon` context lets `docker --context harpoon` work without `DOCKER_HOST`. The current packaged testing prerelease is [v2.0.0-rc.4](releases/v2.0.0-rc.4.md); v0.1.1 remains the latest stable desktop release.
 
 ## Endpoint
 
 - Context name: `harpoon`
 - Endpoint: `unix:///tmp/harpoon-docker.sock`
 - Created via `docker context create harpoon --docker host=unix:///tmp/harpoon-docker.sock --description Harpoon`
-- Harpoon never overwrites a foreign `harpoon` context; setup reports conflict and exits 1.
+- `harpoon docker setup` **repairs** an existing `harpoon` context pointing at the wrong endpoint (tries `context update`, then remove/recreate if necessary). It does not change the default Docker context. Be aware that a preexisting context *named* `harpoon` may therefore be changed; inspect it first if you use that name for another engine.
 
 ## CLI
 
@@ -18,7 +18,7 @@ harpoon docker remove  # remove only if owned (endpoint matches)
 harpoon docker use     # docker context use harpoon (explicit activation)
 ```
 
-`harpoon docker setup` prefers `docker context create`; never manually writes `~/.docker`.
+`harpoon docker setup` verifies an existing correct context; repairs an incorrect one using the Docker CLI; or creates it if absent. It never manually writes `~/.docker`.
 
 ## Workflow
 
@@ -56,7 +56,7 @@ Context survives `harpoon stop`/`start`. When stopped, `docker --context harpoon
 
 ## Coexistence
 
-Existing contexts (`default`, `desktop-linux`) untouched. `harpoon docker setup` is idempotent; second invocation reports valid. `remove` refuses foreign context.
+Existing contexts with other names (`default`, `desktop-linux`) remain untouched; `harpoon docker setup` may repair only the context named `harpoon`. It does **not** select a different active/default context. `remove` refuses a context whose endpoint is not Harpoon's.
 
 ## Build
 
@@ -69,7 +69,7 @@ Socket remains `0600`; integration never adds TCP. No network exposure.
 ## Failure
 
 - Docker not installed → setup/status reports, exit 1
-- Context conflict → setup reports, exit 1, no overwrite
+- Context named `harpoon` with a wrong endpoint → setup tries to repair it, returning an error only if repair fails; do not use this name for a different engine.
 - Stopped Harpoon → `docker --context harpoon version` fails normally (socket unavailable)
 - Duplicate setup → idempotent success
 - Remove absent → success; remove foreign → refuse
