@@ -16,7 +16,7 @@ A native macOS workspace for managing Docker-compatible containers, Compose stac
 
 *Deployments → Overview for an application deployed from a local Git repository: the running release with a captured preview of the app, its local address, and the latest deployment's stages (source, build, preliminary check, cutover, final check) with the recorded health evidence.*
 
-> **Release status.** The container runtime and desktop workspace are in the [v2.0.0-rc.3 testing prerelease](#downloads-stable-versus-testing). The source-deployment features shown above (generated build recipes, Metrics, release-aware cleanup, the redesigned Overview and Settings) are 2.0.1 work on the `feat/2.0.1-source-deployments` branch and are **not in any published release**. The screenshots on this page were taken from a development build of that branch. See [unreleased changes](docs/releases/unreleased.md).
+> **Release status.** The container runtime and desktop workspace and the source-deployment features shown above (generated build recipes, Metrics, release-aware cleanup, the redesigned Overview and Settings) are in the [v2.0.0-rc.4 testing prerelease](#downloads-stable-versus-testing). The shipping desktop app has not been launched in acceptance, Intel guest boot is unverified and the two-Mac startup reliability gate is open. See the [rc.4 release notes](docs/releases/v2.0.0-rc.4.md).
 
 ## Key capabilities
 
@@ -71,32 +71,30 @@ Harpoon does not replace Docker Engine. Docker Engine, containerd, and BuildKit 
 | Release | Status | Downloadable assets |
 |---|---|---|
 | [**v0.1.1**](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) | **Latest stable** desktop release | `Harpoon-0.1.1-arm64.dmg`, `SHA256SUMS` |
-| [**v2.0.0-rc.3**](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.3) | **Testing prerelease**, not stable 2.0.0 | `Harpoon-2.0.0-rc.3-universal.dmg`, `SHA256SUMS`, `SIGNING-PROVENANCE.txt` |
+| [**v2.0.0-rc.4**](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4) | **Testing prerelease**, not stable 2.0.0 | `Harpoon-2.0.0-rc.4-universal.dmg`, `SHA256SUMS`, `SIGNING-PROVENANCE.txt` |
+| [v2.0.0-rc.3](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.3) | Superseded testing prerelease | `Harpoon-2.0.0-rc.3-universal.dmg`, `SHA256SUMS`, `SIGNING-PROVENANCE.txt` |
 | [v2.0.0-rc.2](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.2) | Superseded prerelease | **None.** The release page exists but has no attached files. |
 | [v2.0.0-rc.1](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.1) | Superseded prerelease | `Harpoon-2.0.0-rc.1-arm64.dmg`, teaser video. Not recommended. |
 | [v0.1.0](https://github.com/krazybean/Harpoon/releases/tag/v0.1.0) | Older stable | DMG and the standalone CLI/runtime archive `harpoon-0.1.0-darwin-arm64.tar.gz` |
 
 A standalone v0.1.1 CLI archive is not published. The Releases page is the authoritative list of artifacts.
 
-### v2.0.0-rc.3 (testing prerelease)
+### v2.0.0-rc.4 (testing prerelease)
 
-- **File:** [`Harpoon-2.0.0-rc.3-universal.dmg`](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.3/Harpoon-2.0.0-rc.3-universal.dmg), 359,125,680 bytes.
-- **SHA-256:** `fdf3141e0b6af296b6748035b2b6182b56876bff526700e0197ff0daede1ffab`. This is the only checksum to verify: the hash of the final, notarized and stapled file (`shasum -a 256 Harpoon-2.0.0-rc.3-universal.dmg`, or `SHA256SUMS`). Other hashes in the release notes describe build inputs.
+- **File:** [`Harpoon-2.0.0-rc.4-universal.dmg`](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/Harpoon-2.0.0-rc.4-universal.dmg), 359,820,098 bytes.
+- **SHA-256:** `7dd7cbf2a190f192a886419b1ee84cf38c34ad9f557d0d7c9af8a55e45608d51`. This is the only checksum to verify: the hash of the final, notarized and stapled file (`shasum -a 256 Harpoon-2.0.0-rc.4-universal.dmg`, or `SHA256SUMS`).
 - **Signing:** Developer ID signed (JUAN G CASTRO, LPX4W69ZH8), notarized by Apple (submission Accepted) and stapled. Gatekeeper accepted a download-style (quarantined) copy of the DMG and the app inside it.
-- **Purpose:** a compatibility release. It adds the reader for journal schema 2 (see [Compatibility and removal](#compatibility-and-removal-in-rc3)). It is for testing, not production.
-- **Packaged for:** Apple Silicon (arm64) and Intel (x86_64), as one universal app. Only Apple Silicon has been run (below).
+- **Contains:** source deployments and the deployment workspace, and the lifecycle fixes: Docker starts again after a hard stop, and a release confirmed serving restarts with Docker.
+- **Packaged for:** Apple Silicon (arm64) and Intel (x86_64), as one universal app. Only Apple Silicon has been run.
 - **Requires:** macOS 12 or later.
 
-**Tested.** The runtime packaged in this DMG, run in an isolated test namespace on Apple Silicon, booted its guest, reached Docker-ready and ran an Alpine container (`docker run --rm alpine:3.20 echo SMOKE_OK`).
+**Tested.** The runtime packaged in this DMG, in an isolated namespace on Apple Silicon with a fresh disk, booted, reached Docker-ready, ran an Alpine container and recovered Docker on the first start after three consecutive hard kills.
 
-**Not verified.**
-- **The shipping desktop app has not been installed or launched in acceptance.** Its sockets and lock files are shared with a running production engine, so it could not be isolated safely on the test Mac. The first-launch experience and the desktop's behavior on an existing journal are covered only by build-time checks and CI tests.
-- **Intel:** the Intel binaries are packaged and verified at the binary level, but no Intel guest has been booted and no Intel Mac was used. The x86_64 guest also predates the guest-DNS fix that the arm64 guest has.
-- Upgrade from rc.1 or rc.2, a second Mac, repeated cold boots, and a clean-machine install.
+**Not verified.** The two-Mac 60-cycle startup reliability gate is open. The shipping desktop app has not been installed or launched in acceptance, and a source deployment through it was not run on this bundle. Intel guest boot is unverified. Clean-install and upgrade/rollback are incomplete. Intermittent guest faults are unresolved. Existing application containers keep restart policy `no` until `harpoon-deploy restart-policy --apply` is run.
 
-**Installing.** The expected steps are: download the DMG, verify the SHA-256, open the DMG and copy Harpoon to `/Applications`. Because the image is notarized, Gatekeeper is expected to open it without an override; do not disable Gatekeeper. On first launch from `/Applications`, Harpoon asks once for an administrator password to add its `docker` and `harpoon` commands to your Terminal PATH (see [Requirements](#requirements)). These steps have not been run on a clean machine. Use disposable containers, and keep a copy of `~/Library/Application Support/Harpoon` and `~/Library/Application Support/com.harpoon.desktop` before trying a prerelease; moving back from rc.3 to an earlier prerelease has not been tested.
+**Installing.** Download the DMG, verify the SHA-256, open the DMG and copy Harpoon to `/Applications`. Gatekeeper is expected to open it without an override; do not disable Gatekeeper. Use disposable containers, and keep a copy of `~/Library/Application Support/Harpoon` and `~/Library/Application Support/com.harpoon.desktop` first.
 
-More detail: [rc.3 release notes](docs/releases/v2.0.0-rc.3.md) and the [release page](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.3).
+More detail: [rc.4 release notes](docs/releases/v2.0.0-rc.4.md) and the [release page](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4).
 
 ### Compatibility and removal in rc.3
 
@@ -151,7 +149,7 @@ For component boundaries and transport details, see [Architecture](docs/architec
 
 ## Requirements
 
-- To run: macOS 12 or later on Apple Silicon (the tested platform). The rc.3 DMG also contains Intel binaries, but Intel guest boot is unverified.
+- To run: macOS 12 or later on Apple Silicon (the tested platform). The rc.4 DMG also contains Intel binaries, but Intel guest boot is unverified.
 - To build from source: Xcode Command Line Tools and Rust stable.
 - **Docker CLI bundled**, Docker Desktop **NOT required**. Harpoon.app ships Docker's official CLI (pinned in `harpoon/fetch-docker-cli.sh`) and uses it only when no runnable `docker` is installed. On first launch from /Applications, Harpoon asks once for an administrator password to add its bin folder (bundled `docker` and `harpoon`) to `/etc/paths.d/harpoon`, after Homebrew and `/usr/local/bin`, so new Terminal windows find both commands; a declined prompt is not repeated. Docker Compose v2 plugin (`docker compose version`) required only for `compose` workflows. Harpoon discovers a runnable Docker CLI via `PATH` → `/opt/homebrew/bin/docker` (Finder-safe), rejecting stale or incompatible executables, and creates/repairs context `harpoon` → `unix:///tmp/harpoon-docker.sock` without changing your default context (`harpoon docker setup`; desktop ensures on first use). If `~/.docker/config.json` contains `"credsStore":"desktop"` without `docker-credential-desktop`, `harpoon doctor` warns (Harpoon never deletes `credsStore`).
 - **Persistent storage**: immutable `assets/guest/harpoon-root.img` template (`2 GiB` sparse, `0/0/0`) → mutable `~/Library/.../harpoon-root.img` (grow-only sparse, never silently replaced). First provision **4 GiB** logical sparse (provisional default; larger workloads such as `azure-sql-edge` exhausted 2G, so Harpoon warns when space runs low and offers a user-confirmed expansion, see `docs/configuration.md`) via `harpoon start --disk-size 16G` or `harpoon config set disk-size`; grow via `harpoon disk resize 16G` (VM stopped, `truncate` + guest `resize2fs`, atomic, `backing>FS` retry).
@@ -239,7 +237,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 - **Platform:** Apple Silicon with ARM64 Linux guests is the supported 2.0 release target and the only tested platform. The universal DMG packages Intel binaries and an x86_64 guest, but Intel guest boot has not been verified, so Intel is experimental and unsupported. Windows/Linux hosts are unsupported. Podman/rootless is not a 2.0 gate.
 - **Occasional VM startup condition:** An occasional host-side Virtualization.framework VM startup condition has been observed and characterized (see `docs/results/R1.md` for detailed evidence). The same build has been observed to start successfully; the condition is attributed to host/Virtualization.framework state rather than Harpoon packaging. Startup retries are bounded.
-- **Distribution signing:** the v2.0.0-rc.3 DMG is Developer ID signed, notarized and stapled. Earlier prereleases and source builds are ad-hoc signed (`com.apple.security.virtualization`) and are not notarized.
+- **Distribution signing:** the v2.0.0-rc.4 DMG is Developer ID signed, notarized and stapled. Earlier prereleases and source builds are ad-hoc signed (`com.apple.security.virtualization`) and are not notarized.
 - **Deployments:** attended live deployment, replacement, rollback and restore are open in shipping builds, each started by a person and each needing the explicit `--authorize-live-docker-changes` confirmation (the desktop asks first). Unattended execution of queued Git events, registration removal and application removal are closed. Deployments run on this Mac only: there is no cloud hosting, multi-machine deployment, push-triggered deployment, per-branch preview or Development environment, and no availability guarantee. The source-deployment features on the 2.0.1 branch are not in a published release.
 - **Updates:** currently planned after a fresh build and restart; live reconfigure is not claimed.
 - **Disk:** 2 GiB template + 4 GiB sparse default `harpoon-root.img` (provisional; APFS clone-aware, grown on request via `harpoon disk expand` or `harpoon disk resize`; existing disks keep their size). Bounded at ~962 MiB–1.0 GiB allocated; `growable` was rejected intentionally.
@@ -264,7 +262,7 @@ Automated analysis does not establish that Harpoon is safe, malware-free, or vul
 
 ## Status
 
-Harpoon v2.0.0-rc.3 is a testing prerelease, not a stable 2.0.0 release. It is
+Harpoon v2.0.0-rc.4 is a testing prerelease, not a stable 2.0.0 release. It is
 Developer ID signed, notarized and stapled, and the runtime packaged in it passed
 an Apple Silicon Docker smoke test. Still open: installation and first-launch
 acceptance of the shipping desktop, Intel guest boot, second-Mac acceptance,
