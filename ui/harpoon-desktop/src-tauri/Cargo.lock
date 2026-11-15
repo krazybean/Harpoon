@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "harpoon-desktop"
-version = "2.0.0"
+version = "2.0.0-rc.4"
 dependencies = [
  "block2",
  "harpoon-deploy",
