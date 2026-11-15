@@ -518,7 +518,7 @@ What is true now:
 
 What is **not** claimed:
 
-- A source build is not Developer ID signed or notarized. The published **v2.0.0-rc.3** DMG is: CI builds it ad-hoc signed and it is then re-signed with Developer ID, notarized and stapled afterwards by [`sign-existing-dmg.sh`](distribution.md#signing-an-already-built-dmg-no-rebuild). Local ad-hoc / `Apple Development` signing (any valid Apple Development identity if available) is sufficient for local acceptance, but public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
+- A source build is not Developer ID signed or notarized. The published **v2.0.0-rc.4** DMG is: CI builds it ad-hoc signed and it is then re-signed with Developer ID, notarized and stapled afterwards by [`sign-existing-dmg.sh`](distribution.md#signing-an-already-built-dmg-no-rebuild). Local ad-hoc / `Apple Development` signing (any valid Apple Development identity if available) is sufficient for local acceptance, but public macOS distribution via Gatekeeper requires a `Developer ID Application` certificate and `xcrun notarytool` / `stapler` notarization, which is separate from building Harpoon from source.
 
 Building Harpoon from source does not require Developer ID or notarization; those are distribution-time steps.
 
