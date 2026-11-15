@@ -47,3 +47,45 @@ A person arriving from GitHub should be able to answer, without reading an engin
 - Re-check screenshots and caption text after product/UI changes; change presentation evidence, not the provenance of old results.
 
 Public-facing truth source: [rc.4 release notes](releases/v2.0.0-rc.4.md), [installation](installation.md), [compatibility](compatibility.md), and [security policy](../SECURITY.md).
+
+## Round 2 (2026-11-15)
+
+**Scope:** README and documentation text only, on top of the merged rc.4 documentation (#209, #210, #211). No screenshot, teaser, application, runtime or release artifact is changed. The rc.4 testing, Intel, first-launch, clean-install, upgrade/rollback and two-Mac/60-cycle disclosures are unchanged. The 60-cycle reliability gate remains open. A waiver has been proposed but has not been approved.
+
+### Adopted
+
+| Item | Decision and rationale |
+|---|---|
+| Teaser placement (A2, **modified**) | The existing rc.1 teaser link moves from the end of the Screenshots section to directly beneath the hero screenshot caption, labeled an **older rc.1 preview** that does not show the shipped rc.4 desktop. It stays a plain link: no autoplay, no embed, no new asset. The download links keep their position above the screenshot. |
+| "Why Harpoon?" (A3) | The single-column table with an empty header is replaced by three benefit-oriented points (native Docker-compatible runtime without Docker Desktop, repository to running app on one Mac, explicit user control) and one scope sentence. It adds no Docker Desktop comparison and does not repeat the feature list. |
+| Restart-policy sentence (A4) | The sentence about a "separately authorized migration" now says plainly that applications deployed before the fix do not restart automatically, that upgrading does not change them, and that the owner applies the update deliberately after reading its effects, linking to [application recovery](deployment-recovery.md). |
+| Changelog location (B5) | The detailed rc.4 change log moved with `git mv` to [`releases/changes-since-rc.3.md`](releases/changes-since-rc.3.md); its content, dates and evidence are untouched apart from one sentence pointing to the new entry point. [`releases/unreleased.md`](releases/unreleased.md) is again a real entry point for post-rc.4 changes, and it is empty because nothing has been recorded. The inbound link in [`releases/v2.0.0.md`](releases/v2.0.0.md) was updated, and that draft still uses rc.4 as its baseline. |
+| Source-to-app walkthrough (omission 1) | A short optional step 4 follows the container smoke test: open Deployments, register a repository or checkout, configure the build, confirm the attended deployment, and read the local address in the Overview. It is taken from [installation](installation.md#a-local-source-deployment) and says the path has not been run through the packaged rc.4 desktop in acceptance. No command or flag was added. |
+| Stable versus testing (omission 2) | A "Which should I download?" line under the download links separates v0.1.1 (latest stable) from rc.4 (testing prerelease with the deployment experience). The existing warning box, including Intel and first-launch, is unchanged. |
+| Recovery terminology (omission 3) | The README says Harpoon makes **one bounded attempt** to restore the previously serving release after a failed cutover and records the outcome, and that retry and rollback remain the developer's decisions. It does not say "automatic rollback". Source: [deployment requirements](deployment-control-plane-requirements.md). |
+| Compose requirement (omission 4) | A short note says `harpoon doctor` checks Docker Compose v2 as a separate item and that Compose is required only for Compose workflows, not basic container operations. Verified against `harpoon doctor` and [installation](installation.md). |
+
+### Rejected
+
+| Item | Decision and rationale |
+|---|---|
+| Memory comparison in the README (A1) | **Rejected.** SPIKE 5 measured idle memory on the same Mac, but with Harpoon at 2 vCPUs and 1 GiB against Docker Desktop at 11 vCPUs and about 8 GiB, on a development prototype rather than the shipped rc.4. It is not a benchmark of the current product. The evidence stays in [SPIKE5](results/SPIKE5.md). |
+| Compose-detail screenshot caption (B6) | **No action.** The capture correctly shows the CSSH workspace, so its caption is unchanged. |
+
+### Clarification of the Round 1 performance decision
+
+Round 1 rejected comparative performance numbers on the grounds that prior measurements had "different methods, Macs and workload mixes". That reason was too broad. SPIKE 5 was a same-host, same-day comparison. The accurate reasons are the unequal configuration (2 vCPU / 1 GiB against 11 vCPU / about 8 GiB), that it measured a development prototype and not the shipped release, and that the document itself says the result is not normalized and not a guarantee. The decision not to use it as a current product marketing comparison stands. Revisit only with a controlled, repeatable same-host benchmark of a released build at comparable configuration.
+
+### Deferred visual debt (screenshot recapture queue)
+
+All 14 screenshots are preserved unchanged. These are observations for a future visual review, not authorization to change the app or edit a capture:
+
+- Header sparklines look like yellow marker strokes at README scale.
+- The Overview and Projects captures contain a lot of empty space.
+- The hero screenshot crops the HEALTH panel.
+- The Resources screenshot crops the reclaim button.
+- The Cleanup capture shows zero eligible items.
+- Some captures contain awkward labels such as "1 containers".
+- Some screens show raw byte quantities instead of readable units.
+
+**Condition to recapture:** only after installed rc.4 desktop acceptance, and after any underlying UI issue has been addressed separately. Captures are then retaken from the shipping build with disposable state, not retouched.

@@ -6,11 +6,15 @@ Harpoon is a native macOS workspace for Docker-compatible containers and **atten
 
 **[Download Harpoon 2.0.0-rc.4 for macOS (testing prerelease)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/Harpoon-2.0.0-rc.4-universal.dmg)** · [Latest stable v0.1.1 (Apple Silicon)](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) · [Release notes](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4) · [Screenshots](assets/screenshots/README.md)
 
+**Which should I download?** v0.1.1 is the latest **stable** desktop release (Apple Silicon). v2.0.0-rc.4 is the **testing prerelease** and the only build with the new source-deployment experience; it is not a stable 2.0 release.
+
 > **Before you install:** rc.4 is a **testing prerelease**, not a stable 2.0 release. **Apple Silicon is the only tested platform**; Intel binaries and a guest are included, but Intel boot has not been verified. macOS 12 or later is required. The shipped desktop has not yet passed installed first-launch acceptance; back up existing Harpoon data and use disposable workloads. [What was actually tested](docs/releases/v2.0.0-rc.4.md#verification).
 
 ![Harpoon Deployments Overview showing a locally running app, its preview, address and recorded deployment stages](assets/screenshots/deployments-overview.png)
 
 *Deployments Overview, captured from a development build with local applications—not a separately accepted screenshot of the shipped rc.4 desktop. [See all screenshots and their provenance](assets/screenshots/README.md).*
+
+[Watch the 15-second Harpoon 2.0 teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4): an **older rc.1 preview** video that does not show the shipped rc.4 desktop.
 
 ## Install and try Harpoon
 
@@ -41,6 +45,10 @@ docker --context harpoon run --rm hello-world
 
 The `harpoon` context uses Harpoon's local socket; using `--context harpoon` does not change your existing default Docker context. The first image pull needs network access. The desktop can manage containers even if you decline optional Terminal-path registration. If CLI discovery or context setup fails, see [installation and troubleshooting](docs/installation.md).
 
+**Compose:** `harpoon doctor` checks Docker Compose v2 as a separate item. Compose is required only for Compose workflows, not for basic Docker container operations. [Details](docs/installation.md).
+
+**4. Try a source deployment (optional).** In the desktop, open **Deployments** and register a Git repository or local checkout. A Dockerfile project uses its Dockerfile; a supported npm or Python (pip/uv) project without one can use a generated build recipe. Configure the install, build and start settings, variables and Keychain secrets, review the local port and health check, then explicitly confirm the deployment. When the final check passes, the Overview shows the running release and its local address. This path has **not** been run through the packaged rc.4 desktop in acceptance; use a disposable project. [Full walkthrough and limits](docs/installation.md#a-local-source-deployment).
+
 **Already using Harpoon?** Back up `~/Library/Application Support/Harpoon` **and** `~/Library/Application Support/com.harpoon.desktop` before trying rc.4. Upgrading and rolling back this prerelease have not yet been accepted as safe workflows. [Backups, data locations and removal](docs/installation.md#data-upgrades-and-removal).
 
 ## What you can do
@@ -56,20 +64,18 @@ The `harpoon` context uses Harpoon's local socket; using `--context harpoon` doe
 - Register a Git source or local checkout. Deploy a Dockerfile project or use a generated build recipe for supported **npm** and **Python (pip/uv)** projects.
 - Configure build and start behavior, environment variables and macOS Keychain-backed secrets. Build secrets use BuildKit secret mounts on supported generated builds.
 - Confirm each live deployment or replacement; review the recorded build, preliminary check, cutover and final health evidence.
+- If a replacement fails after cutover begins, Harpoon makes **one bounded attempt** to restore the previously serving release and records the outcome. Retrying and rollback remain decisions you make.
 - View history and the serving container's Docker metrics, and use explicit rollback or Rebuild & Restore operations when applicable. Cleanup of old release artifacts requires confirmation.
 
 **Boundaries matter:** Harpoon deploys to **this Mac**, not Vercel or a remote server. It does not auto-deploy on push, provide public cloud hosting, guarantee zero downtime, or create per-branch preview environments. Development/Preview environment cards in example screenshots are not promises of available environments. All live deployment actions are attended. [Deployment requirements and limits](docs/deployment-control-plane-requirements.md).
 
 ## Why Harpoon?
 
-| | Harpoon today |
-|---|---|
-| **Runtime** | Native macOS VM using Apple's Virtualization.framework, with Docker Engine inside the Linux guest. |
-| **Workflow** | Containers and Compose alongside a source-to-local-app deployment workspace. |
-| **Control** | Explicit deploy, rollback, disk-growth and cleanup decisions; local Docker context rather than a separate container-engine API. |
-| **Scope** | One Mac, with evidence and documented limitations instead of a claim of Docker Desktop, Vercel, or Kubernetes feature parity. |
+- **A native macOS Docker-compatible runtime.** Docker Engine runs in a lightweight Linux VM built on Apple's Virtualization.framework, so you use the standard Docker CLI and context without Docker Desktop.
+- **From a repository to a running app on the same Mac.** Register a Git repository or local checkout, build it and run it locally, next to your other containers.
+- **You stay in control.** Deployments, replacements, rollback, disk growth and cleanup are explicit, attended decisions, and Harpoon records what happened.
 
-Harpoon is built for developers who want a straightforward local runtime **and** a path from source code to a running app. It is not a replacement for production orchestration or managed hosting.
+Harpoon is for one Mac. It is not a replacement for production orchestration or managed hosting, and it makes no claim of Docker Desktop, Vercel or Kubernetes feature parity.
 
 ## Screenshots
 
@@ -78,7 +84,7 @@ Harpoon is built for developers who want a straightforward local runtime **and**
 | ![Docker-reported metrics for a serving app container](assets/screenshots/deployments-metrics.png) | ![Docker container and network topology view](assets/screenshots/networks-topology.png) |
 | Docker-reported CPU, memory, network and uptime for a serving release, with session-only history. | Container-to-network attachment; animated links do not represent measured traffic. |
 
-[View the full screenshot gallery, including capture context](assets/screenshots/README.md) · [Watch the Harpoon 2.0 teaser](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.1/Harpoon-2.0-teaser-v2-15s.mp4) (older preview video).
+[View the full screenshot gallery, including capture context](assets/screenshots/README.md)
 
 ## Compatibility, safety and known limitations
 
@@ -90,7 +96,7 @@ Harpoon is built for developers who want a straightforward local runtime **and**
 
 The rc.4 package's **Apple Silicon runtime** booted in an isolated test, ran an Alpine container and recovered Docker after three engine hard kills. The **shipping desktop app was not installed or launched for acceptance**. A clean install on a second Mac, Intel boot, two-Mac/60-cycle reliability, upgrade/rollback, and a deployed app running through the packaged desktop remain unverified. Intermittent guest faults and `VZErrorDomain 1` startup failures remain known risks; the available evidence does **not** establish their cause or eliminate them.
 
-Existing applications deployed before the lifecycle fix retain restart policy `no` until the separately authorized migration is performed. Removing Harpoon.app does not automatically remove your persistent Docker disk, deployment journal or Keychain secrets. Read [installation, backups and troubleshooting](docs/installation.md) before upgrading, removing or troubleshooting an installation.
+Applications deployed before the restart-policy fix will **not** restart automatically after Harpoon or its VM restarts. Upgrading does not change them; the owner must apply the policy update deliberately, after reading its effects, using the procedure in [application recovery](docs/deployment-recovery.md). Removing Harpoon.app does not automatically remove your persistent Docker disk, deployment journal or Keychain secrets. Read [installation, backups and troubleshooting](docs/installation.md) before upgrading, removing or troubleshooting an installation.
 
 Security issues should be reported privately via the [security policy](SECURITY.md), not as public issues. [Read release acceptance details](docs/releases/v2.0.0-rc.4.md) and [compatibility notes](docs/compatibility.md).
 
