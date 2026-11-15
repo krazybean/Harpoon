@@ -2,7 +2,7 @@
 
 [← Back to the Harpoon README](../../README.md)
 
-Fourteen screenshots of the Harpoon desktop app, grouped by area. They were captured from a **development build of the 2.0.1 feature branch** (`feat/2.0.1-source-deployments`) on a Mac running Harpoon with two locally deployed applications. The container-runtime screens exist in the [v2.0.0-rc.3 testing prerelease](../../README.md#downloads-stable-versus-testing); the source-deployment screens, container metrics and Docker artifact cleanup are **unreleased** work (see [unreleased changes](../../docs/releases/unreleased.md)), so the rc.3 app may look different.
+Fourteen screenshots of the Harpoon desktop app, grouped by area. They were captured from a **development build of the 2.0.1 feature branch** (`feat/2.0.1-source-deployments`) with two locally deployed applications. **These features shipped in the [v2.0.0-rc.4 testing prerelease](../../docs/releases/v2.0.0-rc.4.md), but the installed/shipping desktop app was not launched in acceptance**; the images are genuine development captures, not verification of the shipped DMG's desktop or an assurance that every control is available. Intel guest boot is also unverified.
 
 **Contents:** [Runtime overview](#runtime-overview) · [Containers and Compose](#containers-and-compose) · [Source deployments](#source-deployments) · [Operations and metrics](#operations-and-metrics) · [Images, networking, and resources](#images-networking-and-resources) · [Engine discovery](#engine-discovery)
 
@@ -44,7 +44,7 @@ The same workspace scrolled to its shell tile. A connected session in the select
 
 ## Source deployments
 
-Unreleased 2.0.1 branch work. Deployments are attended and local; the screens below show recorded state, not a hosted service.
+The depicted capabilities are included in the rc.4 testing prerelease, but these images were captured from a development build. Deployments are attended and local; the screens show recorded state, not a hosted service or acceptance of the shipping desktop.
 
 ### Deployment projects
 

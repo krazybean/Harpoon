@@ -1,10 +1,10 @@
 # Changes since v2.0.0-rc.3 (released in rc.4)
 
-Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped in the [rc.4 prerelease](v2.0.0-rc.4.md) and are not in the rc.3 DMG. Section headings that say "not released" predate rc.4. New unreleased changes go in a new section below.
+Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped in the [rc.4 prerelease](v2.0.0-rc.4.md) and are not in the rc.3 DMG. The sections below describe rc.4, not pending features. Add genuinely new unreleased changes in a separately labeled section.
 
 ## Behavior changes
 
-### Applications come back after a Harpoon restart (lifecycle fix, not released)
+### Applications come back after a Harpoon restart (shipped in rc.4)
 
 - **Cause.** Harpoon created every application container with restart policy `no`, so after any guest restart the applications stayed
   down until started by hand. The database container (a Compose service with `unless-stopped`) came back; the applications did not.
@@ -13,7 +13,7 @@ Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped i
   `harpoon-deploy restart-policy` (dry run by default) applies the same to releases that predate this. See
   [Application recovery after a restart](../deployment-recovery.md).
 
-### Source deployments: a repository without a Dockerfile builds from a recipe Harpoon generates (2.0.1 work, not released)
+### Source deployments: a repository without a Dockerfile builds from a recipe Harpoon generates (shipped in rc.4)
 
 - **Detection.** When a registration names no Dockerfile and the checkout has none, Harpoon detects an npm project (`package.json`;
   `npm ci` with a lockfile) or a Python one (pip or uv only) and renders a Dockerfile for that one build. It exists only in the private
