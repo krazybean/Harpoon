@@ -18,6 +18,8 @@ Historical prototypes remain frozen evidence and MUST NOT be referenced by produ
 
 ## Quick start
 
+> **Known verification drift (rc.4):** `verify-guest.sh` still searches `RuntimeConfig.swift` for the removed **32 GiB** default. Current new-disk default is **4 GiB**, so that check reports a false failure for both architectures even when the manifest and all other guest checks pass. This is tracked in the [rc.4 known limits](../../docs/releases/v2.0.0-rc.4.md#known-limits). The full `build.sh` gate should not be reported green until the stale assertion is updated; do not ignore unrelated failures.
+
 ```sh
 # build all three assets (kernel + initramfs + root)
 bash tools/guest-builder/build.sh
