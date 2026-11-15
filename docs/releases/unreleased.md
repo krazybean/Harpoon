@@ -1,6 +1,6 @@
-# Unreleased changes (after v2.0.0-rc.3)
+# Changes since v2.0.0-rc.3 (released in rc.4)
 
-Changes merged to `main` since [rc.3](v2.0.0-rc.3.md) that are not in any published release. They are not in the rc.3 DMG.
+Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped in the [rc.4 prerelease](v2.0.0-rc.4.md) and are not in the rc.3 DMG. Section headings that say "not released" predate rc.4. New unreleased changes go in a new section below.
 
 ## Behavior changes
 
