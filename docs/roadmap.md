@@ -1,5 +1,7 @@
 # Harpoon Roadmap — Canonical Trackable
 
+> **Release-status checkpoint (2026-11-15):** [v2.0.0-rc.4](releases/v2.0.0-rc.4.md) is the latest published **testing prerelease**, signed/notarized/stapled with a universal DMG; v0.1.1 remains the **latest stable** desktop release. The installed rc.4 desktop, Intel guest boot, two-Mac 60-cycle reliability, clean-install, and upgrade/rollback acceptance remain unverified. For current shipped scope and release gates use the [rc.4 record](releases/v2.0.0-rc.4.md) and [stable 2.0.0 draft](releases/v2.0.0.md); older dated milestone and candidate paragraphs below are historical planning snapshots, **not** the current release status.
+
 > Harpoon is a lightweight Docker-compatible runtime for Apple Silicon macOS. Docker Engine remains authoritative for containers/images/volumes/networks/API/Compose/BuildKit. Harpoon owns only the macOS↔Linux boundary (VM lifecycle, socket bridge, networking, bind-mount transport, resources, memory reclamation, diagnostics).
 
 ## Deployment control plane (Harpoon 2.1) — canonical milestone tracker
@@ -23,8 +25,8 @@ contradictory or missing.
 
 **Tracks.** Harpoon 2.0 runtime/distribution gates (release candidates, second-Mac verification,
 signing, packaging, UI polish, Intel, DNS) are a separate track and are not prerequisites of any 2.1
-milestone below. The "Next milestone" lines under *Current Position* belong to the 2.0 runtime/UI
-track; the 2.1 next milestone is stated only here. Anything that does block a 2.1 milestone must
+milestone below. The older "Next milestone" lines under *Historical Position Snapshots* belong to dated 2.0 runtime/UI
+planning, not to the current release. The 2.1 milestone sequence is documented separately here. Anything that does block a 2.1 milestone must
 name the specific acceptance criterion it blocks; otherwise it is deferred without interrupting
 execution.
 
@@ -97,7 +99,7 @@ behind the decision: `docs/results/DEPLOY_MILESTONE_B_ACCEPTANCE_REVIEW.md` (sec
 | B12 | Explicit manual rollback | **Implementation complete; offline evidence retained**: `releases` lists retained releases and the serving one; `rollback --to REL` re-serves an exact earlier release from its retained image id and pinned configuration (nothing rebuilt), after a preliminary check, with a printed plan, interruption bound and data warning, explicit `--confirm-rollback`, the existing bounded recovery on failure, a durable rollback record, and a trigger pause after success; live wiring is present behind the separately authorized acceptance gate | #128 | `docs/results/DEPLOY_B12_ROLLBACK.md`; requirements D5, criterion 5 |
 | B13 | Runtime configuration, failure hardening, acceptance matrix | **Implementation complete; offline evidence retained**: `--env KEY=VALUE` non-secret variables validated, pinned per release (`v2` pin; `v1` unchanged) and reproduced by restoration and rollback; preliminary-failure next actions (real commands only); status wording and forwarder-default corrections; offline failure matrix audit and additions; canonical acceptance matrix and deferred live procedures; durable pause/resume state is implemented | this PR | `docs/results/DEPLOY_B13_ACCEPTANCE.md`; criteria 1 and 3 |
 | B14 | Durable pauses, held events, explicit resume | **Complete (offline)**: `pause`/`event`/`resume` records in the journal replayed from SQLite; engine ingress (`ingest`) with delivery-id idempotency, isolation and fail-closed replay; `resume --app A --dismiss \| --newest \| --revision REV` and read-only `events`; a selection is recorded as pending attended execution, deploys **nothing** and keeps the application blocked until dismissed; `status` shows pauses, held events and decisions; crash sweeps (every write, every SQLite prefix); no event source and no source executor exist, so real delivery and execution are deferred to Milestone D | this PR | `docs/results/DEPLOY_B14_EVENTS_RESUME.md` |
-| B15 | Reviewed live lifecycle integration | **Implementation complete; live evidence partial**: live `replace`, `rollback` and `restore` wired into the maintained CLI behind a gate that is **closed in the shipping binary**; a separate `harpoon-deploy-acceptance` binary (opt-in Cargo feature, no fault injection) opens it for authorized acceptance runs; honours B13 environment pins and B14 pauses; packaging-isolation tests and CI guards; L1–L4 were demonstrated, while L5–L7 and P1–P2 remain untested under the recorded idle-host precondition failure | this PR | `docs/results/DEPLOY_B15_LIVE_INTEGRATION.md` |
+| B15 | Reviewed live lifecycle integration | **Implementation complete; live evidence partial (historical B15 record)**: live `replace`, `rollback` and `restore` were initially wired into the maintained CLI behind a gate **closed in the shipping binary at that time**; the shipping gate was subsequently opened for explicitly authorized attended operations (included in rc.4); a separate `harpoon-deploy-acceptance` binary (opt-in Cargo feature, no fault injection) opens it for authorized acceptance runs; honours B13 environment pins and B14 pauses; packaging-isolation tests and CI guards; L1–L4 were demonstrated, while L5–L7 and P1–P2 remain untested under the recorded idle-host precondition failure | this PR | `docs/results/DEPLOY_B15_LIVE_INTEGRATION.md` |
 
 ### Acceptance disposition (not a new submilestone)
 
@@ -161,7 +163,7 @@ and `DEPLOY_B11_RECOVERY.md`.
 
 The separate Harpoon 2.0 track is unchanged by this milestone.
 
-**Current: Milestone E — real desktop deployment experience (attended only).** Milestone C is implementation-complete by owner decision and Gate U is NOT PASSED (see the table above). L1–L4 remain preserved live evidence;
+**Historical next milestone (recorded before rc.4): Milestone E — real desktop deployment experience (attended only).** Milestone C is implementation-complete by owner decision and Gate U is NOT PASSED (see the table above). L1–L4 remain preserved live evidence;
 L5–L7 and P1–P2 are explicitly deferred and untested after the idle-host precondition stopped the
 campaign before S0. This owner-risk acceptance does not reopen any live gate. Revisit the deferred
 checks only when a separately authorized, idle-host campaign is worth the release risk.
@@ -179,9 +181,11 @@ and automatic Docker-state reconciliation (cleanup stays explicit and ownership-
   Mac-side listener; a fuller reachability view (other interfaces, firewall, the VM boundary) is not built.
 * **Container-card layout in the Containers view** beyond the overflow fixes in section 13 of the Milestone E report.
 
-## Current Position
+## Historical Position Snapshots
 
-### Harpoon 2.0 Step 1 — release hardening IN PROGRESS (2026-10-29)
+**The following status paragraphs were recorded in October/early November 2026 and are preserved as historical planning evidence. They do not supersede the rc.4 release status above.**
+
+### Harpoon 2.0 Step 1 — historical release hardening (2026-10-29)
 
 The Apple Silicon target is the 2.0 release scope. Intel/universal packaging,
 Windows/Linux hosts, and the 2.1 deployment control plane (tracked above) remain
