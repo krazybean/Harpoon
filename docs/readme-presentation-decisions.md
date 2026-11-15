@@ -43,7 +43,7 @@ A person arriving from GitHub should be able to answer, without reading an engin
 
 - Install and launch the shipped rc.4 desktop on a clean Mac; capture the first-run, Docker-context and source-deployment flow using disposable state.
 - Re-test Intel guest boot on Intel hardware before calling it supported, and complete the separately documented reliability and upgrade/rollback gates.
-- Update GitHub repository **description and topics** through repository settings: the existing description (“Cause damn the whales”) does not tell potential installers what the software does. Suggested description: **“Native macOS Docker-compatible runtime with local source-to-app deployments.”** Suggested topics: `macos`, `docker`, `containers`, `virtualization`, `developer-tools`, `tauri`. This is repository metadata, not a README code change.
+- **Completed 2026-11-15:** GitHub repository description changed from “Cause damn the whales” to **“Native macOS Docker-compatible runtime with local source-to-app deployments.”** Topics were set to `macos`, `docker`, `containers`, `virtualization`, `developer-tools`, `tauri`. This is repository metadata, not a README code change.
 - Re-check screenshots and caption text after product/UI changes; change presentation evidence, not the provenance of old results.
 
 Public-facing truth source: [rc.4 release notes](releases/v2.0.0-rc.4.md), [installation](installation.md), [compatibility](compatibility.md), and [security policy](../SECURITY.md).
