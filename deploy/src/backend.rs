@@ -180,6 +180,12 @@ pub trait Backend: ResourceOps {
     fn start_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
     /// Check the new release after the switch.
     fn final_check(&mut self, io: &mut StepIo<'_>) -> Result<CheckEvidence, StepError>;
+    /// Called once, after the release is durably recorded as serving: make the runtime bring it back
+    /// by itself after a restart. Never called for a release that failed or was not cut over. A
+    /// failure is a warning, not a failed deployment (the release is already serving).
+    fn confirm_serving(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
+        Ok(())
+    }
     /// Stop a new release that started but failed, to free its address before restoring.
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError>;
     /// Whether passing evidence marked `simulated` may establish health. Only fakes say yes; a
@@ -217,6 +223,7 @@ pub enum Call {
     StopCurrent,
     StartNew,
     FinalCheck,
+    ConfirmServing,
     StopNew,
     RestorePrevious { budget_ms: u64 },
 }
@@ -304,6 +311,7 @@ pub struct FakeBackend {
     start_new: Scripted,
     final_check: Scripted,
     stop_new: Scripted,
+    confirm_serving: Scripted,
     restore: VecDeque<(RestoreResult, u64)>,
     trace: Option<Trace>,
     pub calls: Vec<Call>,
@@ -339,6 +347,7 @@ impl FakeBackend {
             start_new: Scripted::ok(300),
             final_check: Scripted::ok(200),
             stop_new: Scripted::ok(100),
+            confirm_serving: Scripted::ok(0),
             restore: VecDeque::from([(RestoreResult::Healthy, 400)]),
             trace: None,
             calls: Vec::new(),
@@ -439,6 +448,10 @@ impl FakeBackend {
     }
     pub fn fail_final_check(mut self, msg: &str) -> Self {
         self.final_check.result = Err(StepError::new(msg));
+        self
+    }
+    pub fn fail_confirm_serving(mut self, msg: &str) -> Self {
+        self.confirm_serving.result = Err(StepError::new(msg));
         self
     }
     pub fn fail_stop_new(mut self, msg: &str) -> Self {
@@ -680,6 +693,9 @@ impl Backend for FakeBackend {
             .final_evidence
             .clone()
             .unwrap_or_else(|| CheckEvidence::simulated_passing("fake final check", &HealthSpec::first_test("/"))))
+    }
+    fn confirm_serving(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
+        self.run(Call::ConfirmServing, |b| b.confirm_serving.clone())
     }
     fn stop_new(&mut self, _io: &mut StepIo<'_>) -> Result<(), StepError> {
         self.run(Call::StopNew, |b| b.stop_new.clone())

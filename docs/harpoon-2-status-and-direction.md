@@ -1,16 +1,14 @@
 # Harpoon 2 — Status and Direction
 
-Status: canonical consolidation of repository evidence and current direction
-Date: 2026-10-30 (runtime sections last reviewed 2026-10-29; deployment sections reconciled with the canonical roadmap after PR #121)
+Status: **historical direction snapshot**, written 2026-10-30 (runtime sections last reviewed 2026-10-29; deployment sections reconciled after PR #121). **Not the authority for current release or milestone status.** For published rc.4 scope and evidence, see [the rc.4 release notes](releases/v2.0.0-rc.4.md); for active milestones, use the [roadmap](roadmap.md).
 
 **Milestone status lives only in [the roadmap](roadmap.md#deployment-control-plane-harpoon-21--canonical-milestone-tracker).**
 This document does not track which deployment milestones are done; where it describes the
 deployment direction it records scope and rationale, and defers every status claim to the roadmap.
 
-This document is the short index for the current Harpoon 2 runtime state and the
-proposed deployment-control-plane direction. It records what is implemented,
-validated, proposed, rejected, or still unknown. It does not promote conversation
-ideas to shipped features.
+This document preserves the directions and evidence distinctions recorded at the time.
+Its dated assessments are **not updated claims about what shipped in rc.4**. Do not
+promote conversation ideas or historic acceptance evidence to current features.
 
 ## Status vocabulary
 
@@ -52,15 +50,12 @@ runtime checks. Release tooling and the relocatable tarball are documented in
 `VZErrorDomain 1` startup failures remain a known host/Virtualization.framework
 risk; they were characterized, not fixed.
 
-**Release status:** `v2.0.0-rc.3` is the current testing-prerelease target (the
-schema-2 journal-reader compatibility release; see
-[its notes](releases/v2.0.0-rc.3.md)) and is not a stable release. The paragraph
-below records rc.2, whose guest initramfs and kernel match the tracked
-manifest (`30f5a015ca8594bf55acd546e9a5a9d511f6a538c4696be4d698d95edcb96664`
-and `d625d13a08f08ba1befa309edab7fa9360093b7e7c62b03010c0de084ff9ac20`), and
-one upgraded-host smoke boot passed. Second-Mac acceptance, 2×30 cold boots,
-upgrade/rollback, Developer ID signing, notarization, and Gatekeeper validation
-remain open.
+**Current release pointer (2026-11-15):** [`v2.0.0-rc.4`](releases/v2.0.0-rc.4.md) is the
+published testing prerelease, signed, notarized and stapled; `v0.1.1` remains stable.
+The shipped Apple Silicon runtime passed an isolated smoke test and hard-stop recovery;
+installed desktop acceptance, Intel guest boot, two-Mac 60-cycle reliability, and
+upgrade/rollback remain open. The prior rc.2/rc.3 evidence in this document is
+historical and is not the present release-status authority.
 
 **Validated as release preparation, not as a clean-machine release:** the runtime
 closure work justifies another RC transfer to the work Mac, but the current
@@ -78,10 +73,11 @@ the runtime architecture passed or failed.
 
 ## Intel and non-macOS portability
 
-**Current status: unknown/investigation, not supported.** The current product
-contract is Apple Silicon macOS with an ARM64 Linux guest. The repository makes no
-Intel or Windows claim; x86_64 images are not an MVP promise and may require
-Rosetta or emulation.
+**As of rc.4: Apple Silicon is the tested target.** The universal DMG includes
+x86_64 binaries and guest assets, but **Intel guest boot is unverified**; Intel
+is experimental, not supported. Windows and Linux hosts remain unsupported.
+The following adapter discussion records future architecture options, not a
+promise of cross-platform availability.
 
 **Proposed direction:** preserve the deployment and Docker-facing contract while
 placing host-specific work behind runtime adapters. A future adapter boundary may

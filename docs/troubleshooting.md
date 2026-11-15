@@ -46,12 +46,9 @@ harpoon docker setup   # → Creates harpoon → unix:///tmp/harpoon-docker.sock
 ```
 `harpoon start` hints `harpoon docker setup` if missing.
 
-**Docker context conflict**
-```
-Conflict: context 'harpoon' already exists but targets unix:///tmp/fake.sock
-Refusing to overwrite.
-```
-`harpoon docker remove` only removes owned context (endpoint matches). Otherwise `docker context rm harpoon` manually.
+**Docker context points at the wrong engine**
+
+`harpoon docker setup` now repairs a context named `harpoon` with the wrong endpoint, first trying `docker context update` and then remove/recreate if needed. It does **not** switch the default context. If you deliberately use a context named `harpoon` for another engine, rename or back it up **before** running setup; Harpoon owns that context name. Verify with `docker context inspect harpoon` (expected: `unix:///tmp/harpoon-docker.sock`). `harpoon docker remove` still refuses to remove a context unless its endpoint matches Harpoon's.
 
 **Socket permission**
 ```
