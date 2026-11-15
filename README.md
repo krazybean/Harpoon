@@ -4,7 +4,7 @@
 
 Harpoon is a native macOS workspace for Docker-compatible containers and **attended, local source deployments**. Run containers and Compose projects, or build an application from a Git repository and manage its releases on the same Mac—without requiring Docker Desktop, Kubernetes, or a cloud account. Apple's `Virtualization.framework` runs the lightweight Linux guest; Docker Engine remains responsible for containers, images, networks, volumes, and builds.
 
-**[Download Harpoon 2.0.0-rc.4 for macOS (testing prerelease)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/Harpoon-2.0.0-rc.4-universal.dmg)** · [Release notes](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4) · [Screenshots](assets/screenshots/README.md)
+**[Download Harpoon 2.0.0-rc.4 for macOS (testing prerelease)](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/Harpoon-2.0.0-rc.4-universal.dmg)** · [Latest stable v0.1.1 (Apple Silicon)](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) · [Release notes](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4) · [Screenshots](assets/screenshots/README.md)
 
 > **Before you install:** rc.4 is a **testing prerelease**, not a stable 2.0 release. **Apple Silicon is the only tested platform**; Intel binaries and a guest are included, but Intel boot has not been verified. macOS 12 or later is required. The shipped desktop has not yet passed installed first-launch acceptance; back up existing Harpoon data and use disposable workloads. [What was actually tested](docs/releases/v2.0.0-rc.4.md#verification).
 
