@@ -1,6 +1,6 @@
 # Changes since v2.0.0-rc.3 (released in rc.4)
 
-Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped in the [rc.4 prerelease](v2.0.0-rc.4.md) and are not in the rc.3 DMG. The sections below describe rc.4, not pending features. Add genuinely new unreleased changes in a separately labeled section.
+Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped in the [rc.4 prerelease](v2.0.0-rc.4.md) and are not in the rc.3 DMG. The sections below describe **already released** rc.4 features, not pending changes. Despite this historical file name, this is an rc.4 change log; use [rc.4 release notes](v2.0.0-rc.4.md) for release status and add new unreleased changes in a separately labeled section.
 
 ## Behavior changes
 
@@ -39,7 +39,7 @@ Detail for changes merged to `main` after [rc.3](v2.0.0-rc.3.md). They shipped i
   what the capture window sees and refuses redirects off the app's own host; the app's real headers and what ordinary visitors get are untouched. The
   capture waits for a drawn, settled frame, refuses a blank one, runs one window at a time and closes it on success and failure.
 
-### Deployments: the Metrics tab shows the serving container's real measurements (2.0.1 work, not released)
+### Deployments: the Metrics tab shows the serving container's real measurements (shipped in rc.4)
 
 - The tab replaces its placeholder with CPU, memory, network and uptime for the container the journal says is serving, read
   from Docker's own API through the existing socket (`GET /containers/{id}/json` and `/stats`; nothing is spawned, nothing
