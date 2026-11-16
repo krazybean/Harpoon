@@ -1,99 +1,67 @@
-# Installation & Distribution (M11)
+# Install Harpoon on macOS
 
-Harpoon is a self-contained, relocatable macOS installation. No source tree is required after install.
+This is the installation guide for people using a **published Harpoon.app DMG**, not building Harpoon from source. For compilation and historical standalone CLI packaging, see [Building](building.md) and [Distribution](distribution.md).
 
-## Artifacts
+## Choose a release
 
-- `dist/harpoon-0.1.0-dev-darwin-arm64/` — staged layout
-  - `bin/harpoon` (802K, arm64, ad-hoc signed `com.apple.security.virtualization`, `valid on disk`)
-  - `lib/harpoon/Image-virt` (33M kernel)
-  - `lib/harpoon/harpoon-initramfs.cpio.gz` (14M, sha `70a89d585bf0efbe...`)
-  - `lib/harpoon/harpoon-root.img` (2.0G logical, 962M allocated APFS sparse, ext4)
-  - `install.sh`, `uninstall.sh`, `share/doc/harpoon/`
-- `dist/harpoon-0.1.0-dev-darwin-arm64.tar.gz` (289M) + `.sha256` (`c2930f90a80f...` — regenerate and `shasum -a 256 -c`)
+| Release | Use |
+|---|---|
+| [Harpoon v2.0.0-rc.4 universal DMG](https://github.com/krazybean/Harpoon/releases/tag/v2.0.0-rc.4) | **Testing prerelease.** Apple Silicon only has been run in acceptance; Intel guest boot remains unverified. |
+| [Harpoon v0.1.1 arm64 DMG](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) | **Latest stable** desktop release, Apple Silicon. |
 
-## Install
+macOS 12 or later is required for the rc.4 package. You do not need Docker Desktop, Rust, Xcode, Node.js or a source checkout to use the bundled app. The rc.4 **runtime** passed isolated Apple Silicon acceptance, but installation and first launch of the **shipping desktop app** have not been accepted, so treat it as experimental software.
 
-From a checked-out repo or extracted archive:
+## Install rc.4
 
-```sh
-bash harpoon/install.sh          # installs to /usr/local (needs sudo for /usr/local)
-# or from staged archive:
-tar xzf dist/harpoon-0.1.0-dev-darwin-arm64.tar.gz
-./dist/harpoon-0.1.0-dev-darwin-arm64/install.sh
-```
+1. Download [`Harpoon-2.0.0-rc.4-universal.dmg`](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/Harpoon-2.0.0-rc.4-universal.dmg) from the GitHub release.
+2. Check `shasum -a 256 Harpoon-2.0.0-rc.4-universal.dmg` against the [published checksum](https://github.com/krazybean/Harpoon/releases/download/v2.0.0-rc.4/SHA256SUMS). Expected: `7dd7cbf2a190f192a886419b1ee84cf38c34ad9f557d0d7c9af8a55e45608d51`. If it differs, stop.
+3. Open the DMG and copy **Harpoon.app** to **/Applications**.
+4. Launch Harpoon. It may offer to add its bundled `harpoon` and `docker` commands to new Terminal sessions through `/etc/paths.d/harpoon`; this is optional and requires an administrator password. Declining does not prevent using the desktop.
+5. Start the Harpoon runtime from the desktop and check its status. The first image pull requires internet access. Developer ID signing, notarization and stapling were verified for rc.4, so do not disable Gatekeeper to install it.
 
-Install checks `harpoon status`/`lsof /tmp/harpoon.lock` and refuses if running (`harpoon stop` first). Binaries are `cp -c` (APFS clone) aware for the sparse root image; lib files are `644`, bin `755`.
+### CLI verification (optional)
 
-## Run anywhere
+After accepting the Terminal command registration, open a **new** Terminal window:
 
 ```sh
-cd /tmp
-harpoon version   # 0.1.0-dev
-harpoon doctor    # 11 PASS when staged/installed
-harpoon start     # block device attached /tmp/harpoon-runtime/data/harpoon-root.img or ~/Library/...
-harpoon status    # running
+harpoon status
+harpoon doctor
 docker --context harpoon version
 docker --context harpoon run --rm hello-world
-harpoon stop
 ```
 
-Resource resolution (`RuntimeConfig.resolveResource`/`resolveRootDisk`):
+The `harpoon` Docker context points at `unix:///tmp/harpoon-docker.sock` and is set up without changing your default Docker context. If necessary, `harpoon docker setup` creates or repairs it. If you have a separate Docker CLI, invoke it with `--context harpoon` to avoid talking to the wrong engine. Docker Compose v2 is separately needed only for Compose workflows.
 
-1. `installedLibDir` candidates: `/usr/local/lib/harpoon`, `/opt/homebrew/lib/harpoon`, `bin/../lib/harpoon` (relocatable), then cwd fallback `spike1/cache/...` for dev.
-2. User disk precedence: `~/Library/Application Support/Harpoon/data/harpoon-root.img` then `/tmp/harpoon-runtime/data/harpoon-root.img` (sandbox fallback). First run provisions by `cp -c`/`ditto` clone from template; logical size verified (2G). Subsequent runs reuse existing user disk — reinstall does not overwrite.
+## A local source deployment
 
-## Uninstall / Upgrade
+In **Deployments**, register a Git repository or local checkout. For a Dockerfile project, Harpoon uses its Dockerfile; supported npm and Python pip/uv projects without a Dockerfile can be built using a generated recipe. Configure install/build/start settings, variables and Keychain secrets, review the target local port and health check, then explicitly confirm the deployment. The stages recorded by Harpoon distinguish build, preliminary health check, cutover and final check.
 
-```sh
-harpoon stop
-bash harpoon/uninstall.sh          # removes /usr/local/bin/harpoon + /usr/local/lib/harpoon, preserves user data, removes harpoon docker context if owned
-bash harpoon/uninstall.sh --purge  # also removes ~/Library/Application Support/Harpoon and /tmp/harpoon-runtime
+Deployments run on this Mac only. They require an attending person; no automatic deploy-on-push, remote hosting, branch preview environment or uptime guarantee is offered. The source-deployment path of the **packaged rc.4 desktop** has not been run in acceptance. [See the specific test evidence](releases/v2.0.0-rc.4.md).
 
-# upgrade: stop, then install.sh again (same prefix) — user disk preserved
-bash harpoon/install.sh
+## Data, upgrades and removal
+
+**Back up both support directories before installing rc.4 over an existing Harpoon installation:**
+
+```text
+~/Library/Application Support/Harpoon
+~/Library/Application Support/com.harpoon.desktop
 ```
 
-## Docker prerequisites (Stage 3B)
+The first holds runtime configuration, persistent guest disk and operational state. The second holds desktop/deployment state, including the SQLite deployment journal. Deployment secrets are stored in the macOS Keychain (not in the SQLite journal). Container images, volumes and data live in the guest disk; **removing the app bundle does not remove them automatically**.
 
-Docker CLI is **required**. Docker Desktop is **NOT required**. Docker Compose v2 is **separately detected** and required only for `compose` workflows.
+An existing root disk is reused and is never silently replaced merely because a new app version ships. New disks start at 4 GiB logical sparse capacity by default; enlarging one is a grow-only, explicitly confirmed operation which interrupts running containers. It does not reclaim already allocated blocks; `harpoon disk reclaim --yes` requests a guest trim and does not prune Docker data. [Disk configuration and recovery](configuration.md).
 
-- **Docker CLI**: Harpoon discovers a runnable CLI via the current `PATH` → `/opt/homebrew/bin/docker` → `/usr/bin/docker`. Finder-launched UI (minimal `PATH`) still resolves via `/opt/homebrew` without sourcing shell startup files; stale or incompatible executables are skipped after a `--version` probe. `harpoon doctor` reports `Docker CLI ................. PASS /opt/homebrew/bin/docker` or `FAIL — Docker CLI not installed/found`. No generic `os error 2` reaches UI.
-- **Harpoon context**: `harpoon` → `unix:///tmp/harpoon-docker.sock`. Created/repaired idempotently by `harpoon docker setup` (does **not** switch your active/default context; Harpoon operations use `docker --context harpoon ...`). The desktop app ensures the context on first relevant use. Verify with `docker context inspect harpoon` (Host must be exactly `unix:///tmp/harpoon-docker.sock`). Repeated `harpoon docker setup` is safe; it repairs a wrong endpoint via `context update` → `rm -f` → `create`.
-- **Docker Compose v2**: Detected separately via `docker compose version` (using the same resolved executable). `harpoon doctor` shows `Docker Compose plugin ...... PASS v5.1.0` or `FAIL` with hint. Ordinary `docker run` etc continue to work when Compose is missing; Compose itself will show an actionable message.
-- **Stale Docker Desktop credential helper**: Harpoon inspects `~/.docker/config.json` (respecting `DOCKER_CONFIG`) non-destructively. If `"credsStore":"desktop"` and `docker-credential-desktop` is not found in `PATH`/standard locations, `harpoon doctor` warns `Docker credential helper ... WARN — config references docker-credential-desktop but helper not installed` (Harpoon never silently deletes `credsStore`; remove it manually or install the helper if you need it).
+**Upgrades and rollback are not verified for rc.4.** Do not infer that a successful new-install smoke test proves a stateful upgrade is safe. Before trying an upgrade or downgrade: stop workloads deliberately, retain verified backups of **both** support directories and any external application data, and be prepared to restore the previous app *and* data together if needed. Older builds can be incompatible with future deployment-journal schema changes; rc.4 reads schema 1 and 2 but does not write schema 2.
 
-```sh
-harpoon docker setup   # idempotent, repairs wrong endpoint, leaves default context unchanged
-harpoon doctor         # decomposed: CLI, Compose, context, socket, Engine, credsStore
-docker --context harpoon version
-docker --context harpoon run --rm hello-world
-docker --context harpoon compose version
-```
+To stop using the DMG-installed app, stop the Harpoon runtime, quit the desktop, then remove **Harpoon.app** from Applications. If you accepted the optional Terminal-path integration, an administrator can remove `/etc/paths.d/harpoon` separately. This is **not** a data purge: do not delete either support directory or Keychain secrets unless you've independently verified backups and intend to remove all persistent Harpoon state. The repository's `harpoon/install.sh` and `harpoon/uninstall.sh` describe a separate source/CLI installation path, not an automatic uninstaller for the DMG desktop.
 
-## Persistent storage (Stage 3C)
+## Troubleshooting
 
-Immutable template `assets/guest/harpoon-root.img` (`2 GiB` logical, `~962M` APFS sparse, `0/0/0`) is **never** silently replaced. First `harpoon start` (or `harpoon start --disk-size 16G`) copies to mutable `~/Library/Application Support/Harpoon/data/harpoon-root.img` (`/tmp/...` fallback) sparse-grown to the **4 GiB default** (provisional; 2 GiB minimum, `--disk-size`/`HARPOON_DISK_SIZE`/`disk-size` override it) (`truncate` + guest `resize2fs` on next boot; `azure-sql-edge` exhausted 2G). Supports `G/GiB/M/MiB` (e.g. `12G 16G 32G`), grow-only via `harpoon disk resize 16G` (VM stopped, `requested <= current` rejected, no shrink, filesystem expands on next boot). `harpoon disk status` reports backing logical/physical (sparse), FS used/free, inode, template; `harpoon doctor` allows normal ext4 `df` overhead and warns only when usable capacity is more than 2% below backing geometry, plus host low `<2G` and `FS <512M`. `harpoon config set/get disk-size 16G` persists; `HARPOON_DISK_SIZE` env also considered. No `e2fsprogs` install required on macOS; guest owns `resize2fs`. Interrupted file-grow without FS remains valid old FS; retry expands.
+- **Command not found:** open a new Terminal after the optional PATH registration. Otherwise use the desktop, or consult [Building](building.md) for source/CLI instructions.
+- **Wrong Docker engine:** inspect `docker context ls`; use `docker --context harpoon ...`, not an assumed default. `harpoon docker setup` repairs its endpoint without selecting it as default.
+- **Docker is not ready:** check `harpoon status` and `harpoon doctor`; inspect [runtime logs and diagnostics](lifecycle.md). Startup may fail with `VZErrorDomain 1` or an intermittent guest fault; these are **unresolved** and aren't a reason to delete the root disk or disable Gatekeeper.
+- **Images won't pull:** check the Mac's network and the guest's Docker readiness. A running Docker context alone does not establish that a registry is reachable.
+- **Low disk space:** inspect `harpoon disk status`; expansion requires confirmation and temporarily stops the VM. Reclaim and cleanup are separate operations with different effects.
+- **Existing app doesn't restart after an engine restart:** older deployments may still have Docker restart policy `no`; see [application recovery](deployment-recovery.md) for the dry-run-first migration. Do not apply it to production workloads without authorization.
 
-```sh
-harpoon disk status
-harpoon disk resize 16G # VM stopped
-harpoon start --disk-size 32G # first provision only
-```
-
-## Verification
-
-```sh
-codesign --verify --verbose /usr/local/bin/harpoon  # valid on disk
-codesign -d --entitlements :- /usr/local/bin/harpoon | grep virtualization
-spctl --assess --type execute --verbose /usr/local/bin/harpoon  # ad-hoc: internal error expected; Developer ID + notarization required for Gatekeeper PASS
-shasum -a 256 -c dist/harpoon-0.1.0-dev-darwin-arm64.tar.gz.sha256
-bash harpoon/m11-test.sh
-```
-
-## Known limitations
-
-- Ad-hoc signature only (`-`); not notarized — Gatekeeper `spctl` fails until Developer ID + `notarytool` is added (no updater/GUI).
-- Host transient `VZErrorDomain Code=1` (`Internal Virtualization error`) intermittently blocks `harpoon start` on this macOS host; retry once, then `harpoon stop` + retry. Not a packaging bug (observed with both staged and repo bins, both disks).
-- Sandbox on this dev host blocks `mkdir ~/Library/Application Support/Harpoon/data` (`Operation not permitted`); production fallback to `/tmp/harpoon-runtime/data` is functional, but production hosts allow the primary path.
-- `harpoon-root.img` is sparse APFS; `du -m` should show ~962M, not 36M (fixed from `FileManager.copyItem` truncation via `cp -c`/`ditto`).
+If you encounter a bug, use [GitHub Issues](https://github.com/krazybean/Harpoon/issues) with your Harpoon version, macOS version, Mac architecture, and diagnostic output. For vulnerabilities, follow [private reporting](../SECURITY.md).
