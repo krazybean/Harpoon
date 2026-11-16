@@ -35,12 +35,25 @@ No safety check was weakened. No replan or scope reduction was needed.
 
 ## Evidence
 - Environment: Node 22.23.3, clean `node_modules` from `npm ci`.
-- `npm test`: 366 tests, 366 pass, 0 fail, 0 skipped (350 before; 16 new in `diskTelemetry.test.mjs` and `diskMeter.test.mjs`).
+- `npm test`: 366 tests, 366 pass, 0 fail, 0 skipped (350 before; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
 - `npm run build` (`tsc && vite build`): passes. `npm audit`: 0 vulnerabilities.
 - UI evidence: a static harness renders the real `DiskMeter` and `DiskChip` with the app's CSS in headless Chromium at 20/50/85/95% and in the stale, engine-down, disconnected and unsupported states. It used no Docker, no Harpoon and no live engine.
 - Nothing in this slice calls the live engine except the existing read-only `get_disk_capacity`, unchanged.
 
+## Corrective review (owner request, same slice)
+| # | Finding | Change | Regression test |
+|---|---|---|---|
+| 1 | A remembered `pressure` (Healthy/Warning/Critical) was still shown for stale, engine-down, disconnected, unsupported and unavailable readings | `diskView.pressure` is the runtime's class only when status is `live`, otherwise `unknown`. Historical usage (percent, used/free) stays for stale and engine-down, worded "was used at the last reading", with a neutral bar. Unsupported shows no figures. The chip's accessible name no longer claims health when stale | `diskTelemetry.test` (all states), `diskMeter.test` (no health label, neutral bar, chip) |
+| 2 | "Last successful reading N ago" only updated when the store changed, so it froze if refreshes failed or hung | `useDiskView` owns a 15 s tick (`TICK_MS`) independent of any request; `DiskView.now` carries the clock. The earlier `touch()` path is removed | `diskLifecycle.test` (advances after a failure, while a request hangs, and turns stale by age with no failure) |
+| 2b | Found while testing: one request that never answers kept `inflight` set forever, so no later refresh could run | `refresh` abandons a request after `FETCH_TIMEOUT_MS` (20 s) as a failure and clears the timer | `diskTelemetry.test` (hung request), `diskLifecycle.test` (recovers after the timer fires) |
+| 3 | Subscription/timer lifecycle under React Strict Mode | The polling effect owns the poll timer and the `enabled` flag (cleanup clears the timer and sets `enabled` false, so nothing claims to be live when nothing polls). Concurrent refreshes share one request. The store's default clock is now `() => Date.now()` (it captured the function at creation) | `diskLifecycle.test`: one request and one poll timer after the double mount, one tick timer per subscribed view, nothing left after unmount (timers 0, subscriptions 0, enabled false); toggling enabled does not stack timers |
+| 4 | Safety of the notice and reclaim on non-live readings | Notice: a stale warning is still shown ("was running low at the last reading"), so a failed refresh cannot hide it, but "Review expansion" and "Confirm expansion" require a live reading (also re-checked inside `confirm`). Reclaim: the button needs a live reading (unchanged in effect from before, now explicit) and explains why it is off. Unsupported, disconnected and engine-down show no warning, as before | `diskSafety.test` (real components): nothing read; live warning with cancel and confirm paths; failed refresh keeps the warning and disables both actions; a reading that goes stale mid-review cannot be confirmed; unsupported / disconnected / engine-down |
+| 5 | Visual evidence of the whole page | The real `ResourcesView` and header chip inside Strict Mode with a mocked `invoke` (no engine, no Docker). Live: warning meter. Stale: neutral bar, "8 min ago" reached by the real tick after the clock was advanced and a refresh failed, reclaim disabled with its reason | scratchpad `disk-ui/resources-live.png`, `resources-stale.png` |
+
+Further small fixes from the screenshots: error text no longer shows a leading "Error:", and the reclaim card's allocation line says "Current allocation appears once disk status is live" instead of implying the disk does not exist.
+
+Failures and root causes in this pass: the elapsed-time tests initially failed because the store captured `Date.now` at creation (fixed above, which also made a real clock-injection bug visible); a later test hung because an earlier test left a never-answering request in flight, which exposed the missing timeout (2b); my "all non-live states" test mutated its own reply array while looping (test bug, corrected).
+
 ## Known limits
 - Warning/critical colour is the runtime's classification, so a desktop running against an older runtime that reports a different `pressure` shows that runtime's verdict.
 - The meter does not explain what is using the space; that is Slice 2.
-- "Last successful reading" is refreshed when the store changes (one poll a minute, or a touch when the window is hidden); between ticks the age text can lag by up to a minute.

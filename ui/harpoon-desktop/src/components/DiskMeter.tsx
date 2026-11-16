@@ -14,8 +14,8 @@ const PRESSURE_BADGE: Record<DiskPressure, string> = { ok: "badge--running", war
  * Always-visible disk usage. The bar is the guest filesystem's real utilization; its colour is the runtime's own pressure class. The Mac's
  * sparse disk image is a separate line: it only grows, and freed guest space is not returned to macOS until it is reclaimed.
  */
-export function DiskMeter({ view, now }: { view: DiskView; now: number }) {
-  const { cap, status, percent, pressure } = view;
+export function DiskMeter({ view }: { view: DiskView }) {
+  const { cap, status, percent, pressure, now } = view;
   const g = cap && cap.guest ? guestLine(cap, formatSize) : null;
   const host = cap ? hostLine(cap, formatSize) : null;
   const pct = percent === null ? null : Math.min(100, Math.max(0, percent));
@@ -32,7 +32,7 @@ export function DiskMeter({ view, now }: { view: DiskView; now: number }) {
       {shown ? (
         <>
           <div className="text-body" style={{ margin: "8px 0 6px", display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-            <b style={{ fontSize: 20 }}>{Math.round(pct!)}%</b> <span>of the guest filesystem is used</span>
+            <b style={{ fontSize: 20 }}>{Math.round(pct!)}%</b> <span>of the guest filesystem {status === "live" ? "is used" : "was used at the last reading"}</span>
             {PRESSURE_LABEL[pressure] && <span className={`badge badge--sm ${PRESSURE_BADGE[pressure]}`}>{PRESSURE_LABEL[pressure]}</span>}
           </div>
           <div className="disk-meter" data-pressure={pressure} data-stale={status === "live" ? undefined : "true"}

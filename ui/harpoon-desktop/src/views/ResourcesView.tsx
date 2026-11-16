@@ -22,7 +22,7 @@ export const ResourcesView = memo(function ResourcesView({
   const disk = useDiskView();
   return (
     <div style={{ display: "grid", gap: 12 }}>
-      <DiskMeter view={disk} now={Date.now()} />
+      <DiskMeter view={disk} />
       <div className="panel" style={{ overflow: "hidden" }}>
         <div className="panel-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span className="text-panel-title">Resources & Config <span className="text-meta" style={{ textTransform: "none", letterSpacing: 0, marginLeft: 8 }}>{fmtTs(configAt)}</span></span>

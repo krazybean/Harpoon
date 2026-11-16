@@ -47,7 +47,7 @@ async function render(el) {
 test("the meter shows real utilization at 20, 50, 85 and 95 percent, with the runtime's own classification", async () => {
   for (const [pct, pressure, label] of [[20, "ok", /Healthy/], [50, "ok", /Healthy/], [85, "warning", /Warning/], [95, "critical", /Critical/]]) {
     const v = diskView(tele(cap(pct, pressure)), 1000);
-    const r = await render(React.createElement(DiskMeter, { view: v, now: 1000 }));
+    const r = await render(React.createElement(DiskMeter, { view: v }));
     const m = r.host.querySelector('[role="meter"]');
     assert.equal(m.getAttribute("aria-valuenow"), String(pct));
     assert.equal(m.dataset.pressure, pressure);
@@ -59,7 +59,7 @@ test("the meter shows real utilization at 20, 50, 85 and 95 percent, with the ru
 });
 
 test("guest usage and the Mac's sparse image are separate and explained", async () => {
-  const r = await render(React.createElement(DiskMeter, { view: diskView(tele(cap(50, "ok")), 1000), now: 1000 }));
+  const r = await render(React.createElement(DiskMeter, { view: diskView(tele(cap(50, "ok")), 1000) }));
   const t = r.host.textContent;
   assert.match(t, /50 GiB used of 100 GiB · 50 GiB free/);
   assert.match(t, /Guest filesystem:/);
@@ -75,17 +75,19 @@ test("every unavailable state is distinct and never draws a zero bar", async () 
     ["disconnected", tele(raw), /Guest not answering/],
     ["unsupported", tele(null, { failure: { kind: "unsupported", message: "x", at: 1 } }), /Unsupported/],
     ["unavailable", tele(null, { failure: { kind: "failed", message: "boom", at: 1 } }), /Unavailable/],
-    ["stale", tele(cap(50, "ok"), { failure: { kind: "failed", message: "boom", at: 2 } }), /Stale/],
+    ["stale", tele(cap(95, "critical"), { failure: { kind: "failed", message: "boom", at: 2 } }), /Stale/],
   ];
   const seen = new Set();
   for (const [status, t, label] of cases) {
-    const r = await render(React.createElement(DiskMeter, { view: diskView(t, 1000), now: 1000 }));
+    const r = await render(React.createElement(DiskMeter, { view: diskView(t, 1000) }));
     assert.equal(r.host.firstChild.dataset.diskStatus, status);
     assert.match(r.host.textContent, label);
     seen.add(r.host.textContent.match(label)[0]);
     const m = r.host.querySelector('[role="meter"]');
-    if (status === "engine-down" || status === "stale") { assert.equal(m.getAttribute("aria-valuenow"), "50"); assert.equal(m.dataset.stale, "true"); assert.match(r.host.textContent, /last figures|out of date/); }
+    if (status === "engine-down" || status === "stale") { assert.equal(m.getAttribute("aria-valuenow"), status === "stale" ? "95" : "50"); assert.equal(m.dataset.stale, "true"); assert.match(r.host.textContent, /last figures|out of date/); }
     else assert.equal(m, null, `${status}: no bar`);
+    assert.doesNotMatch(r.host.textContent, /Healthy|Warning: running low|Critical: almost full/, `${status}: no current-health label`);
+    if (m) assert.equal(m.dataset.pressure, "unknown", `${status}: neutral bar`);
     await r.unmount();
   }
   assert.equal(seen.size, cases.length);
@@ -103,6 +105,8 @@ test("the chip is a real button, opens Resources, and says stale when it is", as
   await live.unmount();
   const stale = await render(React.createElement(DiskChip, { view: diskView(tele(cap(85, "warning"), { failure: { kind: "failed", message: "x", at: 2 } }), 1000), onOpen() {} }));
   assert.match(stale.host.textContent, /Disk 85% · stale/);
+  assert.doesNotMatch(stale.host.querySelector("button").getAttribute("aria-label"), /warning|critical|healthy/i, "a stale chip does not claim current health");
+  assert.match(stale.host.querySelector("button").getAttribute("aria-label"), /stale/);
   await stale.unmount();
   for (const t of [tele(null), tele(cap(10, "ok"), { enabled: false })]) {
     const none = await render(React.createElement(DiskChip, { view: diskView(t, 1000), onOpen() {} }));

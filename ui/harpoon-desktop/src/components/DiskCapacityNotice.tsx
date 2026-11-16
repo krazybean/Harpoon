@@ -6,6 +6,7 @@ import {
 } from "../lib/diskCapacity";
 import type { Dismissal } from "../lib/diskCapacity";
 import { diskTelemetry, useDiskView } from "../hooks/useDiskTelemetry";
+import { ageLabel } from "../lib/diskTelemetry";
 
 const KEY = "harpoon.diskNotice.dismissal";
 
@@ -23,7 +24,9 @@ function saveDismissal(d: Dismissal | null) {
  */
 export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabled: boolean; stagesShown: boolean; onExpanded: () => void }) {
   const view = useDiskView();
-  const cap = view.status === "live" || view.status === "stale" ? view.cap : null;
+  // A remembered warning stays visible (a failed refresh must not hide it), but only a live reading may offer expansion.
+  const live = view.status === "live";
+  const cap = live || view.status === "stale" ? view.cap : null;
   const [dismissal, setDismissal] = useState<Dismissal | null>(() => loadDismissal());
   const [reviewing, setReviewing] = useState(false);
   const [choice, setChoice] = useState<number | "custom" | null>(null);
@@ -38,7 +41,7 @@ export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabl
 
   const requested: number | null = choice === "custom" ? (custom.trim() && /^\d+$/.test(custom.trim()) ? Number(custom.trim()) * GIB : null) : choice;
   const customError = choice === "custom" && cap ? customSizeError(custom, cap) : null;
-  const canConfirm = Boolean(cap && requested && !busy && !customError);
+  const canConfirm = Boolean(live && cap && requested && !busy && !customError);
 
   const dismiss = () => {
     if (!cap) return;
@@ -47,7 +50,7 @@ export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabl
   };
 
   const confirm = async () => {
-    if (!cap || !requested) return;
+    if (!live || !cap || !requested) return;
     // The only path to a lifecycle action: an explicit confirmation that says the containers are interrupted.
     const ok = await confirmAction(confirmationMessage(cap, requested), "Restart and expand");
     if (!ok) return;
@@ -79,13 +82,14 @@ export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabl
       {!busy && !result && enabled && cap && (
         <>
           <div>
-            <strong>{level === "critical" ? "Docker disk is almost full." : "Docker disk is running low."}</strong>{" "}
+            <strong>{live ? (level === "critical" ? "Docker disk is almost full." : "Docker disk is running low.") : (level === "critical" ? "Docker disk was almost full at the last reading." : "Docker disk was running low at the last reading.")}</strong>{" "}
             {summary(cap)}{cap.hostAvailableBytes !== undefined && <> Host has {formatSize(cap.hostAvailableBytes)} free.</>}
+            {!live && <> Last successful reading {ageLabel(view.at, view.now)}; these figures may be out of date. Expansion can be reviewed once disk status refreshes.</>}
           </div>
           {!reviewing && (
             <div className="dialog-actions">
               <button className="btn btn--secondary" onClick={dismiss}>Not now</button>
-              <button className="btn btn--primary" onClick={() => { setReviewing(true); setChoice(cap.suggestedSizes[0] ?? "custom"); }}>Review expansion</button>
+              <button className="btn btn--primary" disabled={!live} onClick={() => { setReviewing(true); setChoice(cap.suggestedSizes[0] ?? "custom"); }}>Review expansion</button>
             </div>
           )}
           {reviewing && (

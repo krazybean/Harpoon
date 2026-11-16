@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ageLabel, createDiskTelemetry, diskView, guestLine, hostLine, initialTelemetry, POLL_MS, STALE_AFTER_MS } from "./diskTelemetry.ts";
+import { ageLabel, createDiskTelemetry, FETCH_TIMEOUT_MS, diskView, guestLine, hostLine, initialTelemetry, POLL_MS, STALE_AFTER_MS } from "./diskTelemetry.ts";
 import { formatSize, GIB } from "./diskCapacity.ts";
 
 const capText = (over = {}, guest = { capacityBytes: 10 * GIB, usedBytes: 5 * GIB, availableBytes: 5 * GIB }) =>
@@ -33,7 +33,7 @@ test("a failed refresh keeps the last good reading and its time, and says it is 
   assert.equal(v.status, "stale");
   assert.equal(v.at, 1000, "the time of the last SUCCESSFUL reading");
   assert.equal(v.percent, 50, "not reset to zero");
-  assert.equal(v.pressure, "warning");
+  assert.equal(v.pressure, "unknown", "a remembered warning is not current health");
   assert.match(v.note, /management channel timed out/);
 });
 
@@ -116,4 +116,56 @@ test("ageLabel", () => {
   assert.equal(ageLabel(1000, 1000), "just now");
   assert.equal(ageLabel(0, 30_000), "30 s ago");
   assert.equal(ageLabel(0, 5 * 60_000), "5 min ago");
+});
+
+test("only a live reading carries a pressure class; every other state reports unknown while keeping historical usage where it has any", async () => {
+  const warn = capText({ pressure: "critical" });
+  const noGuest = JSON.parse(warn); delete noGuest.guest;
+  const mk = async (replies, enabled = true) => { const n = replies.length; const { s } = store(replies); s.setEnabled(true); for (let i = 0; i < n; i++) await s.refresh(); if (!enabled) s.setEnabled(false); return s; };
+  const live = await mk([warn]);
+  assert.equal(diskView(live.get(), 1000).pressure, "critical");
+  const cases = {
+    stale: await mk([warn, new Error("x")]),
+    "stale by age": live,
+    "engine-down": await mk([warn], false),
+    stopped: await mk([capText({ state: "stopped", pressure: "critical" })]),
+    disconnected: await mk([JSON.stringify({ ...noGuest, pressure: "critical" })]),
+    unsupported: await mk([warn, "garbage"]),
+    unavailable: await mk([new Error("x")]),
+  };
+  for (const [name, s] of Object.entries(cases)) {
+    const v = diskView(s.get(), name === "stale by age" ? 1000 + STALE_AFTER_MS + 1 : 1000);
+    assert.notEqual(v.status, "live", name);
+    assert.equal(v.pressure, "unknown", name);
+  }
+  const hist = diskView(cases.stale.get(), 1000);
+  assert.equal(hist.percent, 50, "historical usage remains for stale");
+  assert.equal(diskView(cases.unsupported.get(), 1000).percent, null, "unsupported shows nothing");
+});
+
+test("the view carries the clock it was computed against", async () => {
+  const { s } = store([capText()]);
+  s.setEnabled(true); await s.refresh();
+  assert.equal(diskView(s.get(), 4242).now, 4242);
+});
+
+test("a request that never answers is abandoned as a failure, so it cannot block later refreshes", async () => {
+  const realSet = globalThis.setTimeout; const timers = [];
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+  const realClear = globalThis.clearTimeout; globalThis.clearTimeout = () => {};
+  try {
+    let hang = true;
+    const s = createDiskTelemetry(() => (hang ? new Promise(() => {}) : Promise.resolve(capText())), () => 1000);
+    s.setEnabled(true);
+    const first = s.refresh();
+    assert.strictEqual(s.refresh(), first, "a second caller joins the pending request");
+    assert.equal(timers.at(-1).ms, FETCH_TIMEOUT_MS);
+    timers.at(-1).fn();
+    await first;
+    assert.equal(diskView(s.get(), 1000).status, "unavailable");
+    assert.match(s.get().failure.message, /timed out/);
+    hang = false;
+    await s.refresh();
+    assert.equal(diskView(s.get(), 1000).status, "live", "the next refresh runs and recovers");
+  } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
 });

@@ -8,10 +8,12 @@ import type { DiskCapacity, DiskPressure } from "./diskCapacity.ts";
 export const POLL_MS = 60_000;
 /** A reading older than this (three missed polls) is no longer "live", even if no refresh has reported a failure. */
 export const STALE_AFTER_MS = 3 * POLL_MS;
+/** A refresh that has not answered by now is abandoned as failed, so one hung request can never block every later refresh. */
+export const FETCH_TIMEOUT_MS = 20_000;
 
 export interface Reading { cap: DiskCapacity; at: number }
 export interface Failure { kind: "failed" | "unsupported"; message: string; at: number }
-export interface Telemetry { enabled: boolean; last: Reading | null; failure: Failure | null; tick: number }
+export interface Telemetry { enabled: boolean; last: Reading | null; failure: Failure | null }
 
 /**
  * live: a fresh reading with guest figures.
@@ -29,19 +31,22 @@ export interface DiskView {
   at: number | null;
   /** Guest filesystem utilization, only when the last reading has guest figures. */
   percent: number | null;
-  /** The runtime's classification of the last reading; "unknown" when there is none. */
+  /** The runtime's classification of the CURRENT reading. "unknown" unless the status is live: a remembered figure must not look like current health. */
   pressure: DiskPressure;
   note: string;
+  /** The clock this view was computed against, so "N ago" labels agree with the staleness decision. */
+  now: number;
 }
 
-export const initialTelemetry = (): Telemetry => ({ enabled: false, last: null, failure: null, tick: 0 });
+export const initialTelemetry = (): Telemetry => ({ enabled: false, last: null, failure: null });
 
 export function diskView(t: Telemetry, now: number): DiskView {
   const cap = t.last?.cap ?? null;
   const at = t.last?.at ?? null;
-  const base = { cap, at, percent: cap ? usedPercent(cap) : null, pressure: (cap?.pressure ?? "unknown") as DiskPressure };
+  // Historical usage (percent) stays available; the pressure class is only ever the live one.
+  const base = { cap, at, percent: cap ? usedPercent(cap) : null, pressure: "unknown" as DiskPressure, now };
   if (!t.enabled) return { ...base, status: "engine-down", note: "Harpoon is not running." };
-  if (t.failure?.kind === "unsupported") return { ...base, cap: null, at: null, percent: null, pressure: "unknown", status: "unsupported", note: "This runtime reports disk usage in a form this app does not understand." };
+  if (t.failure?.kind === "unsupported") return { ...base, cap: null, at: null, percent: null, status: "unsupported", note: "This runtime reports disk usage in a form this app does not understand." };
   if (t.failure) return t.last
     ? { ...base, status: "stale", note: `The last refresh failed: ${t.failure.message || "no reason given"}.` }
     : { ...base, status: "unavailable", note: `Disk usage could not be read: ${t.failure.message || "no reason given"}.` };
@@ -49,7 +54,7 @@ export function diskView(t: Telemetry, now: number): DiskView {
   if (t.last.cap.state !== "running") return { ...base, status: "engine-down", note: "Harpoon is not running." };
   if (!t.last.cap.guest) return { ...base, status: "disconnected", note: "The guest is not answering on its management channel, so its filesystem figures are unavailable." };
   if (now - t.last.at > STALE_AFTER_MS) return { ...base, status: "stale", note: "No recent refresh has completed." };
-  return { ...base, status: "live", note: "" };
+  return { ...base, status: "live", pressure: t.last.cap.pressure, note: "" };
 }
 
 export interface DiskTelemetryStore {
@@ -57,11 +62,9 @@ export interface DiskTelemetryStore {
   subscribe(fn: () => void): () => void;
   refresh(): Promise<void>;
   setEnabled(enabled: boolean): void;
-  /** Re-notify subscribers without a refresh, so time-based staleness is re-evaluated. */
-  touch(): void;
 }
 
-export function createDiskTelemetry(fetchText: () => Promise<string>, now: () => number = Date.now): DiskTelemetryStore {
+export function createDiskTelemetry(fetchText: () => Promise<string>, now: () => number = () => Date.now()): DiskTelemetryStore {
   let state = initialTelemetry();
   const subs = new Set<() => void>();
   let inflight: Promise<void> | null = null;
@@ -70,17 +73,18 @@ export function createDiskTelemetry(fetchText: () => Promise<string>, now: () =>
     get: () => state,
     subscribe(fn) { subs.add(fn); return () => { subs.delete(fn); }; },
     setEnabled(enabled) { if (enabled !== state.enabled) set({ ...state, enabled }); },
-    touch() { set({ ...state, tick: state.tick + 1 }); },
     refresh() {
       if (inflight) return inflight; // one request at a time, whoever asks
       inflight = (async () => {
         try {
-          const cap = parseDiskCapacity(await fetchText());
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("disk status timed out")), FETCH_TIMEOUT_MS); });
+          const cap = parseDiskCapacity(await Promise.race([fetchText(), timeout]).finally(() => clearTimeout(timer)));
           set(cap
             ? { ...state, last: { cap, at: now() }, failure: null }
             : { ...state, failure: { kind: "unsupported", message: "unrecognized disk status", at: now() } });
         } catch (e) {
-          set({ ...state, failure: { kind: "failed", message: String(e).trim(), at: now() } });
+          set({ ...state, failure: { kind: "failed", message: String(e).replace(/^Error:\s*/, "").trim(), at: now() } });
         } finally { inflight = null; }
       })();
       return inflight;

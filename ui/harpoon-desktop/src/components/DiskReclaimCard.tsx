@@ -254,7 +254,7 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
       <div className="text-body" style={{ lineHeight: 1.7, marginTop: 6 }}>
         {cap && cap.provisioned
           ? <>Capacity {formatSize(cap.logicalBytes)} • {formatSize(cap.physicalBytes)} currently allocated on this Mac</>
-          : <>Allocation appears once the disk exists and can be read.</>}
+          : <>Current allocation appears once disk status is live.</>}
       </div>
       <div className="text-meta" style={{ margin: "6px 0" }}>
         Reclaiming asks the guest to hand blocks it no longer uses back to macOS. It does not delete Docker images, containers or volumes, and the amount returned is only known afterwards.
