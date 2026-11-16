@@ -1,5 +1,7 @@
 # Architecture
 
+> **Release reference (2026-11-15):** [v2.0.0-rc.4](releases/v2.0.0-rc.4.md) is the published, signed/notarized **testing prerelease**, while v0.1.1 remains the latest stable release. Milestone sections (M8/M10/M11 and earlier) retain the state measured **at that milestone** and are not current installation or default-setting instructions. See [Installation](installation.md) and [Configuration](configuration.md) for the present user contract.
+
 This document describes Harpoon's system architecture: its components, the boundaries
 between them, and the data flows that connect them. For scope and acceptance criteria,
 see [Requirements](requirements.md). For memory behavior, see the
@@ -184,7 +186,9 @@ Harpoon separates **immutable template** `assets/guest/harpoon-root.img` (pristi
 See [Installation](installation.md) (disk prerequisites) and `harpoon disk --help`.
 
 
-## Developer Ergonomics (M10)
+## Developer Ergonomics (M10 — historical milestone snapshot)
+
+The values below document M10 at the time; current build versions, resource defaults and precedence are in [Configuration](configuration.md) and the release record.
 
 - Persistent config `~/Library/Application Support/Harpoon/config.json` (`cpus`, `memory`), precedence `CLI > config > env > defaults`, atomic writes, validation `1...8` and `512|768|1024`
 - `harpoon help` (product description, examples, diagnostics), `harpoon doctor` (PASS/WARN/FAIL for host/Harpoon/Docker), `harpoon status --json`, `harpoon logs --path`, `harpoon docker env`
@@ -507,7 +511,9 @@ Performance optimization deferred until correctness basis exists — host↔cont
 Configured capacity vs guest physical vs guest active vs page cache vs reclaimable vs ballooned vs cgroup vs host resident (`phys_footprint`) vs macOS compressed vs swap vs memory pressure — reclamation success is **host resident decrease**, not guest free increase. Spike 5 qualified benchmark: same Mac, snapshot window `+5s` stable (`+30s/+60s` high-water NO reclamation observed), `2` vCPUs vs Docker Desktop `11` vCPUs, `~970` vs `~7922 MiB` visible, `nginx+Redis+Postgres` equivalence with `--dns 1.1.1.1 8.8.8.8` `compat` — figures are measurement qualified, not universal guarantees.
 
 
-## Distribution (M11)
+## Distribution (M11 — historical source-CLI layout)
+
+The `0.1.0-dev` archive and ad-hoc signing details below describe M11, **not** the currently published rc.4 DMG. For rc.4 distribution and Developer ID/notarization, see [Distribution](distribution.md) and [rc.4](releases/v2.0.0-rc.4.md).
 
 Relocatable, self-contained macOS installation — no source required after install.
 

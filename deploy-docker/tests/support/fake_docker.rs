@@ -37,6 +37,8 @@ pub struct Ctr {
     pub host_port: Option<u16>,
     /// When set, `NetworkSettings.Ports` is exactly this (to model odd mappings) instead of the usual one.
     pub ports_override: Option<Json>,
+    /// Set by `POST /containers/{id}/update`; until then the create request's `HostConfig.RestartPolicy.Name`.
+    pub restart_policy: Option<String>,
     pub create_body: Json,
     pub logs: Vec<u8>,
 }
@@ -159,6 +161,7 @@ impl St {
             restart_count: 0,
             host_port: None,
             ports_override: None,
+            restart_policy: None,
             create_body: Json::Null,
             logs: Vec::new(),
         });
@@ -432,6 +435,19 @@ fn labels_json(l: &Labels) -> Json {
     )
 }
 
+/// What Docker would report: the update's policy, else the one the container was created with, else none.
+pub fn restart_policy_of(c: &Ctr) -> String {
+    c.restart_policy.clone().unwrap_or_else(|| {
+        c.create_body
+            .get("HostConfig")
+            .and_then(|h| h.get("RestartPolicy"))
+            .and_then(|r| r.get("Name"))
+            .and_then(Json::as_str)
+            .unwrap_or("no")
+            .to_string()
+    })
+}
+
 pub fn container_inspect_json(c: &Ctr) -> String {
     obj(vec![
         ("Id", Json::Str(c.id.clone())),
@@ -482,16 +498,22 @@ pub fn container_inspect_json(c: &Ctr) -> String {
         ),
         (
             "HostConfig",
-            obj(vec![(
-                "PortBindings",
-                match c.host_port {
-                    Some(p) => obj(vec![(
-                        "8080/tcp",
-                        Json::Arr(vec![obj(vec![("HostPort", Json::Str(p.to_string()))])]),
-                    )]),
-                    None => Json::Null,
-                },
-            )]),
+            obj(vec![
+                (
+                    "PortBindings",
+                    match c.host_port {
+                        Some(p) => obj(vec![(
+                            "8080/tcp",
+                            Json::Arr(vec![obj(vec![("HostPort", Json::Str(p.to_string()))])]),
+                        )]),
+                        None => Json::Null,
+                    },
+                ),
+                (
+                    "RestartPolicy",
+                    obj(vec![("Name", Json::Str(restart_policy_of(c)))]),
+                ),
+            ]),
         ),
     ])
     .to_json()
@@ -783,6 +805,7 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                 restart_count: 0,
                 host_port,
                 ports_override: None,
+                restart_policy: None,
                 create_body: j,
                 logs: Vec::new(),
             });
@@ -823,6 +846,19 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                     }
                     s.containers[pos].running = true;
                     (204, String::new())
+                }
+                ("POST", ["update"]) => {
+                    let name = Json::parse(body).ok().and_then(|j| {
+                        j.get("RestartPolicy")
+                            .and_then(|r| r.get("Name"))
+                            .and_then(Json::as_str)
+                            .map(str::to_string)
+                    });
+                    let Some(name) = name else {
+                        return (400, "{\"message\":\"update needs a RestartPolicy\"}".into());
+                    };
+                    s.containers[pos].restart_policy = Some(name);
+                    (200, "{\"Warnings\":[]}".into())
                 }
                 ("POST", ["stop"]) => {
                     if !s.containers[pos].running {

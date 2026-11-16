@@ -1,4 +1,4 @@
 harpoon-guest-assets-v1
 kernel_version 6.12.110-0-virt
 kernel_sha256 d625d13a08f08ba1befa309edab7fa9360093b7e7c62b03010c0de084ff9ac20
-initramfs_sha256 58420573ebcca81dc92db0465f4148d30cf808ef9242b21826e427386bf0c036
+initramfs_sha256 6fae89f2960c49bdfd1f3d3aa17b5cb7165262f50fc07ae296a269c6bdadde50

@@ -600,6 +600,33 @@ impl<T: HttpTransport> DockerBackend<T> {
         Ok(Verified::Ok(info))
     }
 
+    /// Give the recorded, running, still-owned container the serving restart policy. Never starts, stops, recreates or
+    /// adopts anything; `apply = false` only reports.
+    pub fn ensure_restart_policy(
+        &self,
+        req: &RemoveRequest,
+        apply: bool,
+        left: Duration,
+    ) -> Result<RestartOutcome, StepError> {
+        match self.verify_container(req, left)? {
+            Verified::Absent => Ok(RestartOutcome::Absent),
+            Verified::Refused(why) => Ok(RestartOutcome::Refused(why)),
+            Verified::Ok(info) if !info.running => Ok(RestartOutcome::NotRunning),
+            Verified::Ok(info) if info.restart_policy == SERVING_RESTART_POLICY => {
+                Ok(RestartOutcome::Already)
+            }
+            Verified::Ok(_) if !apply => Ok(RestartOutcome::WouldSet),
+            Verified::Ok(info) => match self
+                .api
+                .set_restart_policy(&info.id, SERVING_RESTART_POLICY, left)
+                .map_err(|e| api_err("setting the restart policy", e))?
+            {
+                true => Ok(RestartOutcome::Set),
+                false => Ok(RestartOutcome::Absent),
+            },
+        }
+    }
+
     fn attach_logs(&self, io: &mut StepIo<'_>, b: &Budget, id: &str) {
         let Ok(left) = b.left("reading container logs") else {
             return;
@@ -1093,6 +1120,23 @@ impl<T: HttpTransport> DockerBackend<T> {
         ));
         Ok(())
     }
+}
+
+/// The policy a release that is confirmed serving gets: Docker brings it back after a guest restart, but a container that was
+/// stopped on purpose (Harpoon's own stop of a replaced release, or `docker stop`) stays stopped. `always` would revive those.
+pub const SERVING_RESTART_POLICY: &str = "unless-stopped";
+
+/// What `ensure_restart_policy` found or did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartOutcome {
+    Absent,
+    /// Not the container the journal recorded (id, name or Harpoon labels differ). Not touched.
+    Refused(String),
+    /// Stopped now, so its desired state is "stopped". Not touched, never started.
+    NotRunning,
+    Already,
+    WouldSet,
+    Set,
 }
 
 enum Verified {
@@ -1716,6 +1760,34 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             StepError::new(format!("container {name} has no receipt in the ledger"))
         })?;
         self.health(io, &b, &id, &name, port, "the final check")
+    }
+
+    fn confirm_serving(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {
+        let b = Budget::new(io.budget_ms);
+        let (name, _) = self
+            .st
+            .app
+            .clone()
+            .ok_or_else(|| StepError::new("no application container was started"))?;
+        let id = Self::receipted_id(io, ResourceKind::Container, &name).ok_or_else(|| {
+            StepError::new(format!("container {name} has no receipt in the ledger"))
+        })?;
+        let req = RemoveRequest {
+            kind: ResourceKind::Container,
+            id,
+            name: name.clone(),
+            app: io.app().clone(),
+            deployment: io.deployment().clone(),
+        };
+        match self.ensure_restart_policy(&req, true, b.left("setting the restart policy")?)? {
+            RestartOutcome::Set | RestartOutcome::Already => Ok(()),
+            RestartOutcome::Absent => Err(StepError::new(format!("container {name} is gone"))),
+            RestartOutcome::NotRunning => {
+                Err(StepError::new(format!("container {name} is not running")))
+            }
+            RestartOutcome::Refused(why) => Err(StepError::new(why)),
+            RestartOutcome::WouldSet => unreachable!("apply was true"),
+        }
     }
 
     fn stop_new(&mut self, io: &mut StepIo<'_>) -> Result<(), StepError> {

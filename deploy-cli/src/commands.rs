@@ -16,7 +16,7 @@ use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, Recovery
 use harpoon_deploy::time::{Clock, ManualClock, OsEntropy, SystemClock};
 use harpoon_deploy_docker::api::{DockerApi, Limits};
 use harpoon_deploy_docker::attribution::HostGuestProof;
-use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig};
+use harpoon_deploy_docker::backend::{Attribution, DockerBackend, DockerConfig, RestartOutcome};
 use harpoon_deploy_docker::buildx_run::StdFileProbe;
 use harpoon_deploy_docker::confine::{confine, confine_generated, Source};
 use harpoon_deploy_docker::dockerfile::required_images;
@@ -56,6 +56,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "plan" => plan(p, gate, out),
         "recover" => recover(p, out),
         "reconcile" => reconcile_cmd(p, out),
+        "restart-policy" => restart_policy_cmd(p, out),
         "deploy" => deploy(p, gate, svc, out),
         "replace" => replace(p, gate, svc, out),
         "restore" => restore(p, gate, svc, out),
@@ -1676,6 +1677,118 @@ fn reconcile_cmd(p: &Parsed, out: &mut String) -> R {
         }
         Ok(exit::FAILED)
     }
+}
+
+/// Give every application's recorded, running, still-owned serving container Docker's `unless-stopped` policy. It never
+/// starts, stops, recreates or adopts anything and writes no journal record: a container that is stopped now keeps its
+/// recorded desired state, and one the journal does not vouch for is reported and left alone.
+fn restart_policy_cmd(p: &Parsed, out: &mut String) -> R {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        authorized(p)?;
+    }
+    let socket = socket_flag(p)?
+        .ok_or_else(|| Fail::runtime("restart-policy needs an explicit --docker-socket PATH; nothing is assumed about the runtime"))?;
+    if !rt.initialised() {
+        let _ = writeln!(
+            out,
+            "nothing to do: no journal exists at {}",
+            rt.journal_dir().display()
+        );
+        return Ok(exit::OK);
+    }
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused(
+            "this is a simulated runtime; there is no Docker container to configure",
+        ));
+    }
+    let backend = docker_backend(p, &rt, &socket)?;
+    // Apply holds the writer lock, so no deployment can start mid-way; it writes nothing.
+    let (_writer, restored) = if apply {
+        let (j, r) = store::open_writer(&rt, Kind::Docker)?;
+        (Some(j), r)
+    } else {
+        (None, store::read_restored(&rt)?.expect("initialised above"))
+    };
+    let deps = &restored.deployments;
+    let nf = unfinished(deps);
+    if apply && !nf.is_empty() {
+        return Err(Fail::refused(format!(
+            "{}\nrestart-policy --apply only acts when no deployment is unfinished",
+            nf.join("\n")
+        )));
+    }
+    for l in &nf {
+        let _ = writeln!(out, "note: {l}");
+    }
+    let mut apps: Vec<ApplicationId> = Vec::new();
+    for d in deps {
+        if !apps.contains(&d.application_id) {
+            apps.push(d.application_id.clone());
+        }
+    }
+    let mut bad = false;
+    for app in &apps {
+        let Some(s) = harpoon_deploy::serving::serving_release(&restored.ledger, deps, app) else {
+            let _ = writeln!(out, "{app}: nothing is recorded as serving; left alone");
+            continue;
+        };
+        let key =
+            harpoon_deploy::ledger::ResourceKey::new(ResourceKind::Container, &s.container_name);
+        let Some(id) = restored
+            .ledger
+            .find(&s.container_owner, &key)
+            .and_then(|e| e.id.clone())
+        else {
+            let _ = writeln!(
+                out,
+                "{app}: container {} has no recorded id; left alone",
+                s.container_name
+            );
+            bad = true;
+            continue;
+        };
+        let req = harpoon_deploy::ledger::RemoveRequest {
+            kind: ResourceKind::Container,
+            id,
+            name: s.container_name.clone(),
+            app: app.clone(),
+            deployment: s.container_owner.clone(),
+        };
+        let line = match backend.ensure_restart_policy(&req, apply, Duration::from_secs(30)) {
+            Ok(RestartOutcome::Set) => "set unless-stopped".to_string(),
+            Ok(RestartOutcome::WouldSet) => "would set unless-stopped".to_string(),
+            Ok(RestartOutcome::Already) => "already unless-stopped".to_string(),
+            Ok(RestartOutcome::NotRunning) => {
+                "not running (stopped is its desired state); left alone, not started".to_string()
+            }
+            Ok(RestartOutcome::Absent) => {
+                bad = true;
+                "recorded as serving but absent from Docker; left alone".to_string()
+            }
+            Ok(RestartOutcome::Refused(why)) => {
+                bad = true;
+                format!("not the recorded container: {why}")
+            }
+            Err(e) => {
+                bad = true;
+                format!("could not be checked: {}", e.message)
+            }
+        };
+        let _ = writeln!(
+            out,
+            "{app}: {} (release {}): {line}",
+            s.container_name, s.release
+        );
+    }
+    if !apply {
+        let _ = writeln!(
+            out,
+            "dry run: nothing was changed. Add --apply and --{AUTH_FLAG}=… to set the policy."
+        );
+    }
+    Ok(if bad { exit::FAILED } else { exit::OK })
 }
 
 // ------------------------------------------------------------------ deploy

@@ -1,5 +1,7 @@
 # Distribution
 
+**Current published desktop distribution (2026-11-15):** [v2.0.0-rc.4](releases/v2.0.0-rc.4.md) is the signed, notarized, stapled **testing prerelease** (universal DMG with `SHA256SUMS` and `SIGNING-PROVENANCE.txt`); [v0.1.1](https://github.com/krazybean/Harpoon/releases/tag/v0.1.1) remains the latest **stable** release. The standalone `0.1.0-dev` layout immediately below is **historical M11 source-build evidence**, not the current recommended download or signing state. For packaged app installation, see [Installation](installation.md).
+
 See [Installation](installation.md) for usage and [Architecture — Distribution (M11)](architecture.md#distribution-m11) for layout.
 
 Staged `dist/harpoon-0.1.0-dev-darwin-arm64` is relocatable (`bin/../lib/harpoon`), verified `cd /tmp && harpoon doctor` PASS. Archive `tar.gz` 289M + `sha256` `c2930f90…` (`shasum -c` OK). Signing ad-hoc (`-`) with `com.apple.security.virtualization` (`valid on disk`), not notarized — `spctl` expected fail until Developer ID + `notarytool`.

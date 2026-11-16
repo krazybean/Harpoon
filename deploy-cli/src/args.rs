@@ -61,6 +61,11 @@ const SPECS: &[Spec] = &[
         switches: &["apply"],
     },
     Spec {
+        command: "restart-policy",
+        values: &["runtime-dir", "docker-socket", "resources-dir", AUTH_FLAG],
+        switches: &["apply"],
+    },
+    Spec {
         command: "deploy",
         values: &[
             "runtime-dir",
@@ -482,6 +487,7 @@ COMMANDS
   plan            validate source/config and show what a deploy would do (starts nothing)
   recover         mark interrupted deployments (writes the journal); never touches Docker
   reconcile       compare the ledger with the runtime; --apply removes only verified resources
+  restart-policy  make each serving release restart with Docker after a guest restart (verified, running containers only); dry run unless --apply
   deploy          first-deployment workflow; live only with the explicit --authorize-live-docker-changes opt-in (--simulate is offline)
   replace         health-gated replacement of a running release: prepares a candidate, shows the cutover plan; live only with the explicit --authorize-live-docker-changes opt-in; offline with --simulate
   releases        list an application's retained releases, the one serving, and why any cannot be rolled back to (reads the journal only)

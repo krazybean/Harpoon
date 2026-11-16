@@ -108,6 +108,8 @@ pub struct ContainerInfo {
     pub started_at: String,
     /// `RestartCount`; zero when Docker did not say.
     pub restart_count: u64,
+    /// `HostConfig.RestartPolicy.Name`; empty when Docker did not say (which Docker reports for no policy).
+    pub restart_policy: String,
     /// `NetworkSettings.Ports`: the host side of each published container port, as Docker reports
     /// it for the running container (empty when nothing is published).
     pub published: Vec<Published>,
@@ -172,8 +174,8 @@ pub struct CreateSpec<'a> {
 }
 
 impl CreateSpec<'_> {
-    /// The create request body. No `HostIp` in the port binding (approved decision), no restart
-    /// policy, swap disabled (`MemorySwap == Memory`), default network.
+    /// The create request body. No `HostIp` in the port binding (approved decision), restart policy
+    /// `no` (a release gets `unless-stopped` only once it is confirmed serving: see `set_restart_policy`), swap disabled (`MemorySwap == Memory`), default network.
     pub fn body(&self) -> Json {
         let port_key = format!("{}/tcp", self.container_port);
         let mut body = obj(vec![
@@ -725,6 +727,13 @@ impl DockerApi {
                         .and_then(Json::as_i64)
                         .unwrap_or(0)
                         .max(0) as u64,
+                    restart_policy: j
+                        .get("HostConfig")
+                        .and_then(|h| h.get("RestartPolicy"))
+                        .and_then(|r| r.get("Name"))
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     published: published_of(&j)?,
                 }))
             }
@@ -754,6 +763,27 @@ impl DockerApi {
             }
             409 => Ok(CreateOutcome::NameInUse(message_of(&r))),
             _ => Err(Self::unexpected("container create", &r)),
+        }
+    }
+
+    /// `POST /containers/{id}/update` with only a restart policy. `Ok(false)` = no such container.
+    pub fn set_restart_policy(
+        &self,
+        id: &str,
+        name: &str,
+        left: Duration,
+    ) -> Result<bool, ApiError> {
+        let body = obj(vec![("RestartPolicy", obj(vec![("Name", s(name))]))]);
+        let r = self.call(
+            "POST",
+            &format!("/containers/{}/update", enc(id)),
+            Some(&body),
+            left,
+        )?;
+        match r.status {
+            200 => Ok(true),
+            404 => Ok(false),
+            _ => Err(Self::unexpected("container update", &r)),
         }
     }
 
