@@ -149,13 +149,13 @@ test("the view carries the clock it was computed against", async () => {
   assert.equal(diskView(s.get(), 4242).now, 4242);
 });
 
-test("a request that never answers is abandoned as a failure, so it cannot block later refreshes", async () => {
+test("a request that never answers is abandoned as a failure; refreshing resumes when the runtime call ends", async () => {
   const realSet = globalThis.setTimeout; const timers = [];
   globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
   const realClear = globalThis.clearTimeout; globalThis.clearTimeout = () => {};
   try {
-    let hang = true;
-    const s = createDiskTelemetry(() => (hang ? new Promise(() => {}) : Promise.resolve(capText())), () => 1000);
+    const calls = [];
+    const s = createDiskTelemetry(() => new Promise((res) => calls.push(res)), () => 1000);
     s.setEnabled(true);
     const first = s.refresh();
     assert.strictEqual(s.refresh(), first, "a second caller joins the pending request");
@@ -164,8 +164,104 @@ test("a request that never answers is abandoned as a failure, so it cannot block
     await first;
     assert.equal(diskView(s.get(), 1000).status, "unavailable");
     assert.match(s.get().failure.message, /timed out/);
-    hang = false;
-    await s.refresh();
+    calls[0](capText());                                   // the old call finally ends
+    await new Promise((r) => setImmediate(r));
+    const next = s.refresh(); calls[1](capText()); await next;
     assert.equal(diskView(s.get(), 1000).status, "live", "the next refresh runs and recovers");
   } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+});
+
+test("only a live reading carries a pressure class; every other state reports unknown while keeping historical usage where it has any", async () => {
+  const warn = capText({ pressure: "critical" });
+  const noGuest = JSON.parse(warn); delete noGuest.guest;
+  const mk = async (replies, enabled = true) => { const n = replies.length; const { s } = store(replies); s.setEnabled(true); for (let i = 0; i < n; i++) await s.refresh(); if (!enabled) s.setEnabled(false); return s; };
+  const live = await mk([warn]);
+  assert.equal(diskView(live.get(), 1000).pressure, "critical");
+  const cases = {
+    stale: await mk([warn, new Error("x")]),
+    "stale by age": live,
+    "engine-down": await mk([warn], false),
+    stopped: await mk([capText({ state: "stopped", pressure: "critical" })]),
+    disconnected: await mk([JSON.stringify({ ...noGuest, pressure: "critical" })]),
+    unsupported: await mk([warn, "garbage"]),
+    unavailable: await mk([new Error("x")]),
+  };
+  for (const [name, s] of Object.entries(cases)) {
+    const v = diskView(s.get(), name === "stale by age" ? 1000 + STALE_AFTER_MS + 1 : 1000);
+    assert.notEqual(v.status, "live", name);
+    assert.equal(v.pressure, "unknown", name);
+  }
+  const hist = diskView(cases.stale.get(), 1000);
+  assert.equal(hist.percent, 50, "historical usage remains for stale");
+  assert.equal(diskView(cases.unsupported.get(), 1000).percent, null, "unsupported shows nothing");
+});
+
+test("the view carries the clock it was computed against", async () => {
+  const { s } = store([capText()]);
+  s.setEnabled(true); await s.refresh();
+  assert.equal(diskView(s.get(), 4242).now, 4242);
+});
+
+// --- timeout guarantees --------------------------------------------------------------------------------------------------------
+// A fake setTimeout registry: pending timers are listed, and firing one removes it, like a real timer.
+function fakeTimers() {
+  const real = { set: globalThis.setTimeout, clear: globalThis.clearTimeout };
+  const pending = new Map(); let id = 0;
+  globalThis.setTimeout = (fn, ms) => { pending.set(++id, { fn, ms }); return id; };
+  globalThis.clearTimeout = (i) => { pending.delete(i); };
+  return { pending, fire: () => { const [i, t] = [...pending].at(-1); pending.delete(i); t.fn(); }, restore: () => { globalThis.setTimeout = real.set; globalThis.clearTimeout = real.clear; } };
+}
+const deferred = () => { let resolve, reject; const p = new Promise((a, b) => { resolve = a; reject = b; }); return { p, resolve, reject }; };
+
+test("a late reply from a timed-out request is discarded and never overwrites newer state", async () => {
+  const f = fakeTimers();
+  try {
+    const calls = []; let n = 0;
+    const s = createDiskTelemetry(() => { const d = deferred(); calls.push(d); return d.p; }, () => 1000 + 100 * n++);
+    s.setEnabled(true);
+    const a = s.refresh(); f.fire(); await a;                          // request A is abandoned
+    assert.equal(diskView(s.get(), 1000).status, "unavailable");
+    calls[0].resolve(capText({ pressure: "critical" }));                // A answers late with a live-looking reading
+    await new Promise((r) => setImmediate(r));
+    assert.equal(s.get().last, null, "the late reply was not applied");
+    const b = s.refresh(); calls[1].resolve(capText({ pressure: "ok" })); await b; // a newer request succeeds
+    const good = s.get().last;
+    assert.equal(good.cap.pressure, "ok");
+    const c = s.refresh(); calls[2].reject(new Error("later failure")); await c;
+    calls[0].resolve(capText({ pressure: "critical" }));                // A (long settled) cannot change anything now
+    calls[1].resolve(capText({ pressure: "critical" }));
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(s.get().last, good, "newer telemetry is untouched by old replies");
+  } finally { f.restore(); }
+});
+
+test("repeated timeouts never run a second native request while the abandoned one is still running", async () => {
+  const f = fakeTimers();
+  try {
+    const calls = [];
+    const s = createDiskTelemetry(() => { const d = deferred(); calls.push(d); return d.p; }, () => 1000);
+    s.setEnabled(true);
+    for (let i = 0; i < 10; i++) { const r = s.refresh(); if (f.pending.size) f.fire(); await r; }
+    assert.equal(calls.length, 1, "ten polls, one native request");
+    assert.match(s.get().failure.message, /still running|timed out/);
+    assert.equal(f.pending.size, 0, "no timer left behind");
+    calls[0].reject(new Error("finally failed"));                         // the runtime call ends
+    await new Promise((r) => setImmediate(r));
+    const r = s.refresh(); calls[1].resolve(capText()); await r;
+    assert.equal(calls.length, 2, "refreshing resumes once the old call has ended");
+    assert.equal(diskView(s.get(), 1000).status, "live");
+  } finally { f.restore(); }
+});
+
+test("the abandon timer never outlives a request: success, failure and timeout all leave none pending", async () => {
+  const f = fakeTimers();
+  try {
+    const replies = [() => Promise.resolve(capText()), () => Promise.reject(new Error("x")), () => new Promise(() => {})];
+    const s = createDiskTelemetry(() => replies.shift()(), () => 1000);
+    s.setEnabled(true);
+    await s.refresh(); assert.equal(f.pending.size, 0, "after success");
+    await s.refresh(); assert.equal(f.pending.size, 0, "after failure");
+    const r = s.refresh(); assert.equal(f.pending.size, 1, "one timer while waiting"); assert.equal([...f.pending.values()][0].ms, FETCH_TIMEOUT_MS);
+    f.fire(); await r; assert.equal(f.pending.size, 0, "after timeout");
+  } finally { f.restore(); }
 });

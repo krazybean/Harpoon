@@ -35,7 +35,7 @@ No safety check was weakened. No replan or scope reduction was needed.
 
 ## Evidence
 - Environment: Node 22.23.3, clean `node_modules` from `npm ci`.
-- `npm test`: 366 tests, 366 pass, 0 fail, 0 skipped (350 before; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
+- `npm test`: 366 tests, 366 pass, 0 fail, 0 skipped (350 before at the start of this slice, 384 now; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
 - `npm run build` (`tsc && vite build`): passes. `npm audit`: 0 vulnerabilities.
 - UI evidence: a static harness renders the real `DiskMeter` and `DiskChip` with the app's CSS in headless Chromium at 20/50/85/95% and in the stale, engine-down, disconnected and unsupported states. It used no Docker, no Harpoon and no live engine.
 - Nothing in this slice calls the live engine except the existing read-only `get_disk_capacity`, unchanged.
@@ -54,6 +54,19 @@ Further small fixes from the screenshots: error text no longer shows a leading "
 
 Failures and root causes in this pass: the elapsed-time tests initially failed because the store captured `Date.now` at creation (fixed above, which also made a real clock-injection bug visible); a later test hung because an earlier test left a never-answering request in flight, which exposed the missing timeout (2b); my "all non-live states" test mutated its own reply array while looping (test bug, corrected).
 
+## Timeout review (final inspection before the PR)
+| Guarantee | Result | Evidence |
+|---|---|---|
+| A late reply from a timed-out request cannot overwrite newer telemetry | **Held by construction**: only the winner of the `race` is applied, and a new request cannot start until the old call has ended, so no older reply can arrive after a newer one | `diskTelemetry.test` "a late reply from a timed-out request is discarded…"; `diskSafety.test` late live reply leaves controls disabled |
+| Repeated timeouts do not cause unbounded concurrent native operations | **Did not hold; fixed.** With a call that never ends, every poll after a timeout started another `disk status` process (about one a minute, each holding a blocking thread in the desktop). The store now keeps the one runtime call in a `native` slot: while it has not ended, refreshes fail immediately with "the previous disk status request is still running" and start nothing. At most one runtime call exists | `diskTelemetry.test` "repeated timeouts never run a second native request…" (ten polls, one call; resumes when it ends). The test failed before the fix |
+| Stale telemetry cannot re-enable expansion or reclaim | **Held.** The controls require status `live`; a timeout makes the status stale and the late reply is discarded, so only a refresh that really completes re-enables them | `diskSafety.test` "a timed-out refresh leaves both actions disabled…" |
+| Timers are cleaned up | **Held.** The abandon timer is cleared on success, failure and timeout; poll and tick timers and subscriptions are released on unmount (Strict Mode) | `diskTelemetry.test` "the abandon timer never outlives a request"; `diskLifecycle.test` |
+
+A second defect was found by the new test and fixed: `refresh` cleared its `inflight` marker in a `finally` inside the async body, and a body that finished without awaiting (the new "previous request still running" path) ran that `finally` before `inflight` was assigned, leaving a settled promise stuck there so every later refresh returned it without running. The marker is now cleared with `.finally()` on the returned promise, after the assignment.
+
+Two lifecycle tests then failed by design: they let a hung call stay hung and expected the next refresh to run. They now end the runtime call first and assert that no second call starts while it is still running.
+
 ## Known limits
+- **The desktop-side timeout does not cancel the underlying runtime command.** `get_disk_capacity` runs `harpoon disk status --json` as a child process on a blocking thread; abandoning the wait in the UI leaves that process running until it ends. The store now allows at most one such call at a time, so a permanently hung runtime costs one process and one thread, and disk status stays "failed/stale" (reclaim and expansion stay disabled) until that call ends. Cancelling it would need a kill-on-timeout in `main.rs`, which is outside this slice.
 - Warning/critical colour is the runtime's classification, so a desktop running against an older runtime that reports a different `pressure` shows that runtime's verdict.
 - The meter does not explain what is using the space; that is Slice 2.

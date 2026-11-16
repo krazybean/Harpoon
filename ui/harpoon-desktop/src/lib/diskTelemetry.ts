@@ -68,6 +68,8 @@ export function createDiskTelemetry(fetchText: () => Promise<string>, now: () =>
   let state = initialTelemetry();
   const subs = new Set<() => void>();
   let inflight: Promise<void> | null = null;
+  // The runtime call itself. It cannot be cancelled from here, so after a timeout it may still be running: no second one starts until it ends.
+  let native: Promise<unknown> | null = null;
   const set = (next: Telemetry) => { state = next; subs.forEach((f) => f()); };
   return {
     get: () => state,
@@ -77,16 +79,22 @@ export function createDiskTelemetry(fetchText: () => Promise<string>, now: () =>
       if (inflight) return inflight; // one request at a time, whoever asks
       inflight = (async () => {
         try {
+          if (native) throw new Error("the previous disk status request is still running");
+          const call = Promise.resolve(fetchText());
+          native = call;
+          const release = () => { if (native === call) native = null; };
+          call.then(release, release);
           let timer: ReturnType<typeof setTimeout> | undefined;
           const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("disk status timed out")), FETCH_TIMEOUT_MS); });
-          const cap = parseDiskCapacity(await Promise.race([fetchText(), timeout]).finally(() => clearTimeout(timer)));
+          // Only this race's winner is applied; a reply that arrives after the timeout is ignored.
+          const cap = parseDiskCapacity(await Promise.race([call, timeout]).finally(() => clearTimeout(timer)));
           set(cap
             ? { ...state, last: { cap, at: now() }, failure: null }
             : { ...state, failure: { kind: "unsupported", message: "unrecognized disk status", at: now() } });
         } catch (e) {
           set({ ...state, failure: { kind: "failed", message: String(e).replace(/^Error:\s*/, "").trim(), at: now() } });
-        } finally { inflight = null; }
-      })();
+        }
+      })().finally(() => { inflight = null; }); // after the assignment: a body that finishes without awaiting must not leave a settled promise stuck here
       return inflight;
     },
   };

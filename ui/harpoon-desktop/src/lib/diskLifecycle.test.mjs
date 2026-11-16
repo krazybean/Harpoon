@@ -40,8 +40,8 @@ const GIB = 1024 ** 3;
 const reading = JSON.stringify({ provisioned: true, state: "running", logicalBytes: 12 * GIB, physicalBytes: 3 * GIB, pressure: "warning", suggestedSizes: [], maxBytes: 0, hostReserveBytes: 0,
   guest: { capacityBytes: 100 * GIB, usedBytes: 85 * GIB, availableBytes: 15 * GIB } });
 
-let requests = 0, behaviour = "ok";
-globalThis.__invoke = async () => { requests++; if (behaviour === "hang") return new Promise(() => {}); if (behaviour === "fail") throw new Error("down"); return reading; };
+let requests = 0, behaviour = "ok", endHung = () => {};
+globalThis.__invoke = async () => { requests++; if (behaviour === "hang") return new Promise((res) => { endHung = () => res(reading); }); if (behaviour === "fail") throw new Error("down"); return reading; };
 
 // count subscribe/unsubscribe through the store's own methods, before any component renders
 let subscribed = 0;
@@ -107,9 +107,15 @@ test("the elapsed-time label keeps advancing while mounted, after a failed refre
       assert.match(r.host.textContent, /Last successful reading 7 min ago/, "advances while a request is hanging");
       await act(async () => { timeouts.at(-1).fn(); await pending; }); // the abandon timer fires
       assert.match(diskTelemetry.get().failure.message, /timed out/);
+      const before = requests;
       behaviour = "ok";
       await act(async () => { await diskTelemetry.refresh(); });
-      assert.match(r.host.textContent, /Last successful reading just now/, "a hung request did not block the next refresh");
+      assert.equal(requests, before, "while the abandoned call still runs, no second one starts");
+      assert.match(r.host.textContent, /Last successful reading 7 min ago/);
+      await act(async () => { endHung(); await new Promise((res) => setImmediate(res)); }); // the runtime call finally ends
+      await act(async () => { await diskTelemetry.refresh(); });
+      assert.equal(requests, before + 1);
+      assert.match(r.host.textContent, /Last successful reading just now/, "refreshing resumes once the old call ended");
     } finally { await r.unmount(); }
   } finally { Date.now = realNow; }
 });

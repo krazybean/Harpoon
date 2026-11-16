@@ -36,7 +36,7 @@ const cap = (pressure, o = {}) => ({ provisioned: true, state: "running", logica
 let reply = null; const log = [];
 globalThis.__invoke = async (cmd) => {
   log.push(cmd);
-  if (cmd === "get_disk_capacity") { if (reply instanceof Error) throw reply; return typeof reply === "string" ? reply : JSON.stringify(reply); }
+  if (cmd === "get_disk_capacity") { if (reply && reply.hang) return reply.hang; if (reply instanceof Error) throw reply; return typeof reply === "string" ? reply : JSON.stringify(reply); }
   if (cmd === "reclaim_disk_confirmed") return JSON.stringify({ status: "reclaimed", message: "ok", logicalBytes: 12 * GIB, physicalBeforeBytes: 3 * GIB, physicalAfterBytes: 2 * GIB });
   if (cmd === "expand_disk_confirmed") return "done";
   throw new Error(`unexpected ${cmd}`);
@@ -124,4 +124,28 @@ test("unsupported, disconnected and engine-down readings neither show a warning 
     assert.equal(m.btn("Reclaim unused space").disabled, true, `${name}: reclaim disabled`);
     await m.unmount();
   }
+});
+
+test("a timed-out refresh leaves both actions disabled, a late live reply cannot re-enable them, and the next real refresh does", async () => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout; const timers = [];
+  reply = cap("critical"); diskTelemetry.setEnabled(true); await refresh();
+  const m = await mount();
+  assert.equal(m.btn("Reclaim unused space").disabled, false, "live to start with");
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; }; globalThis.clearTimeout = () => {};
+  try {
+    let late; reply = { hang: new Promise((res) => { late = res; }) };
+    const pending = act(async () => { const p = diskTelemetry.refresh(); await Promise.resolve(); timers.at(-1).fn(); await p; });
+    await pending;
+    assert.equal(m.btn("Reclaim unused space").disabled, true, "disabled after the timeout");
+    assert.equal(m.btn("Review expansion").disabled, true);
+    assert.match(m.notice().textContent, /last reading/);
+    log.length = 0;
+    await act(async () => { late(JSON.stringify(cap("critical"))); await new Promise((r) => setImmediate(r)); });
+    assert.equal(m.btn("Reclaim unused space").disabled, true, "the late reply is discarded: still disabled");
+    assert.equal(m.btn("Review expansion").disabled, true);
+    reply = cap("critical");
+    await act(async () => { await diskTelemetry.refresh(); });
+    assert.equal(m.btn("Reclaim unused space").disabled, false, "a refresh that really completes re-enables it");
+    assert.equal(m.btn("Review expansion").disabled, false);
+  } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; await m.unmount(); }
 });
