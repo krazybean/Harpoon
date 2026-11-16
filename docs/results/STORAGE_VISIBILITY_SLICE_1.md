@@ -35,7 +35,7 @@ No safety check was weakened. No replan or scope reduction was needed.
 
 ## Evidence
 - Environment: Node 22.23.3, clean `node_modules` from `npm ci`.
-- `npm test`: 366 tests, 366 pass, 0 fail, 0 skipped (350 before at the start of this slice, 384 now; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
+- `npm test`: 384 tests, 384 pass, 0 fail, 0 skipped (350 at the start of this slice; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
 - `npm run build` (`tsc && vite build`): passes. `npm audit`: 0 vulnerabilities.
 - UI evidence: a static harness renders the real `DiskMeter` and `DiskChip` with the app's CSS in headless Chromium at 20/50/85/95% and in the stale, engine-down, disconnected and unsupported states. It used no Docker, no Harpoon and no live engine.
 - Nothing in this slice calls the live engine except the existing read-only `get_disk_capacity`, unchanged.
