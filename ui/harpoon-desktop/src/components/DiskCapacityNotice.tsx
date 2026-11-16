@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import {
-  assessSize, confirmationMessage, customSizeError, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, GIB,
+  assessSize, confirmationMessage, customSizeError, dismissalFor, formatSize, noticeLevel, sizeArg, summary, GIB,
 } from "../lib/diskCapacity";
-import type { DiskCapacity, Dismissal } from "../lib/diskCapacity";
+import type { Dismissal } from "../lib/diskCapacity";
+import { diskTelemetry, useDiskView } from "../hooks/useDiskTelemetry";
 
-const POLL_MS = 60_000; // one `df` over the management channel per minute, only while Harpoon is running and the window is visible
 const KEY = "harpoon.diskNotice.dismissal";
 
 function loadDismissal(): Dismissal | null {
@@ -19,30 +19,17 @@ function saveDismissal(d: Dismissal | null) {
 /**
  * Low-disk notice. It never resizes or restarts anything by itself: "Not now" only remembers the dismissal, "Review expansion" opens the
  * choices, and the VM is touched only after the confirmation dialog is accepted. When the desktop is not connected to the runtime
- * (`enabled` false) it renders nothing and polls nothing.
+ * (`enabled` false) it renders nothing. The reading comes from the shared disk telemetry; this component never polls.
  */
 export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabled: boolean; stagesShown: boolean; onExpanded: () => void }) {
-  const [cap, setCap] = useState<DiskCapacity | null>(null);
+  const view = useDiskView();
+  const cap = view.status === "live" || view.status === "stale" ? view.cap : null;
   const [dismissal, setDismissal] = useState<Dismissal | null>(() => loadDismissal());
   const [reviewing, setReviewing] = useState(false);
   const [choice, setChoice] = useState<number | "custom" | null>(null);
   const [custom, setCustom] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const busyRef = useRef(false);
-  busyRef.current = busy;
-
-  const poll = useCallback(async () => {
-    if (busyRef.current) return;
-    try { setCap(parseDiskCapacity(await invoke<string>("get_disk_capacity"))); } catch { /* status is shown elsewhere; stay quiet */ }
-  }, []);
-
-  useEffect(() => {
-    if (!enabled) { if (!busyRef.current) setCap(null); return; }
-    void poll();
-    const id = window.setInterval(() => { if (document.visibilityState === "visible") void poll(); }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [enabled, poll]);
 
   const level = busy ? "none" : noticeLevel(cap, dismissal, Date.now());
   // While an expansion runs Harpoon is stopped for a while, so `enabled` goes false; keep the progress and the outcome on screen.
@@ -75,7 +62,7 @@ export function DiskCapacityNotice({ enabled, stagesShown, onExpanded }: { enabl
     } finally {
       setBusy(false);
       onExpanded();
-      void poll();
+      void diskTelemetry.refresh();
     }
   };
 

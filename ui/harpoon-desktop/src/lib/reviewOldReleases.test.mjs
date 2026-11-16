@@ -48,8 +48,10 @@ test("an empty inventory opens an informative dialog with no removal action", as
   await m.click(m.button());
   const d = m.dialog();
   assert.ok(d, "a dialog opens");
-  assert.match(d.textContent, /Everything is clean/);
-  assert.match(d.textContent, /No obsolete deployment artifacts were found/);
+  assert.match(d.textContent, /No obsolete deployment artifacts found/);
+  assert.match(d.textContent, /No obsolete Harpoon deployment artifacts were found/);
+  assert.doesNotMatch(d.textContent, /Everything is clean/);
+  assert.match(d.textContent, /Other categories, such as build cache|other categories, such as build cache/i);
   assert.match(d.textContent, /Running releases and persistent volumes remain protected/);
   assert.deepEqual([...d.querySelectorAll("button")].map((b) => b.textContent), ["Close"]);
   assert.equal(document.activeElement, d.querySelector("button"));
@@ -107,7 +109,7 @@ test("a failed request shows an error, never an empty inventory", async () => {
     await m.click(m.button());
     assert.equal(m.dialog(), null);
     assert.match(m.host.querySelector('[role="alert"]').textContent, /engine unreachable|Start the engine/);
-    assert.doesNotMatch(m.host.textContent, /Nothing to clean up/);
+    assert.doesNotMatch(m.host.textContent, /No obsolete/);
     assert.equal(m.button().disabled, false, "can retry");
     await m.unmount();
   }

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
-import { formatSize, parseDiskCapacity, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
-import type { DiskCapacity, ExpansionState, ReclaimResult } from "../lib/diskCapacity";
+import { useDiskView, diskTelemetry } from "../hooks/useDiskTelemetry";
+import { formatSize, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
+import type { ExpansionState, ReclaimResult } from "../lib/diskCapacity";
 import { cleanupActionLabel, confirmLabel, impactBreakdown, freedSummary, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CacheReport, CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
@@ -76,13 +77,13 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       {clean && (
         <div className="dialog-scrim" role="presentation" onClick={() => setClean(false)}>
           <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="clean-title" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") setClean(false); }}>
-            <div id="clean-title" className="dialog-title">Everything is clean</div>
-            <div className="dialog-body">No obsolete deployment artifacts were found. Running releases and persistent volumes remain protected, and nothing was changed.</div>
+            <div id="clean-title" className="dialog-title">No obsolete deployment artifacts found</div>
+            <div className="dialog-body">No obsolete Harpoon deployment artifacts were found. This does not mean Docker storage is clean: other categories, such as build cache and images Harpoon did not deploy, may still contain reclaimable space. Running releases and persistent volumes remain protected, and nothing was changed.</div>
             <div className="dialog-actions"><button ref={closeRef} className="btn btn--secondary" onClick={() => setClean(false)}>Close</button></div>
           </div>
         </div>
       )}
-      {plan && nothingToClean(plan) && <div role="status" className="text-meta">Nothing to clean up: only what is serving now is left{sum && sum.review ? `, and ${sum.review} item${sum.review === 1 ? "" : "s"} need${sum.review === 1 ? "s" : ""} review below` : ""}.</div>}
+      {plan && nothingToClean(plan) && <div role="status" className="text-meta">No obsolete Harpoon deployment artifacts found: only what is serving now is left{sum && sum.review ? `, and ${sum.review} item${sum.review === 1 ? "" : "s"} need${sum.review === 1 ? "s" : ""} review below` : ""}. Other Docker storage may still contain reclaimable space.</div>}
       {plan && inv && (
         <div role="region" aria-label="Cleanup candidates by application" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
           <div className="artifact-metrics">
@@ -225,19 +226,16 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
 }
 
 export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expansion: ExpansionState | null | undefined }) {
-  const [cap, setCap] = useState<DiskCapacity | null>(null);
+  const view = useDiskView();
+  const cap = view.status === "live" ? view.cap : null; // reclaiming needs the running guest, not a remembered reading
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ReclaimResult | null>(null);
-  const busyRef = useRef(false);
-  busyRef.current = busy;
-
-  const load = useCallback(async () => {
-    if (busyRef.current) return;
-    try { setCap(parseDiskCapacity(await invoke<string>("get_disk_capacity"))); } catch { setCap(null); }
-  }, []);
+  const load = useCallback(() => diskTelemetry.refresh(), []);
   useEffect(() => { if (enabled) void load(); }, [enabled, load, expansion?.phase]);
 
-  const blocked = reclaimBlockedReason(enabled ? cap : null, expansion);
+  const blocked = !cap && enabled && view.cap && expansion?.active !== true
+    ? `Disk usage is not live (${view.note.replace(/\.$/, "")}), so reclaiming is unavailable until it refreshes.`
+    : reclaimBlockedReason(enabled ? cap : null, expansion);
 
   const reclaim = async () => {
     if (!cap || blocked || busy) return;
@@ -252,11 +250,11 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
   return (
     <div className="panel" style={{ padding: 14 }}>
       <DockerArtifacts enabled={enabled} onDone={() => void load()} />
-      <div className="text-panel-title">Guest filesystem</div>
+      <div className="text-panel-title">Disk image on this Mac</div>
       <div className="text-body" style={{ lineHeight: 1.7, marginTop: 6 }}>
         {cap && cap.provisioned
           ? <>Capacity {formatSize(cap.logicalBytes)} • {formatSize(cap.physicalBytes)} currently allocated on this Mac</>
-          : <>Capacity and allocation appear once the disk exists.</>}
+          : <>Allocation appears once the disk exists and can be read.</>}
       </div>
       <div className="text-meta" style={{ margin: "6px 0" }}>
         Reclaiming asks the guest to hand blocks it no longer uses back to macOS. It does not delete Docker images, containers or volumes, and the amount returned is only known afterwards.
