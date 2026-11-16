@@ -31,11 +31,43 @@ export const MIB = 1024 * 1024;
 const BUCKET_PERCENT = 5;
 const CRITICAL_REMIND_MS = 60 * 60 * 1000;
 
+const PRESSURES: readonly string[] = ["unknown", "ok", "warning", "critical"];
+/** A size in bytes as the runtime prints it: a finite number, never negative. (JSON has no NaN; `1e999` parses to Infinity.) */
+const size = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Why a parsed `harpoon disk status --json` object cannot be used, or null. Every field the desktop reads is checked; optional ones only when present. */
+export function diskCapacityProblem(o: unknown): string | null {
+  if (!isObject(o)) return "not an object";
+  if (typeof o.provisioned !== "boolean") return "provisioned is not a boolean";
+  if (typeof o.state !== "string" || o.state === "") return "state is not a string";
+  if (!size(o.logicalBytes)) return "logicalBytes is not a finite non-negative number";
+  if (!size(o.physicalBytes)) return "physicalBytes is not a finite non-negative number";
+  if (typeof o.pressure !== "string" || !PRESSURES.includes(o.pressure)) return "pressure is not a recognised class";
+  if (!Array.isArray(o.suggestedSizes) || !o.suggestedSizes.every(size)) return "suggestedSizes is not a list of sizes";
+  if (!size(o.maxBytes)) return "maxBytes is not a finite non-negative number";
+  if (!size(o.hostReserveBytes)) return "hostReserveBytes is not a finite non-negative number";
+  if (o.hostAvailableBytes !== undefined && !size(o.hostAvailableBytes)) return "hostAvailableBytes is not a finite non-negative number";
+  if (o.suggestions !== undefined && !(Array.isArray(o.suggestions) && o.suggestions.every((x) => isObject(x) && size(x.bytes) && typeof x.oversubscribed === "boolean"))) return "suggestions is malformed";
+  if (o.guest !== undefined) {
+    const g = o.guest;
+    if (!isObject(g) || !size(g.capacityBytes) || !size(g.usedBytes) || !size(g.availableBytes)) return "guest figures are not finite non-negative numbers";
+    // `df -B1 /`: Used + Available never exceeds the filesystem size (the difference is reserved blocks), and an empty one cannot be a utilization.
+    if (g.capacityBytes === 0 || g.usedBytes + g.availableBytes === 0) return "guest capacity is empty";
+    if (g.usedBytes + g.availableBytes > g.capacityBytes) return "guest used plus available exceeds its capacity";
+  }
+  if (o.pendingExpansion !== undefined) {
+    const p = o.pendingExpansion;
+    if (!isObject(p) || typeof p.phase !== "string" || !size(p.fromBytes) || !size(p.toBytes) || typeof p.recovery !== "string" || (p.active !== undefined && typeof p.active !== "boolean")) return "pendingExpansion is malformed";
+  }
+  return null;
+}
+
+/** The parsed status, or null when it is not JSON or fails `diskCapacityProblem`. Valid responses are returned exactly as the runtime sent them. */
 export function parseDiskCapacity(text: string): DiskCapacity | null {
   try {
     const o = JSON.parse(text);
-    if (!o || typeof o !== "object" || typeof o.logicalBytes !== "number" || typeof o.pressure !== "string") return null;
-    return o as DiskCapacity;
+    return diskCapacityProblem(o) === null ? (o as DiskCapacity) : null;
   } catch {
     return null;
   }

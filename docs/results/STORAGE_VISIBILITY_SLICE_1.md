@@ -35,7 +35,7 @@ No safety check was weakened. No replan or scope reduction was needed.
 
 ## Evidence
 - Environment: Node 22.23.3, clean `node_modules` from `npm ci`.
-- `npm test`: 384 tests, 384 pass, 0 fail, 0 skipped (350 at the start of this slice; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
+- `npm test`: 387 tests, 387 pass, 0 fail, 0 skipped (350 at the start of this slice; the new files are `diskTelemetry`, `diskMeter`, `diskLifecycle`, `diskSafety`).
 - `npm run build` (`tsc && vite build`): passes. `npm audit`: 0 vulnerabilities.
 - UI evidence: a static harness renders the real `DiskMeter` and `DiskChip` with the app's CSS in headless Chromium at 20/50/85/95% and in the stale, engine-down, disconnected and unsupported states. It used no Docker, no Harpoon and no live engine.
 - Nothing in this slice calls the live engine except the existing read-only `get_disk_capacity`, unchanged.
@@ -65,6 +65,14 @@ Failures and root causes in this pass: the elapsed-time tests initially failed b
 A second defect was found by the new test and fixed: `refresh` cleared its `inflight` marker in a `finally` inside the async body, and a body that finished without awaiting (the new "previous request still running" path) ran that `finally` before `inflight` was assigned, leaving a settled promise stuck there so every later refresh returned it without running. The marker is now cleared with `.finally()` on the returned promise, after the assignment.
 
 Two lifecycle tests then failed by design: they let a hung call stay hung and expected the next refresh to run. They now end the runtime call first and assert that no second call starts while it is still running.
+
+## Independent review corrections (PR #216)
+| Finding | Verification | Correction | Tests |
+|---|---|---|---|
+| P1: `parseDiskCapacity` only checked that `logicalBytes` was a number and `pressure` a string, so NaN-producing input, an unknown pressure class or inconsistent guest sizes reached the meter (`aria-valuenow`, bar width) | Read the contract in `harpoon/Sources/HarpoonDiskCLI.swift` `diskStatusJSON` and `DiskCapacity.swift` (`DiskPressure`: unknown, ok, warning, critical; sizes are UInt64; `guest` comes from `df -B1 /`, where Used + Available never exceeds the size). JSON itself has no NaN, but a literal such as `1e999` parses to Infinity | `diskCapacityProblem` validates every field the desktop reads: required booleans/strings, finite non-negative sizes, a recognised pressure, `suggestedSizes`/`suggestions` shapes, optional `hostAvailableBytes`, and a present `guest` or `pendingExpansion` must be complete; guest capacity must be non-zero with used + available non-zero and not above it. A reply that fails is `null`, which the store already records as `unsupported` and leaves `last` untouched. Valid replies are returned exactly as sent. Deliberately not enforced (could reject valid replies): `guest.capacity <= logicalBytes` and `physical <= logical` | `diskCapacity.test`: the three real runtime shapes (running with guest, unprovisioned, pending expansion) are accepted unchanged; missing fields, wrong types, unknown pressure, negative/overflowing sizes, partial guest, inconsistent sizes, malformed pending expansion are rejected; NaN/Infinity/`1e999`; accepted input always yields a utilization in [0, 100]. `diskTelemetry.test`: five malformed replies after a good one leave the store's last reading intact and the next valid reply recovers. The new rejection tests fail against the old parser |
+| P2: duplicate tests in `diskTelemetry.test.mjs` | Two tests were each present twice with byte-identical bodies ("only a live reading carries a pressure class…" and "the view carries the clock…") from an earlier scripted edit | Removed the copies (19 to 17 tests, one assertion set each remains; none of the removed assertions was unique) | the suite below |
+
+The `unsupported` view still hides the figures (a runtime that answers in an unrecognised shape is not trusted for numbers), while the store keeps the last good reading so a single bad reply does not lose it.
 
 ## Known limits
 - **The desktop-side timeout does not cancel the underlying runtime command.** `get_disk_capacity` runs `harpoon disk status --json` as a child process on a blocking thread; abandoning the wait in the UI leaves that process running until it ends. The store now allows at most one such call at a time, so a permanently hung runtime costs one process and one thread, and disk status stays "failed/stale" (reclaim and expansion stay disabled) until that call ends. Cancelling it would need a kill-on-timeout in `main.rs`, which is outside this slice.

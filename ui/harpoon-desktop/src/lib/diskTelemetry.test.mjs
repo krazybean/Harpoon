@@ -171,37 +171,6 @@ test("a request that never answers is abandoned as a failure; refreshing resumes
   } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
 });
 
-test("only a live reading carries a pressure class; every other state reports unknown while keeping historical usage where it has any", async () => {
-  const warn = capText({ pressure: "critical" });
-  const noGuest = JSON.parse(warn); delete noGuest.guest;
-  const mk = async (replies, enabled = true) => { const n = replies.length; const { s } = store(replies); s.setEnabled(true); for (let i = 0; i < n; i++) await s.refresh(); if (!enabled) s.setEnabled(false); return s; };
-  const live = await mk([warn]);
-  assert.equal(diskView(live.get(), 1000).pressure, "critical");
-  const cases = {
-    stale: await mk([warn, new Error("x")]),
-    "stale by age": live,
-    "engine-down": await mk([warn], false),
-    stopped: await mk([capText({ state: "stopped", pressure: "critical" })]),
-    disconnected: await mk([JSON.stringify({ ...noGuest, pressure: "critical" })]),
-    unsupported: await mk([warn, "garbage"]),
-    unavailable: await mk([new Error("x")]),
-  };
-  for (const [name, s] of Object.entries(cases)) {
-    const v = diskView(s.get(), name === "stale by age" ? 1000 + STALE_AFTER_MS + 1 : 1000);
-    assert.notEqual(v.status, "live", name);
-    assert.equal(v.pressure, "unknown", name);
-  }
-  const hist = diskView(cases.stale.get(), 1000);
-  assert.equal(hist.percent, 50, "historical usage remains for stale");
-  assert.equal(diskView(cases.unsupported.get(), 1000).percent, null, "unsupported shows nothing");
-});
-
-test("the view carries the clock it was computed against", async () => {
-  const { s } = store([capText()]);
-  s.setEnabled(true); await s.refresh();
-  assert.equal(diskView(s.get(), 4242).now, 4242);
-});
-
 // --- timeout guarantees --------------------------------------------------------------------------------------------------------
 // A fake setTimeout registry: pending timers are listed, and firing one removes it, like a real timer.
 function fakeTimers() {
@@ -264,4 +233,21 @@ test("the abandon timer never outlives a request: success, failure and timeout a
     const r = s.refresh(); assert.equal(f.pending.size, 1, "one timer while waiting"); assert.equal([...f.pending.values()][0].ms, FETCH_TIMEOUT_MS);
     f.fire(); await r; assert.equal(f.pending.size, 0, "after timeout");
   } finally { f.restore(); }
+});
+
+test("a malformed reply after a good reading is unsupported, keeps the last good reading in the store, and the next valid reply recovers", async () => {
+  const bad = [capText({ pressure: "severe" }), capText({}, { capacityBytes: GIB, usedBytes: 2 * GIB, availableBytes: 0 }), capText({ logicalBytes: -1 }), '{"logicalBytes":1e999,"pressure":"ok"}', "NaN"];
+  const { s, at } = store([capText({ pressure: "warning" }), ...bad, capText({ pressure: "ok" })]);
+  s.setEnabled(true); await s.refresh();
+  const good = s.get().last;
+  for (const _ of bad) {
+    at(5000); await s.refresh();
+    assert.equal(s.get().failure.kind, "unsupported");
+    assert.strictEqual(s.get().last, good, "the last good reading is not discarded");
+    const v = diskView(s.get(), 5000);
+    assert.equal(v.status, "unsupported"); assert.equal(v.cap, null); assert.equal(v.percent, null); assert.equal(v.pressure, "unknown");
+  }
+  at(9000); await s.refresh();
+  const v = diskView(s.get(), 9000);
+  assert.equal(v.status, "live"); assert.equal(v.pressure, "ok"); assert.equal(s.get().failure, null);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessSize, confirmationMessage, customSizeError, expansionActive, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, usedPercent, GIB, MIB } from "./diskCapacity.ts";
+import { diskCapacityProblem, assessSize, confirmationMessage, customSizeError, expansionActive, dismissalFor, formatSize, noticeLevel, parseDiskCapacity, sizeArg, summary, usedPercent, GIB, MIB } from "./diskCapacity.ts";
 
 const cap = (over = {}) => ({
   provisioned: true, state: "running", logicalBytes: 4 * GIB, physicalBytes: 2 * GIB, hostAvailableBytes: 100 * GIB,
@@ -153,4 +153,76 @@ test("the reclaim confirmation states what it does not do and promises no amount
   assert.match(m, /does not delete Docker images, containers or volumes/); assert.match(m, /does not restart Harpoon/);
   assert.match(m, /may be small or zero/);
   assert.doesNotMatch(m, /will (free|reclaim|return) \d/i, "no promised amount");
+});
+
+// --- the runtime contract (`harpoon disk status --json`, HarpoonDiskCLI.swift `diskStatusJSON`) --------------------------------------
+// Keys and shapes exactly as the Swift code writes them (sorted keys, UInt64 sizes, optional guest/hostAvailableBytes/configured/pendingExpansion).
+const thresholds = { warnUsedPercent: 80, criticalUsedPercent: 92, warnAvailableBytes: GIB, criticalAvailableBytes: 384 * MIB };
+const contract = {
+  running: { backingPath: "/x/disk.img", configured: "12G", defaultBytes: 4 * GIB, expansionRequiresRestart: true, hostAvailableBytes: 90 * GIB, hostReserveBytes: 5 * GIB,
+    logicalBytes: 12 * GIB, maxBytes: 512 * GIB, physicalBytes: 7 * GIB, pressure: "warning", provisioned: true, state: "running", thresholds,
+    suggestedSizes: [16 * GIB, 32 * GIB], suggestions: [{ bytes: 16 * GIB, oversubscribed: false }, { bytes: 32 * GIB, oversubscribed: true }],
+    guest: { availableBytes: 1.7 * GIB | 0, capacityBytes: 11 * GIB, usedBytes: 9 * GIB } },
+  unprovisioned: { backingPath: "/x/disk.img", defaultBytes: 4 * GIB, expansionRequiresRestart: true, hostReserveBytes: 5 * GIB, logicalBytes: 0, maxBytes: 512 * GIB,
+    physicalBytes: 0, pressure: "unknown", provisioned: false, state: "stopped", suggestedSizes: [], suggestions: [], thresholds },
+  pending: { backingPath: "/x/disk.img", defaultBytes: 4 * GIB, expansionRequiresRestart: true, hostAvailableBytes: 50 * GIB, hostReserveBytes: 5 * GIB, logicalBytes: 8 * GIB,
+    maxBytes: 512 * GIB, physicalBytes: 3 * GIB, pressure: "unknown", provisioned: true, state: "stopped", suggestedSizes: [16 * GIB], suggestions: [{ bytes: 16 * GIB, oversubscribed: false }],
+    thresholds, pendingExpansion: { active: false, fromBytes: 4 * GIB, phase: "growing", recovery: "Run harpoon disk expand again.", toBytes: 8 * GIB } },
+};
+
+test("every shape the runtime actually writes is accepted, unchanged", () => {
+  for (const [name, o] of Object.entries(contract)) {
+    const parsed = parseDiskCapacity(JSON.stringify(o));
+    assert.deepEqual(parsed, o, name);
+  }
+  const guestless = { ...contract.running }; delete guestless.guest;
+  assert.notEqual(parseDiskCapacity(JSON.stringify({ ...guestless, pressure: "unknown" })), null, "a running VM whose guest did not answer is still a valid reply");
+  for (const pressure of ["unknown", "ok", "warning", "critical"]) assert.notEqual(parseDiskCapacity(JSON.stringify({ ...contract.running, pressure })), null, pressure);
+});
+
+test("malformed or partial replies are rejected, never half-accepted", () => {
+  const base = contract.running;
+  const bad = (name, mutate) => { const o = JSON.parse(JSON.stringify(base)); mutate(o); assert.equal(parseDiskCapacity(JSON.stringify(o)), null, name); assert.ok(diskCapacityProblem(JSON.parse(JSON.stringify(o))), name); };
+  for (const k of ["provisioned", "state", "logicalBytes", "physicalBytes", "pressure", "suggestedSizes", "maxBytes", "hostReserveBytes"]) bad(`missing ${k}`, (o) => { delete o[k]; });
+  for (const p of ["OK", "severe", "", 1, null, true, ["ok"]]) bad(`pressure ${JSON.stringify(p)}`, (o) => { o.pressure = p; });
+  for (const v of ["5", null, true, -1, [], {}]) {
+    bad(`logicalBytes ${JSON.stringify(v)}`, (o) => { o.logicalBytes = v; });
+    bad(`guest.usedBytes ${JSON.stringify(v)}`, (o) => { o.guest.usedBytes = v; });
+    bad(`hostAvailableBytes ${JSON.stringify(v)}`, (o) => { o.hostAvailableBytes = v; });
+  }
+  bad("provisioned string", (o) => { o.provisioned = "true"; });
+  bad("state number", (o) => { o.state = 3; });
+  bad("negative physical", (o) => { o.physicalBytes = -5; });
+  bad("suggested size string", (o) => { o.suggestedSizes = [16 * GIB, "32G"]; });
+  bad("suggested sizes not a list", (o) => { o.suggestedSizes = 16 * GIB; });
+  bad("negative suggestion", (o) => { o.suggestedSizes = [-1]; });
+  bad("suggestion detail without oversubscribed", (o) => { o.suggestions = [{ bytes: 1 }]; });
+  bad("guest not an object", (o) => { o.guest = 5; });
+  bad("guest null", (o) => { o.guest = null; });
+  bad("guest partial", (o) => { delete o.guest.availableBytes; });
+  bad("guest used over capacity", (o) => { o.guest.usedBytes = o.guest.capacityBytes + 1; o.guest.availableBytes = 0; });
+  bad("guest used plus available over capacity", (o) => { o.guest.usedBytes = 9 * GIB; o.guest.availableBytes = 3 * GIB; });
+  bad("guest capacity zero", (o) => { o.guest = { capacityBytes: 0, usedBytes: 0, availableBytes: 0 }; });
+  bad("guest with nothing used or free", (o) => { o.guest = { capacityBytes: GIB, usedBytes: 0, availableBytes: 0 }; });
+  bad("pendingExpansion partial", (o) => { o.pendingExpansion = { phase: "growing" }; });
+  bad("pendingExpansion active not boolean", (o) => { o.pendingExpansion = { phase: "growing", fromBytes: 1, toBytes: 2, recovery: "", active: "yes" }; });
+});
+
+test("NaN and Infinity cannot get through: not JSON, or an overflowing literal that parses to Infinity", () => {
+  const text = JSON.stringify(contract.running);
+  assert.equal(parseDiskCapacity(text.replace(`"usedBytes":${contract.running.guest.usedBytes}`, '"usedBytes":NaN')), null, "NaN is not JSON");
+  assert.equal(parseDiskCapacity(text.replace(`"usedBytes":${contract.running.guest.usedBytes}`, '"usedBytes":Infinity')), null, "Infinity is not JSON");
+  const overflow = text.replace(`"usedBytes":${contract.running.guest.usedBytes}`, '"usedBytes":1e999');
+  assert.equal(JSON.parse(overflow).guest.usedBytes, Infinity, "precondition: the literal parses to Infinity");
+  assert.equal(parseDiskCapacity(overflow), null);
+  assert.equal(parseDiskCapacity(text.replace(`"logicalBytes":${contract.running.logicalBytes}`, '"logicalBytes":1e999')), null);
+  assert.equal(parseDiskCapacity(text.replace(`"capacityBytes":${contract.running.guest.capacityBytes}`, '"capacityBytes":-1e999')), null);
+});
+
+test("anything accepted yields a utilization that is a real number from 0 to 100", () => {
+  for (const [used, free, capacity] of [[1, 0, 1], [0, 1, 1], [5 * GIB, 5 * GIB, 10 * GIB], [9 * GIB, 0.5 * GIB, 10 * GIB], [1, 1, 2 ** 40]]) {
+    const parsed = parseDiskCapacity(JSON.stringify({ ...contract.running, guest: { usedBytes: used, availableBytes: free, capacityBytes: capacity } }));
+    const pct = usedPercent(parsed);
+    assert.ok(Number.isFinite(pct) && pct >= 0 && pct <= 100, `${used}/${free}/${capacity} -> ${pct}`);
+  }
 });
