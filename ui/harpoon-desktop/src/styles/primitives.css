@@ -809,3 +809,11 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .cleanup-impact__list li { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; color: var(--text-primary); }
 .cleanup-impact__records ul { max-height: 160px; overflow: auto; display: grid; gap: 6px; margin-top: 6px; }
 .cleanup-impact__records li { overflow-wrap: anywhere; }
+.disk-meter { height: 10px; border-radius: 5px; background: var(--panel-header); border: 1px solid var(--border); overflow: hidden; }
+.disk-meter__fill { display: block; height: 100%; background: var(--success); }
+.disk-meter[data-pressure="warning"] .disk-meter__fill { background: var(--warning); }
+.disk-meter[data-pressure="critical"] .disk-meter__fill { background: var(--error); }
+.disk-meter[data-pressure="unknown"] .disk-meter__fill { background: var(--text-tertiary); }
+.disk-meter[data-stale] .disk-meter__fill { opacity: 0.55; }
+.disk-chip { cursor: pointer; min-height: 24px; }
+.disk-chip:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }

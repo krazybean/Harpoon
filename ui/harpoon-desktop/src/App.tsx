@@ -23,6 +23,8 @@ import type { Destination, Nav } from "./lib/navigation";
 import { containerDestination } from "./lib/navigation";
 import { ConfirmDialogHost, confirmAction } from "./components/ConfirmDialog";
 import { DiskCapacityNotice } from "./components/DiskCapacityNotice";
+import { ConnectedDiskChip } from "./components/DiskMeter";
+import { useDiskTelemetryPolling } from "./hooks/useDiskTelemetry";
 import { ExpansionProgress } from "./components/ExpansionProgress";
 import { OVERLAY_GRACE_MS, degradedManagement, overlayShouldYield, reconcilePhase, startAvailable, stoppedPanelVisible, withTimeout } from "./lib/lifecycle";
 import type { BootstrapPhase } from "./lib/lifecycle";
@@ -668,6 +670,7 @@ export default function App() {
   };
 
   const expanding = expansionActive(status);
+  useDiskTelemetryPolling(tauriAvailable && status?.state === "running" && bootstrapPhase === "ready");
   const isStopped = status?.state==="stopped" || status?.state==="stale" || bootstrapPhase==="stopped";
   const isRunning = status?.state==="running" || bootstrapPhase==="ready" || bootstrapPhase==="docker_starting";
   const showBootstrapOverlay = !technologyShowcase && !topologyPrototype && bootstrapPhase!=="ready" && bootstrapPhase!=="failed" && bootstrapPhase!=="stopped";
@@ -690,6 +693,7 @@ export default function App() {
             {counts && <span className="text-meta" style={{ color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{counts.running}/{counts.containers} containers • {counts.images} imgs • {counts.volumes} vols • {counts.networks} nets</span>}
           </div>
           <div className="shell-header__right">
+            <ConnectedDiskChip onOpen={() => handleNav("resources")} />
             <ResourceMeters />
             <EngineManageMenu state={expanding ? "expanding disk" : status?.state ?? bootstrapPhase} expanding={expanding} disabled={!tauriAvailable || Boolean(actionInProgress)} onAction={(action) => doAction(action, () => invoke(`${action}_harpoon`))} />
             <button onClick={()=>{ refreshStatus(); refreshCounts(); refreshConfig(); refreshDocker(); if(active==="containers") refreshContainers(); if(active==="images") refreshImages(); if(active==="volumes") refreshVolumes(); if(active==="networks") refreshNetworks(); if(active==="diagnostics"){refreshDoctor(); refreshLogs();} }} disabled={!tauriAvailable} className="btn btn--secondary">Refresh</button>
