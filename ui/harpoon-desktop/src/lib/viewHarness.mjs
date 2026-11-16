@@ -1,4 +1,4 @@
-// Test harness: the real Deployments view, rendered in jsdom. esbuild (already installed with Vite) bundles
+// Test harness: the real Deployments view, rendered in jsdom. esbuild (a pinned devDependency) bundles
 // DeployView.tsx and React once per test run; styles are dropped. Nothing is mocked except the engine the view is given.
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
