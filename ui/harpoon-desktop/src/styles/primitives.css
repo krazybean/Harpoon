@@ -838,3 +838,13 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .storage-details { margin: 8px 0 0; display: grid; gap: 4px; }
 .storage-details dd { margin: 0; overflow-wrap: anywhere; }
 .storage-refresh { min-height: 44px; min-width: 44px; }
+
+/* Contextual actions only move focus to the existing control; the result lists three independent measurements. */
+.storage-action-box p { line-height: 1.45; }
+.storage-action-box { display: grid; gap: 8px; justify-items: start; margin: 6px 0 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-header); }
+.storage-action { min-height: 44px; }
+.storage-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.cleanup-result { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-header); }
+.cleanup-result__figures { margin: 8px 0 0; display: grid; gap: 6px; }
+.cleanup-result__figures dd { margin: 0; overflow-wrap: anywhere; }
+[id^="cleanup-"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }

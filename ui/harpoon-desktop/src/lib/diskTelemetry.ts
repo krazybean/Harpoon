@@ -61,20 +61,24 @@ export interface DiskTelemetryStore {
   get(): Telemetry;
   subscribe(fn: () => void): () => void;
   refresh(): Promise<void>;
+  /** A reading that started after this call: waits out any request already running (its reading may predate the caller's moment), then starts its own. */
+  fresh(): Promise<void>;
   setEnabled(enabled: boolean): void;
 }
 
 export function createDiskTelemetry(fetchText: () => Promise<string>, now: () => number = () => Date.now()): DiskTelemetryStore {
   let state = initialTelemetry();
+  let self: DiskTelemetryStore;
   const subs = new Set<() => void>();
   let inflight: Promise<void> | null = null;
   // The runtime call itself. It cannot be cancelled from here, so after a timeout it may still be running: no second one starts until it ends.
   let native: Promise<unknown> | null = null;
   const set = (next: Telemetry) => { state = next; subs.forEach((f) => f()); };
-  return {
+  self = {
     get: () => state,
     subscribe(fn) { subs.add(fn); return () => { subs.delete(fn); }; },
     setEnabled(enabled) { if (enabled !== state.enabled) set({ ...state, enabled }); },
+    async fresh() { if (inflight) await inflight; return self.refresh(); },
     refresh() {
       if (inflight) return inflight; // one request at a time, whoever asks
       inflight = (async () => {
@@ -98,6 +102,7 @@ export function createDiskTelemetry(fetchText: () => Promise<string>, now: () =>
       return inflight;
     },
   };
+  return self;
 }
 
 /** Meter text, kept apart so the guest filesystem and the Mac's sparse image are never mixed in one sentence. */

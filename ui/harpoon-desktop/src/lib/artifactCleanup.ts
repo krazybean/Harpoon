@@ -22,6 +22,10 @@ export type CleanupReport = {
   /** Guest filesystem free space around an applied cleanup, when the management channel could measure it. */
   guestFreeBefore: number | null;
   guestFreeAfter: number | null;
+  /** The engine's "reclaimed-containers" and "reclaimed-images" lines were both present and whole numbers. Without them nothing is known about what was removed: a missing count is not zero. */
+  reported: boolean;
+  /** The engine's "kept:" lines: objects it looked at and left in place, with its reason. */
+  kept: string[];
 };
 
 const VERDICTS: Verdict[] = ["ready", "reconcile", "protected", "review"];
@@ -44,14 +48,15 @@ function itemOf(raw: unknown): CleanupItem | null {
 
 export function parseCleanup(detail: string): CleanupReport {
   const lines = detail.split("\n").map((l) => l.trim()).filter(Boolean);
-  const num = (key: string) => { const l = lines.find((x) => x.startsWith(`${key}:`)); return l ? Number(l.slice(key.length + 1)) : 0; };
-  const bytes = (key: string) => { const l = lines.find((x) => x.startsWith(`${key}:`)); const n = l ? Number(l.slice(key.length + 1)) : NaN; return Number.isFinite(n) ? n : null; };
+  const whole = (key: string): number | null => { const l = lines.find((x) => x.startsWith(`${key}:`)); const n = l && /^\d+$/.test(l.slice(key.length + 1).trim()) ? Number(l.slice(key.length + 1)) : NaN; return Number.isSafeInteger(n) ? n : null; };
+  const num = (key: string) => whole(key) ?? 0;
+  const bytes = whole;
   const items: CleanupItem[] = [];
   for (const l of lines) {
     if (!l.startsWith("item: ")) continue;
     try { const it = itemOf(JSON.parse(l.slice(6))); if (it) items.push(it); } catch { /* a malformed line is skipped, never guessed at */ }
   }
-  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes") };
+  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), reported: whole("reclaimed-containers") !== null && whole("reclaimed-images") !== null, kept: lines.filter((l) => l.startsWith("kept: ")).map((l) => l.slice(6)), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes") };
 }
 
 /** What a person can act on: Docker objects to remove, and journal records that only need reconciling. */
@@ -179,10 +184,11 @@ export function freedSummary(r: Pick<CleanupReport, "guestFreeBefore" | "guestFr
   return `Guest free space: ${size(r.guestFreeBefore)} before, ${size(r.guestFreeAfter)} after (${d >= 0 ? "+" : "−"}${size(Math.abs(d))}).`;
 }
 
-export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null };
+export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null; /** Why an apply would be refused right now (an unfinished deployment, an unreadable journal), or `null` when the guard is clear or was not reported. */ blocked: string | null };
 
 /** The engine's `prune-build-cache` report. Docker's reclaimed figure is shown as Docker's; the guest's own free space is the measured change. */
 export function parseCache(detail: string): CacheReport {
-  const n = (key: string) => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith(`${key}:`)); const v = l ? Number(l.slice(key.length + 1)) : NaN; return Number.isFinite(v) ? v : null; };
-  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes") };
+  // a size is a whole, non-negative number of bytes; anything else (missing, negative, fractional, text) is "not reported", never a number
+  const n = (key: string) => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith(`${key}:`)); const s = l ? l.slice(key.length + 1).trim() : ""; return /^\d+$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null; };
+  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes"), blocked: (() => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith("prune-guard: blocked")); return l ? l.replace(/^prune-guard: blocked:?\s*/, "") || "the engine did not say why" : null; })() };
 }

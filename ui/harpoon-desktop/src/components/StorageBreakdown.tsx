@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { ageLabel } from "../lib/diskTelemetry";
 import { CATEGORY_ORDER } from "../lib/storageInventory";
 import type { Bytes, InvCategory, InvItem, InventoryView } from "../lib/storageInventory";
+import type { CleanupTarget } from "../lib/cleanupTargets";
 
 // Read-only. Every row is an independent Docker-reported measurement: nothing here is a share of the disk, nothing is summed across
 // rows, and no row offers to remove anything. Meaning is written in words next to each figure, not carried by colour.
@@ -67,6 +68,18 @@ function ItemRow({ item }: { item: InvItem }) {
   );
 }
 
+/** What each row may lead to. A target only moves focus to the existing control; the rest are inspection only, and say so. This list is
+ *  information, not permission: the engine re-checks everything when the person reviews, and again when they confirm. */
+const REVIEW_NOTE = "This list is information, not permission. Reviewing runs the engine's own checks now, and nothing is removed until you confirm there.";
+const ACTIONS: Record<string, { target?: CleanupTarget; label?: string; note: string }> = {
+  "deployment-images": { target: "old-releases", label: "Go to Review old releases", note: `Only releases the journal records as no longer serving can be reviewed. The serving release and the image it pins are always kept. ${REVIEW_NOTE}` },
+  "obsolete-artifacts": { target: "old-releases", label: "Go to Review old releases", note: `${REVIEW_NOTE} Objects listed here that the engine cannot prove are safe to remove are left alone.` },
+  "build-cache": { target: "build-cache", label: "Go to Check build cache", note: "Checking asks Docker how much cache nothing is using and removes nothing. Pruning is a separate step with its own confirmation. Docker's figure is not a promise of free disk space." },
+  "other-images": { note: "Inspection only. Images Harpoon did not deploy, and images of unknown ownership, are not removed from here." },
+  volumes: { note: "Inspection only. Harpoon never removes persistent volumes." },
+  "writable-layers": { note: "Inspection only. Containers are not removed from here, and running or stopped containers keep their images protected." },
+};
+
 function figureText(c: InvCategory): string {
   if (c.status === "unavailable") return "Not available";
   if (c.bytes === null) return c.id === "obsolete-artifacts" || c.id.endsWith("images") ? "Sizes overlap, not totalled" : "No size reported";
@@ -74,7 +87,8 @@ function figureText(c: InvCategory): string {
   return c.bytesComplete ? fmtBytes(c.bytes) : `at least ${fmtBytes(c.bytes)} (${unmeasured || "some"} not measured)`;
 }
 
-function Row({ c }: { c: InvCategory }) {
+function Row({ c, onAction }: { c: InvCategory; onAction?: (t: CleanupTarget) => void }) {
+  const action = ACTIONS[c.id];
   const [open, setOpen] = useState(false);
   const id = useId();
   return (
@@ -88,6 +102,12 @@ function Row({ c }: { c: InvCategory }) {
       {open && (
         <div id={id} className="storage-row__body" role="group" aria-label={`${c.title} details`}>
           <p className="text-meta">{c.sizeBasis}</p>
+          {action && (
+            <div className="storage-action-box">
+              <p className="text-meta" style={{ margin: 0 }}>{action.note}</p>
+              {action.target && onAction && <button type="button" className="btn btn--secondary storage-action" onClick={() => onAction(action.target!)}>{action.label}</button>}
+            </div>
+          )}
           {c.note && <p className="text-body" role="status">{c.note}</p>}
           {c.figures.map((f) => (
             <p key={f.label} className="text-body"><b>{f.label}:</b> {f.bytes === null ? "unknown (a record has no size)" : fmtBytes(f.bytes)} <span className="text-meta">{f.meaning}</span></p>
@@ -121,7 +141,7 @@ function Unattributed() {
   );
 }
 
-export function StorageBreakdown({ view, onRefresh }: { view: InventoryView; onRefresh: () => void }) {
+export function StorageBreakdown({ view, onRefresh, onAction }: { view: InventoryView; onRefresh: () => void; onAction?: (t: CleanupTarget) => void }) {
   const { inv, status, loading, now } = view;
   const cats = inv ? CATEGORY_ORDER.map((id) => inv.categories.find((c) => c.id === id)!) : [];
   const failedSources = inv ? inv.sources.filter((s) => s.status !== "ok") : [];
@@ -145,9 +165,15 @@ export function StorageBreakdown({ view, onRefresh }: { view: InventoryView; onR
           {failedSources.map((s) => <div key={s.endpoint} className="text-body" role="status">{s.endpoint}: {s.status === "failed" ? `failed (${s.detail})` : s.detail}</div>)}
           {!inv.journalAvailable && <div className="text-body" role="status">The deployment journal could not be used{inv.journalNote ? ` (${inv.journalNote})` : ""}, so no ownership is confirmed. Harpoon labels are claims only.</div>}
           <ul className="storage-rows">
-            {cats.map((c) => <Row key={c.id} c={c} />)}
+            {cats.map((c) => <Row key={c.id} c={c} onAction={onAction} />)}
             <Unattributed />
           </ul>
+          {onAction && (
+            <div className="storage-action-box" style={{ marginTop: 8 }}>
+              <p className="text-meta" style={{ margin: 0 }}>Space freed inside Harpoon stays allocated on your Mac until unused disk blocks are returned. That is a separate step and does not delete Docker objects.</p>
+              <button type="button" className="btn btn--secondary storage-action" onClick={() => onAction("disk-blocks")}>Go to Reclaim unused space</button>
+            </div>
+          )}
           <p className="text-meta" style={{ marginTop: 8 }}>
             {inv.imageLayersBytes !== null ? `All images: ${fmtBytes(inv.imageLayersBytes)} of layers, shared layers counted once. ` : ""}{inv.imageLayersMeaning}
             {inv.unknownOwnershipItems > 0 && ` ${inv.unknownOwnershipItems} listed objects have unknown ownership. Unknown does not mean unused or safe to remove.`}

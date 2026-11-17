@@ -223,6 +223,19 @@ fn lock_dir(dir: &Path) -> Result<File, SqliteOpenError> {
     }
 }
 
+/// The writer lock, held without opening, migrating or changing anything in the journal. While it is held no other Harpoon writer
+/// (a deployment, a cleanup, a recovery) can start: each of them takes this same lock first. It is released when this is dropped.
+/// Only the lock file itself can be created (empty); no journal data is touched.
+pub struct WriterHold {
+    _lock: File,
+}
+
+/// Take the writer lock for an operation that must not overlap any Harpoon deployment writer, such as a build-cache prune that has
+/// just checked that nothing is deploying. Fails, naming the holder's lock, when another process is writing.
+pub fn hold_writer_lock(dir: &Path) -> Result<WriterHold, SqliteOpenError> {
+    lock_dir(dir).map(|lock| WriterHold { _lock: lock })
+}
+
 fn migrate(db: &Db) -> Result<(), SqliteOpenError> {
     db.exec("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, body TEXT NOT NULL); INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);")
 }

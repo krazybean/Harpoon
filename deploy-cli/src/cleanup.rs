@@ -472,6 +472,65 @@ fn guest_free(p: &Parsed, socket: &Path) -> Option<u64> {
         .map(|(free, _)| free)
 }
 
+/// Why a build-cache prune must not be applied now, from the journal alone (read-only: the same detection and reader as every
+/// other command, so a legacy `journal.wal` counts as much as the SQLite store). `Ok(())` only when a journal is genuinely absent
+/// (nothing is recorded as deploying) or is readable, unlocked and has no unfinished deployment. Anything that cannot be
+/// established fails closed. This is Harpoon's own record: it says nothing about builds started by other Docker clients.
+/// The preview uses this alone; the apply path uses [`cache_hold`], which adds the lock.
+fn cache_guard(rt: &Runtime) -> Result<(), String> {
+    if !rt.initialised() {
+        return Ok(());
+    }
+    match harpoon_deploy_journal::writer_lock_status(&rt.journal_dir()) {
+        Ok(harpoon_deploy_journal::LockStatus::Held) => return Err(
+            "another Harpoon process holds the deployment journal, so a deployment may be running"
+                .into(),
+        ),
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!(
+                "the journal's lock state could not be read ({})",
+                e.0
+            ))
+        }
+    }
+    unfinished_in_journal(rt)
+}
+
+fn unfinished_in_journal(rt: &Runtime) -> Result<(), String> {
+    match store::read_restored(rt) {
+        Ok(Some(r)) => match unfinished(&r.deployments).first() {
+            Some(first) => Err(first.to_string()),
+            None => Ok(()),
+        },
+        Ok(None) => Ok(()),
+        Err(e) => Err(format!(
+            "the deployment journal could not be read ({})",
+            e.message.lines().next().unwrap_or("")
+        )),
+    }
+}
+
+/// The apply path's guard: the check above made under the journal's own writer lock, which the returned hold keeps until the prune is
+/// over. Every Harpoon deployment writer takes that lock before it starts, so none can begin between the check and the cache removal (the
+/// desktop's own operations are also serialised by its operations mutex; this closes the same window for a terminal process).
+/// A genuinely absent journal needs no lock. The lock is a flag on a lock file: no journal data is read for writing, migrated or changed.
+fn cache_hold(rt: &Runtime) -> Result<Option<harpoon_deploy_journal::WriterHold>, String> {
+    if !rt.initialised() {
+        return Ok(None);
+    }
+    let hold = harpoon_deploy_journal::hold_writer_lock(&rt.journal_dir()).map_err(|e| {
+        if e.0.contains("another Harpoon process holds") {
+            "another Harpoon process holds the deployment journal, so a deployment may be running"
+                .to_string()
+        } else {
+            format!("the journal's writer lock could not be taken ({})", e.0)
+        }
+    })?;
+    unfinished_in_journal(rt)?;
+    Ok(Some(hold))
+}
+
 /// `prune-build-cache`: removes BuildKit cache nothing is using, through Docker's own prune call (what `docker builder
 /// prune` does without `--all`). The cache is not something Harpoon records, so there is nothing to journal; what is
 /// reported is Docker's figure and the guest filesystem's measured free space before and after. Later builds are slower
@@ -489,6 +548,21 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "this is a simulated runtime; there is nothing real to prune",
         ));
     }
+    // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview. The hold
+    // lives until this function returns, that is, through the prune.
+    let guard = if apply { Ok(()) } else { cache_guard(&rt) };
+    let _hold = if apply {
+        match cache_hold(&rt) {
+            Ok(h) => h,
+            Err(why) => {
+                return Err(Fail::refused(format!(
+                    "the build cache was not pruned: {why}. Prune only when no deployment is running or unfinished (run `recover` for an interrupted one). Nothing was changed."
+                )))
+            }
+        }
+    } else {
+        None
+    };
     let api = harpoon_deploy_docker::api::DockerApi::new(&socket, Duration::from_secs(30));
     let runtime_err = |e: harpoon_deploy_docker::api::ApiError| {
         Fail::runtime(format!(
@@ -502,6 +576,14 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     let _ = writeln!(out, "build cache: {total} bytes in all, {unused} bytes not in use. A prune removes only the unused part; images, containers and volumes are not touched, and later builds are slower until the cache fills again.");
     let _ = writeln!(out, "build-cache-reclaimable-bytes: {unused}");
     if !apply {
+        match &guard {
+            Ok(()) => {
+                let _ = writeln!(out, "prune-guard: clear");
+            }
+            Err(why) => {
+                let _ = writeln!(out, "prune-guard: blocked: {why}");
+            }
+        }
         let _ = writeln!(
             out,
             "dry run: nothing was changed. Add --apply and --{}=… to carry this out.",
@@ -510,9 +592,20 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
         return Ok(exit::OK);
     }
     let before = guest_free(p, &socket);
-    let freed = api
-        .prune_build_cache(Duration::from_secs(300))
-        .map_err(|e| Fail::failed(format!("Docker did not complete the prune: {e}")))?;
+    let freed = api.prune_build_cache(Duration::from_secs(300)).map_err(|e| {
+        use harpoon_deploy_docker::api::ApiError;
+        use harpoon_deploy_docker::http::HttpError;
+        match &e {
+            // Docker never received the request: nothing happened
+            ApiError::Transport(HttpError::Connect(_)) => Fail::failed(format!("Docker did not complete the prune: {e}. Nothing was changed.")),
+            // The request may have reached Docker and been carried out; the answer is what is missing. Never reported as a plain failure.
+            ApiError::Transport(_) | ApiError::Malformed { .. } => Fail::failed(format!(
+                "result unknown: Docker did not give a usable answer to the prune request ({e}). The prune may have completed fully, partly or not at all; nothing is assumed."
+            )),
+            // Docker answered that it failed; some cache may already have gone before the error
+            ApiError::Status { .. } => Fail::failed(format!("Docker did not complete the prune: {e}. Cache removed before the error is not restored.")),
+        }
+    })?;
     let _ = writeln!(out, "build-cache-reclaimed-bytes: {freed}");
     match (before, guest_free(p, &socket)) {
         (Some(b), Some(a)) => {

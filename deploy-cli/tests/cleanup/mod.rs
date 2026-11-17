@@ -309,6 +309,550 @@ fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused
     );
 }
 
+// ---------------------------------------------------------------- the build-cache prune guard
+
+fn posts(t: &T) -> usize {
+    t.h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST")
+        .count()
+}
+
+fn seed_cache(t: &T) {
+    t.h.docker
+        .with(|s| s.build_cache = vec![(1_000, false), (500, true), (250, false)]);
+}
+
+fn with_deployment(t: &T, status: DeploymentStatus) {
+    static N: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(40);
+    let (app, dep) = ids(N.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    j.persist(&finished(&app, &dep, status)).unwrap();
+}
+
+fn legacy_journal(t: &T, lines: Option<usize>) {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ui/harpoon-desktop/src-tauri/tests/fixtures/b7-legacy-runtime/deploy-journal/journal.wal");
+    let text = std::fs::read_to_string(fixture).unwrap();
+    let kept: String = text
+        .lines()
+        .take(lines.unwrap_or(usize::MAX))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(t.journal_dir().join("journal.wal"), kept).unwrap();
+}
+
+#[test]
+fn an_unfinished_deployment_refuses_the_prune_on_the_apply_path_and_nothing_is_pruned() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Running);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("was not pruned") && o.stderr.contains("Nothing was changed"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0, "Docker was never asked to prune");
+    assert_eq!(t.h.docker.with(|s| s.build_cache.len()), 3);
+    // the dry run still answers, and says the apply would be refused
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("prune-guard: blocked"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("build-cache-reclaimable-bytes: 1250"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn the_guard_is_checked_when_applying_not_when_previewing() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert!(o.stdout.contains("prune-guard: clear"), "{}", o.stdout);
+    // a deployment starts between the preview and the confirmation
+    {
+        let (app, dep) = ids(41);
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.persist(&finished(&app, &dep, DeploymentStatus::Queued))
+            .unwrap();
+    }
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn a_journal_with_only_finished_deployments_allows_the_prune_and_it_stays_all_false() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    for s in [DeploymentStatus::Succeeded, DeploymentStatus::Failed] {
+        with_deployment(&t, s);
+    }
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.clone()),
+        vec![(500, true)],
+        "only the unused part went"
+    );
+    let reqs = t.h.docker.requests();
+    let prunes: Vec<_> = reqs.iter().filter(|r| r.method == "POST").collect();
+    assert_eq!(prunes.len(), 1);
+    assert!(
+        prunes[0].path.starts_with("/build/prune") && prunes[0].path.contains("all=false"),
+        "{}",
+        prunes[0].path
+    );
+    assert!(
+        reqs.iter().all(|r| r.method != "DELETE"),
+        "no image, container or volume was removed"
+    );
+}
+
+#[test]
+fn a_genuinely_absent_journal_does_not_block_the_prune() {
+    let t = T::new();
+    t.docker_runtime(); // a runtime folder with no journal file of either kind
+    seed_cache(&t);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(posts(&t), 1);
+}
+
+#[test]
+fn a_legacy_journal_is_read_where_it_is_and_decides_in_the_same_way() {
+    // a finished deployment: allowed
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    legacy_journal(&t, None);
+    let before = std::fs::read(t.journal_dir().join("journal.wal")).unwrap();
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(posts(&t), 1);
+    assert_eq!(
+        std::fs::read(t.journal_dir().join("journal.wal")).unwrap(),
+        before,
+        "not rewritten"
+    );
+    assert!(
+        !t.journal_dir().join("deployments.sqlite3").exists(),
+        "not converted"
+    );
+    // the same journal cut while the deployment was still running: refused
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    legacy_journal(&t, Some(3));
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("is running")
+            || o.stderr.contains("not finished")
+            || o.stderr.contains("run `recover`"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn an_unreadable_or_ambiguous_journal_fails_closed_in_both_formats() {
+    for (file, bytes) in [
+        ("journal.wal", &b"this is not a journal"[..]),
+        ("deployments.sqlite3", &b"not a database at all"[..]),
+    ] {
+        let t = T::new();
+        t.docker_runtime();
+        seed_cache(&t);
+        std::fs::write(t.journal_dir().join(file), bytes).unwrap();
+        let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("could not be read"),
+            "{file}: {}",
+            o.stderr
+        );
+        assert_eq!(posts(&t), 0, "{file}");
+        assert_eq!(
+            std::fs::read(t.journal_dir().join(file)).unwrap(),
+            bytes,
+            "{file} was not repaired"
+        );
+        let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+        assert!(
+            o.stdout.contains("prune-guard: blocked"),
+            "{file}: {}",
+            o.stdout
+        );
+    }
+}
+
+#[test]
+fn a_journal_another_process_is_writing_refuses_the_prune() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let _writer = open_j(&t.journal_dir()).unwrap(); // a writer holds the store
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("holds the deployment journal"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn no_deployment_writer_can_start_between_the_check_and_the_prune_in_either_journal_format() {
+    use std::sync::{Arc, Mutex};
+    use support::fake_docker::Action;
+    for legacy in [false, true] {
+        let t = T::new();
+        t.docker_runtime();
+        seed_cache(&t);
+        if legacy {
+            legacy_journal(&t, None);
+        } else {
+            with_deployment(&t, DeploymentStatus::Succeeded);
+        }
+        let dir = t.journal_dir();
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let (s2, d2) = (seen.clone(), dir.clone());
+        // At the instant Docker is asked to prune, a second Harpoon writer tries to start (a deployment from a terminal, say).
+        t.h.docker.fault(
+            Some("POST"),
+            "/build/prune",
+            1,
+            Action::Race(Arc::new(move |_| {
+                *s2.lock().unwrap() =
+                    Some(match harpoon_deploy_journal::SqliteJournal::open(&d2) {
+                        Ok(_) => "a second writer started during the prune".to_string(),
+                        Err(e) => e.to_string(),
+                    });
+            })),
+        );
+        let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+        assert_exit(&o, 0);
+        let got = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the prune request reached Docker");
+        assert!(
+            got.contains("another Harpoon process holds"),
+            "legacy={legacy}: {got}"
+        );
+        assert_eq!(posts(&t), 1);
+        // the hold ended with the command: a writer can start now, and the journal itself was never written by the hold
+        assert!(
+            harpoon_deploy_journal::hold_writer_lock(&dir).is_ok(),
+            "legacy={legacy}: the lock was released"
+        );
+        if legacy {
+            assert!(
+                !dir.join("deployments.sqlite3").exists(),
+                "the legacy journal was not converted"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_preview_holds_no_lock() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(harpoon_deploy_journal::hold_writer_lock(&t.journal_dir()).is_ok());
+}
+
+#[test]
+fn the_confirmation_requirement_is_unchanged_by_the_guard() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply"]));
+    assert_ne!(o.code, 0);
+    assert_eq!(posts(&t), 0);
+}
+
+// ---------------------------------------------------------------- the real output contracts, captured for the desktop
+
+/// What the real commands print and exit with, for each scenario the desktop's result panel has to read. The desktop's tests run its parser
+/// on exactly these captures (after the desktop's own response mapping), so its fixtures cannot drift from the engine. Paths that vary
+/// from run to run are replaced by placeholders. Regenerate with `WRITE_CLEANUP_FIXTURES=1 cargo test --test cli cleanup_output_contracts`.
+fn capture(t: &T, name: &str, o: &Outcome, into: &mut Vec<(String, Json)>) {
+    use harpoon_deploy_docker::json::{n, obj, s};
+    let scrub = |x: &str| {
+        x.replace(&t.socket(), "<docker-socket>")
+            .replace(&t.rt.display().to_string(), "<runtime>")
+            .replace(&t.resources(), "<resources>")
+            .replace(&t.mgmt.path().display().to_string(), "<mgmt-socket>")
+    };
+    into.push((
+        name.to_string(),
+        obj(vec![
+            ("code", n(o.code as i64)),
+            ("stdout", s(scrub(&o.stdout))),
+            ("stderr", s(scrub(&o.stderr))),
+        ]),
+    ));
+}
+
+#[test]
+fn cleanup_output_contracts_match_the_desktops_fixtures() {
+    use harpoon_deploy_docker::json::obj;
+    use support::fake_docker::Action;
+    let mut all: Vec<(String, Json)> = Vec::new();
+    let mgmt = |t: &T| {
+        vec![
+            "--mgmt-socket".to_string(),
+            t.mgmt.path().display().to_string(),
+        ]
+    };
+    let with_mgmt = |t: &T, mut a: Vec<String>| {
+        a.extend(mgmt(t));
+        a
+    };
+
+    // ---- cleanup-releases
+    let t = T::new();
+    world(&t);
+    capture(
+        &t,
+        "releases-dry-run",
+        &go(&t, &SHIPPING, &args(&t, &[])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-refused-unauthorized",
+        &go(&t, &SHIPPING, &args(&t, &["--apply"])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-success",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-nothing-left",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-dry-run-nothing-left",
+        &go(&t, &SHIPPING, &args(&t, &[])),
+        &mut all,
+    );
+
+    let t = T::new();
+    world(&t);
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/images/",
+        usize::MAX,
+        Action::Respond(409, r#"{"message":"conflict: unable to delete, image is referenced in multiple repositories"}"#.into()),
+    );
+    capture(
+        &t,
+        "releases-apply-partial-image-kept",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+
+    let t = T::new();
+    let w = world(&t);
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let (_, running) = ids(9);
+        j.persist(&finished(&w.app, &running, DeploymentStatus::Running))
+            .unwrap();
+    }
+    capture(
+        &t,
+        "releases-apply-refused-unfinished",
+        &go(&t, &SHIPPING, &args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    world(&t);
+    let mut a = args(&t, &["--apply", &auth()]);
+    let i = a.iter().position(|x| x == &t.socket()).unwrap();
+    a[i] = "/nonexistent/docker.sock".into();
+    capture(
+        &t,
+        "releases-apply-engine-unreachable",
+        &go(&t, &SHIPPING, &a),
+        &mut all,
+    );
+
+    // ---- prune-build-cache
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    capture(
+        &t,
+        "cache-preview-clear",
+        &go(&t, &SHIPPING, &with_mgmt(&t, cache_args(&t, &[]))),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-refused-unauthorized",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply"])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-success",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, cache_args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-success-guest-unmeasured",
+        &{
+            let t2 = T::new();
+            t2.docker_runtime();
+            seed_cache(&t2);
+            go(&t2, &SHIPPING, &cache_args(&t2, &["--apply", &auth()]))
+        },
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    t.h.docker.with(|s| s.build_cache = vec![(500, true)]);
+    capture(
+        &t,
+        "cache-preview-nothing-unused",
+        &go(&t, &SHIPPING, &with_mgmt(&t, cache_args(&t, &[]))),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-nothing-unused",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, cache_args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    {
+        // a fixed id: the shared counter in `with_deployment` depends on which tests ran first, and the capture must not
+        let (app, dep) = ids(40);
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.persist(&finished(&app, &dep, DeploymentStatus::Running))
+            .unwrap();
+    }
+    capture(
+        &t,
+        "cache-preview-blocked-unfinished",
+        &go(&t, &SHIPPING, &cache_args(&t, &[])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-refused-unfinished",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker.fault(
+        Some("POST"),
+        "/build/prune",
+        1,
+        Action::Respond(
+            500,
+            r#"{"message":"prune failed: buildkit is not available"}"#.into(),
+        ),
+    );
+    capture(
+        &t,
+        "cache-apply-failed-docker-error",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker
+        .fault(Some("POST"), "/build/prune", 1, Action::Disconnect);
+    capture(
+        &t,
+        "cache-apply-connection-lost",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker
+        .fault(Some("POST"), "/build/prune", 1, Action::ApplyThenDrop);
+    capture(
+        &t,
+        "cache-apply-reply-lost-after-prune",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let now = obj(all.iter().map(|(k, v)| (k.as_str(), v.clone())).collect()).to_json();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ui/harpoon-desktop/src-tauri/tests/fixtures/cleanup-outputs/raw.json");
+    if std::env::var_os("WRITE_CLEANUP_FIXTURES").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &now).unwrap();
+    }
+    let committed =
+        std::fs::read_to_string(&path).expect("fixture missing: run with WRITE_CLEANUP_FIXTURES=1");
+    assert_eq!(committed, now, "the captured command outputs changed: regenerate with WRITE_CLEANUP_FIXTURES=1 and review the diff");
+}
+
 // ---------------------------------------------------------------- ownership and classification
 
 use harpoon_deploy::git::{CredKind, GitRecord, RepoRec, SelectorKind, SourceRec};

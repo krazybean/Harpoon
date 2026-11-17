@@ -2579,3 +2579,149 @@ mod storage_journal {
         );
     }
 }
+
+#[test]
+fn every_production_engine_operation_runs_under_the_operations_mutex() {
+    // The build-cache prune checks the journal and prunes inside one engine command, and every desktop-started engine command takes
+    // OPS first and holds it to the end: nothing the desktop starts can begin a deployment between that check and the prune.
+    let src = include_str!("../deploy_api.rs");
+    let start = src
+        .find("pub async fn deploy_op(")
+        .expect("deploy_op exists");
+    let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+    let lock = body
+        .find("let _one = OPS.lock()")
+        .expect("deploy_op names and holds the guard (a bare `_` would release it at once)");
+    let run = body
+        .find("run_op_with(")
+        .expect("deploy_op runs the operation");
+    assert!(lock < run, "the mutex is taken before the engine command starts, and `_one` lives to the end of the closure");
+    assert_eq!(src.matches("OPS.lock(").count(), 1, "one place takes it");
+    // run_op_with has exactly three mentions: its definition, run_op (tests only call that) and deploy_op
+    assert_eq!(
+        src.matches("run_op_with(").count(),
+        3,
+        "no other production path runs an engine command"
+    );
+}
+
+/// The real `cleanup-releases` and `prune-build-cache` outputs (captured by the engine's own tests with a fake Docker) passed through the
+/// real response mapping. The desktop's tests read the result, so what the UI parses is what these commands print, not a hand-written object.
+mod cleanup_contracts {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn raw() -> BTreeMap<String, serde_json::Value> {
+        let p =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cleanup-outputs/raw.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(p).expect(
+                "run the engine's cleanup_output_contracts test with WRITE_CLEANUP_FIXTURES=1",
+            ),
+        )
+        .unwrap()
+    }
+
+    fn op_for(name: &str) -> DeployOp {
+        let apply = name.contains("-apply-");
+        if name.starts_with("releases-") {
+            DeployOp::CleanupReleases { apply }
+        } else {
+            DeployOp::PruneBuildCache { apply }
+        }
+    }
+
+    fn mapped() -> BTreeMap<String, OpResult> {
+        raw()
+            .into_iter()
+            .map(|(name, v)| {
+                let out = harpoon_deploy_cli::Outcome {
+                    code: v["code"].as_i64().unwrap() as i32,
+                    stdout: v["stdout"].as_str().unwrap().to_string(),
+                    stderr: v["stderr"].as_str().unwrap().to_string(),
+                };
+                let r = op_result(&op_for(&name), &out);
+                (name, r)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_desktops_result_fixture_is_the_real_outputs_through_the_real_mapping() {
+        let now = serde_json::to_string(&mapped()).unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/lib/fixtures/cleanup-opresults.json");
+        if std::env::var_os("WRITE_CLEANUP_FIXTURES").is_some() {
+            std::fs::write(&path, &now).unwrap();
+        }
+        let committed = std::fs::read_to_string(&path)
+            .expect("fixture missing: run with WRITE_CLEANUP_FIXTURES=1");
+        assert_eq!(committed, now, "regenerate with WRITE_CLEANUP_FIXTURES=1 cargo test cleanup_contracts and review the diff");
+    }
+
+    #[test]
+    fn exit_codes_map_to_the_engines_answer_without_guessing() {
+        let m = mapped();
+        // refused: exit 6, nothing changed, and the reason is the engine's own
+        for name in [
+            "releases-apply-refused-unfinished",
+            "cache-apply-refused-unfinished",
+            "releases-apply-refused-unauthorized",
+            "cache-apply-refused-unauthorized",
+        ] {
+            let r = &m[name];
+            assert!(!r.ok && r.exit_code == 6, "{name}");
+            assert!(
+                r.hint.as_deref().unwrap().contains("changing anything")
+                    || r.hint.as_deref().unwrap().contains("confirmation")
+                    || r.hint.as_deref().unwrap().contains("Nothing was changed"),
+                "{name}: {:?}",
+                r.hint
+            );
+        }
+        // a cache prune that failed is not described as a failed deployment
+        let failed = &m["cache-apply-failed-docker-error"];
+        assert!(!failed.ok && failed.exit_code == 7);
+        let hint = failed.hint.as_deref().unwrap();
+        assert!(!hint.to_lowercase().contains("deployment"), "{hint}");
+        assert!(
+            hint.contains("Review again") && hint.matches("not restored").count() == 1,
+            "{hint}"
+        );
+        // a prune whose answer never arrived is "could not confirm", in both cases (the second one actually pruned)
+        for name in [
+            "cache-apply-connection-lost",
+            "cache-apply-reply-lost-after-prune",
+        ] {
+            let r = &m[name];
+            assert!(
+                !r.ok && r.summary.starts_with("result unknown:"),
+                "{name}: {}",
+                r.summary
+            );
+            assert!(
+                r.hint
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("The engine could not confirm what happened:"),
+                "{name}"
+            );
+        }
+        // success keeps stdout as the detail; the summary is its first line
+        assert!(
+            m["cache-apply-success"].ok
+                && m["cache-apply-success"]
+                    .detail
+                    .contains("build-cache-reclaimed-bytes: 1250")
+        );
+        assert!(m["releases-apply-partial-image-kept"]
+            .detail
+            .contains("kept: image"));
+        // an engine that could not reach Docker says nothing was changed
+        assert!(m["releases-apply-engine-unreachable"]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("Nothing was changed"));
+    }
+}
