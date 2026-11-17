@@ -23,6 +23,8 @@ HARPOON_LOG = HOME / "Library/Application Support/Harpoon/harpoon.log"
 RUNTIME_JSON = HOME / "Library/Application Support/Harpoon/runtime.json"
 PROTECTED = {"Collectiv": "http://127.0.0.1:38000/", "juancastro.me": "http://127.0.0.1:38006/"}
 PG = "collectiv-harpoon-test-db-1"
+BASE_IMAGE = "busybox:1.36"   # Harpoon never pulls implicitly (deliberate): the base image must already be in the engine
+PULL = f"docker --context harpoon pull {BASE_IMAGE}"
 
 
 def now(): return time.time()
@@ -65,6 +67,22 @@ class Run:
     def docker(self, *args):
         if self.sim: return ""
         return subprocess.run(["docker", "--context", "harpoon", *args], capture_output=True, text=True, timeout=120).stdout
+
+    def docker_rc(self, *args):
+        p = subprocess.run(["docker", "--context", "harpoon", *args], capture_output=True, text=True, timeout=120)
+        return p.returncode, p.stdout
+
+    def prerequisites(self):
+        """Everything that must hold before the first deployment. Returns the failures (empty = ready). Changes nothing."""
+        bad = []
+        if not os.access(self.a.cli, os.X_OK): bad.append(f"the CLI is not executable: {self.a.cli}")
+        if self.sim: return bad                                   # a simulated run needs no engine
+        rc, _ = self.docker_rc("version", "--format", "{{.Server.Version}}")
+        if rc != 0: bad.append("the Harpoon Docker engine does not answer (docker --context harpoon version)")
+        else:
+            rc, _ = self.docker_rc("image", "inspect", BASE_IMAGE)
+            if rc != 0: bad.append(f"the base image {BASE_IMAGE} is not in the engine. Harpoon never pulls implicitly, so pull it first, yourself: {PULL}")
+        return bad
 
     def get(self, url, timeout=3):
         try:
@@ -307,6 +325,13 @@ class Run:
                     added=added, removed=removed, foreign_additions=foreign, journal_integrity=integ, active_deployments=len(re.findall(r" running ", st)))
 
     def main(self):
+        missing = self.prerequisites()
+        if missing:
+            for m in missing: self.log("PREREQUISITE FAILED:", m)
+            self.record("prerequisites", False, missing=missing)
+            (self.out / "report.md").write_text("# Real-Docker acceptance\n\nNOT STARTED: prerequisites failed. Nothing was deployed or changed.\n\n" + "\n".join(f"- {m}" for m in missing) + "\n")
+            return 2
+        self.record("prerequisites", True)
         before = self.snapshot_docker()
         (self.out / "docker-before.json").write_text(json.dumps(before, indent=1))
         self.protected_ok("start")
