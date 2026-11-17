@@ -212,6 +212,9 @@ pub struct ServingDto {
     pub release: String,
     pub deployment: String,
     pub container: String,
+    /// The deployment whose ledger holds the serving container (and whose label it carries). It is the release's own
+    /// deployment unless a restoration or rollback recreated the container under another one.
+    pub container_owner: String,
     /// `original`, `restored` or `rolled_back`
     pub via: String,
     pub since_ms: u64,
@@ -682,6 +685,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
             release: s.release.to_string(),
             deployment: s.deployment.to_string(),
             container: s.container_name.clone(),
+            container_owner: s.container_owner.to_string(),
             via: match s.via {
                 harpoon_deploy::serving::ServedBy::Original => "original",
                 harpoon_deploy::serving::ServedBy::Restored { .. } => "restored",

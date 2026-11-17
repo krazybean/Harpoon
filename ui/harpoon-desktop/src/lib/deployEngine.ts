@@ -36,7 +36,7 @@ export type SnapApp = {
   disconnected?: { name: string; url: string; registeredMs: number; removedMs: number } | null;
   /** The stable `<label>.harpoon.localhost` name of the application, and whether it routes (serving / idle / conflict / external). */
   hostname?: string; route?: "serving" | "idle" | "conflict" | "external"; deployments: SnapDeployment[];
-  serving: { release: string; deployment: string; container: string; via: string; sinceMs: number; hostPort: number | null; healthPath: string | null } | null;
+  serving: { release: string; deployment: string; container: string; /** the deployment that created the container: differs from `deployment` after a restoration or rollback */ containerOwner?: string; via: string; sinceMs: number; hostPort: number | null; healthPath: string | null } | null;
   pauses: { origin: string; kind: string; sinceMs: number; context: string; recorded: boolean }[];
   events: { delivery: string; source: string; revision: string; receivedMs: number; status: string; decidedMs: number | null; related: string | null }[];
 };
@@ -393,8 +393,11 @@ const shortId = (id: string) => id.replace(/^sha256:/, "").slice(0, 12);
 export function correlate(app: SnapApp, observed: Observed, hostListeners: HostListeners = null): Observation | null {
   const sv = app.serving;
   if (!sv) return null;
+  // The release's own deployment holds its port lease; the container is recorded (and labelled) under the deployment that created it,
+  // which after a restoration or rollback is another one.
   const dep = app.deployments.find((d) => d.id === sv.deployment);
-  const rec = dep?.resources.find((r) => r.kind === "container" && r.name === sv.container);
+  const owner = sv.containerOwner ?? sv.deployment;
+  const rec = app.deployments.find((d) => d.id === owner)?.resources.find((r) => r.kind === "container" && r.name === sv.container);
   const lease = dep?.resources.find((r) => r.kind === "port" && r.state === "created");
   const leasePort = lease ? Number(lease.name) : null;
   const recorded = `release ${sv.release} serving in container ${sv.container}${rec?.id ? ` (${shortId(rec.id)})` : ""}${leasePort ? `, port lease ${leasePort}` : ""}`;
@@ -417,7 +420,7 @@ export function correlate(app: SnapApp, observed: Observed, hostListeners: HostL
   };
   label("managed", LABEL_MANAGED, "true", "Managed by Harpoon");
   label("app", LABEL_APP, app.id, "Belongs to this application");
-  label("deployment", LABEL_DEPLOYMENT, sv.deployment, "Created by this deployment");
+  label("deployment", LABEL_DEPLOYMENT, owner, "Created by this deployment");
   if (leasePort && row.mappings.length) {
     if (row.ports.includes(leasePort)) add("port", "Port lease", "ok", `Docker publishes the leased port ${leasePort}.`);
     else add("port", "Port lease", "fail", `The recorded port lease ${leasePort} is not among the published ports (${row.ports.join(", ")}).`);

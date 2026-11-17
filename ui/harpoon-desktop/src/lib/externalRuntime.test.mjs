@@ -85,7 +85,7 @@ test("docker ps rows are read for id, state, labels and published ports", () => 
 });
 
 test("Harpoon's own applications get the same comparison", () => {
-  const own = { ...OWN, store: "ok", source: { ...OWN.source, journalFormat: "sqlite" }, apps: B7.apps.map((a) => ({ ...a, id: "app_OWN", serving: { ...a.serving, deployment: "dep_OWN", container: "hp-dep_OWN" }, deployments: a.deployments.map((d) => ({ ...d, id: "dep_OWN", resources: d.resources.map((r) => (r.kind === "container" && r.state === "created" ? { ...r, name: "hp-dep_OWN" } : r)) })) })) };
+  const own = { ...OWN, store: "ok", source: { ...OWN.source, journalFormat: "sqlite" }, apps: B7.apps.map((a) => ({ ...a, id: "app_OWN", serving: { ...a.serving, deployment: "dep_OWN", containerOwner: "dep_OWN", container: "hp-dep_OWN" }, deployments: a.deployments.map((d) => ({ ...d, id: "dep_OWN", resources: d.resources.map((r) => (r.kind === "container" && r.state === "created" ? { ...r, name: "hp-dep_OWN" } : r)) })) })) };
   const s = toDeployState(own, { observed: { "hp-dep_OWN": row({ labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_OWN", "io.harpoon.deployment": "dep_OWN" } }) }, keychain: "unlocked" });
   assert.equal(s.apps.app_OWN.observation.kind, "match");
   assert.equal(s.apps.app_OWN.external, undefined);

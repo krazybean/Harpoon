@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { appStatus } from "./deployStore.ts";
+import { appStatus, attention } from "./deployStore.ts";
 import { NO_SETTINGS } from "./sourceSettings.ts";
 import { dialogKeptOnListChange } from "../views/deploy/context.ts";
 import { removalBackup, NO_NEW_BACKUP_NOTE, EXACT_TEXT_INPUT, APP_REMOVAL_CLOSED_REASON, applicationRemoval, applicationRemovalBlock, deploymentOf, liveBlock, logLines, hasNoSource, NO_SOURCE_REASON, REMOVAL_CLOSED_REASON, registrationRemoval, observedFrom, registrationEdit, registrationFormOf, registrationOutcome, toDeployState } from "./deployEngine.ts";
@@ -42,6 +42,28 @@ test("no seeded or fabricated content: every app, id and release comes from the 
   assert.deepEqual(s.apps.app_1.previews, []);
   assert.equal(s.apps.app_1.resources, null);
   assert.equal(s.job, null);
+});
+
+// After an explicit restoration the release is D1's but its container is recorded, and labelled, under the deployment that
+// restored it (D2). The desktop used to look for it under D1, call it a mismatch, and show a healthy application as down.
+test("a restored release is recognised by its container's own deployment, not shown as down", () => {
+  const serving = { release: "rel_dep_1", deployment: "dep_1", containerOwner: "dep_2", container: "hp-dep_2-restored", via: "restored", sinceMs: NOW - 90000, hostPort: 41000, healthPath: "/healthz" };
+  const restoredBy = dep("dep_2", { createdMs: NOW - 40000, startedMs: NOW - 39000, finishedMs: NOW - 20000, status: "interrupted", release: null, replaces: "rel_dep_1", cutover: "failed", recovery: { outcome: "restored", budgetMs: 60000, startedMs: NOW - 95000, finishedMs: NOW - 92000 }, resources: [{ kind: "container", name: "hp-dep_2-restored", id: "cid-restored", state: "created" }] });
+  const a = app([dep("dep_1"), restoredBy], { serving });
+  const row = { id: "cid-restored", state: "running", labels: { "io.harpoon.managed": "true", "io.harpoon.app": "app_1", "io.harpoon.deployment": "dep_2" }, ports: [41000], mappings: [] };
+  const up = st(snap([a]), { observed: { "hp-dep_2-restored": row } }).apps.app_1;
+  assert.equal(up.observation.kind, "match", JSON.stringify(up.observation.checks));
+  assert.deepEqual([up.currentReleaseId, up.url], ["rel_dep_1", "http://127.0.0.1:41000"]);
+  assert.equal(appStatus(up, "connected").kind, "running");
+  assert.equal(attention(up, "connected")?.title ?? null, "Needs attention", "the failed cutover is still worth saying, but the application is not down");
+  assert.match(attention(up, "connected").text, /was restored/);
+  // a container that carries some other deployment's label is still a mismatch
+  const wrong = st(snap([a]), { observed: { "hp-dep_2-restored": { ...row, labels: { ...row.labels, "io.harpoon.deployment": "dep_9" } } } }).apps.app_1;
+  assert.equal(wrong.observation.kind, "mismatch");
+  assert.equal(appStatus(wrong, "connected").kind, "down");
+  // an older engine's snapshot without the owner keeps the old reading
+  const legacy = st(snap([app([dep("dep_1")], { serving: { ...serving, containerOwner: undefined, container: "hp-dep_1", via: "original" } })]), { observed: { "hp-dep_1": { ...row, labels: { ...row.labels, "io.harpoon.deployment": "dep_1" } } } }).apps.app_1;
+  assert.equal(appStatus(legacy, "connected").kind, "running");
 });
 
 test("recorded serving release is only 'running' when Docker was observed running it", () => {
