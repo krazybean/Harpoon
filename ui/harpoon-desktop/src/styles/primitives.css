@@ -817,3 +817,26 @@ button.overview-inventory:hover { border-color: var(--border-strong); background
 .disk-meter[data-stale] .disk-meter__fill { opacity: 0.55; }
 .disk-chip { cursor: pointer; min-height: 24px; }
 .disk-chip:focus-visible { outline: 2px solid var(--accent-yellow); outline-offset: 2px; }
+
+/* Storage breakdown: independent rows, never a share of one total. Every control is a real button at least 44px tall. */
+.storage-rows, .storage-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.storage-row { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+.storage-row__head, .storage-item__head { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; min-height: 44px; padding: 8px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--text-primary); }
+.storage-row__head:focus-visible, .storage-item__head:focus-visible, .storage-refresh:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.storage-row__head::before, .storage-item__head::before { content: "▸"; color: var(--text-secondary); }
+.storage-row__head[aria-expanded="true"]::before, .storage-item__head[aria-expanded="true"]::before { content: "▾"; }
+.storage-row__title { font-weight: 600; flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.storage-row__figure { font-variant-numeric: tabular-nums; flex: 0 1 auto; overflow-wrap: anywhere; }
+.storage-bar { flex: 1 0 100%; height: 6px; border-radius: 3px; background: var(--panel-header); border: 1px solid var(--border); overflow: hidden; }
+.storage-bar__fill { display: block; height: 100%; background: var(--text-secondary); }
+.storage-row__body { padding: 4px 12px 12px; border-top: 1px solid var(--border); }
+.storage-item { border-top: 1px solid var(--border); }
+.storage-item__head { padding: 6px 4px; }
+.storage-item__name { flex: 1 1 180px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-item__size { font-variant-numeric: tabular-nums; }
+.storage-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.storage-item__body { padding: 2px 4px 10px 20px; }
+.storage-evidence { margin: 2px 0 0; padding-left: 16px; }
+.storage-details { margin: 8px 0 0; display: grid; gap: 4px; }
+.storage-details dd { margin: 0; overflow-wrap: anywhere; }
+.storage-refresh { min-height: 44px; min-width: 44px; }

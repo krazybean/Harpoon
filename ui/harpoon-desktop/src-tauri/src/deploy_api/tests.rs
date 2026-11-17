@@ -2304,3 +2304,11 @@ mod metrics_dto {
         for bad in ["", "a b", "a/b", "a;b", "../x", &"x".repeat(201)] { assert!(!name_ok(bad), "{bad}"); }
     }
 }
+
+#[test]
+fn only_one_storage_inventory_can_hold_the_slot() {
+    let first = StorageSlot::take().expect("free at first");
+    assert!(StorageSlot::take().is_none(), "a second request is refused while the first runs");
+    drop(first);
+    assert!(StorageSlot::take().is_some(), "released when the work ends");
+}

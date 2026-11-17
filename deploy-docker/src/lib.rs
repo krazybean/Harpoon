@@ -20,5 +20,6 @@ pub mod plan;
 pub mod preflight;
 pub mod probe;
 pub mod snapshot;
+pub mod storage;
 
 pub use backend::{DockerBackend, DockerConfig};

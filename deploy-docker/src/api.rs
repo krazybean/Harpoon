@@ -910,7 +910,7 @@ impl DockerApi {
         }
     }
 
-    fn call_capped(
+    pub(crate) fn call_capped(
         &self,
         method: &str,
         path: &str,
@@ -926,7 +926,7 @@ impl DockerApi {
     }
 }
 
-enum Capped {
+pub(crate) enum Capped {
     Ok(Response),
     TooLarge,
 }

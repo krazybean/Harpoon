@@ -2089,6 +2089,58 @@ pub async fn deploy_metrics(app: tauri::AppHandle, request: MetricsRequest) -> R
     .map_err(|e| format!("background task failed: {e}"))
 }
 
+// ------------------------------------------------------------------ storage inventory (read-only)
+
+/// At most one inventory runs in this process. The UI gives up on a slow one after a timeout but cannot cancel it, so the
+/// slot is held by the native work itself: a second request is refused while the first is still running, however many
+/// times the page asks.
+static STORAGE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct StorageSlot;
+
+impl StorageSlot {
+    fn take() -> Option<StorageSlot> {
+        (!STORAGE_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(StorageSlot)
+    }
+}
+
+impl Drop for StorageSlot {
+    fn drop(&mut self) {
+        STORAGE_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What Docker reports it stores, and what the journal proves about who owns it: two `GET`s and a read-only journal
+/// read (no writer, no lock). Returns the inventory as JSON text for the desktop to validate. Nothing here can change
+/// Docker or the journal.
+#[tauri::command]
+pub async fn storage_inventory(app: tauri::AppHandle) -> Result<String, String> {
+    let slot = StorageSlot::take().ok_or_else(|| "a storage inventory request is already running".to_string())?;
+    use tauri::Manager;
+    let dir = app_dir(&app)?;
+    let home = app.path().home_dir().map_err(|e| format!("no home directory: {e}"))?;
+    let env = environment(&home)?;
+    let resources = bundled_resources(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _slot = slot;
+        let info = discover_runtime(&env.support, &env.mgmt_socket, &resources, &process_command)?;
+        let info = match &env.namespace { Some(ns) => confine_to_namespace(info, ns)?, None => info };
+        let wait = std::time::Duration::from_secs(10);
+        let api = harpoon_deploy_docker::api::DockerApi::new(&info.docker_socket, wait);
+        let (df, list) = harpoon_deploy_docker::storage::fetch(&api, wait);
+        // an unreadable journal confirms nothing; it never fails the inventory
+        let jd = journal_dir(&dir);
+        let facts = if jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() {
+            SqliteJournal::read_only(&jd).map(|r| harpoon_deploy_docker::storage::facts_from(&r.ledger, &r.deployments)).unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        harpoon_deploy_docker::storage::build(&df, &list, &facts, now_ms()).map(|j| j.to_json())
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
+}
+
 // ------------------------------------------------------------------ host listeners (effective exposure)
 
 /// One TCP listener on this Mac, as `lsof` reports it. This is what is actually bound on the host, as opposed to
