@@ -17,9 +17,12 @@ const OLD: &str = "sha256:bbbb00000000000000000000000000000000000000000000000000
 const STOPPED: &str = "sha256:cccc000000000000000000000000000000000000000000000000000000000003"; // used by a stopped container
 const TAGGED: &str = "sha256:dddd000000000000000000000000000000000000000000000000000000000004"; // tagged, nothing uses it
 const DANGLING: &str = "sha256:eeee000000000000000000000000000000000000000000000000000000000005";
+const ADOPT: &str = "sha256:1111000000000000000000000000000000000000000000000000000000000007"; // Harpoon labels, no journal record
 const PG: &str = "sha256:ffff000000000000000000000000000000000000000000000000000000000006";
 const LBL: &str =
     r#"{"io.harpoon.managed":"true","io.harpoon.app":"app_1","io.harpoon.deployment":"dep_1"}"#;
+const LBL9: &str =
+    r#"{"io.harpoon.managed":"true","io.harpoon.app":"app_9","io.harpoon.deployment":"dep_9"}"#;
 const LBL2: &str =
     r#"{"io.harpoon.managed":"true","io.harpoon.app":"app_1","io.harpoon.deployment":"dep_2"}"#;
 
@@ -33,6 +36,7 @@ fn df() -> String {
   {{"Id":"{STOPPED}","RepoTags":["tools:1"],"Labels":null,"Size":209715200,"SharedSize":-1,"Containers":1}},
   {{"Id":"{TAGGED}","RepoTags":["scratch:1"],"Labels":{{}},"Size":104857600,"SharedSize":0,"Containers":0}},
   {{"Id":"{DANGLING}","RepoTags":["<none>:<none>"],"Size":52428800,"Containers":0}},
+  {{"Id":"{ADOPT}","RepoTags":["adopted:1"],"Labels":{LBL9},"Size":31457280,"SharedSize":0,"Containers":0}},
   {{"Id":"{PG}","RepoTags":["postgres:15"],"Labels":null,"Size":419430400,"SharedSize":0,"Containers":1}}
  ],
  "Containers": [
@@ -658,4 +662,124 @@ fn the_desktop_fixture_is_what_the_runtime_writes() {
     let committed =
         std::fs::read_to_string(&path).expect("fixture missing: run with WRITE_STORAGE_FIXTURE=1");
     assert_eq!(committed, now, "the desktop's fixture is stale: regenerate with WRITE_STORAGE_FIXTURE=1 cargo test --test storage_inventory");
+}
+
+#[test]
+fn a_label_claim_is_kept_apart_from_journal_confirmation_and_from_unknown() {
+    let j = ok();
+    let claim = item(cat(&j, "other-images"), "adopted:1");
+    assert_eq!(props(claim), ["harpoon-labelled-unconfirmed"]);
+    assert_eq!(claim.get("protection").unwrap().as_str(), Some("none"));
+    assert!(!props(claim)
+        .iter()
+        .any(|p| p == "active-deployment" || p == "historical-deployment"));
+    // confirmed, claimed and unknown never share a property
+    let confirmed = props(item(cat(&j, "deployment-images"), "web:1"));
+    let unknown = props(item(cat(&j, "other-images"), "scratch:1"));
+    assert!(
+        confirmed.contains(&"historical-deployment".to_string())
+            && !confirmed.contains(&"unknown-ownership".to_string())
+    );
+    assert_eq!(unknown, ["unknown-ownership"]);
+    // running and stopped references are separate properties
+    let both = |name: &str| props(item(cat(&j, "other-images"), name));
+    assert!(both("postgres:15").contains(&"referenced-by-running-container".to_string()));
+    assert!(
+        both("tools:1").contains(&"referenced-by-stopped-container".to_string())
+            && !both("tools:1").contains(&"referenced-by-running-container".to_string())
+    );
+}
+
+#[test]
+fn a_measured_zero_is_zero_and_every_other_cache_size_is_unknown() {
+    let cache = |records: &str| {
+        let d = format!(r#"{{"Images":[],"Volumes":[],"Containers":[],"BuildCache":{records}}}"#);
+        run(Document::Body(d), Document::Body("[]".into()), &facts()).unwrap()
+    };
+    let figure = |j: &Json, l: &str| {
+        cat(j, "build-cache")
+            .get("figures")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f.get("label").unwrap().as_str() == Some(l))
+            .unwrap()
+            .get("bytes")
+            .unwrap()
+            .clone()
+    };
+    // really zero: Docker said 0
+    let zero = cache(r#"[{"ID":"a","Type":"regular","InUse":false,"Size":0}]"#);
+    assert_eq!(figure(&zero, "Sum of record sizes").as_i64(), Some(0));
+    assert_eq!(
+        figure(&zero, "Reported by Docker as not in use").as_i64(),
+        Some(0)
+    );
+    let c = cat(&zero, "build-cache");
+    assert_eq!(
+        (
+            c.get("bytes").unwrap().as_i64(),
+            c.get("bytesComplete").unwrap().as_bool()
+        ),
+        (Some(0), Some(true))
+    );
+    // no records at all is an empty cache Docker listed, also zero
+    assert_eq!(
+        cat(&cache("[]"), "build-cache")
+            .get("bytes")
+            .unwrap()
+            .as_i64(),
+        Some(0)
+    );
+    // missing, null, negative, fractional and mistyped sizes are unknown, never zero
+    for bad in [
+        r#""Size":-1"#,
+        r#""Size":null"#,
+        r#""Size":"12""#,
+        r#""Size":1.5"#,
+        r#""Foo":1"#,
+    ] {
+        let j = cache(&format!(
+            r#"[{{"ID":"a","Type":"regular","InUse":false,{bad}}}]"#
+        ));
+        assert!(figure(&j, "Sum of record sizes").is_null(), "{bad}");
+        assert!(
+            figure(&j, "Reported by Docker as not in use").is_null(),
+            "{bad}"
+        );
+        let c = cat(&j, "build-cache");
+        assert!(
+            c.get("bytes").unwrap().is_null()
+                && c.get("items").unwrap().as_array().unwrap()[0]
+                    .get("bytes")
+                    .unwrap()
+                    .is_null(),
+            "{bad}"
+        );
+    }
+    // a record whose use is not reported cannot be counted as unused
+    let j = cache(r#"[{"ID":"a","Type":"regular","Size":10}]"#);
+    assert_eq!(figure(&j, "Sum of record sizes").as_i64(), Some(10));
+    assert!(figure(&j, "Reported by Docker as not in use").is_null());
+    // a record without an id is skipped and the category is partial, not a smaller total
+    let j = cache(
+        r#"[{"Type":"regular","Size":10},{"ID":"b","Type":"regular","InUse":false,"Size":5}]"#,
+    );
+    assert_eq!(
+        cat(&j, "build-cache").get("status").unwrap().as_str(),
+        Some("partial")
+    );
+    // a malformed cache section is unavailable
+    let d = r#"{"Images":[],"Volumes":[],"Containers":[],"BuildCache":{"x":1}}"#;
+    let j = run(
+        Document::Body(d.into()),
+        Document::Body("[]".into()),
+        &facts(),
+    )
+    .unwrap();
+    assert_eq!(
+        cat(&j, "build-cache").get("status").unwrap().as_str(),
+        Some("unavailable")
+    );
 }

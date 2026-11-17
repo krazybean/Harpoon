@@ -246,3 +246,63 @@ test("long names wrap or truncate with the full name available, and every contro
   assert.match(css, /\.storage-refresh \{ min-height: 44px; min-width: 44px/);
   assert.match(css, /\.storage-row__head:focus-visible/);
 });
+
+test("rows carry no comparison bars or width-based graphics that could read as a share of the disk", async () => {
+  const r = await render(React.createElement(StorageBreakdown, { view: view(), onRefresh() {} }));
+  for (const b of [...r.host.querySelectorAll("button")]) if (b.getAttribute("aria-expanded") === "false") await click(b);
+  assert.equal(r.host.querySelectorAll('.storage-bar, [class*="bar"], [role="meter"], [role="progressbar"], svg, canvas').length, 0);
+  assert.equal([...r.host.querySelectorAll("[style]")].filter((e) => /width\s*:\s*[\d.]+%/.test(e.getAttribute("style"))).length, 0);
+  await r.unmount();
+  assert.doesNotMatch(readFileSync(new URL("../styles/primitives.css", import.meta.url), "utf8"), /storage-bar/);
+});
+
+test("a measured 0 B is shown as 0 B; unavailable, unreported and incomplete cache figures are never shown as zero", async () => {
+  const withCache = (over) => { const inv = JSON.parse(FIXTURE); Object.assign(inv.categories.find((c) => c.id === "build-cache"), over); return inv; };
+  const figure = async (inv) => {
+    const r = await render(React.createElement(StorageBreakdown, { view: view({ inv }), onRefresh() {} }));
+    const text = rowBtn(r.host, "Build cache").querySelector(".storage-row__figure").textContent;
+    await click(rowBtn(r.host, "Build cache"));
+    const body = r.host.querySelector(".storage-row__body")?.textContent ?? "";
+    await r.unmount();
+    return { text, body };
+  };
+  assert.equal((await figure(withCache({ bytes: 0, bytesComplete: true, count: 0, items: [], figures: [{ label: "Sum of record sizes", bytes: 0, meaning: "m" }] }))).text, "0 B");
+  assert.match((await figure(withCache({ bytes: 0, bytesComplete: true, count: 0, items: [], figures: [{ label: "Sum of record sizes", bytes: 0, meaning: "m" }] }))).body, /Sum of record sizes:<?.*0 B/);
+  const unreported = await figure(withCache({ bytes: null, bytesComplete: false, figures: [{ label: "Sum of record sizes", bytes: null, meaning: "m" }] }));
+  assert.equal(unreported.text, "No size reported"); assert.match(unreported.body, /Sum of record sizes: unknown/); assert.doesNotMatch(unreported.body, /: 0 B/);
+  assert.equal((await figure(withCache({ status: "unavailable", bytes: null, note: "n" }))).text, "Not available");
+  const partial = await figure(withCache({ bytes: 0, bytesComplete: false }));
+  assert.match(partial.text, /^at least 0 B \((\d+|some) not measured\)$/, "an incomplete zero is a floor, not a total");
+  const inv = JSON.parse(FIXTURE);
+  inv.categories.find((c) => c.id === "other-images").items[0].bytes = null;
+  const r = await render(React.createElement(StorageBreakdown, { view: view({ inv }), onRefresh() {} }));
+  await click(rowBtn(r.host, "Other images"));
+  assert.match(r.host.querySelector(".storage-item__size").textContent, /^size not reported$/);
+  await r.unmount();
+});
+
+test("expanded details keep confirmed ownership, label claims, unknown ownership and running/stopped references apart", async () => {
+  const r = await render(React.createElement(StorageBreakdown, { view: view(), onRefresh() {} }));
+  const open = async (row, name) => {
+    if (rowBtn(r.host, row).getAttribute("aria-expanded") === "false") await click(rowBtn(r.host, row));
+    const head = [...r.host.querySelectorAll(".storage-item__head")].find((b) => b.textContent.includes(name));
+    await click(head);
+    return r.host.querySelector(`[id="${head.getAttribute("aria-controls")}"]`).textContent;
+  };
+  const confirmed = await open("Deployment images", "web:1");
+  assert.match(confirmed, /Confirmed by the journal: historical deployment/);
+  assert.doesNotMatch(confirmed, /Label claim|Unknown ownership/);
+  assert.match(confirmed, /Reference: used by a stopped container/);
+  assert.doesNotMatch(confirmed, /Reference: used by a running container/);
+  const claim = await open("Other images", "adopted:1");
+  assert.match(claim, /Label claim only, not confirmed/);
+  assert.match(claim, /Labels are a claim, not proof/);
+  assert.doesNotMatch(claim, /Confirmed by the journal|Unknown ownership/);
+  const unknown = await open("Other images", "scratch:1");
+  assert.match(unknown, /Unknown ownership/);
+  assert.doesNotMatch(unknown, /Confirmed by the journal|Label claim/);
+  const running = await open("Other images", "postgres:15");
+  assert.match(running, /Reference: used by a running container/);
+  assert.doesNotMatch(running, /Reference: used by a stopped container|Confirmed by the journal/);
+  await r.unmount();
+});

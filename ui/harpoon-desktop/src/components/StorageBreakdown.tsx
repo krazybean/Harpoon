@@ -15,9 +15,9 @@ export function fmtBytes(b: number): string {
 const size = (b: Bytes) => (b === null ? "size not reported" : fmtBytes(b));
 
 const PROPERTY: Record<string, string> = {
-  "active-deployment": "Active deployment", "historical-deployment": "Historical deployment",
-  "referenced-by-running-container": "Used by a running container", "referenced-by-stopped-container": "Used by a stopped container",
-  "persistent-data": "Persistent data", "unknown-ownership": "Unknown ownership", "harpoon-labelled-unconfirmed": "Harpoon labels, not confirmed",
+  "active-deployment": "Confirmed by the journal: active deployment", "historical-deployment": "Confirmed by the journal: historical deployment",
+  "referenced-by-running-container": "Reference: used by a running container", "referenced-by-stopped-container": "Reference: used by a stopped container",
+  "persistent-data": "Persistent data", "unknown-ownership": "Unknown ownership", "harpoon-labelled-unconfirmed": "Label claim only, not confirmed",
   "label-journal-mismatch": "Labels disagree with the journal", "journal-released": "Journal: released",
 };
 const STATE: Record<string, string> = {
@@ -74,10 +74,9 @@ function figureText(c: InvCategory): string {
   return c.bytesComplete ? fmtBytes(c.bytes) : `at least ${fmtBytes(c.bytes)} (${unmeasured || "some"} not measured)`;
 }
 
-function Row({ c, scale }: { c: InvCategory; scale: number }) {
+function Row({ c }: { c: InvCategory }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const pct = c.bytes !== null && scale > 0 ? Math.max(2, Math.round((c.bytes / scale) * 100)) : null;
   return (
     <li className="storage-row">
       <button type="button" className="storage-row__head" aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)}>
@@ -85,7 +84,6 @@ function Row({ c, scale }: { c: InvCategory; scale: number }) {
         <span className="storage-row__figure">{figureText(c)}</span>
         <span className="text-meta storage-row__count">{c.status === "unavailable" ? "" : `${c.count} ${c.count === 1 ? "item" : "items"}`}</span>
         {c.status !== "ok" && <span className={`badge badge--sm ${c.status === "partial" ? "badge--warning" : "badge--stopped"}`}>{c.status === "partial" ? "Partial" : "Unavailable"}</span>}
-        {pct !== null && <span className="storage-bar" aria-hidden="true"><span className="storage-bar__fill" style={{ width: `${pct}%` }} /></span>}
       </button>
       {open && (
         <div id={id} className="storage-row__body" role="group" aria-label={`${c.title} details`}>
@@ -126,7 +124,6 @@ function Unattributed() {
 export function StorageBreakdown({ view, onRefresh }: { view: InventoryView; onRefresh: () => void }) {
   const { inv, status, loading, now } = view;
   const cats = inv ? CATEGORY_ORDER.map((id) => inv.categories.find((c) => c.id === id)!) : [];
-  const scale = Math.max(0, ...cats.map((c) => (c.status === "unavailable" ? 0 : c.bytes ?? 0)));
   const failedSources = inv ? inv.sources.filter((s) => s.status !== "ok") : [];
   return (
     <div className="panel" style={{ padding: 14 }} data-storage-status={status}>
@@ -148,14 +145,13 @@ export function StorageBreakdown({ view, onRefresh }: { view: InventoryView; onR
           {failedSources.map((s) => <div key={s.endpoint} className="text-body" role="status">{s.endpoint}: {s.status === "failed" ? `failed (${s.detail})` : s.detail}</div>)}
           {!inv.journalAvailable && <div className="text-body" role="status">The deployment journal could not be read, so no ownership is confirmed.</div>}
           <ul className="storage-rows">
-            {cats.map((c) => <Row key={c.id} c={c} scale={scale} />)}
+            {cats.map((c) => <Row key={c.id} c={c} />)}
             <Unattributed />
           </ul>
           <p className="text-meta" style={{ marginTop: 8 }}>
             {inv.imageLayersBytes !== null ? `All images: ${fmtBytes(inv.imageLayersBytes)} of layers, shared layers counted once. ` : ""}{inv.imageLayersMeaning}
             {inv.unknownOwnershipItems > 0 && ` ${inv.unknownOwnershipItems} listed objects have unknown ownership. Unknown does not mean unused or safe to remove.`}
           </p>
-          <p className="text-meta">Bars compare rows with each other only.</p>
         </>
       )}
     </div>

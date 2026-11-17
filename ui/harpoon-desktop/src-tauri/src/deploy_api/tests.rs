@@ -2312,3 +2312,10 @@ fn only_one_storage_inventory_can_hold_the_slot() {
     drop(first);
     assert!(StorageSlot::take().is_some(), "released when the work ends");
 }
+
+#[test]
+fn the_storage_slot_is_a_flag_not_a_lock_so_it_blocks_no_other_operation() {
+    let _held = StorageSlot::take().expect("free");
+    // deploy operations serialise on OPS; holding the inventory slot must not touch it
+    assert!(OPS.try_lock().is_ok(), "the inventory slot holds no mutex");
+}

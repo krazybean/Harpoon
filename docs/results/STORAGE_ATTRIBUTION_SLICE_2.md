@@ -27,7 +27,7 @@ Two read-only Docker `GET`s plus a read-only journal read, one new Rust module, 
 ## Ponytail and UI/UX Pro Max
 
 - Ponytail: no new CLI subcommand, no extra endpoint, no new dependency, no cache layer, no periodic refresh, one small parser per layer. The Rust output is JSON text validated in TS, the same boundary Slice 1 uses for disk status.
-- UI/UX Pro Max (accordion and meter guidance): real `<button aria-expanded aria-controls>` rows, 44 px targets, visible focus ring, no hover-only content, text chips instead of colour-only meaning, long names truncate with a `title` and wrap in details, `role="status"` for state messages, no pie or segmented bar. Bars compare rows with each other and are labelled so.
+- UI/UX Pro Max (accordion and meter guidance): real `<button aria-expanded aria-controls>` rows, 44 px targets, visible focus ring, no hover-only content, text chips instead of colour-only meaning, long names truncate with a `title` and wrap in details, `role="status"` for state messages, no pie, segmented bar or any bar graphic (see the pre-PR review).
 
 ## Inventory model and fields used
 
@@ -53,7 +53,7 @@ Output per category: `status` (ok/partial/unavailable), `count`, `bytes` (only w
 - Image sizes include shared layers, so image categories and the obsolete category carry no total ("Sizes overlap, not totalled"). Per-image `SharedSize` is shown as "N of its size is shared" or "not reported" (`-1`).
 - `LayersSize` is shown once, as Docker's own accounting with shared layers counted once, not as a physical total and not as the sum of anything.
 - Volumes, writable layers and build cache give a total only as "at least X (N not measured)" when some member is unmeasured. Cache figures are `null` when any record lacks a size, never a smaller sum.
-- "Other / unattributed" is always "Not reliably quantifiable". Nothing subtracts the rows from guest usage, and no percentage is derived from the rows. Rows may overlap (an object can be in its own row and in the obsolete row).
+- "Other / unattributed" is always "Not reliably quantifiable". Nothing subtracts the rows from guest usage, and no percentage or comparison graphic is derived from the rows. Rows may overlap (an object can be in its own row and in the obsolete row).
 - Log sizes are not measured: shown as "not measured".
 
 ## Attempts, failed tests and root causes
@@ -86,8 +86,18 @@ Slice 3 (contextual cleanup), unreferenced-image removal, `all=true` BuildKit pr
 
 ## Final validation
 
-- `deploy-docker`: 305 tests pass (18 new in `tests/storage_inventory.rs`, incl. journal facts, GET-only, oversize, fixture sync).
-- `src-tauri`: 152 tests pass (1 new: the single-slot guard).
-- UI (Node 22.23.3): 408 of 408 pass (21 new in `storageInventory.test.mjs` and `storageBreakdown.test.mjs`); `tsc` and `npm run build` pass.
+- `deploy-docker`: 307 tests pass (20 new in `tests/storage_inventory.rs`, incl. journal facts, GET-only, oversize, fixture sync).
+- `src-tauri`: 153 tests pass (2 new: the slot guard and its no-lock property).
+- UI (Node 22.23.3): 411 of 411 pass (24 new in `storageInventory.test.mjs` and `storageBreakdown.test.mjs`); `tsc` and `npm run build` pass.
+- Formatting: `rustfmt --check` is clean on `storage.rs` and `tests/storage_inventory.rs`. The `src-tauri` crate already had 423 rustfmt differences on `main`; the count is unchanged by this branch, so nothing new was added and the existing files were not reformatted.
 - `git diff --check` clean. `cargo clippy` shows no warnings in the new code.
-- Screenshots (mocked data, scratchpad `storage-ui/`): `resources-collapsed.png`, `resources-expanded.png`, `resources-narrow.png` (390 px). Stale and error states are covered by tests, not screenshots.
+- Screenshots (mocked data, scratchpad `storage-ui/`): `resources-collapsed.png`, `resources-expanded.png`, `resources-narrow.png` (390 px), re-captured after the bars were removed. Stale and error states are covered by tests, not screenshots.
+
+## Pre-PR review (owner's four checks)
+
+| # | Check | Finding | Change |
+|---|---|---|---|
+| 1 | Measured `0 B` vs unavailable, malformed or incomplete cache | The Rust side already kept them apart: a size is `Option`, and only a whole non-negative number counts. Missing, `null`, `-1`, fractional and string sizes are unknown; a record with no use flag is never counted as unused; a record without an id makes the category partial; a non-list cache section is unavailable. The UI showed "0 B" only for a measured, complete zero, and "No size reported", "Not available" or "at least X (N not measured)" otherwise. These were untested at the edges. | Added `a_measured_zero_is_zero_and_every_other_cache_size_is_unknown` (Rust) and a UI test covering "0 B", "No size reported", "Not available", an incomplete zero (a floor), and an unreported item size. |
+| 2 | Remove the comparison bars | Done. The bar was scaled to the largest row, which could still be read as a share. Removed the markup, the scale calculation, the footnote and the CSS. | Test asserts no bar, meter, progress, svg or canvas element and no percentage-width style anywhere in an expanded breakdown, and no `storage-bar` rule in the stylesheet. |
+| 3 | Concurrency guard holds no mutex | Confirmed by reading the code: `StorageSlot` is an `AtomicBool` swapped once; it is held by the work as a flag and never locks. `storage_inventory` does not take the `OPS` mutex that `deploy_op` uses, the journal read is `SqliteJournal::read_only` (no writer, no lock), and the Docker calls hold nothing. | Added a test that holds the slot and asserts `OPS.try_lock()` succeeds. |
+| 4 | Ownership distinctions in expanded details | Confirmed, with one gap: a label-only object was not in the fixture, and the journal-confirmed label read just "Active deployment". Wording now says "Confirmed by the journal: active/historical deployment", "Label claim only, not confirmed", "Reference: used by a running/stopped container", "Unknown ownership". | Added a label-only image (`adopted:1`) to the fixture (regenerated and kept in sync by the fixture test). Rust and UI tests assert that confirmed, claimed, unknown and the two reference kinds never share a property or a label. |
