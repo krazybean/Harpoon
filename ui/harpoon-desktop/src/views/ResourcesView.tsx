@@ -3,6 +3,8 @@ import { fmtTs } from "../components/ShelfPrimitives";
 import { DiskReclaimCard } from "../components/DiskReclaimCard";
 import { DiskMeter } from "../components/DiskMeter";
 import { useDiskView } from "../hooks/useDiskTelemetry";
+import { StorageBreakdown } from "../components/StorageBreakdown";
+import { useStorageInventory } from "../hooks/useStorageInventory";
 
 type ConfigResult = { cpus: number; memory: number; raw: string; path: string };
 type HarpoonStatus = { cpus?: number; memoryMiB?: number; diskPath?: string; diskLogicalBytes?: number; diskExpansion?: { active?: boolean; phase: string } };
@@ -20,9 +22,11 @@ export const ResourcesView = memo(function ResourcesView({
   onSetMemory: (v: number) => void;
 }) {
   const disk = useDiskView();
+  const storage = useStorageInventory(running);
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <DiskMeter view={disk} />
+      <StorageBreakdown view={storage.view} onRefresh={storage.refresh} />
       <div className="panel" style={{ overflow: "hidden" }}>
         <div className="panel-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span className="text-panel-title">Resources & Config <span className="text-meta" style={{ textTransform: "none", letterSpacing: 0, marginLeft: 8 }}>{fmtTs(configAt)}</span></span>

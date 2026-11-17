@@ -561,6 +561,12 @@ pub fn route_table(rt: &Path) -> Result<harpoon_deploy::route::RouteTable, Strin
     Ok(harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids_of(&r)))
 }
 
+/// Either journal file is there: the SQLite store, or the legacy `journal.wal` that `SqliteJournal::read_only` reads where it is.
+fn has_journal(jd: &Path) -> bool {
+    jd.join(harpoon_deploy_journal::SQLITE_FILE).exists()
+        || jd.join(harpoon_deploy_journal::JOURNAL_FILE).exists()
+}
+
 fn journal_format(jd: &Path) -> &'static str {
     if jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() {
         "sqlite"
@@ -614,8 +620,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
     // An empty journal directory (a first operation that failed before writing anything) is an
     // uninitialised store, not a damaged one. A directory with either journal file in it is read, and
     // fails closed below if that file is unreadable.
-    if !jd.join(harpoon_deploy_journal::SQLITE_FILE).exists() && !jd.join(harpoon_deploy_journal::JOURNAL_FILE).exists()
-    {
+    if !has_journal(&jd) {
         return snap;
     }
     snap.writer_held = matches!(writer_lock_status(&jd), Ok(LockStatus::Held));
@@ -2087,6 +2092,101 @@ pub async fn deploy_metrics(app: tauri::AppHandle, request: MetricsRequest) -> R
     })
     .await
     .map_err(|e| format!("background task failed: {e}"))
+}
+
+// ------------------------------------------------------------------ storage inventory (read-only)
+
+/// At most one inventory runs in this process. The UI gives up on a slow one after a timeout but cannot cancel it, so the
+/// slot is held by the native work itself: a second request is refused while the first is still running, however many
+/// times the page asks.
+static STORAGE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct StorageSlot;
+
+impl StorageSlot {
+    fn take() -> Option<StorageSlot> {
+        (!STORAGE_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(StorageSlot)
+    }
+}
+
+impl Drop for StorageSlot {
+    fn drop(&mut self) {
+        STORAGE_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The whole native inventory finishes within this, discovery and journal read included: each Docker request gets only
+/// what is left. The page waits longer (`FETCH_TIMEOUT_MS` in `storageInventory.ts`, checked by a test), so it never
+/// gives up on work that is still within its budget.
+const STORAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(18);
+
+/// What the journal proves, read-only, in either supported format (the same detection and reader as the snapshot: nothing
+/// is created, migrated or written). A missing or unreadable journal confirms nothing and says why.
+fn storage_journal_facts(rt: &Path) -> harpoon_deploy_docker::storage::JournalFacts {
+    use harpoon_deploy_docker::storage::{facts_from, JournalFacts};
+    let jd = journal_dir(rt);
+    if !has_journal(&jd) {
+        return JournalFacts {
+            note: Some("no deployment journal was found for this runtime".into()),
+            ..Default::default()
+        };
+    }
+    match SqliteJournal::read_only(&jd) {
+        Ok(r) => facts_from(&r.ledger, &r.deployments),
+        Err(e) => JournalFacts {
+            note: Some(format!("the journal could not be read: {}", e.0)),
+            ..Default::default()
+        },
+    }
+}
+
+/// The inventory itself, against a given Docker socket and deadline.
+fn storage_inventory_at(
+    rt: &Path,
+    socket: &Path,
+    deadline: std::time::Instant,
+    budget: std::time::Duration,
+    now: u64,
+) -> Result<String, String> {
+    let facts = storage_journal_facts(rt);
+    let api = harpoon_deploy_docker::api::DockerApi::new(socket, budget);
+    let (df, list) = harpoon_deploy_docker::storage::fetch(&api, deadline);
+    harpoon_deploy_docker::storage::build(&df, &list, &facts, now).map(|j| j.to_json())
+}
+
+/// What Docker reports it stores, and what the journal proves about who owns it: two `GET`s and a read-only journal
+/// read (no writer, no lock). Returns the inventory as JSON text for the desktop to validate. Nothing here can change
+/// Docker or the journal.
+#[tauri::command]
+pub async fn storage_inventory(app: tauri::AppHandle) -> Result<String, String> {
+    let slot = StorageSlot::take()
+        .ok_or_else(|| "a storage inventory request is already running".to_string())?;
+    use tauri::Manager;
+    let dir = app_dir(&app)?;
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("no home directory: {e}"))?;
+    let env = environment(&home)?;
+    let resources = bundled_resources(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _slot = slot;
+        let started = std::time::Instant::now();
+        let info = discover_runtime(&env.support, &env.mgmt_socket, &resources, &process_command)?;
+        let info = match &env.namespace {
+            Some(ns) => confine_to_namespace(info, ns)?,
+            None => info,
+        };
+        storage_inventory_at(
+            &dir,
+            &info.docker_socket,
+            started + STORAGE_BUDGET,
+            STORAGE_BUDGET,
+            now_ms(),
+        )
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
 }
 
 // ------------------------------------------------------------------ host listeners (effective exposure)

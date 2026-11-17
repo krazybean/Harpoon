@@ -2304,3 +2304,278 @@ mod metrics_dto {
         for bad in ["", "a b", "a/b", "a;b", "../x", &"x".repeat(201)] { assert!(!name_ok(bad), "{bad}"); }
     }
 }
+
+#[test]
+fn only_one_storage_inventory_can_hold_the_slot() {
+    let first = StorageSlot::take().expect("free at first");
+    assert!(
+        StorageSlot::take().is_none(),
+        "a second request is refused while the first runs"
+    );
+    drop(first);
+    assert!(StorageSlot::take().is_some(), "released when the work ends");
+}
+
+#[test]
+fn the_storage_slot_is_a_flag_not_a_lock_so_it_blocks_no_other_operation() {
+    let _held = StorageSlot::take().expect("free");
+    // deploy operations serialise on OPS; holding the inventory slot must not touch it
+    assert!(OPS.try_lock().is_ok(), "the inventory slot holds no mutex");
+}
+
+/// The storage inventory reads the journal exactly as the snapshot does: either format, read-only, and a journal it cannot use
+/// confirms nothing (and says why) instead of reading as "no ownership".
+mod storage_journal {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    const IMAGE: &str = "sha256:02693c38b1e53e275038a66f9f1ee6133062d573de5fa41f4dfb2c926a53e578";
+    const CONTAINER: &str = "2f70855fd334312f11ae3b2c5cb2ef42af49203820869637c71c02ead50ed936";
+
+    fn legacy_copy(name: &str) -> PathBuf {
+        let dir = rt(name);
+        std::fs::create_dir_all(dir.join("deploy-journal")).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/b7-legacy-runtime/deploy-journal/journal.wal"),
+            dir.join("deploy-journal/journal.wal"),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<_> = std::fs::read_dir(dir.join("deploy-journal"))
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn confirmed(f: &harpoon_deploy_docker::storage::JournalFacts) -> bool {
+        use harpoon_deploy_docker::storage::FactKind;
+        f.available
+            && f.note.is_none()
+            && f.entries
+                .iter()
+                .any(|e| e.kind == FactKind::Image && e.id == IMAGE)
+            && f.entries
+                .iter()
+                .any(|e| e.kind == FactKind::Container && e.id == CONTAINER)
+    }
+
+    #[test]
+    fn a_legacy_journal_gives_confirmed_ids_and_is_not_touched_or_converted() {
+        let dir = legacy_copy("sj-legacy");
+        let before = files(&dir);
+        let f = storage_journal_facts(&dir);
+        assert!(confirmed(&f), "{f:?}");
+        assert_eq!(
+            files(&dir),
+            before,
+            "nothing was written, created or migrated"
+        );
+        assert!(!journal_dir(&dir)
+            .join(harpoon_deploy_journal::SQLITE_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn a_sqlite_journal_gives_the_same_confirmed_ids() {
+        let dir = legacy_copy("sj-sqlite");
+        drop(open_journal(&dir)); // a writer upgrades the legacy journal into the SQLite store
+        let jd = journal_dir(&dir);
+        assert!(
+            jd.join(harpoon_deploy_journal::SQLITE_FILE).exists(),
+            "the fixture became a real SQLite journal"
+        );
+        std::fs::remove_file(jd.join(harpoon_deploy_journal::JOURNAL_FILE)).unwrap(); // SQLite only now
+        let before = files(&dir);
+        let f = storage_journal_facts(&dir);
+        assert!(confirmed(&f), "{f:?}");
+        assert_eq!(
+            files(&dir).len(),
+            before.len(),
+            "no file appeared or vanished"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_journal_confirms_nothing_and_says_why() {
+        let none = rt("sj-none");
+        let f = storage_journal_facts(&none);
+        assert!(
+            !f.available
+                && f.entries.is_empty()
+                && f.note.as_deref().unwrap().contains("no deployment journal")
+        );
+        let empty = rt("sj-empty");
+        std::fs::create_dir_all(journal_dir(&empty)).unwrap();
+        assert!(
+            !storage_journal_facts(&empty).available,
+            "an empty journal folder is not a journal"
+        );
+        let bad = rt("sj-bad");
+        std::fs::create_dir_all(journal_dir(&bad)).unwrap();
+        std::fs::write(
+            journal_dir(&bad).join("journal.wal"),
+            b"this is not a journal",
+        )
+        .unwrap();
+        let f = storage_journal_facts(&bad);
+        assert!(!f.available && f.entries.is_empty() && f.serving_images.is_empty());
+        assert!(
+            f.note.as_deref().unwrap().contains("could not be read"),
+            "{:?}",
+            f.note
+        );
+        assert_eq!(
+            std::fs::read(journal_dir(&bad).join("journal.wal")).unwrap(),
+            b"this is not a journal",
+            "not repaired"
+        );
+    }
+
+    fn fake_docker(name: &str) -> PathBuf {
+        let dir = rt(name);
+        let sock = dir.join("d.sock");
+        let l = UnixListener::bind(&sock).unwrap();
+        let df = format!(
+            r#"{{"LayersSize":5,"Images":[{{"Id":"{IMAGE}","RepoTags":["app:1"],"Labels":null,"Size":5,"SharedSize":0}}],"Containers":[{{"Id":"{CONTAINER}","SizeRw":1}}],"Volumes":[],"BuildCache":[]}}"#
+        );
+        let list = format!(
+            r#"[{{"Id":"{CONTAINER}","Names":["/hp-dep"],"ImageID":"{IMAGE}","State":"running","Labels":null,"Mounts":[]}}]"#
+        );
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { return };
+                let mut buf = [0u8; 2048];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                assert!(line.starts_with("GET "), "the inventory only reads: {line}");
+                let body = if line.contains("/system/df") {
+                    &df
+                } else {
+                    &list
+                };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        sock
+    }
+
+    fn inventory(rt_dir: &Path, sock: &Path) -> serde_json::Value {
+        let budget = Duration::from_secs(5);
+        let text = storage_inventory_at(rt_dir, sock, Instant::now() + budget, budget, 1).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn image_properties(j: &serde_json::Value) -> Vec<String> {
+        let cats = j["categories"].as_array().unwrap();
+        let all: Vec<&serde_json::Value> = cats
+            .iter()
+            .flat_map(|c| c["items"].as_array().unwrap().iter())
+            .filter(|i| i["id"] == IMAGE.trim_start_matches("sha256:"))
+            .collect();
+        let mut v: Vec<String> = all
+            .iter()
+            .flat_map(|i| {
+                i["ownership"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| o["property"].as_str().unwrap().to_string())
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn the_inventory_confirms_ownership_from_a_legacy_journal_and_from_nothing_when_the_journal_is_unusable(
+    ) {
+        let sock = fake_docker("sj-docker");
+        let good = legacy_copy("sj-e2e-good");
+        let j = inventory(&good, &sock);
+        assert_eq!(j["journalAvailable"], true);
+        let props = image_properties(&j);
+        assert!(
+            props
+                .iter()
+                .any(|p| p == "active-deployment" || p == "historical-deployment"),
+            "confirmed by the legacy journal: {props:?}"
+        );
+        assert!(!props.iter().any(|p| p == "unknown-ownership"));
+        // the same Docker, an unusable journal: nothing is confirmed, and the output says why
+        let bad = rt("sj-e2e-bad");
+        std::fs::create_dir_all(journal_dir(&bad)).unwrap();
+        std::fs::write(journal_dir(&bad).join("journal.wal"), b"garbage").unwrap();
+        let j = inventory(&bad, &sock);
+        assert_eq!(j["journalAvailable"], false);
+        assert!(j["journalNote"]
+            .as_str()
+            .unwrap()
+            .contains("could not be read"));
+        let props = image_properties(&j);
+        assert!(
+            props.iter().any(|p| p == "unknown-ownership")
+                && !props.iter().any(|p| p.contains("deployment")),
+            "{props:?}"
+        );
+        // and a runtime with no journal at all
+        let j = inventory(&rt("sj-e2e-none"), &sock);
+        assert_eq!(
+            (
+                j["journalAvailable"].clone(),
+                j["journalNote"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no deployment journal")
+            ),
+            (false.into(), true)
+        );
+    }
+
+    #[test]
+    fn the_native_budget_and_the_pages_timeout_are_one_contract() {
+        let ts = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/storageInventory.ts"),
+        )
+        .unwrap();
+        let num = |re: &str| -> u64 {
+            let at = ts.find(re).unwrap_or_else(|| panic!("{re} not found")) + re.len();
+            ts[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '_')
+                .filter(|c| *c != '_')
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        };
+        let native_ms = num("NATIVE_BUDGET_MS = ");
+        let margin_ms = num("FETCH_TIMEOUT_MS = NATIVE_BUDGET_MS + ");
+        assert_eq!(
+            native_ms,
+            STORAGE_BUDGET.as_millis() as u64,
+            "the page's copy of the native budget is stale"
+        );
+        assert!(
+            margin_ms >= 5_000,
+            "the page must wait well past the native deadline"
+        );
+    }
+}
