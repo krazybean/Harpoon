@@ -11,7 +11,8 @@ never contains it.
   python3 real_docker_acceptance.py teardown --out DIR              # remove ONLY resources labelled with the test app
 
 Scenarios (one report.json + report.md in the evidence directory): setup, replace x N under journal polling, build failure,
-health failure before cutover, Docker API failure during candidate creation, SIGKILL after the image intent, SIGKILL during
+health failure before cutover, Docker API failure at the preliminary candidate's creation (proxy), Docker name conflict at the final
+candidate's creation (real 409), SIGKILL after the image intent, SIGKILL during
 cutover (recover, restore, reconcile), repeated health checks through the host forwarder, ownership audit.
 """
 import argparse, datetime, json, os, pathlib, re, shutil, signal, socket, sqlite3, subprocess, sys, threading, time, urllib.request
@@ -25,6 +26,14 @@ PROTECTED = {"Collectiv": "http://127.0.0.1:38000/", "juancastro.me": "http://12
 PG = "collectiv-harpoon-test-db-1"
 BASE_IMAGE = "busybox:1.36"   # Harpoon never pulls implicitly (deliberate): the base image must already be in the engine
 PULL = f"docker --context harpoon pull {BASE_IMAGE}"
+# The live flags each CLI command accepts (deploy-cli/src/args.rs is strict: an unknown flag is a usage error, rc 2). test_scenarios.py
+# checks this table against args.rs, so a change to the CLI's flags fails a test instead of a live run.
+LIVE_FLAGS = {
+    "deploy": ("docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address"),
+    "replace": ("docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address"),
+    "restore": ("docker-socket", "mgmt-socket", "resources-dir", "forwarder-pid", "forwarder-command", "forward-address"),
+    "reconcile": ("docker-socket", "resources-dir"),
+}
 
 
 def now(): return time.time()
@@ -42,10 +51,16 @@ class Run:
         if not self.sim and not self.auth:
             sys.exit("set HARPOON_LIVE_AUTH to the live-change authorization phrase (or use --simulate)")
         rj = json.loads(RUNTIME_JSON.read_text()) if RUNTIME_JSON.exists() else {}
-        self.live = ["--docker-socket", a.socket or SOCK, "--mgmt-socket", MGMT, "--resources-dir", RES,
-                     "--forwarder-pid", str(rj.get("pid", 0)), "--forwarder-command", "harpoon"]
+        self.live = {"docker-socket": a.socket or SOCK, "mgmt-socket": MGMT, "resources-dir": RES,
+                     "forwarder-pid": str(rj.get("pid", 0)), "forwarder-command": "harpoon"}
         if rj.get("forwardTarget", {}).get("address"):
-            self.live += ["--forward-address", rj["forwardTarget"]["address"]]
+            self.live["forward-address"] = rj["forwardTarget"]["address"]
+
+    def live_for(self, cmd, **override):
+        """The live flags this command accepts, plus the authorization. Never a flag the command does not take."""
+        v = {**self.live, **override}
+        out = [x for k in LIVE_FLAGS[cmd] if k in v for x in (f"--{k}", v[k])]
+        return out + [f"--authorize-live-docker-changes={self.auth}"]
 
     # ---- plumbing
     def log(self, *m):
@@ -53,10 +68,10 @@ class Run:
         print(line, flush=True)
         with open(self.out / "run.log", "a") as f: f.write(line + "\n")
 
-    def cli(self, *args, live=True, timeout=900):
+    def cli(self, *args, live=True, timeout=900, **override):
         cmd = [self.a.cli, *args, "--runtime-dir", str(self.rt)]
         if self.sim: cmd.append("--simulate") if args[0] in ("deploy", "replace", "restore", "rollback") else None
-        elif live: cmd += self.live + [f"--authorize-live-docker-changes={self.auth}"]
+        elif live: cmd += self.live_for(args[0], **override)
         t = now()
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         dt = now() - t
@@ -200,9 +215,45 @@ class Run:
         self.record(name, ok, rc=rc, secs=round(dt, 1), failed_at=fail.group(1) if fail else None, message=(fail.group(2)[:200] if fail else err[:200]),
                     serving_before=before, serving_after=after, status_tail=self.status().splitlines()[-6:])
 
+    # ---- fault injection. A fault counts only if it demonstrably fired; a scenario whose fault did not fire fails.
+    def ready_for_change(self, name):
+        """A new change is refused (rc 6) while the journal holds unfinished or unresolved work; that gate is correct and is not bypassed.
+        A scenario starts only from a clean journal, and says so when it cannot."""
+        st = self.status()
+        if self.sim or ("unresolved cleanup: none" in st and not re.search(r"^\s+dep_\w+ (running|interrupted)", st, re.M)): return True
+        self.record(name, False, precondition="the journal holds unfinished or unresolved work from an earlier scenario, so a new replacement would be refused; nothing was started",
+                    status_tail=st.strip().splitlines()[-12:])
+        return False
+
+    def settle(self):
+        """The recovery path after an interrupted or failed run: recover (journal only), then reconcile as a dry run and with --apply."""
+        out = {}
+        rc, o, _, _ = self.cli("recover", live=False)
+        m = re.search(r"marked interrupted: (dep_\w+)", o)
+        out.update(recover_rc=rc, interrupted_deployment=m.group(1) if m else None)
+        if self.sim: out.update(reconcile_plan=[], reconcile_dry_rc=0, reconcile_apply_rc=0, reconcile_tail=[]); return out
+        rc_c, o_c, _, _ = self.cli("reconcile")
+        rc_p, o_p, _, _ = self.cli("reconcile", "--apply")
+        out.update(reconcile_plan=o_c.strip().splitlines()[-4:], reconcile_dry_rc=rc_c, reconcile_apply_rc=rc_p, reconcile_tail=o_p.strip().splitlines()[-3:])
+        return out
+
+    def serving_up(self): return self.sim or any(self.get(f"http://127.0.0.1:{p}/health", 3)[0] == 200 for p in self.serving_ports())
+
+    @staticmethod
+    def is_pre_create(line):
+        """The request that creates the PRELIMINARY candidate container (before any cutover): POST /containers/create?name=hp-dep_..-pre"""
+        m = re.match(r"POST /containers/create\?(?:\S*&)?name=(hp-dep_\w+-pre)(?:&\S*)? ", line)
+        return m is not None
+
+    @staticmethod
+    def fault_passed(fired, rc, serving_up): return fired == 1 and rc != 0 and serving_up
+
     def docker_api_failure(self):
-        """A pass-through socket that fails the candidate's container creation once. Fired or not is recorded."""
-        proxy = str(self.out / "docker-fault.sock")
+        """Docker answers 500 to the preliminary candidate's container creation. The engine's own guard (the Docker socket must be owned by
+        the engine process) rejects any proxy at the health check, so the fault is placed where the proxy is still in the path: creation,
+        which comes before the health check. The cutover-time creation is covered by `dockerconflict`."""
+        name, proxy = "docker-api-failure-before-cutover", str(self.out / "docker-fault.sock")
+        if not self.ready_for_change(name): return
         fired = {"n": 0}
         srv = socket.socket(socket.AF_UNIX); srv.bind(proxy); srv.listen(64)
 
@@ -210,17 +261,16 @@ class Run:
             try:
                 while (d := a.recv(65536)): b.sendall(d)
             except OSError: pass
-            for s in (a, b):
-                try: s.shutdown(socket.SHUT_RDWR)
+            for x in (a, b):
+                try: x.shutdown(socket.SHUT_RDWR)
                 except OSError: pass
 
         def handle(c):
-            head = c.recv(65536, socket.MSG_PEEK)
-            line = head.split(b"\r\n", 1)[0].decode(errors="replace")
-            if line.startswith("POST /containers/create") and f"name=hp-dep_" in line and not line.split("name=")[1].split()[0].endswith("-pre") and fired["n"] == 0:
+            line = c.recv(65536, socket.MSG_PEEK).split(b"\r\n", 1)[0].decode(errors="replace")
+            if self.is_pre_create(line) and fired["n"] == 0:
                 fired["n"] += 1
                 c.recv(65536)
-                body = b'{"message":"injected: candidate creation failed"}'
+                body = b'{"message":"injected: container creation failed"}'
                 c.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body)); c.close(); return
             u = socket.socket(socket.AF_UNIX); u.connect(SOCK)
             threading.Thread(target=pump, args=(c, u), daemon=True).start(); pump(u, c)
@@ -231,26 +281,69 @@ class Run:
                 except OSError: return
                 threading.Thread(target=handle, args=(c,), daemon=True).start()
         threading.Thread(target=loop, daemon=True).start()
-        before = self.serving_ports(); t0 = now()
+        before = self.serving_ports()
         self.write_app(950)
-        saved = self.a.socket; self.a.socket = proxy; self.live[1] = proxy
-        rc, out, err, dt = self.cli("replace", "--app", self.app, *self.src(), "--confirm-cutover")
-        self.live[1] = SOCK; self.a.socket = saved; srv.close()
+        rc, out, err, dt = self.cli("replace", "--app", self.app, *self.src(), "--confirm-cutover", **{"docker-socket": proxy})
+        srv.close()
         fail = re.search(r"failure at (\w+): (.*)", out)
-        restored = re.search(r"recovery: (\w+)", self.status())
-        up = any(self.get(f"http://127.0.0.1:{p}/health", 3)[0] == 200 for p in self.serving_ports())
-        self.record("docker-api-failure-during-candidate-creation", fired["n"] == 1 and rc != 0 and up, injection_fired=fired["n"], rc=rc, secs=round(dt, 1),
-                    failed_at=fail.group(1) if fail else None, message=(fail.group(2)[:200] if fail else err[:200]), serving_up_after=up, recovery=restored.group(1) if restored else None,
-                    serving_before=before, serving_after=self.serving_ports())
+        up = self.serving_up()
+        st = self.settle()
+        self.record(name, self.fault_passed(fired["n"], rc, up) and st["reconcile_apply_rc"] == 0 and "unresolved cleanup: none" in self.status(),
+                    injection_fired=fired["n"], rc=rc, secs=round(dt, 1), failed_at=fail.group(1) if fail else None, message=(fail.group(2)[:200] if fail else (out + err)[-300:]),
+                    serving_up_after=up, serving_before=before, serving_after=self.serving_ports(), **st)
 
-    def kill_when(self, name, predicate, then):
-        """Start a replacement, SIGKILL the CLI the moment the journal satisfies `predicate`, then run `then`."""
+    def docker_name_conflict(self):
+        """A real Docker failure at the FINAL candidate's creation, which happens after the current release was stopped: a disposable
+        container (no Harpoon labels) is created under the exact name the engine will use for the candidate, so Docker itself answers
+        409 Conflict. The engine must restore the previous release and must not touch a container it does not own."""
+        name = "docker-api-failure-at-cutover-name-conflict"
+        if not self.ready_for_change(name): return
+        before, t0 = self.serving_ports(), now()
+        self.write_app(960)
+        cmd = [self.a.cli, "replace", "--app", self.app, *self.src(), "--confirm-cutover", "--runtime-dir", str(self.rt), *self.live_for("replace")]
+        res = {"conflict_id": None, "conflict_name": None}
+
+        def plant():
+            t_end = now() + 120
+            while now() < t_end and not res["conflict_id"]:
+                c = self.journal()
+                if c:
+                    try:
+                        r = c.execute("select body from records where kind='snapshot' and seq > ? order by seq desc limit 1", (self.baseline_seq,)).fetchone()
+                        f = r[0].split("\t") if r else []
+                        if len(f) > 6 and f[6] == "running":
+                            nm = f"hp-dep_{f[3].removeprefix('dep_')}"
+                            rc, o = self.docker_rc("create", "--name", nm, "--label", f"io.harpoon.acceptance={self.out.name}", BASE_IMAGE, "true")
+                            if rc == 0: res.update(conflict_id=o.strip(), conflict_name=nm)
+                    except Exception: pass
+                    c.close()
+                time.sleep(0.05)
+        th = threading.Thread(target=plant, daemon=True); th.start()
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        th.join(5)
+        (self.out / "dockerconflict.out").write_text(p.stdout + p.stderr)
+        fail = re.search(r"failure at (\w+): (.*)", p.stdout)
+        up = self.serving_up()
+        untouched = None
+        if res["conflict_id"]:
+            rc, o = self.docker_rc("inspect", res["conflict_id"], "--format", "{{.Name}} {{index .Config.Labels \"io.harpoon.acceptance\"}}")
+            untouched = rc == 0 and o.split() == ["/" + res["conflict_name"], self.out.name]
+            if untouched: self.docker_rc("rm", res["conflict_id"])                 # exact id, verified name and label: ours
+        st = self.settle()
+        ok = bool(res["conflict_id"]) and p.returncode != 0 and up and untouched is True and st["reconcile_apply_rc"] == 0 and "unresolved cleanup: none" in self.status()
+        self.record(name, ok, conflict_created=bool(res["conflict_id"]), conflict_name=res["conflict_name"], conflict_untouched_by_engine=untouched, rc=p.returncode,
+                    failed_at=fail.group(1) if fail else None, message=(fail.group(2)[:240] if fail else (p.stdout + p.stderr)[-300:]), serving_up_after=up,
+                    serving_before=before, serving_after=self.serving_ports(), secs=round(now() - t0, 1), **st)
+
+    def kill_when(self, name, predicate):
+        """Start a replacement, SIGKILL the CLI the moment the journal satisfies `predicate`. Returns (killed_at, serving_before, rc, output)."""
         self.write_app(970 + len(self.results))
         cmd = [self.a.cli, "replace", "--app", self.app, *self.src(), "--confirm-cutover", "--runtime-dir", str(self.rt)]
         if self.sim: cmd.append("--simulate")
-        else: cmd += self.live + [f"--authorize-live-docker-changes={self.auth}"]
+        else: cmd += self.live_for("replace")
         before = self.serving_ports()
-        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        outf = self.out / f"{name}.out"
+        with open(outf, "w") as f: p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
         killed = None; t_end = now() + 600
         while p.poll() is None and now() < t_end:
             c = self.journal()
@@ -261,44 +354,48 @@ class Run:
                 c.close()
             time.sleep(0.01)
         p.wait()
-        self.log(name, "killed" if killed else "NOT killed (the run finished first)", "rc", p.returncode)
-        return killed, before, then
+        tail = outf.read_text(errors="replace").strip().splitlines()[-6:]
+        self.log(name, "killed" if killed else "NOT killed (the run finished first)", "rc", p.returncode, tail[-1:] if not killed else "")
+        return killed, before, p.returncode, tail
 
     def kill_after_image_intent(self):
+        name = "sigkill-after-image-intent"
+        if not self.ready_for_change(name): return
         def pred(c):
             r = c.execute("select body from records where kind='ledger' and body like '%\tintent\timage\t%' order by seq desc limit 1").fetchone()
             if not r: return False
             tag = r[0].split("\t")[3]
             return c.execute("select count(*) from records where kind='ledger' and body like ? and body like '%\treceipt\timage\t%'", (f"%{tag}%",)).fetchone()[0] == 0 \
                 and c.execute("select count(*) from records where kind='ledger' and body like ?", (f"%\tintent\timage\t{tag}%",)).fetchone()[0] == 1 and c.execute("select count(*) from records").fetchone()[0] > self.baseline_seq
-        killed, before, _ = self.kill_when("kill-after-image-intent", pred, None)
-        self.after_kill("sigkill-after-image-intent", killed, before)
+        self.after_kill(name, *self.kill_when("kill-after-image-intent", pred))
 
     def kill_during_cutover(self):
+        name = "sigkill-during-cutover"
+        if not self.ready_for_change(name): return
         def pred(c):
             r = c.execute("select body from records where kind='snapshot' order by seq desc limit 1").fetchone()
             return bool(r) and "\tbegun\t" in r[0] and c.execute("select count(*) from records").fetchone()[0] > self.baseline_seq
-        killed, before, _ = self.kill_when("kill-during-cutover", pred, None)
-        self.after_kill("sigkill-during-cutover", killed, before, restore=True)
+        self.after_kill(name, *self.kill_when("kill-during-cutover", pred), restore=True)
 
-    def after_kill(self, name, killed, before, restore=False):
+    def after_kill(self, name, killed, before, rc, tail, restore=False):
         t0 = now()
-        st0 = self.status()
         rc_r, out_r, _, _ = self.cli("recover", live=False)
         dep = re.search(r"marked interrupted: (dep_\w+)", out_r)
-        steps = {"killed": bool(killed), "interrupted_deployment": dep.group(1) if dep else None}
+        steps = {"killed": bool(killed), "interrupted_deployment": dep.group(1) if dep else None, "replace_rc": rc, "replace_tail": tail}
         if restore and dep:
             rc_d, out_d, _, _ = self.cli("restore", "--deployment", dep.group(1))                    # dry run
             rc_a, out_a, _, dt_a = self.cli("restore", "--deployment", dep.group(1), "--apply")
             steps.update(restore_dry_rc=rc_d, restore_rc=rc_a, restore_secs=round(dt_a, 1), restore_tail=out_a.strip().splitlines()[-3:])
-        if self.sim: rc_c, out_c, rc_p, out_p = 0, "", 0, ""                                           # a simulated runtime has nothing to reconcile
+        if self.sim: rc_c = rc_p = 0; out_c = out_p = ""                                             # a simulated runtime has nothing to reconcile
         else:
             rc_c, out_c, _, _ = self.cli("reconcile")                                                # dry run
             rc_p, out_p, _, _ = self.cli("reconcile", "--apply")
         st = self.status()
-        up = self.sim or any(self.get(f"http://127.0.0.1:{p}/health", 3)[0] == 200 for p in self.serving_ports())
+        up = self.serving_up()
         unresolved = re.findall(r"unresolved cleanup \((\d+)\)", st)
-        self.record(name, (bool(killed) or self.sim) and up and (not unresolved or self.sim), recovery_secs=round(now() - t0, 1), reconcile_plan=out_c.strip().splitlines()[-4:],
+        clean = rc_c == 0 and rc_p == 0 and (self.sim or not unresolved)                              # a failing recovery command is a failure, not a skipped step
+        self.record(name, (bool(killed) or self.sim) and up and clean and (not restore or not dep or steps["restore_rc"] == 0),
+                    recovery_secs=round(now() - t0, 1), reconcile_plan=out_c.strip().splitlines()[-4:], reconcile_dry_rc=rc_c,
                     reconcile_apply_rc=rc_p, reconcile_tail=out_p.strip().splitlines()[-3:], serving_up=up, unresolved=unresolved or 0,
                     serving_before=before, serving_after=self.serving_ports(), **steps)
         self.baseline_seq = (lambda c: c.execute("select max(seq) from records").fetchone()[0])(self.journal())
@@ -340,11 +437,11 @@ class Run:
         steps = [("replace", lambda: self.replacements(self.a.iterations)),
                  ("buildfail", lambda: self.expect_failed_and_serving("build-failure-before-cutover", "buildfail", expect="build")),
                  ("healthfail", lambda: self.expect_failed_and_serving("health-failure-before-cutover", "wrongport", "--health-timeout-secs", "20", expect="preliminary_check")),
-                 ("dockerapi", self.docker_api_failure), ("killintent", self.kill_after_image_intent), ("killcutover", self.kill_during_cutover),
+                 ("dockerapi", self.docker_api_failure), ("dockerconflict", self.docker_name_conflict), ("killintent", self.kill_after_image_intent), ("killcutover", self.kill_during_cutover),
                  ("forwarder", self.forwarder_probes)]
         for key, fn in steps:
             if self.a.only and key not in self.a.only: continue
-            if self.sim and key in ("buildfail", "healthfail", "dockerapi", "forwarder"): self.record(key, True, skipped="needs real Docker"); continue
+            if self.sim and key in ("buildfail", "healthfail", "dockerapi", "dockerconflict", "forwarder"): self.record(key, True, skipped="needs real Docker"); continue
             self.log("== scenario", key)
             try: fn()
             except SystemExit: raise
