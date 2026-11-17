@@ -309,6 +309,221 @@ fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused
     );
 }
 
+// ---------------------------------------------------------------- the build-cache prune guard
+
+fn posts(t: &T) -> usize {
+    t.h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST")
+        .count()
+}
+
+fn seed_cache(t: &T) {
+    t.h.docker
+        .with(|s| s.build_cache = vec![(1_000, false), (500, true), (250, false)]);
+}
+
+fn with_deployment(t: &T, status: DeploymentStatus) {
+    static N: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(40);
+    let (app, dep) = ids(N.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    j.persist(&finished(&app, &dep, status)).unwrap();
+}
+
+fn legacy_journal(t: &T, lines: Option<usize>) {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ui/harpoon-desktop/src-tauri/tests/fixtures/b7-legacy-runtime/deploy-journal/journal.wal");
+    let text = std::fs::read_to_string(fixture).unwrap();
+    let kept: String = text
+        .lines()
+        .take(lines.unwrap_or(usize::MAX))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(t.journal_dir().join("journal.wal"), kept).unwrap();
+}
+
+#[test]
+fn an_unfinished_deployment_refuses_the_prune_on_the_apply_path_and_nothing_is_pruned() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Running);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("was not pruned") && o.stderr.contains("Nothing was changed"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0, "Docker was never asked to prune");
+    assert_eq!(t.h.docker.with(|s| s.build_cache.len()), 3);
+    // the dry run still answers, and says the apply would be refused
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(o.stdout.contains("prune-guard: blocked"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("build-cache-reclaimable-bytes: 1250"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn the_guard_is_checked_when_applying_not_when_previewing() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert!(o.stdout.contains("prune-guard: clear"), "{}", o.stdout);
+    // a deployment starts between the preview and the confirmation
+    {
+        let (app, dep) = ids(41);
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.persist(&finished(&app, &dep, DeploymentStatus::Queued))
+            .unwrap();
+    }
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn a_journal_with_only_finished_deployments_allows_the_prune_and_it_stays_all_false() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    for s in [DeploymentStatus::Succeeded, DeploymentStatus::Failed] {
+        with_deployment(&t, s);
+    }
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.clone()),
+        vec![(500, true)],
+        "only the unused part went"
+    );
+    let reqs = t.h.docker.requests();
+    let prunes: Vec<_> = reqs.iter().filter(|r| r.method == "POST").collect();
+    assert_eq!(prunes.len(), 1);
+    assert!(
+        prunes[0].path.starts_with("/build/prune") && prunes[0].path.contains("all=false"),
+        "{}",
+        prunes[0].path
+    );
+    assert!(
+        reqs.iter().all(|r| r.method != "DELETE"),
+        "no image, container or volume was removed"
+    );
+}
+
+#[test]
+fn a_genuinely_absent_journal_does_not_block_the_prune() {
+    let t = T::new();
+    t.docker_runtime(); // a runtime folder with no journal file of either kind
+    seed_cache(&t);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(posts(&t), 1);
+}
+
+#[test]
+fn a_legacy_journal_is_read_where_it_is_and_decides_in_the_same_way() {
+    // a finished deployment: allowed
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    legacy_journal(&t, None);
+    let before = std::fs::read(t.journal_dir().join("journal.wal")).unwrap();
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert_eq!(posts(&t), 1);
+    assert_eq!(
+        std::fs::read(t.journal_dir().join("journal.wal")).unwrap(),
+        before,
+        "not rewritten"
+    );
+    assert!(
+        !t.journal_dir().join("deployments.sqlite3").exists(),
+        "not converted"
+    );
+    // the same journal cut while the deployment was still running: refused
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    legacy_journal(&t, Some(3));
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("is running")
+            || o.stderr.contains("not finished")
+            || o.stderr.contains("run `recover`"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn an_unreadable_or_ambiguous_journal_fails_closed_in_both_formats() {
+    for (file, bytes) in [
+        ("journal.wal", &b"this is not a journal"[..]),
+        ("deployments.sqlite3", &b"not a database at all"[..]),
+    ] {
+        let t = T::new();
+        t.docker_runtime();
+        seed_cache(&t);
+        std::fs::write(t.journal_dir().join(file), bytes).unwrap();
+        let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+        assert_exit(&o, 6);
+        assert!(
+            o.stderr.contains("could not be read"),
+            "{file}: {}",
+            o.stderr
+        );
+        assert_eq!(posts(&t), 0, "{file}");
+        assert_eq!(
+            std::fs::read(t.journal_dir().join(file)).unwrap(),
+            bytes,
+            "{file} was not repaired"
+        );
+        let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+        assert!(
+            o.stdout.contains("prune-guard: blocked"),
+            "{file}: {}",
+            o.stdout
+        );
+    }
+}
+
+#[test]
+fn a_journal_another_process_is_writing_refuses_the_prune() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let _writer = open_j(&t.journal_dir()).unwrap(); // a writer holds the store
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains("holds the deployment journal"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(posts(&t), 0);
+}
+
+#[test]
+fn the_confirmation_requirement_is_unchanged_by_the_guard() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply"]));
+    assert_ne!(o.code, 0);
+    assert_eq!(posts(&t), 0);
+}
+
 // ---------------------------------------------------------------- ownership and classification
 
 use harpoon_deploy::git::{CredKind, GitRecord, RepoRec, SelectorKind, SourceRec};

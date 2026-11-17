@@ -29,3 +29,15 @@ export function useDiskView(): DiskView {
   }, []);
   return diskView(t, now);
 }
+
+/**
+ * The Mac-side allocation of the disk image right now, or `null`. It forces a fresh read and accepts only one that completed after this call
+ * began, so a remembered or stale figure is never used as a before/after measurement.
+ */
+export async function hostAllocationNow(): Promise<number | null> {
+  const started = Date.now();
+  try { await diskTelemetry.refresh(); } catch { return null; }
+  const t = diskTelemetry.get();
+  if (!t.enabled || t.failure || !t.last || t.last.at < started || !t.last.cap.provisioned) return null;
+  return t.last.cap.physicalBytes;
+}

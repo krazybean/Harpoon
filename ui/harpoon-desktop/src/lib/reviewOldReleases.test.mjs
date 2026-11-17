@@ -33,7 +33,7 @@ const ok = (lines) => ({ ok: true, summary: "", hint: "", detail: lines.join("\n
 
 async function mount(handler) {
   const calls = [];
-  globalThis.__invoke = (cmd, args) => { calls.push(args); return handler(args); };
+  globalThis.__invoke = (cmd, args) => { if (cmd !== "deploy_op") return Promise.reject(new Error(`no ${cmd} in this test`)); calls.push(args); return handler(args); }; // only the engine operations are recorded
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);

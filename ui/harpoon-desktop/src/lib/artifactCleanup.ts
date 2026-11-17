@@ -179,10 +179,10 @@ export function freedSummary(r: Pick<CleanupReport, "guestFreeBefore" | "guestFr
   return `Guest free space: ${size(r.guestFreeBefore)} before, ${size(r.guestFreeAfter)} after (${d >= 0 ? "+" : "−"}${size(Math.abs(d))}).`;
 }
 
-export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null };
+export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null; /** Why an apply would be refused right now (an unfinished deployment, an unreadable journal), or `null` when the guard is clear or was not reported. */ blocked: string | null };
 
 /** The engine's `prune-build-cache` report. Docker's reclaimed figure is shown as Docker's; the guest's own free space is the measured change. */
 export function parseCache(detail: string): CacheReport {
   const n = (key: string) => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith(`${key}:`)); const v = l ? Number(l.slice(key.length + 1)) : NaN; return Number.isFinite(v) ? v : null; };
-  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes") };
+  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes"), blocked: (() => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith("prune-guard: blocked")); return l ? l.replace(/^prune-guard: blocked:?\s*/, "") || "the engine did not say why" : null; })() };
 }

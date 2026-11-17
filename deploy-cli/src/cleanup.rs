@@ -472,6 +472,40 @@ fn guest_free(p: &Parsed, socket: &Path) -> Option<u64> {
         .map(|(free, _)| free)
 }
 
+/// Why a build-cache prune must not be applied now, from the journal alone (read-only; the same detection and reader as every
+/// other command, so a legacy `journal.wal` counts as much as the SQLite store). `Ok(())` only when a journal is genuinely absent
+/// (nothing is recorded as deploying) or is readable, unlocked and has no unfinished deployment. Anything that cannot be
+/// established fails closed. This is Harpoon's own record: it says nothing about builds started by other Docker clients.
+fn prune_guard(rt: &Runtime) -> Result<(), String> {
+    if !rt.initialised() {
+        return Ok(());
+    }
+    match harpoon_deploy_journal::writer_lock_status(&rt.journal_dir()) {
+        Ok(harpoon_deploy_journal::LockStatus::Held) => return Err(
+            "another Harpoon process holds the deployment journal, so a deployment may be running"
+                .into(),
+        ),
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!(
+                "the journal's lock state could not be read ({})",
+                e.0
+            ))
+        }
+    }
+    match store::read_restored(rt) {
+        Ok(Some(r)) => match unfinished(&r.deployments).first() {
+            Some(first) => Err(first.to_string()),
+            None => Ok(()),
+        },
+        Ok(None) => Ok(()),
+        Err(e) => Err(format!(
+            "the deployment journal could not be read ({})",
+            e.message.lines().next().unwrap_or("")
+        )),
+    }
+}
+
 /// `prune-build-cache`: removes BuildKit cache nothing is using, through Docker's own prune call (what `docker builder
 /// prune` does without `--all`). The cache is not something Harpoon records, so there is nothing to journal; what is
 /// reported is Docker's figure and the guest filesystem's measured free space before and after. Later builds are slower
@@ -489,6 +523,15 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "this is a simulated runtime; there is nothing real to prune",
         ));
     }
+    // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview.
+    let guard = prune_guard(&rt);
+    if apply {
+        if let Err(why) = &guard {
+            return Err(Fail::refused(format!(
+                "the build cache was not pruned: {why}. Prune only when no deployment is running or unfinished (run `recover` for an interrupted one). Nothing was changed."
+            )));
+        }
+    }
     let api = harpoon_deploy_docker::api::DockerApi::new(&socket, Duration::from_secs(30));
     let runtime_err = |e: harpoon_deploy_docker::api::ApiError| {
         Fail::runtime(format!(
@@ -502,6 +545,14 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     let _ = writeln!(out, "build cache: {total} bytes in all, {unused} bytes not in use. A prune removes only the unused part; images, containers and volumes are not touched, and later builds are slower until the cache fills again.");
     let _ = writeln!(out, "build-cache-reclaimable-bytes: {unused}");
     if !apply {
+        match &guard {
+            Ok(()) => {
+                let _ = writeln!(out, "prune-guard: clear");
+            }
+            Err(why) => {
+                let _ = writeln!(out, "prune-guard: blocked: {why}");
+            }
+        }
         let _ = writeln!(
             out,
             "dry run: nothing was changed. Add --apply and --{}=… to carry this out.",
