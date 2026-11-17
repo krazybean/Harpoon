@@ -40,7 +40,12 @@ async function mount(handler) {
   await act(async () => root.render(React.createElement(React.Fragment, null, React.createElement(DockerArtifacts, { enabled: true, onDone: () => {} }), React.createElement(ConfirmDialogHost))));
   const button = () => [...host.querySelectorAll("button")].find((b) => b.textContent.startsWith("Review old") || b.textContent === "Looking…");
   const click = (b) => act(async () => { b.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
-  return { host, calls, button, click, dialog: () => document.querySelector('[role="dialog"]'), unmount: () => act(async () => root.unmount()) };
+  return { host, calls, button, click, dialog: () => document.querySelector('[role="dialog"]'), unmount: async () => {
+    // a confirmation left open holds the page's one-cleanup-at-a-time lock until it is answered, so answer it before leaving
+    const cancel = [...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent === "Cancel");
+    if (cancel) await act(async () => { cancel.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    await act(async () => root.unmount());
+  } };
 }
 
 test("an empty inventory opens an informative dialog with no removal action", async () => {

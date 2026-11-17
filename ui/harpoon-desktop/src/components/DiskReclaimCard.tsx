@@ -7,6 +7,7 @@ import { cacheOutcome, failureOutcome, releasesOutcome, reclaimOutcome } from ".
 import type { CleanupOutcome } from "../lib/cleanupResult";
 import { fmtBytes } from "./StorageBreakdown";
 import { CLEANUP_TARGETS } from "../lib/cleanupTargets";
+import { acquireCleanup, useCleanupActive } from "../lib/cleanupLock";
 import { formatSize, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { ExpansionState, ReclaimResult } from "../lib/diskCapacity";
 import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
@@ -29,6 +30,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
   const [busy, setBusy] = useState<"review" | "apply" | null>(null);
   const [plan, setPlan] = useState<CleanupReport | null>(null);
   const [outcome, setOutcome] = useState<CleanupOutcome | null>(null);
+  const otherCleanup = useCleanupActive() !== null;
   const [error, setError] = useState<string | null>(null);
   const [clean, setClean] = useState(false);
   // Which application groups are open. Kept across refreshes: a new inventory only changes the rows inside.
@@ -55,6 +57,8 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
   const apply = async () => {
     // one apply at a time, from the click through the confirmation to the result: a second click or a repeated confirmation starts nothing
     if (!plan || nothingToClean(plan) || inFlight.current) return;
+    const release = acquireCleanup("old-releases"); // another cleanup running would land inside this one's measurements
+    if (!release) return;
     inFlight.current = true;
     try {
       const sum = operationSummary(plan);
@@ -70,7 +74,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
         result = r.ok ? releasesOutcome(plan, parseCleanup(r.detail), { before, after }) : failureOutcome("old-releases", r, null, { before, after });
       } catch (e) { result = failureOutcome("old-releases", null, e, { before, after: await hostAllocationNow() }); }
       setOutcome(result); setPlan(null);
-    } finally { inFlight.current = false; setBusy(null); onDone(); }
+    } finally { inFlight.current = false; release(); setBusy(null); onDone(); }
   };
   const sum = plan ? operationSummary(plan) : null;
   const inv = plan ? inventorySummary(plan) : null;
@@ -85,7 +89,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
       </div>
       <div className="dialog-actions">
         <button id={CLEANUP_TARGETS["old-releases"].button} className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Looking…" : "Review old releases…"}</button>
-        {plan && actionLabel && <button className="btn btn--primary" disabled={busy !== null} onClick={apply}>{busy === "apply" ? "Cleaning up…" : actionLabel}</button>}
+        {plan && actionLabel && <button className="btn btn--primary" disabled={busy !== null || otherCleanup} onClick={apply}>{busy === "apply" ? "Cleaning up…" : actionLabel}</button>}
       </div>
       {busy === "review" && <div role="status" className="text-meta">Looking for old releases…</div>}
       {clean && (
@@ -215,6 +219,7 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
   const [outcome, setOutcome] = useState<CleanupOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(false);
+  const otherCleanup = useCleanupActive() !== null;
   const inFlight = useRef(false);
   const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "prune-build-cache", apply: true }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "prune-build-cache", apply: false } });
   const check = async () => {
@@ -234,9 +239,11 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
   };
   const prune = async () => {
     if (inFlight.current || size === null || size <= 0 || blocked) return;
+    const release = acquireCleanup("build-cache");
+    if (!release) return;
     inFlight.current = true;
     try {
-      if (!(await confirmAction(`Harpoon will ask Docker to delete ${size !== null ? `about ${fmtBytes(size)} of ` : ""}BuildKit cache that nothing is using.\n\nImages, containers and volumes are not touched. The next builds will be slower while the cache fills again. Docker decides what is unused when it prunes, and that can differ from this figure. Pruning does not protect against builds started by other Docker clients.`, "Prune build cache"))) return;
+      if (!(await confirmAction(`Harpoon will ask Docker to delete BuildKit cache that Docker reports as unused${size !== null ? ` (about ${fmtBytes(size)} by its last count)` : ""}.\n\nUnused is not the same as useless: this cache can be reusable, so removing it can make later builds slower while it fills again. Docker decides what is unused when it prunes, and that can differ from this figure. The amount is Docker's accounting, not a promise of free disk space, and the space stays allocated on your Mac until you reclaim unused space.\n\nImages, containers and volumes are not touched. Pruning does not protect against builds started by other Docker clients.`, "Prune build cache"))) return;
       setBusy("prune"); setError(null); setOutcome(null);
       const before = await hostAllocationNow();
       let result: CleanupOutcome;
@@ -246,14 +253,14 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
         result = r.ok ? cacheOutcome(parseCache(r.detail), { before, after }, fmtBytes) : failureOutcome("build-cache", r, null, { before, after });
       } catch (e) { result = failureOutcome("build-cache", null, e, { before, after: await hostAllocationNow() }); }
       setOutcome(result); setSize(null); setBlocked(null);
-    } finally { inFlight.current = false; setBusy(null); onDone(); }
+    } finally { inFlight.current = false; release(); setBusy(null); onDone(); }
   };
   return (
     <div id={CLEANUP_TARGETS["build-cache"].section} tabIndex={-1} style={{ marginTop: 10 }}>
       <div className="text-meta">Build cache speeds up rebuilds. Deleting it frees space but makes the next builds slower.</div>
       <div className="dialog-actions">
         <button id={CLEANUP_TARGETS["build-cache"].button} className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={check}>{busy === "check" ? "Checking…" : "Check build cache"}</button>
-        {size !== null && size > 0 && !blocked && <button className="btn btn--secondary" disabled={busy !== null} onClick={prune}>{busy === "prune" ? "Pruning…" : `Prune ${fmtBytes(size)}…`}</button>}
+        {size !== null && size > 0 && !blocked && <button className="btn btn--secondary" disabled={busy !== null || otherCleanup} onClick={prune}>{busy === "prune" ? "Pruning…" : `Prune ${fmtBytes(size)}…`}</button>}
       </div>
       {empty && <div role="status" className="text-meta">No unused build cache.</div>}
       {blocked && <div role="status" className="text-body">Pruning is unavailable right now: {blocked}. Nothing was changed.</div>}
@@ -269,6 +276,7 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ReclaimResult | null>(null);
   const inFlight = useRef(false);
+  const otherCleanup = useCleanupActive() !== null;
   const load = useCallback(() => diskTelemetry.refresh(), []);
   useEffect(() => { if (enabled) void load(); }, [enabled, load, expansion?.phase]);
 
@@ -278,13 +286,15 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
 
   const reclaim = async () => {
     if (!cap || blocked || busy || inFlight.current) return;
+    const release = acquireCleanup("disk-blocks");
+    if (!release) return;
     inFlight.current = true;
     try {
       if (!(await confirmAction(reclaimConfirmationMessage(cap), "Reclaim unused space"))) return;
       setBusy(true); setResult(null);
       try { setResult(parseReclaimResult(await invoke<string>("reclaim_disk_confirmed"))); }
       catch (e) { setResult(parseReclaimResult(String(e))); }
-    } finally { inFlight.current = false; setBusy(false); void load(); }
+    } finally { inFlight.current = false; release(); setBusy(false); void load(); }
   };
 
   return (
@@ -300,7 +310,7 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
         Reclaiming asks the guest to hand blocks it no longer uses back to macOS. It does not delete Docker images, containers or volumes, and the amount returned is only known afterwards.
       </div>
       <div className="dialog-actions">
-        <button id={CLEANUP_TARGETS["disk-blocks"].button} className="btn btn--secondary" disabled={Boolean(blocked) || busy} title={blocked ?? undefined} onClick={reclaim}>
+        <button id={CLEANUP_TARGETS["disk-blocks"].button} className="btn btn--secondary" disabled={Boolean(blocked) || busy || otherCleanup} title={blocked ?? (otherCleanup ? "Another cleanup is running." : undefined)} onClick={reclaim}>
           {busy ? "Reclaiming…" : "Reclaim unused space…"}
         </button>
       </div>

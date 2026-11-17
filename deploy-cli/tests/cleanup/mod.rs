@@ -515,6 +515,72 @@ fn a_journal_another_process_is_writing_refuses_the_prune() {
 }
 
 #[test]
+fn no_deployment_writer_can_start_between_the_check_and_the_prune_in_either_journal_format() {
+    use std::sync::{Arc, Mutex};
+    use support::fake_docker::Action;
+    for legacy in [false, true] {
+        let t = T::new();
+        t.docker_runtime();
+        seed_cache(&t);
+        if legacy {
+            legacy_journal(&t, None);
+        } else {
+            with_deployment(&t, DeploymentStatus::Succeeded);
+        }
+        let dir = t.journal_dir();
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let (s2, d2) = (seen.clone(), dir.clone());
+        // At the instant Docker is asked to prune, a second Harpoon writer tries to start (a deployment from a terminal, say).
+        t.h.docker.fault(
+            Some("POST"),
+            "/build/prune",
+            1,
+            Action::Race(Arc::new(move |_| {
+                *s2.lock().unwrap() =
+                    Some(match harpoon_deploy_journal::SqliteJournal::open(&d2) {
+                        Ok(_) => "a second writer started during the prune".to_string(),
+                        Err(e) => e.to_string(),
+                    });
+            })),
+        );
+        let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+        assert_exit(&o, 0);
+        let got = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the prune request reached Docker");
+        assert!(
+            got.contains("another Harpoon process holds"),
+            "legacy={legacy}: {got}"
+        );
+        assert_eq!(posts(&t), 1);
+        // the hold ended with the command: a writer can start now, and the journal itself was never written by the hold
+        assert!(
+            harpoon_deploy_journal::hold_writer_lock(&dir).is_ok(),
+            "legacy={legacy}: the lock was released"
+        );
+        if legacy {
+            assert!(
+                !dir.join("deployments.sqlite3").exists(),
+                "the legacy journal was not converted"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_preview_holds_no_lock() {
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    with_deployment(&t, DeploymentStatus::Succeeded);
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(harpoon_deploy_journal::hold_writer_lock(&t.journal_dir()).is_ok());
+}
+
+#[test]
 fn the_confirmation_requirement_is_unchanged_by_the_guard() {
     let t = T::new();
     t.docker_runtime();

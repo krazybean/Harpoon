@@ -472,10 +472,11 @@ fn guest_free(p: &Parsed, socket: &Path) -> Option<u64> {
         .map(|(free, _)| free)
 }
 
-/// Why a build-cache prune must not be applied now, from the journal alone (read-only; the same detection and reader as every
+/// Why a build-cache prune must not be applied now, from the journal alone (read-only: the same detection and reader as every
 /// other command, so a legacy `journal.wal` counts as much as the SQLite store). `Ok(())` only when a journal is genuinely absent
 /// (nothing is recorded as deploying) or is readable, unlocked and has no unfinished deployment. Anything that cannot be
 /// established fails closed. This is Harpoon's own record: it says nothing about builds started by other Docker clients.
+/// The preview uses this alone; the apply path uses [`prune_hold`], which adds the lock.
 fn prune_guard(rt: &Runtime) -> Result<(), String> {
     if !rt.initialised() {
         return Ok(());
@@ -493,6 +494,10 @@ fn prune_guard(rt: &Runtime) -> Result<(), String> {
             ))
         }
     }
+    unfinished_in_journal(rt)
+}
+
+fn unfinished_in_journal(rt: &Runtime) -> Result<(), String> {
     match store::read_restored(rt) {
         Ok(Some(r)) => match unfinished(&r.deployments).first() {
             Some(first) => Err(first.to_string()),
@@ -504,6 +509,26 @@ fn prune_guard(rt: &Runtime) -> Result<(), String> {
             e.message.lines().next().unwrap_or("")
         )),
     }
+}
+
+/// The apply path's guard: the check above made under the journal's own writer lock, which the returned hold keeps until the prune is
+/// over. Every Harpoon deployment writer takes that lock before it starts, so none can begin between the check and the prune (the
+/// desktop's own operations are also serialised by its operations mutex; this closes the same window for a terminal process).
+/// A genuinely absent journal needs no lock. The lock is a flag on a lock file: no journal data is read for writing, migrated or changed.
+fn prune_hold(rt: &Runtime) -> Result<Option<harpoon_deploy_journal::WriterHold>, String> {
+    if !rt.initialised() {
+        return Ok(None);
+    }
+    let hold = harpoon_deploy_journal::hold_writer_lock(&rt.journal_dir()).map_err(|e| {
+        if e.0.contains("another Harpoon process holds") {
+            "another Harpoon process holds the deployment journal, so a deployment may be running"
+                .to_string()
+        } else {
+            format!("the journal's writer lock could not be taken ({})", e.0)
+        }
+    })?;
+    unfinished_in_journal(rt)?;
+    Ok(Some(hold))
 }
 
 /// `prune-build-cache`: removes BuildKit cache nothing is using, through Docker's own prune call (what `docker builder
@@ -523,15 +548,21 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "this is a simulated runtime; there is nothing real to prune",
         ));
     }
-    // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview.
-    let guard = prune_guard(&rt);
-    if apply {
-        if let Err(why) = &guard {
-            return Err(Fail::refused(format!(
-                "the build cache was not pruned: {why}. Prune only when no deployment is running or unfinished (run `recover` for an interrupted one). Nothing was changed."
-            )));
+    // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview. The hold
+    // lives until this function returns, that is, through the prune.
+    let guard = if apply { Ok(()) } else { prune_guard(&rt) };
+    let _hold = if apply {
+        match prune_hold(&rt) {
+            Ok(h) => h,
+            Err(why) => {
+                return Err(Fail::refused(format!(
+                    "the build cache was not pruned: {why}. Prune only when no deployment is running or unfinished (run `recover` for an interrupted one). Nothing was changed."
+                )))
+            }
         }
-    }
+    } else {
+        None
+    };
     let api = harpoon_deploy_docker::api::DockerApi::new(&socket, Duration::from_secs(30));
     let runtime_err = |e: harpoon_deploy_docker::api::ApiError| {
         Fail::runtime(format!(

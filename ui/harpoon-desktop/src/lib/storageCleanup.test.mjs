@@ -39,13 +39,22 @@ let opLog = [];              // every deploy_op request
 let reclaimLog = [];         // every reclaim request
 let physical = [3 * GIB];    // successive Mac allocations the disk status reports (the last one repeats)
 let diskDown = false;
+let diskHook = null;         // when set, answers get_disk_capacity itself (to script ordering)
+const events = [];           // ordered log of disk reads and engine operations
 let deployReply = () => { throw new Error("no reply scripted"); };
 let reclaimReply = () => JSON.stringify({ status: "reclaimed", message: "Reclaimed.", logicalBytes: 12 * GIB, physicalBeforeBytes: 3 * GIB, physicalAfterBytes: 2 * GIB });
 const capJson = (phys) => JSON.stringify({ provisioned: true, state: "running", logicalBytes: 12 * GIB, physicalBytes: phys, pressure: "ok", suggestedSizes: [], maxBytes: 512 * GIB, hostReserveBytes: 5 * GIB, guest: { capacityBytes: 10 * GIB, usedBytes: 4 * GIB, availableBytes: 6 * GIB } });
 globalThis.__invoke = async (cmd, args) => {
-  if (cmd === "get_disk_capacity") { if (diskDown) throw new Error("management channel timed out"); return capJson(physical.length > 1 ? physical.shift() : physical[0]); }
+  if (cmd === "get_disk_capacity") {
+    events.push("disk:start");
+    await new Promise((r) => setImmediate(r));
+    const done = (v) => { events.push("disk:end"); return v; };
+    if (diskHook) return done(await diskHook());
+    if (diskDown) { events.push("disk:end"); throw new Error("management channel timed out"); }
+    return done(capJson(physical.length > 1 ? physical.shift() : physical[0]));
+  }
   if (cmd === "storage_inventory") return FIXTURE;
-  if (cmd === "deploy_op") { opLog.push(args); return deployReply(args); }
+  if (cmd === "deploy_op") { opLog.push(args); const tag = args.op.apply ? "apply" : "preview"; events.push(`op:${tag}:start`); try { return await deployReply(args); } finally { events.push(`op:${tag}:end`); } }
   if (cmd === "reclaim_disk_confirmed") { reclaimLog.push(cmd); const r = reclaimReply(); if (r instanceof Error) throw r; return r; }
   throw new Error(`unexpected command ${cmd}`);
 };
@@ -55,7 +64,7 @@ const itemLine = (kind, verdict, name = `${kind}-1`) => `item: ${JSON.stringify(
 const PLAN = [itemLine("container", "ready"), itemLine("image", "ready")].join("\n");
 
 async function mount(running = true) {
-  opLog = []; reclaimLog = []; physical = [3 * GIB]; diskDown = false; reclaimReply = () => JSON.stringify({ status: "reclaimed", message: "Reclaimed.", logicalBytes: 12 * GIB, physicalBeforeBytes: 3 * GIB, physicalAfterBytes: 2 * GIB });
+  opLog = []; reclaimLog = []; physical = [3 * GIB]; diskDown = false; diskHook = null; events.length = 0; reclaimReply = () => JSON.stringify({ status: "reclaimed", message: "Reclaimed.", logicalBytes: 12 * GIB, physicalBeforeBytes: 3 * GIB, physicalAfterBytes: 2 * GIB });
   diskTelemetry.setEnabled(running);
   const host = document.createElement("div"); document.body.appendChild(host);
   const root = createRoot(host);
@@ -75,7 +84,11 @@ async function mount(running = true) {
 }
 // a failed assertion must not leave a page mounted (its timers and dialog host would leak into the next test)
 const live = new Set();
-afterEach(async () => { for (const p of [...live]) await p.unmount(); });
+afterEach(async () => {
+  // answer any confirmation left open: it holds the one-cleanup-at-a-time lock until it is
+  for (const b of [...document.querySelectorAll('[role="dialog"] button')].filter((b) => b.textContent === "Cancel")) await act(async () => { b.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  for (const p of [...live]) await p.unmount();
+});
 const text = (el) => el.textContent.replace(/\s+/g, " ");
 const apply = () => opLog.filter((a) => a.op.apply === true);
 
@@ -380,4 +393,112 @@ test("the breakdown and its helpers cannot invoke anything, and no image, contai
   assert.doesNotMatch(card, /remove_image|remove_volume|remove_container|rmi|--force|force=true|all=true/);
   const api = read("../../src-tauri/src/deploy_api.rs");
   assert.doesNotMatch(api, /RemoveImage|remove-image|RemoveVolume|RemoveContainer/, "no new deployment operation removes an image, volume or container");
+});
+
+// ---------------------------------------------------------------- measurement ordering
+
+const confirmCachePrune = async (m) => { await m.click(m.btn("Prune")); await act(async () => { m.dialogBtn("Prune build cache").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); }); };
+const applyWindow = () => events.slice(events.indexOf("op:apply:start") - 4);
+
+test("the Mac allocation is read to completion before the operation starts and only after it has ended", async () => {
+  const m = await mount();
+  deployReply = (a) => ok(a.op.apply ? CACHE_DONE : CACHE_PREVIEW("prune-guard: clear"));
+  await m.click(m.btn("Check build cache")); await m.settle();
+  events.length = 0;
+  physical = [3 * GIB, 2 * GIB];                                  // before, after
+  await confirmCachePrune(m); await m.settle();
+  const seq = events.filter((e) => e !== "op:preview:start" && e !== "op:preview:end");
+  const start = seq.indexOf("op:apply:start"), end = seq.indexOf("op:apply:end");
+  assert.ok(start > 0 && end > start, JSON.stringify(seq));
+  const before = seq.slice(0, start), after = seq.slice(end + 1);
+  assert.deepEqual(before.slice(-2), ["disk:start", "disk:end"], "the before reading finished before the operation began");
+  assert.ok(after.length >= 2 && after[0] === "disk:start", "the after reading began only after the operation ended: " + JSON.stringify(seq));
+  assert.ok(after.includes("disk:end"));
+  const mac = text(m.q('[data-result-kind="build-cache"] [data-figure="mac"]'));
+  assert.match(mac, /3\.0 GiB before, 2\.0 GiB after \(−1\.0 GiB\)/, "before and after come from the two bracketing reads, in that order");
+});
+
+test("a disk read already running when the operation ends is not used as the 'after': a new one is taken", async () => {
+  const m = await mount();
+  let release; const midOp = new Promise((r) => { release = r; });
+  deployReply = async (a) => {
+    if (!a.op.apply) return ok(CACHE_PREVIEW("prune-guard: clear"));
+    // the 60-second poll fires mid-operation: its read started before the operation ended and has not finished
+    diskHook = () => midOp;
+    void diskTelemetry.refresh();
+    await new Promise((r) => setImmediate(r));
+    diskHook = null; physical = [7 * GIB];
+    return ok(CACHE_DONE);
+  };
+  await m.click(m.btn("Check build cache")); await m.settle();
+  physical = [3 * GIB];
+  const done = confirmCachePrune(m);
+  await new Promise((r) => setTimeout(r, 30));
+  release(capJson(5 * GIB));                                      // the mid-operation read finally answers (5 GiB)
+  await done; await m.settle();
+  const mac = text(m.q('[data-result-kind="build-cache"] [data-figure="mac"]'));
+  assert.match(mac, /3\.0 GiB before, 7\.0 GiB after/, "the after reading is the fresh one (7 GiB), not the mid-operation one (5 GiB): " + mac);
+});
+
+test("a failed or missing bracketing reading makes only that side unavailable, and no change is claimed", async () => {
+  const m = await mount();
+  deployReply = (a) => ok(a.op.apply ? CACHE_DONE : CACHE_PREVIEW("prune-guard: clear"));
+  await m.click(m.btn("Check build cache")); await m.settle();
+  let n = 0;
+  diskHook = async () => { if (++n === 2) throw new Error("channel down"); return capJson(3 * GIB); }; // the read after the operation fails
+  await confirmCachePrune(m); await m.settle();
+  const mac = text(m.q('[data-result-kind="build-cache"] [data-figure="mac"]'));
+  assert.match(mac, /Before 3\.0 GiB, after not measured\. A change cannot be stated\./);
+  assert.doesNotMatch(mac, /unchanged|\+|−/);
+});
+
+test("an earlier cleanup result is never updated by a later reclaim", async () => {
+  const m = await mount();
+  deployReply = (a) => ok(a.op.apply ? CACHE_DONE : CACHE_PREVIEW("prune-guard: clear"));
+  await m.click(m.btn("Check build cache")); await m.settle();
+  physical = [3 * GIB, 3 * GIB];
+  await confirmCachePrune(m); await m.settle();
+  const mine = () => text(m.q('[data-result-kind="build-cache"] [data-figure="mac"]'));
+  const first = mine();
+  physical = [2 * GIB];                                           // the guest then hands blocks back
+  await m.click(m.btn("Reclaim unused space"));
+  await act(async () => { m.dialogBtn("Reclaim unused space").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  await m.settle();
+  assert.equal(mine(), first, "the cache result still shows only what happened around the prune");
+  const reclaim = text(m.q('[data-result-kind="disk-blocks"] [data-figure="mac"]'));
+  assert.match(reclaim, /3\.0 GiB before, 2\.0 GiB after/, "the trim's own measurement is on its own result");
+});
+
+test("only one apply-type cleanup runs at a time, so none can land inside another's measurements", async () => {
+  const m = await mount();
+  let finish; const gate = new Promise((r) => { finish = r; });
+  deployReply = async (a) => { if (a.op.apply) { await gate; return ok("reclaimed-containers: 1\nreclaimed-images: 1"); } return ok(PLAN); };
+  await m.click(m.btn("Review old releases")); await m.settle();
+  await m.click(m.btn("Remove 2 Docker artifacts"));
+  await act(async () => { m.dialogBtn("Remove 2 Docker artifacts").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  await new Promise((r) => setTimeout(r, 20));                    // the cleanup is executing
+  assert.equal(m.btn("Reclaim unused space").disabled, true, "reclaim is unavailable while a cleanup runs");
+  await m.click(m.btn("Reclaim unused space"));
+  assert.equal(m.dialog(), null); assert.equal(reclaimLog.length, 0);
+  finish(); await m.settle();
+  assert.equal(m.btn("Reclaim unused space").disabled, false, "available again once the result is in");
+});
+
+// ---------------------------------------------------------------- build-cache confirmation wording
+
+test("the prune confirmation says all=false can remove reusable cache and that the figure is not recovered disk space", async () => {
+  const m = await mount();
+  deployReply = () => ok(CACHE_PREVIEW("prune-guard: clear"));
+  await m.click(m.btn("Check build cache")); await m.settle();
+  await m.click(m.btn("Prune"));
+  const body = text(m.dialog());
+  assert.match(body, /Unused is not the same as useless: this cache can be reusable, so removing it can make later builds slower/);
+  assert.match(body, /Docker decides what is unused when it prunes, and that can differ from this figure/);
+  assert.match(body, /Docker's accounting, not a promise of free disk space/);
+  assert.match(body, /space stays allocated on your Mac until you reclaim unused space/);
+  assert.match(body, /does not protect against builds started by other Docker clients/);
+  assert.doesNotMatch(body, /guarantee|will free|frees up|recover(s|ed)? (the )?(entire|full|all)/i);
+  const src = readFileSync(new URL("../components/DiskReclaimCard.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /all=true|all: true|--all\b/, "the prune was not widened");
+  await act(async () => { m.dialogBtn("Cancel").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
 });

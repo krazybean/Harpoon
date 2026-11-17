@@ -84,6 +84,49 @@ fn sqlite_writer_lock_is_fail_fast() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn holding_the_writer_lock_excludes_every_writer_and_changes_no_journal_data() {
+    use harpoon_deploy_journal::{hold_writer_lock, writer_lock_status, LockStatus};
+    let dir = temp_dir();
+    {
+        let (db, _) = SqliteJournal::open(&dir).unwrap();
+        drop(db);
+    }
+    let before = std::fs::read(dir.join(SQLITE_FILE)).unwrap();
+    let hold = hold_writer_lock(&dir).unwrap();
+    assert_eq!(writer_lock_status(&dir).unwrap(), LockStatus::Held);
+    for attempt in [
+        SqliteJournal::open(&dir).err(),
+        hold_writer_lock(&dir).err(),
+    ] {
+        assert!(attempt
+            .expect("a second writer must be refused")
+            .to_string()
+            .contains("another Harpoon process holds"));
+    }
+    assert_eq!(
+        std::fs::read(dir.join(SQLITE_FILE)).unwrap(),
+        before,
+        "holding the lock wrote nothing to the journal"
+    );
+    drop(hold);
+    assert_eq!(writer_lock_status(&dir).unwrap(), LockStatus::Free);
+    assert!(SqliteJournal::open(&dir).is_ok(), "released when dropped");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn holding_the_lock_does_not_create_or_convert_a_journal() {
+    use harpoon_deploy_journal::hold_writer_lock;
+    let dir = temp_dir();
+    let _hold = hold_writer_lock(&dir).unwrap();
+    assert!(
+        !dir.join(SQLITE_FILE).exists(),
+        "no SQLite journal was created"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn legacy_journal(dir: &std::path::Path) -> (Deployment, LedgerRecord) {
     let (app, dep) = ids();
     let mut deployment = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 10);

@@ -2579,3 +2579,28 @@ mod storage_journal {
         );
     }
 }
+
+#[test]
+fn every_production_engine_operation_runs_under_the_operations_mutex() {
+    // The build-cache prune checks the journal and prunes inside one engine command, and every desktop-started engine command takes
+    // OPS first and holds it to the end: nothing the desktop starts can begin a deployment between that check and the prune.
+    let src = include_str!("../deploy_api.rs");
+    let start = src
+        .find("pub async fn deploy_op(")
+        .expect("deploy_op exists");
+    let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+    let lock = body
+        .find("let _one = OPS.lock()")
+        .expect("deploy_op names and holds the guard (a bare `_` would release it at once)");
+    let run = body
+        .find("run_op_with(")
+        .expect("deploy_op runs the operation");
+    assert!(lock < run, "the mutex is taken before the engine command starts, and `_one` lives to the end of the closure");
+    assert_eq!(src.matches("OPS.lock(").count(), 1, "one place takes it");
+    // run_op_with has exactly three mentions: its definition, run_op (tests only call that) and deploy_op
+    assert_eq!(
+        src.matches("run_op_with(").count(),
+        3,
+        "no other production path runs an engine command"
+    );
+}

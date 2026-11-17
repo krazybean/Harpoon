@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 
 mod sqlite;
 pub use sqlite::{
-    inspect_file, replay_file, writer_lock_status, JournalFileFacts, SqliteJournal,
-    SqliteOpenError, REMOVAL_SCHEMA, SQLITE_FILE, SUPPORTED_SCHEMA,
+    hold_writer_lock, inspect_file, replay_file, writer_lock_status, JournalFileFacts,
+    SqliteJournal, SqliteOpenError, WriterHold, REMOVAL_SCHEMA, SQLITE_FILE, SUPPORTED_SCHEMA,
 };
 
 pub const JOURNAL_FILE: &str = "journal.wal";

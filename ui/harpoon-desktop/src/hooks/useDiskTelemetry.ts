@@ -36,7 +36,8 @@ export function useDiskView(): DiskView {
  */
 export async function hostAllocationNow(): Promise<number | null> {
   const started = Date.now();
-  try { await diskTelemetry.refresh(); } catch { return null; }
+  // `fresh`, not `refresh`: a read already running when this was called may have started before the moment being bracketed
+  try { await diskTelemetry.fresh(); } catch { return null; }
   const t = diskTelemetry.get();
   if (!t.enabled || t.failure || !t.last || t.last.at < started || !t.last.cap.provisioned) return null;
   return t.last.cap.physicalBytes;

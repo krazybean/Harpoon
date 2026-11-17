@@ -38,7 +38,7 @@ Branch `feat/storage-cleanup-slice-3`, from `main` at `14beeaf` (Slices 1 and 2,
 ### Guard behaviour (`prune-build-cache --apply`)
 Checked inside the command, after the live-changes authorization and before Docker is asked to do anything, so no caller can skip it by skipping a preview.
 - No journal file of either kind: allowed (nothing is recorded as deploying), subject to the existing safeguards.
-- A journal another process holds for writing: refused.
+- A journal another process holds for writing: refused. On apply the guard now takes the journal's own writer lock and keeps it through the prune (see the pre-PR verification below).
 - An unfinished deployment (any non-terminal status): refused, naming it and pointing at `recover`.
 - A journal that exists but cannot be read, or whose lock state cannot be read (corrupt `journal.wal` or SQLite file): refused, fail closed. The file is not repaired.
 - Legacy `journal.wal` and SQLite are read by the same code as every other command (`store::read_restored`); nothing is created, migrated or written.
@@ -92,7 +92,28 @@ The guard tests were verified to bite: with the guard disabled, five of them fai
 
 ## Final validation
 
-- `deploy-cli`: 289 tests pass (8 new: the prune guard, both journal formats, unreadable and held-writer states, preview-then-change, confirmation unchanged, `all=false`). `rustfmt --check` clean, no clippy output in the changed files.
-- `deploy-docker`: 311 pass. `src-tauri`: 158 pass (neither changed in this slice).
-- UI (Node 22.23.3): 433 of 433 pass (19 new in `storageCleanup.test.mjs`); `tsc` and `npm run build` pass; `git diff --check` clean.
+- `deploy-cli`: 291 tests pass (10 new: the prune guard, both journal formats, unreadable and held-writer states, preview-then-change, confirmation unchanged, `all=false`). `rustfmt --check` clean, no clippy output in the changed files.
+- `deploy-journal`: 57 pass (2 new). `deploy-docker`: 311 pass (unchanged). `src-tauri`: 159 pass (1 new). Formatting clean and no clippy warnings in the three crates that were clean on `main`; `src-tauri` already had 418 rustfmt differences and gained none.
+- UI (Node 22.23.3): 439 of 439 pass (25 new in `storageCleanup.test.mjs`); `tsc` and `npm run build` pass; `git diff --check` clean.
 - Screenshots (mocked data, scratchpad `storage-ui/`): `s3-breakdown-actions.png`, `s3-confirm.png`, `s3-results.png` (partial release cleanup and a build-cache prune with the three measurements), `s3-blocked.png` (prune unavailable during an unfinished deployment).
+
+## Pre-PR verification pass
+
+The owner asked for three checks (a fourth heading, "Actual result", arrived cut off and is not addressed here).
+
+### 1. Measurement ordering — one real defect found and fixed
+- **Verified as already correct:** the "before" Mac allocation is awaited to completion before the engine operation is invoked, and the "after" read is requested only after the operation's answer (or failure) is in hand.
+- **Defect:** `hostAllocationNow` called the telemetry store's `refresh()`, which joins a read that is already running. The 60-second poll can fire mid-operation; its read would then complete after the operation and be accepted as the "after" even though it was taken before the operation ended. The `at >= started` check does not catch this (completion time is after the call, the reading is not).
+- **Fix:** the store gained `fresh()`, which waits out any running read and then starts its own, so the reading provably starts after the caller's moment. `hostAllocationNow` uses it. A read that fails, or a store whose last reading is older than the call, yields `null` ("not measured").
+- **Second ordering hazard, fixed:** a disk-blocks reclaim started during a cleanup would land inside the cleanup's "after" reading and be attributed to it. The three apply-type operations now share a one-at-a-time lock held from the click through the confirmation to the result (`cleanupLock.ts`); the other buttons are disabled meanwhile. A trim started outside the app (a terminal) cannot be excluded; the result is a measurement of the allocation around the operation, not a claim of cause.
+- **Tests:** the disk-read and operation events are logged in order and the test asserts `disk start, disk end, operation start, operation end, disk start, disk end`; a mid-operation read still in flight when the operation ends is not used (it fails when `fresh()` is replaced by `refresh()`, verified); a failed after-read makes only that side "not measured" and claims no change; a later reclaim does not change an earlier result; a second cleanup cannot start while one runs. One existing test file needed its harness to answer open confirmations before unmounting, because an unanswered confirmation holds the lock until it is answered (in the app, answering or replacing a confirmation always releases it).
+
+### 2. Build-cache confirmation wording — strengthened
+The dialog now says: the cache is what Docker reports as unused; "Unused is not the same as useless: this cache can be reusable, so removing it can make later builds slower while it fills again"; Docker decides what is unused when it prunes and that can differ from the figure; the amount is Docker's accounting, "not a promise of free disk space", and the space "stays allocated on your Mac until you reclaim unused space"; images, containers and volumes are untouched; it does not protect against builds started by other Docker clients. A test asserts each phrase, and asserts no wording that promises recovery and no `all=true`. The prune itself is unchanged (`all=false`).
+
+### 3. Race safety — a real window found and closed
+- **Desktop operations: verified serialised.** `deploy_op` takes the operations mutex before `run_op_with` and holds the named guard to the end of the closure; the guard check and the prune run inside that one in-process engine command; `deploy_op` is the only production caller of `run_op_with`. A source test asserts this so it cannot silently regress.
+- **Terminal writers: not covered by that mutex.** A `harpoon-deploy` process started from a terminal could begin a deployment after the journal check and before (or during) the prune, which can take up to 300 s.
+- **Fix, using the existing mechanism:** every Harpoon writer takes the journal's writer lock first. `prune-build-cache --apply` now takes that same lock, checks for unfinished deployments under it, and holds it until the command returns. `deploy-journal` gained one small function, `hold_writer_lock`, which takes the lock without opening, migrating or writing the journal (only an empty lock file can be created). No new locking framework.
+- **Behaviour to be aware of:** during a prune (up to 300 s) a second Harpoon writer is refused with "another Harpoon process holds the deployment journal", and the desktop's snapshot reports the writer as held. The preview takes no lock. A genuinely absent journal needs none.
+- **Tests:** a fake-Docker fault runs at the instant Docker is asked to prune and tries to start a second writer: it is refused, in both SQLite and legacy journals, the legacy journal is not converted, and the lock is free again afterwards; a preview holds no lock; the new journal function excludes every writer, writes nothing, and creates no journal. With the hold replaced by a plain check the race test fails (verified).
