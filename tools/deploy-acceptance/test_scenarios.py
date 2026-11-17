@@ -98,6 +98,13 @@ class FaultInjection(unittest.TestCase):
         self.assertFalse(t("GET /containers/json HTTP/1.1"))
         self.assertFalse(t("POST /containers/abc/start HTTP/1.1"))
 
+    def test_after_a_409_reconcile_may_only_propose_releasing_the_lease(self):
+        ok = h.Run.only_lease_release
+        self.assertTrue(ok(["would: release port lease 38025 of dep_X (ledger only; applied once that deployment's containers are settled)", "dry run: nothing was changed."]))
+        self.assertFalse(ok(["would: REMOVE container hp-dep_X", "dry run: ..."]))
+        self.assertFalse(ok(["REFUSE container hp-dep_X of dep_X: not ours", "would: release port lease 38025 of dep_X"][:1]))
+        self.assertFalse(ok(["reconcile: nothing to do", "dry run: nothing was changed."]), "nothing at all means the lease was not left to release: the scenario did not reproduce")
+
     def test_a_fault_that_did_not_fire_never_passes(self):
         p = h.Run.fault_passed
         self.assertFalse(p(0, 7, True), "injection_fired=0 must fail even when everything else looks fine")

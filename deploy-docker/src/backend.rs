@@ -561,9 +561,25 @@ impl<T: HttpTransport> DockerBackend<T> {
                 io.receipt(&intent, &id)?;
                 Ok(id)
             }
-            CreateOutcome::NameInUse(why) => Err(StepError::new(format!(
-                "the container name {name} is already in use by something this deployment did not create; it was not touched ({why})"
-            ))),
+            CreateOutcome::NameInUse(why) => {
+                // Docker answered this one create with 409: it created nothing. When the occupant demonstrably does not
+                // carry this deployment's labels, a container Harpoon never made holds the name and nothing of ours exists
+                // under it, so the intent is settled now. Left open, the later cleanup would find that container by name
+                // and record a refusal that never clears, and the deployment's port lease with it. Anything else stays
+                // unresolved for `reconcile`: an occupant that IS labelled for this deployment is a leftover of ours (to
+                // adopt by ownership), and an occupant that cannot be read back proves nothing.
+                let occupant = self
+                    .api
+                    .container_inspect(name, b.left("checking what holds the container name")?);
+                if matches!(&occupant, Ok(Some(c)) if !has_labels(&c.labels, io.app(), io.deployment()))
+                {
+                    io.cleanup_attempt(intent.key())?;
+                    io.cleanup_result(intent.key(), CleanupOutcome::AlreadyAbsent)?;
+                }
+                Err(StepError::new(format!(
+                    "the container name {name} is already in use by something this deployment did not create; it was not touched ({why})"
+                )))
+            }
         }
     }
 

@@ -246,6 +246,12 @@ class Run:
         return m is not None
 
     @staticmethod
+    def only_lease_release(plan):
+        """After a definitive 409 the only thing reconcile may propose is releasing the candidate's port lease: no removal, no refusal."""
+        acts = [l for l in plan if l.startswith("would: ")]
+        return len(acts) == 1 and acts[0].startswith("would: release port lease ")
+
+    @staticmethod
     def fault_passed(fired, rc, serving_up): return fired == 1 and rc != 0 and serving_up
 
     def docker_api_failure(self):
@@ -326,12 +332,17 @@ class Run:
         up = self.serving_up()
         untouched = None
         if res["conflict_id"]:
-            rc, o = self.docker_rc("inspect", res["conflict_id"], "--format", "{{.Name}} {{index .Config.Labels \"io.harpoon.acceptance\"}}")
-            untouched = rc == 0 and o.split() == ["/" + res["conflict_name"], self.out.name]
-            if untouched: self.docker_rc("rm", res["conflict_id"])                 # exact id, verified name and label: ours
-        st = self.settle()
-        ok = bool(res["conflict_id"]) and p.returncode != 0 and up and untouched is True and st["reconcile_apply_rc"] == 0 and "unresolved cleanup: none" in self.status()
-        self.record(name, ok, conflict_created=bool(res["conflict_id"]), conflict_name=res["conflict_name"], conflict_untouched_by_engine=untouched, rc=p.returncode,
+            rc, o = self.docker_rc("inspect", res["conflict_id"])
+            (self.out / "foreign-container-inspect.json").write_text(o)               # evidence first; nothing is removed before this exists
+            try: info = json.loads(o)[0]; untouched = rc == 0 and info["Name"] == "/" + res["conflict_name"] and info["Config"]["Labels"].get("io.harpoon.acceptance") == self.out.name and info["State"]["Status"] != "removing"
+            except Exception: untouched = False
+        st = self.settle()                                                              # reconcile runs WITH the foreign container still present
+        still = res["conflict_id"] and self.docker_rc("inspect", res["conflict_id"])[0] == 0
+        if untouched and still: self.docker_rc("rm", res["conflict_id"])                # exact id, verified name and label: ours
+        plan_ok = self.only_lease_release(st.get("reconcile_plan", []))
+        ok = bool(res["conflict_id"]) and p.returncode != 0 and up and untouched is True and bool(still) and st["reconcile_apply_rc"] == 0 and plan_ok \
+            and "unresolved cleanup: none" in self.status()
+        self.record(name, ok, conflict_created=bool(res["conflict_id"]), foreign_present_through_reconcile=bool(still), reconcile_plan_only_lease_release=plan_ok, conflict_name=res["conflict_name"], conflict_untouched_by_engine=untouched, rc=p.returncode,
                     failed_at=fail.group(1) if fail else None, message=(fail.group(2)[:240] if fail else (p.stdout + p.stderr)[-300:]), serving_up_after=up,
                     serving_before=before, serving_after=self.serving_ports(), secs=round(now() - t0, 1), **st)
 

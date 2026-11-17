@@ -4,6 +4,7 @@
 
 mod support;
 
+use harpoon_deploy::backend::ResourceOps;
 use harpoon_deploy::engine::{
     recover_cutover, EngineError, JournalError, MemoryJournal, RunConfig,
 };
@@ -1648,4 +1649,188 @@ fn a_successful_replacement_records_the_attribution_of_both_checks() {
             "{step:?}: {note}"
         );
     }
+}
+
+// ---- a definitive Docker rejection of the candidate's creation (409: the name is taken by something that is not ours)
+
+/// What would stop the next change of this deployment's application: unsettled work in the ledger.
+fn blockers(ledger: &Ledger, dep: &DeploymentId) -> Vec<String> {
+    ledger
+        .entries()
+        .iter()
+        .filter(|e| &e.deployment == dep)
+        .filter(|e| {
+            e.needs_attention() || (!e.is_released() && e.disposition != Disposition::Retain)
+        })
+        .map(|e| format!("{} {}: {:?}", e.key.kind.as_str(), e.key.name, e.state))
+        .collect()
+}
+
+#[test]
+fn a_foreign_container_on_the_candidates_final_name_is_a_settled_rejection_and_blocks_nothing() {
+    let mut r = rig();
+    let name = harpoon_deploy_docker::backend::serving_name(&r.h.dep.id);
+    // the exact live scenario: the preliminary check passes, then creating the final candidate meets a container Harpoon never made
+    let foreign = r.h.docker.with(|s| s.add_container(&name, vec![], true));
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    let d = r.h.dep.clone();
+
+    assert_eq!(rep.status, DeploymentStatus::Failed);
+    let f = d.failure.as_ref().unwrap();
+    assert_eq!(f.kind, FailureKind::Cutover);
+    assert!(f.message.contains("already in use"), "{}", f.message);
+    // the healthy previous release serves again
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+    assert!(
+        r.h.docker
+            .container(&format!("hp-{}-restored", d.id))
+            .unwrap()
+            .running
+    );
+    // the foreign container is exactly as it was: not adopted, stopped, removed or renamed
+    let c =
+        r.h.docker
+            .container(&name)
+            .expect("the foreign container survives");
+    assert!(c.id == foreign && c.running && c.labels.is_empty());
+    assert!(
+        !r.h.docker
+            .requests()
+            .iter()
+            .any(|q| q.path.contains(&foreign) && q.method != "GET"),
+        "only reads may name the foreign container"
+    );
+    // the creation intent is settled as "never created", and so is the candidate's port lease
+    let e = rep
+        .ledger
+        .find(&d.id, &ResourceKey::new(ResourceKind::Container, &name))
+        .unwrap();
+    assert!(
+        matches!(
+            e.state,
+            harpoon_deploy::ledger::EntryState::Released(
+                harpoon_deploy::ledger::Released::AlreadyAbsent
+            )
+        ),
+        "{:?}",
+        e.state
+    );
+    assert!(
+        rep.cleanup_problems().is_empty(),
+        "{:?}",
+        rep.cleanup_problems()
+    );
+    // a failed cutover keeps its candidate's lease until `reconcile` (by design); that lease is the only thing left
+    assert_eq!(
+        blockers(&rep.ledger, &d.id).len(),
+        1,
+        "{:?}",
+        blockers(&rep.ledger, &d.id)
+    );
+    assert!(
+        blockers(&rep.ledger, &d.id)[0].starts_with("port"),
+        "{:?}",
+        blockers(&rep.ledger, &d.id)
+    );
+
+    // reconcile plans exactly that release (no removal, no refusal), applies it, and still does not touch the foreign container
+    let mut ledger = rep.ledger.clone();
+    let ended = [(d.id.clone(), harpoon_deploy::ledger::EndState::NotSucceeded)];
+    let observed = b.list_resources().unwrap();
+    let plan = harpoon_deploy::ledger::plan(&ledger, &observed, &ended);
+    assert!(
+        matches!(
+            plan.as_slice(),
+            [harpoon_deploy::ledger::Action::ReleaseLease { .. }]
+        ),
+        "{plan:?}"
+    );
+    harpoon_deploy::engine::reconcile(
+        &mut ledger,
+        &ended,
+        &mut MemoryJournal::new(),
+        &mut b,
+        &harpoon_deploy::time::SystemClock,
+    )
+    .unwrap();
+    assert_eq!(blockers(&ledger, &d.id), Vec::<String>::new());
+    assert!(r.h.docker.container(&name).is_some());
+
+    // and the next replacement is permitted: it stops the restored container, not the foreign one
+    let failed = d.clone();
+    let restored_name = format!("hp-{}-restored", failed.id);
+    r.h.dep = new_deployment(&mut r.h.ids);
+    r.h.docker.with(|s| s.faults.clear());
+    r.h.seed_built_image();
+    let mut cfg = r.cfg.clone();
+    cfg.prior_ledger = rep.ledger.clone();
+    cfg.previous_container = Some(harpoon_deploy::backend::ContainerRef {
+        owner: failed.id.clone(),
+        name: restored_name.clone(),
+    });
+    let mut b2 = {
+        let mut c = config(&r.h.ws, &r.h.docker);
+        c.enable_replacement = true;
+        DockerBackend::with_transport(c, Some(&r.h.ws.resources()), transport_ok())
+            .unwrap()
+            .with_entropy(test_entropy())
+            .with_port_probe(NoListeners)
+            .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+    };
+    let rel = release(&r);
+    let rep2 =
+        r.h.run_replacing_with(&mut b2, &mut MemoryJournal::new(), &rel, &cfg)
+            .expect("engine");
+    assert_eq!(
+        rep2.status,
+        DeploymentStatus::Succeeded,
+        "{:?}",
+        r.h.dep.failure
+    );
+    assert!(
+        r.h.docker.container(&name).unwrap().running,
+        "the foreign container was still not touched"
+    );
+}
+
+#[test]
+fn a_create_whose_reply_is_lost_is_not_treated_as_a_rejection() {
+    // Ambiguous: Docker applied the create but the answer never arrived. The intent must stay open (nothing is assumed), and the
+    // container, which carries this deployment's labels, is found by reconcile and handled by ownership, never as "never created".
+    let mut r = rig();
+    let name = harpoon_deploy_docker::backend::serving_name(&r.h.dep.id);
+    r.h.docker.with(|s| {
+        s.faults.push(support::fake_docker::Fault {
+            skip: 1, // the first create is the preliminary container's
+            method: Some("POST"),
+            path_has: "/containers/create".to_string(),
+            remaining: 1,
+            action: Action::ApplyThenDrop,
+        })
+    });
+    let mut b = backend(&r, transport(Observation::Status(200)));
+    let rep = run(&mut r, &mut b);
+    let e = rep
+        .ledger
+        .find(
+            &r.h.dep.id,
+            &ResourceKey::new(ResourceKind::Container, &name),
+        )
+        .unwrap();
+    assert!(
+        !matches!(
+            e.state,
+            harpoon_deploy::ledger::EntryState::Released(
+                harpoon_deploy::ledger::Released::AlreadyAbsent
+            )
+        ) || r.h.docker.container(&name).is_none(),
+        "a container that may exist must not be recorded as absent while it is still there: {:?}",
+        e.state
+    );
 }
