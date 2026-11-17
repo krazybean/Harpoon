@@ -476,8 +476,8 @@ fn guest_free(p: &Parsed, socket: &Path) -> Option<u64> {
 /// other command, so a legacy `journal.wal` counts as much as the SQLite store). `Ok(())` only when a journal is genuinely absent
 /// (nothing is recorded as deploying) or is readable, unlocked and has no unfinished deployment. Anything that cannot be
 /// established fails closed. This is Harpoon's own record: it says nothing about builds started by other Docker clients.
-/// The preview uses this alone; the apply path uses [`prune_hold`], which adds the lock.
-fn prune_guard(rt: &Runtime) -> Result<(), String> {
+/// The preview uses this alone; the apply path uses [`cache_hold`], which adds the lock.
+fn cache_guard(rt: &Runtime) -> Result<(), String> {
     if !rt.initialised() {
         return Ok(());
     }
@@ -512,10 +512,10 @@ fn unfinished_in_journal(rt: &Runtime) -> Result<(), String> {
 }
 
 /// The apply path's guard: the check above made under the journal's own writer lock, which the returned hold keeps until the prune is
-/// over. Every Harpoon deployment writer takes that lock before it starts, so none can begin between the check and the prune (the
+/// over. Every Harpoon deployment writer takes that lock before it starts, so none can begin between the check and the cache removal (the
 /// desktop's own operations are also serialised by its operations mutex; this closes the same window for a terminal process).
 /// A genuinely absent journal needs no lock. The lock is a flag on a lock file: no journal data is read for writing, migrated or changed.
-fn prune_hold(rt: &Runtime) -> Result<Option<harpoon_deploy_journal::WriterHold>, String> {
+fn cache_hold(rt: &Runtime) -> Result<Option<harpoon_deploy_journal::WriterHold>, String> {
     if !rt.initialised() {
         return Ok(None);
     }
@@ -550,9 +550,9 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     }
     // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview. The hold
     // lives until this function returns, that is, through the prune.
-    let guard = if apply { Ok(()) } else { prune_guard(&rt) };
+    let guard = if apply { Ok(()) } else { cache_guard(&rt) };
     let _hold = if apply {
-        match prune_hold(&rt) {
+        match cache_hold(&rt) {
             Ok(h) => h,
             Err(why) => {
                 return Err(Fail::refused(format!(
@@ -600,7 +600,7 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             ApiError::Transport(HttpError::Connect(_)) => Fail::failed(format!("Docker did not complete the prune: {e}. Nothing was changed.")),
             // The request may have reached Docker and been carried out; the answer is what is missing. Never reported as a plain failure.
             ApiError::Transport(_) | ApiError::Malformed { .. } => Fail::failed(format!(
-                "result unknown: Docker did not give a usable answer to the prune ({e}). The prune may have completed fully, partly or not at all; nothing is assumed."
+                "result unknown: Docker did not give a usable answer to the prune request ({e}). The prune may have completed fully, partly or not at all; nothing is assumed."
             )),
             // Docker answered that it failed; some cache may already have gone before the error
             ApiError::Status { .. } => Fail::failed(format!("Docker did not complete the prune: {e}. Cache removed before the error is not restored.")),
