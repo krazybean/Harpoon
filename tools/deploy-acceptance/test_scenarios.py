@@ -81,9 +81,33 @@ class Precondition(unittest.TestCase):
         self.assertTrue(all("precondition" in x for x in r.results))
         self.assertEqual(r.calls, [], "no replacement and no recovery command was run")
 
-    def test_an_interrupted_deployment_also_blocks(self):
-        r = Scripted(pathlib.Path(tempfile.mkdtemp()), status="unresolved cleanup: none\n  dep_01ABC interrupted app=app_X\n")
+    def test_an_unfinished_deployment_blocks(self):
+        for state in ("running", "queued", "requested"):
+            r = Scripted(pathlib.Path(tempfile.mkdtemp()), status=f"unresolved cleanup: none\n  dep_01ABC {state} app=app_X\n")
+            self.assertFalse(r.ready_for_change("x"), state)
+            self.assertIn("unfinished", r.results[-1]["blockers"][0])
+
+    def test_an_unconfirmed_cutover_blocks(self):
+        r = Scripted(pathlib.Path(tempfile.mkdtemp()), status="unresolved cleanup: none\n    cutover began and was never confirmed: completion is UNVERIFIED and the application MAY BE DOWN\n")
         self.assertFalse(r.ready_for_change("x"))
+
+    # The 2026-11-17 17:36 run: `status` showed an interrupted deployment (from the SIGKILL scenario, already reconciled), a restored release
+    # and a PAUSED application, with "unresolved cleanup: none". `replace` accepts that state; the harness must too.
+    REAL = (SC := pathlib.Path(__file__).parent / "fixtures" / "status_interrupted_paused_clean.txt")
+
+    def test_an_interrupted_deployment_and_a_recorded_pause_do_not_block(self):
+        text = self.REAL.read_text()
+        self.assertIn("interrupted", text); self.assertIn("PAUSED", text)
+        self.assertEqual(h.Run.change_blockers(text), [])
+        r = Scripted(pathlib.Path(tempfile.mkdtemp()), status=text)
+        self.assertTrue(r.ready_for_change("x"))
+        self.assertEqual(r.results, [])
+
+    def test_the_blocker_is_named_when_there_is_one(self):
+        r = Scripted(pathlib.Path(tempfile.mkdtemp()), status="unresolved cleanup (1):\n  image x\nPAUSED\n")
+        self.assertFalse(r.ready_for_change("x"))
+        self.assertEqual(r.results[-1]["blockers"], ["unresolved cleanup"])
+        self.assertTrue(r.results[-1]["paused"])
 
     def test_a_clean_journal_is_ready(self):
         self.assertTrue(Scripted(pathlib.Path(tempfile.mkdtemp())).ready_for_change("x"))

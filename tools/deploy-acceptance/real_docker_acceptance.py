@@ -216,13 +216,25 @@ class Run:
                     serving_before=before, serving_after=after, status_tail=self.status().splitlines()[-6:])
 
     # ---- fault injection. A fault counts only if it demonstrably fired; a scenario whose fault did not fire fails.
+    @staticmethod
+    def change_blockers(status):
+        """What `harpoon-deploy replace` itself refuses on (deploy-cli commands.rs: unfinished, unresolved, application_may_be_down), read from
+        `status`. Deliberately NOT blockers: an `interrupted`/`failed` deployment (terminal), a recorded pause (it holds automatic triggers only;
+        `replace` does not look at it) and retained images. Treating those as blockers rejected a clean journal in the 2026-11-17 17:36 run."""
+        b = []
+        if "unresolved cleanup: none" not in status: b.append("unresolved cleanup")
+        b += [f"unfinished deployment: {m.group(0).strip()}" for m in re.finditer(r"^\s+dep_\w+ (?:requested|queued|running)\b.*$", status, re.M)]
+        if "MAY BE DOWN" in status or "application may be down" in status: b.append("a cutover began and was never confirmed")
+        return b
+
     def ready_for_change(self, name):
-        """A new change is refused (rc 6) while the journal holds unfinished or unresolved work; that gate is correct and is not bypassed.
-        A scenario starts only from a clean journal, and says so when it cannot."""
+        """A new change is refused (rc 6) while the engine's own gate has blockers; that gate is correct and is not bypassed. A scenario starts
+        only when `replace` would be accepted, and otherwise records exactly which blocker stopped it. The pause state is recorded, not judged."""
         st = self.status()
-        if self.sim or ("unresolved cleanup: none" in st and not re.search(r"^\s+dep_\w+ (running|interrupted)", st, re.M)): return True
-        self.record(name, False, precondition="the journal holds unfinished or unresolved work from an earlier scenario, so a new replacement would be refused; nothing was started",
-                    status_tail=st.strip().splitlines()[-12:])
+        bl = [] if self.sim else self.change_blockers(st)
+        if not bl: return True
+        self.record(name, False, precondition="the engine would refuse a new replacement; nothing was started", blockers=bl,
+                    paused="PAUSED" in st, status_tail=st.strip().splitlines()[-12:])
         return False
 
     def settle(self):
