@@ -22,7 +22,7 @@ use harpoon_deploy::ledger::{Ledger, ResourceKind};
 use harpoon_deploy::serving::serving_release;
 use harpoon_deploy::state::Deployment;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::Instant;
 
 /// The largest response body read from either endpoint. Raise it only on evidence from a real engine.
 pub const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -43,18 +43,28 @@ pub enum Document {
     Failed(String),
 }
 
-/// Read both documents. Two `GET`s, in sequence; the caller bounds how many of these run at once.
-pub fn fetch(api: &DockerApi, left: Duration) -> (Document, Document) {
-    let get = |path: &str| match api.call_capped("GET", path, MAX_BODY, left) {
-        Ok(Capped::Ok(r)) if r.status == 200 => Document::Body(r.text()),
-        Ok(Capped::Ok(r)) => Document::Failed(format!("HTTP {}", r.status)),
-        Ok(Capped::TooLarge) => Document::Oversized(MAX_BODY),
-        Err(e) => Document::Failed(match e {
-            ApiError::Transport(t) => t.to_string(),
-            other => other.to_string(),
-        }),
+/// Read both documents under one deadline: each request gets only the time that is left, and a request that would start
+/// after the deadline is not sent. Two `GET`s, in sequence; the caller bounds how many of these run at once.
+pub fn fetch(api: &DockerApi, deadline: Instant) -> (Document, Document) {
+    let get = |path: &str| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Document::Failed(
+                "the inventory's time limit was reached before this request could start".into(),
+            );
+        }
+        match api.call_capped("GET", path, MAX_BODY, left) {
+            Ok(Capped::Ok(r)) if r.status == 200 => Document::Body(r.text()),
+            Ok(Capped::Ok(r)) => Document::Failed(format!("HTTP {}", r.status)),
+            Ok(Capped::TooLarge) => Document::Oversized(MAX_BODY),
+            Err(e) => Document::Failed(match e {
+                ApiError::Transport(t) => t.to_string(),
+                other => other.to_string(),
+            }),
+        }
     };
-    (get(DF), get(CONTAINERS))
+    let df = get(DF);
+    (df, get(CONTAINERS))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,8 +90,10 @@ pub struct JournalFacts {
     pub entries: Vec<JournalFact>,
     pub serving_containers: BTreeSet<String>,
     pub serving_images: BTreeSet<String>,
-    /// `false` when the journal could not be read: nothing is then confirmed, and the output says so.
+    /// `false` when the journal could not be used: nothing is then confirmed, and the output says so.
     pub available: bool,
+    /// Why it could not be used (no journal found, or the read failed). `None` when `available`.
+    pub note: Option<String>,
 }
 
 /// The journal's recorded ids, and the ids each application serves now (decided by the same `serving_release` rule the
@@ -949,6 +961,7 @@ pub fn build(
         ("generatedMs", n(now_ms as i64)),
         ("sources", sources),
         ("journalAvailable", Json::Bool(facts.available)),
+        ("journalNote", facts.note.as_deref().map_or(Json::Null, s)),
         ("imageLayersBytes", jb(image_layers)),
         ("imageLayersMeaning", s("Docker's own count of the layers all images use, with shared layers counted once. It is Docker's accounting, not a measurement of disk space.")),
         ("unknownOwnershipItems", n(unknown as i64)),

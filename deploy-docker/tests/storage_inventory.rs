@@ -10,7 +10,7 @@ use harpoon_deploy_docker::storage::{
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const A: &str = "sha256:aaaa000000000000000000000000000000000000000000000000000000000001"; // serving release image
 const OLD: &str = "sha256:bbbb000000000000000000000000000000000000000000000000000000000002"; // superseded release image
@@ -87,6 +87,7 @@ fn facts() -> JournalFacts {
         serving_containers: ["c_web".to_string()].into(),
         serving_images: [A.to_string()].into(),
         available: true,
+        note: None,
     }
 }
 
@@ -556,7 +557,7 @@ fn fake(df_body: String, list_body: String) -> (DockerApi, Arc<Mutex<Vec<String>
 #[test]
 fn the_inventory_asks_exactly_two_get_requests() {
     let (api, seen) = fake(df(), list());
-    let (d, l) = fetch(&api, Duration::from_secs(5));
+    let (d, l) = fetch(&api, Instant::now() + Duration::from_secs(5));
     assert!(matches!(d, Document::Body(_)) && matches!(l, Document::Body(_)));
     assert_eq!(
         *seen.lock().unwrap(),
@@ -571,7 +572,7 @@ fn the_inventory_asks_exactly_two_get_requests() {
 fn a_body_over_the_cap_is_oversized_and_never_parsed() {
     let big = format!(r#"{{"Images":[],"Pad":"{}"}}"#, "x".repeat(MAX_BODY + 10));
     let (api, _) = fake(big, list());
-    let (d, l) = fetch(&api, Duration::from_secs(5));
+    let (d, l) = fetch(&api, Instant::now() + Duration::from_secs(5));
     assert_eq!(d, Document::Oversized(MAX_BODY));
     assert!(matches!(l, Document::Body(_)));
     let j = run(d, l, &facts()).unwrap();
@@ -587,7 +588,7 @@ fn a_body_over_the_cap_is_oversized_and_never_parsed() {
 #[test]
 fn an_unreachable_socket_is_a_failure_not_an_empty_inventory() {
     let api = DockerApi::new("/nonexistent/harpoon-test.sock", Duration::from_secs(1));
-    let (d, l) = fetch(&api, Duration::from_secs(1));
+    let (d, l) = fetch(&api, Instant::now() + Duration::from_secs(1));
     assert!(matches!(d, Document::Failed(_)) && matches!(l, Document::Failed(_)));
     assert!(run(d, l, &facts()).is_err());
 }
@@ -782,4 +783,111 @@ fn a_measured_zero_is_zero_and_every_other_cache_size_is_unknown() {
         cat(&j, "build-cache").get("status").unwrap().as_str(),
         Some("unavailable")
     );
+}
+
+// ---- one deadline for both requests
+
+/// A fake engine that answers each path after its own delay (a thread per connection, so a late answer never blocks the next one).
+fn slow_fake(df_delay: Duration, list_delay: Duration) -> (DockerApi, Arc<Mutex<Vec<String>>>) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1000);
+    let dir = std::env::temp_dir().join(format!(
+        "hps-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("d.sock");
+    let _ = std::fs::remove_file(&sock);
+    let l = UnixListener::bind(&sock).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { return };
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                log.lock().unwrap().push(line.clone());
+                let (body, delay) = if line.contains("/system/df") {
+                    (df(), df_delay)
+                } else {
+                    (list(), list_delay)
+                };
+                std::thread::sleep(delay);
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    (DockerApi::new(&sock, Duration::from_secs(30)), seen)
+}
+
+#[test]
+fn a_slow_first_request_leaves_the_second_only_what_is_left_and_never_overruns_the_deadline() {
+    let (api, seen) = slow_fake(Duration::from_millis(250), Duration::ZERO);
+    let start = Instant::now();
+    let (d, l) = fetch(&api, start + Duration::from_millis(150));
+    assert!(matches!(d, Document::Failed(_)), "{d:?}");
+    assert!(
+        matches!(&l, Document::Failed(m) if m.contains("time limit")),
+        "the second request is not even sent: {l:?}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1, "one request reached Docker");
+    assert!(
+        start.elapsed() < Duration::from_millis(400),
+        "bounded by the deadline, not by the slow answer: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_slow_second_request_is_cut_at_the_shared_deadline_and_the_first_still_counts() {
+    let (api, _) = slow_fake(Duration::from_millis(50), Duration::from_millis(600));
+    let start = Instant::now();
+    let (d, l) = fetch(&api, start + Duration::from_millis(300));
+    assert!(matches!(d, Document::Body(_)));
+    assert!(matches!(l, Document::Failed(_)), "{l:?}");
+    assert!(
+        start.elapsed() < Duration::from_millis(550),
+        "{:?}",
+        start.elapsed()
+    );
+    // the first document alone still makes a partial inventory, with references unknown
+    let j = run(d, l, &facts()).unwrap();
+    assert_eq!(
+        j.get("sources").unwrap().as_array().unwrap()[1]
+            .get("status")
+            .unwrap()
+            .as_str(),
+        Some("failed")
+    );
+    assert!(item(cat(&j, "other-images"), "scratch:1")
+        .get("references")
+        .unwrap()
+        .is_null());
+}
+
+#[test]
+fn an_expired_deadline_sends_nothing() {
+    let (api, seen) = slow_fake(Duration::ZERO, Duration::ZERO);
+    let (d, l) = fetch(&api, Instant::now());
+    assert!(matches!(d, Document::Failed(_)) && matches!(l, Document::Failed(_)));
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(
+        run(d, l, &facts()).is_err(),
+        "nothing readable is an error, not an empty inventory"
+    );
+}
+
+#[test]
+fn both_requests_within_the_deadline_succeed() {
+    let (api, seen) = slow_fake(Duration::from_millis(40), Duration::from_millis(40));
+    let (d, l) = fetch(&api, Instant::now() + Duration::from_secs(5));
+    assert!(matches!(d, Document::Body(_)) && matches!(l, Document::Body(_)));
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }

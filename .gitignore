@@ -42,3 +42,6 @@ ui/inspiration/
 
 /.qmd/*.sqlite*
 /.qmd/index.yml
+
+# Local dev-server process ids
+*.pid

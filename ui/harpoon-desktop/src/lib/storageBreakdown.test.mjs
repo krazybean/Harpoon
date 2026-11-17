@@ -171,12 +171,12 @@ test("empty, partial and unavailable categories are explicit, not zero", async (
   inv.categories.find((c) => c.id === "build-cache").bytes = null;
   inv.categories.find((c) => c.id === "volumes").items = []; inv.categories.find((c) => c.id === "volumes").count = 0; inv.categories.find((c) => c.id === "volumes").bytes = 0; inv.categories.find((c) => c.id === "volumes").bytesComplete = true;
   inv.sources[1] = { endpoint: "/containers/json?all=true", status: "oversized", detail: "The answer is larger than the 4194304-byte limit and was not read, so none of it is shown." };
-  inv.journalAvailable = false;
+  inv.journalAvailable = false; inv.journalNote = "no deployment journal was found for this runtime";
   const r = await render(React.createElement(StorageBreakdown, { view: view({ inv }), onRefresh() {} }));
   assert.equal(rowBtn(r.host, "Build cache").querySelector(".storage-row__figure").textContent, "Not available");
   assert.match(rowBtn(r.host, "Build cache").textContent, /Unavailable/);
   assert.match(text(r.host), /larger than the 4194304-byte limit/);
-  assert.match(text(r.host), /journal could not be read, so no ownership is confirmed/);
+  assert.match(text(r.host), /journal could not be used \(no deployment journal was found for this runtime\), so no ownership is confirmed\. Harpoon labels are claims only/);
   await click(rowBtn(r.host, "Persistent volumes"));
   assert.match(r.host.textContent, /Nothing here/);
   await r.unmount();

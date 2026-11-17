@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createInventoryStore, FETCH_TIMEOUT_MS, inventoryView, initialInventory, parseStorageInventory, CATEGORY_ORDER } from "./storageInventory.ts";
+import { createInventoryStore, FETCH_TIMEOUT_MS, NATIVE_BUDGET_MS, inventoryView, initialInventory, parseStorageInventory, CATEGORY_ORDER } from "./storageInventory.ts";
 
 // A runtime-shaped inventory (the Rust module's output contract), built field by field so each test can break one thing.
 const item = (o = {}) => ({ id: "i1", name: "web:2", kind: "image", bytes: 500, bytesNote: "", state: "tagged-unreferenced", references: [], ownership: [{ property: "unknown-ownership", evidence: "none" }], protection: "none", protectionNote: "", details: [{ label: "Image id", value: "aaaa" }], ...o });
 const cat = (id, o = {}) => ({ id, title: id, sizeBasis: "basis", status: "ok", note: null, count: 0, bytes: null, bytesComplete: false, skipped: 0, omitted: 0, figures: [], counts: [], items: [], ...o });
-export const inv = (over = {}) => ({ schema: 1, generatedMs: 1000, sources: [{ endpoint: "/system/df", status: "ok", detail: "" }], journalAvailable: true, imageLayersBytes: 900, imageLayersMeaning: "m", unknownOwnershipItems: 0, categories: CATEGORY_ORDER.map((id) => cat(id)), ...over });
+export const inv = (over = {}) => ({ schema: 1, generatedMs: 1000, sources: [{ endpoint: "/system/df", status: "ok", detail: "" }], journalAvailable: true, journalNote: null, imageLayersBytes: 900, imageLayersMeaning: "m", unknownOwnershipItems: 0, categories: CATEGORY_ORDER.map((id) => cat(id)), ...over });
 const text = (o) => JSON.stringify(inv(o));
 
 test("a runtime-shaped inventory parses, including unknown (null) sizes", () => {
@@ -134,4 +134,35 @@ test("repeated timeouts start no second native request while the abandoned one s
     const r = s.refresh(); calls[1].resolve(text()); await r;
     assert.equal(calls.length, 2); assert.equal(inventoryView(s.get(), 1000).status, "current");
   } finally { f.restore(); }
+});
+
+test("the page waits longer than the runtime's whole budget, so it never abandons work that is still within it", async () => {
+  assert.equal(NATIVE_BUDGET_MS, 18_000);
+  assert.ok(FETCH_TIMEOUT_MS >= NATIVE_BUDGET_MS + 5_000, "margin for discovery, the journal read and the hand-off");
+  const f = fakeTimers();
+  try {
+    const calls = [];
+    const s = createInventoryStore(() => { const d = deferred(); calls.push(d); return d.p; }, () => 1000);
+    s.setEnabled(true);
+    const r = s.refresh();
+    assert.equal([...f.pending.values()][0].ms, FETCH_TIMEOUT_MS);
+    // a slow native run that ends at its own deadline (inside the page's wait) is still applied
+    calls[0].resolve(text({ unknownOwnershipItems: 3 })); await r;
+    assert.equal(inventoryView(s.get(), 1000).status, "current"); assert.equal(s.get().last.inv.unknownOwnershipItems, 3);
+    assert.equal(f.pending.size, 0);
+  } finally { f.restore(); }
+});
+
+test("a native run that reports its own deadline failure is a stale/unavailable state with the reason, and the next run is allowed", async () => {
+  const { s, at } = store([text(), new Error("the inventory's time limit was reached before this request could start"), text({ unknownOwnershipItems: 4 })]);
+  s.setEnabled(true); await s.refresh();
+  at(5000); await s.refresh();
+  assert.equal(inventoryView(s.get(), 5000).status, "stale"); assert.match(inventoryView(s.get(), 5000).note, /time limit/);
+  at(6000); await s.refresh();
+  assert.equal(inventoryView(s.get(), 6000).status, "current"); assert.equal(s.get().last.inv.unknownOwnershipItems, 4);
+});
+
+test("the journal note is read when present and tolerated when absent", () => {
+  assert.equal(parseStorageInventory(text({ journalAvailable: false, journalNote: "no deployment journal was found" })).journalNote, "no deployment journal was found");
+  assert.equal(parseStorageInventory(text({ journalNote: null })).journalNote, null);
 });

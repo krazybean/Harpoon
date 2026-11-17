@@ -17,7 +17,7 @@ export interface InvCategory {
 }
 export interface InvSource { endpoint: string; status: "ok" | "failed" | "oversized" | "invalid"; detail: string }
 export interface Inventory {
-  generatedMs: number; sources: InvSource[]; journalAvailable: boolean; imageLayersBytes: Bytes; imageLayersMeaning: string;
+  generatedMs: number; sources: InvSource[]; journalAvailable: boolean; journalNote: string | null; imageLayersBytes: Bytes; imageLayersMeaning: string;
   unknownOwnershipItems: number; categories: InvCategory[];
 }
 
@@ -66,10 +66,13 @@ export function parseStorageInventory(text: string): Inventory | null {
   if (sources.includes(null) || cats.includes(null)) return null;
   const all = cats as InvCategory[];
   if (!CATEGORY_ORDER.every((id) => all.some((c) => c.id === id))) return null;
-  return { generatedMs: gen, sources: sources as InvSource[], journalAvailable: j.journalAvailable, imageLayersBytes: layers, imageLayersMeaning: str(j.imageLayersMeaning) ?? "", unknownOwnershipItems: unknown, categories: all };
+  return { generatedMs: gen, sources: sources as InvSource[], journalAvailable: j.journalAvailable, journalNote: str(j.journalNote), imageLayersBytes: layers, imageLayersMeaning: str(j.imageLayersMeaning) ?? "", unknownOwnershipItems: unknown, categories: all };
 }
 
-export const FETCH_TIMEOUT_MS = 20_000;
+/** The runtime finishes (or gives up on) an inventory within this, discovery and journal included (`STORAGE_BUDGET` in deploy_api.rs; a Rust test keeps them equal). */
+export const NATIVE_BUDGET_MS = 18_000;
+/** The page waits longer than the runtime's budget, so it never abandons work that is still within it. */
+export const FETCH_TIMEOUT_MS = NATIVE_BUDGET_MS + 7_000;
 
 export interface InventoryState {
   enabled: boolean; loading: boolean;

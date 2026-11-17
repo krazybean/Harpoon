@@ -143,7 +143,7 @@ export function StorageBreakdown({ view, onRefresh }: { view: InventoryView; onR
       {inv && (
         <>
           {failedSources.map((s) => <div key={s.endpoint} className="text-body" role="status">{s.endpoint}: {s.status === "failed" ? `failed (${s.detail})` : s.detail}</div>)}
-          {!inv.journalAvailable && <div className="text-body" role="status">The deployment journal could not be read, so no ownership is confirmed.</div>}
+          {!inv.journalAvailable && <div className="text-body" role="status">The deployment journal could not be used{inv.journalNote ? ` (${inv.journalNote})` : ""}, so no ownership is confirmed. Harpoon labels are claims only.</div>}
           <ul className="storage-rows">
             {cats.map((c) => <Row key={c.id} c={c} />)}
             <Unattributed />
