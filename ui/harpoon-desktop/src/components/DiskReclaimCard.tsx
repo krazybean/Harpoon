@@ -3,13 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import { useDiskView, diskTelemetry, hostAllocationNow } from "../hooks/useDiskTelemetry";
 import { CleanupResult } from "./CleanupResult";
-import { cacheOutcome, failureOutcome, releasesOutcome, reclaimOutcome } from "../lib/cleanupResult";
+import { cacheOutcome, failureOutcome, releasesOutcome, reclaimOutcomeFromText } from "../lib/cleanupResult";
 import type { CleanupOutcome } from "../lib/cleanupResult";
 import { fmtBytes } from "./StorageBreakdown";
 import { CLEANUP_TARGETS } from "../lib/cleanupTargets";
 import { acquireCleanup, useCleanupActive } from "../lib/cleanupLock";
-import { formatSize, parseReclaimResult, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
-import type { ExpansionState, ReclaimResult } from "../lib/diskCapacity";
+import { formatSize, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
+import type { ExpansionState } from "../lib/diskCapacity";
 import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
@@ -274,7 +274,7 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
   const view = useDiskView();
   const cap = view.status === "live" ? view.cap : null; // reclaiming needs the running guest, not a remembered reading
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<ReclaimResult | null>(null);
+  const [result, setResult] = useState<CleanupOutcome | null>(null);
   const inFlight = useRef(false);
   const otherCleanup = useCleanupActive() !== null;
   const load = useCallback(() => diskTelemetry.refresh(), []);
@@ -292,8 +292,8 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
     try {
       if (!(await confirmAction(reclaimConfirmationMessage(cap), "Reclaim unused space"))) return;
       setBusy(true); setResult(null);
-      try { setResult(parseReclaimResult(await invoke<string>("reclaim_disk_confirmed"))); }
-      catch (e) { setResult(parseReclaimResult(String(e))); }
+      try { setResult(reclaimOutcomeFromText(await invoke<string>("reclaim_disk_confirmed"))); }
+      catch (e) { setResult(reclaimOutcomeFromText(String(e))); }
     } finally { inFlight.current = false; release(); setBusy(false); void load(); }
   };
 
@@ -316,7 +316,7 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
       </div>
       {blocked && !busy && <div className="text-meta">{blocked}</div>}
       {busy && <div role="status" className="text-meta">Trimming the guest disk. Harpoon keeps running.</div>}
-      {result && !busy && <CleanupResult outcome={reclaimOutcome(result)} label="Reclaim unused space" />}
+      {result && !busy && <CleanupResult outcome={result} label="Reclaim unused space" />}
     </div>
   );
 }

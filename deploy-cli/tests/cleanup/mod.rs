@@ -590,6 +590,269 @@ fn the_confirmation_requirement_is_unchanged_by_the_guard() {
     assert_eq!(posts(&t), 0);
 }
 
+// ---------------------------------------------------------------- the real output contracts, captured for the desktop
+
+/// What the real commands print and exit with, for each scenario the desktop's result panel has to read. The desktop's tests run its parser
+/// on exactly these captures (after the desktop's own response mapping), so its fixtures cannot drift from the engine. Paths that vary
+/// from run to run are replaced by placeholders. Regenerate with `WRITE_CLEANUP_FIXTURES=1 cargo test --test cli cleanup_output_contracts`.
+fn capture(t: &T, name: &str, o: &Outcome, into: &mut Vec<(String, Json)>) {
+    use harpoon_deploy_docker::json::{n, obj, s};
+    let scrub = |x: &str| {
+        x.replace(&t.socket(), "<docker-socket>")
+            .replace(&t.rt.display().to_string(), "<runtime>")
+            .replace(&t.resources(), "<resources>")
+            .replace(&t.mgmt.path().display().to_string(), "<mgmt-socket>")
+    };
+    into.push((
+        name.to_string(),
+        obj(vec![
+            ("code", n(o.code as i64)),
+            ("stdout", s(scrub(&o.stdout))),
+            ("stderr", s(scrub(&o.stderr))),
+        ]),
+    ));
+}
+
+#[test]
+fn cleanup_output_contracts_match_the_desktops_fixtures() {
+    use harpoon_deploy_docker::json::obj;
+    use support::fake_docker::Action;
+    let mut all: Vec<(String, Json)> = Vec::new();
+    let mgmt = |t: &T| {
+        vec![
+            "--mgmt-socket".to_string(),
+            t.mgmt.path().display().to_string(),
+        ]
+    };
+    let with_mgmt = |t: &T, mut a: Vec<String>| {
+        a.extend(mgmt(t));
+        a
+    };
+
+    // ---- cleanup-releases
+    let t = T::new();
+    world(&t);
+    capture(
+        &t,
+        "releases-dry-run",
+        &go(&t, &SHIPPING, &args(&t, &[])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-refused-unauthorized",
+        &go(&t, &SHIPPING, &args(&t, &["--apply"])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-success",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-apply-nothing-left",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "releases-dry-run-nothing-left",
+        &go(&t, &SHIPPING, &args(&t, &[])),
+        &mut all,
+    );
+
+    let t = T::new();
+    world(&t);
+    t.h.docker.fault(
+        Some("DELETE"),
+        "/images/",
+        usize::MAX,
+        Action::Respond(409, r#"{"message":"conflict: unable to delete, image is referenced in multiple repositories"}"#.into()),
+    );
+    capture(
+        &t,
+        "releases-apply-partial-image-kept",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+
+    let t = T::new();
+    let w = world(&t);
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let (_, running) = ids(9);
+        j.persist(&finished(&w.app, &running, DeploymentStatus::Running))
+            .unwrap();
+    }
+    capture(
+        &t,
+        "releases-apply-refused-unfinished",
+        &go(&t, &SHIPPING, &args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    world(&t);
+    let mut a = args(&t, &["--apply", &auth()]);
+    let i = a.iter().position(|x| x == &t.socket()).unwrap();
+    a[i] = "/nonexistent/docker.sock".into();
+    capture(
+        &t,
+        "releases-apply-engine-unreachable",
+        &go(&t, &SHIPPING, &a),
+        &mut all,
+    );
+
+    // ---- prune-build-cache
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    capture(
+        &t,
+        "cache-preview-clear",
+        &go(&t, &SHIPPING, &with_mgmt(&t, cache_args(&t, &[]))),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-refused-unauthorized",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply"])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-success",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, cache_args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-success-guest-unmeasured",
+        &{
+            let t2 = T::new();
+            t2.docker_runtime();
+            seed_cache(&t2);
+            go(&t2, &SHIPPING, &cache_args(&t2, &["--apply", &auth()]))
+        },
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    t.h.docker.with(|s| s.build_cache = vec![(500, true)]);
+    capture(
+        &t,
+        "cache-preview-nothing-unused",
+        &go(&t, &SHIPPING, &with_mgmt(&t, cache_args(&t, &[]))),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-nothing-unused",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, cache_args(&t, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    {
+        // a fixed id: the shared counter in `with_deployment` depends on which tests ran first, and the capture must not
+        let (app, dep) = ids(40);
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        j.persist(&finished(&app, &dep, DeploymentStatus::Running))
+            .unwrap();
+    }
+    capture(
+        &t,
+        "cache-preview-blocked-unfinished",
+        &go(&t, &SHIPPING, &cache_args(&t, &[])),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-refused-unfinished",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker.fault(
+        Some("POST"),
+        "/build/prune",
+        1,
+        Action::Respond(
+            500,
+            r#"{"message":"prune failed: buildkit is not available"}"#.into(),
+        ),
+    );
+    capture(
+        &t,
+        "cache-apply-failed-docker-error",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker
+        .fault(Some("POST"), "/build/prune", 1, Action::Disconnect);
+    capture(
+        &t,
+        "cache-apply-connection-lost",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let t = T::new();
+    t.docker_runtime();
+    seed_cache(&t);
+    t.h.docker
+        .fault(Some("POST"), "/build/prune", 1, Action::ApplyThenDrop);
+    capture(
+        &t,
+        "cache-apply-reply-lost-after-prune",
+        &go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()])),
+        &mut all,
+    );
+
+    let now = obj(all.iter().map(|(k, v)| (k.as_str(), v.clone())).collect()).to_json();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ui/harpoon-desktop/src-tauri/tests/fixtures/cleanup-outputs/raw.json");
+    if std::env::var_os("WRITE_CLEANUP_FIXTURES").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &now).unwrap();
+    }
+    let committed =
+        std::fs::read_to_string(&path).expect("fixture missing: run with WRITE_CLEANUP_FIXTURES=1");
+    assert_eq!(committed, now, "the captured command outputs changed: regenerate with WRITE_CLEANUP_FIXTURES=1 and review the diff");
+}
+
 // ---------------------------------------------------------------- ownership and classification
 
 use harpoon_deploy::git::{CredKind, GitRecord, RepoRec, SelectorKind, SourceRec};

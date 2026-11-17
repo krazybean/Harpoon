@@ -1741,6 +1741,17 @@ pub fn actionable(op: &DeployOp, code: i32, stdout: &str, stderr: &str) -> Optio
         c if c == exit::RUNTIME => {
             format!("Harpoon could not reach Docker or its management channel: {first} Check that Harpoon shows Docker as ready and try again. {nothing}")
         }
+        c if c == exit::FAILED && matches!(op, DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }) => {
+            // these are not deployments: a generic "the deployment did not succeed" would be wrong, and a missing answer is not a failure
+            if let Some(unknown) = stderr.lines().map(str::trim).find_map(|l| l.strip_prefix("result unknown:")) {
+                format!("The engine could not confirm what happened:{unknown} Review again before trying anything else.")
+            } else {
+                format!(
+                    "The operation did not complete: {first}{} Review again to see what remains.",
+                    if first.contains("not restored") { "" } else { " Anything already removed is not restored." }
+                )
+            }
+        }
         c if c == exit::FAILED => {
             let step = stdout
                 .lines()
@@ -1828,6 +1839,12 @@ pub fn run_op_with(
         next: None,
     };
     let out = run_with(&args, gate, &mut svc);
+    op_result(op, &out)
+}
+
+/// How the engine's command line result reaches the desktop: the summary is the first line of stdout (success) or stderr (failure), the
+/// detail is stdout followed by stderr, and the hint says what a person can do. One function, so a test can run the real command outputs through it.
+pub fn op_result(op: &DeployOp, out: &harpoon_deploy_cli::Outcome) -> OpResult {
     let text = if out.stderr.trim().is_empty() {
         out.stdout.clone()
     } else {
@@ -1849,7 +1866,8 @@ pub fn run_op_with(
         ok: out.code == 0,
         exit_code: out.code,
         refused_by_gate: out.code == harpoon_deploy_cli::exit::REFUSED
-            && (out.stderr.contains("not enabled in this build") || out.stderr.contains("disabled in this build")),
+            && (out.stderr.contains("not enabled in this build")
+                || out.stderr.contains("disabled in this build")),
         hint: actionable(op, out.code, &out.stdout, &out.stderr),
         summary,
         detail: text,

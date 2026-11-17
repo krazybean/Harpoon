@@ -92,9 +92,9 @@ The guard tests were verified to bite: with the guard disabled, five of them fai
 
 ## Final validation
 
-- `deploy-cli`: 291 tests pass (10 new: the prune guard, both journal formats, unreadable and held-writer states, preview-then-change, confirmation unchanged, `all=false`). `rustfmt --check` clean, no clippy output in the changed files.
-- `deploy-journal`: 57 pass (2 new). `deploy-docker`: 311 pass (unchanged). `src-tauri`: 159 pass (1 new). Formatting clean and no clippy warnings in the three crates that were clean on `main`; `src-tauri` already had 418 rustfmt differences and gained none.
-- UI (Node 22.23.3): 439 of 439 pass (25 new in `storageCleanup.test.mjs`); `tsc` and `npm run build` pass; `git diff --check` clean.
+- `deploy-cli`: 292 tests pass (11 new: the prune guard, both journal formats, unreadable and held-writer states, preview-then-change, confirmation unchanged, `all=false`). `rustfmt --check` clean, no clippy output in the changed files.
+- `deploy-journal`: 57 pass (2 new). `deploy-docker`: 311 pass (unchanged). `src-tauri`: 161 pass (3 new). Formatting clean and no clippy warnings in the three crates that were clean on `main`; `src-tauri` already had 418 rustfmt differences and gained none.
+- UI (Node 22.23.3): 459 of 459 pass (45 new in `storageCleanup.test.mjs`); `tsc` and `npm run build` pass; `git diff --check` clean.
 - Screenshots (mocked data, scratchpad `storage-ui/`): `s3-breakdown-actions.png`, `s3-confirm.png`, `s3-results.png` (partial release cleanup and a build-cache prune with the three measurements), `s3-blocked.png` (prune unavailable during an unfinished deployment).
 
 ## Pre-PR verification pass
@@ -117,3 +117,40 @@ The dialog now says: the cache is what Docker reports as unused; "Unused is not 
 - **Fix, using the existing mechanism:** every Harpoon writer takes the journal's writer lock first. `prune-build-cache --apply` now takes that same lock, checks for unfinished deployments under it, and holds it until the command returns. `deploy-journal` gained one small function, `hold_writer_lock`, which takes the lock without opening, migrating or writing the journal (only an empty lock file can be created). No new locking framework.
 - **Behaviour to be aware of:** during a prune (up to 300 s) a second Harpoon writer is refused with "another Harpoon process holds the deployment journal", and the desktop's snapshot reports the writer as held. The preview takes no lock. A genuinely absent journal needs none.
 - **Tests:** a fake-Docker fault runs at the instant Docker is asked to prune and tries to start a second writer: it is refused, in both SQLite and legacy journals, the legacy journal is not converted, and the lock is free again afterwards; a preview holds no lock; the new journal function excludes every writer, writes nothing, and creates no journal. With the hold replaced by a plain check the race test fails (verified).
+
+## Output-contract verification (the result panel against the real commands)
+
+### Method
+The panel was checked against what the three operations actually produce, not against hand-written result objects:
+- **`cleanup-releases` and `prune-build-cache`**: a deploy-cli test runs the real commands (real journal, real `DockerBackend`, fake Docker) for 19 scenarios and records exit status, stdout and stderr (`src-tauri/tests/fixtures/cleanup-outputs/raw.json`). A src-tauri test passes each capture through the desktop's real response mapping (`op_result`, extracted unchanged from `run_op_with`) into `src/lib/fixtures/cleanup-opresults.json`. Both fixtures are kept in step by tests that fail on any difference (`WRITE_CLEANUP_FIXTURES=1` regenerates). The UI tests mount the real Resources page and answer `deploy_op` with those results.
+- **`harpoon disk reclaim`**: Swift cannot run in the test suite, so the status names are read from `HarpoonDiskCLI.swift` by a test that fails if the runtime prints a status the app does not map (or the app maps one the runtime no longer prints). Rejections are fed to the card as plain strings, as Tauri does for a command's `Err(String)`.
+
+### Real defects the real outputs exposed
+| # | Finding (fact) | Fix |
+|---|---|---|
+| 1 | A prune whose reply was lost (the engine's own capture, including one where Docker **did** prune and only the reply was lost) printed "Docker did not complete the prune" and exited as a plain failure. The panel would have said "Did not complete" for work that may have happened. | `prune-build-cache` now classifies a transport timeout, disconnect or malformed answer as `result unknown:` (an unreachable socket, where nothing was sent, stays a plain failure; an HTTP error from Docker stays a failure and says cache removed before the error is not restored). The panel shows "The engine could not confirm the result." and requires a fresh review. |
+| 2 | The desktop's hint for exit 7 was written for deployments ("The deployment did not succeed… Open the step logs"), so a failed cache prune or cleanup was described as a failed deployment. | `actionable` has its own arm for these two operations. |
+| 3 | `parseCleanup` read a missing `reclaimed-containers` / `reclaimed-images` line as 0, so a truncated or unrecognised report looked like "nothing removed" and the absence of an error looked like a result. | The report must state both counts as whole numbers; otherwise the result is unknown. |
+| 4 | Sizes were accepted as any finite number (a negative or fractional value became a figure). | Only whole, non-negative byte counts are figures; anything else is "not reported". |
+| 5 | The partial result showed counts only; the engine's `kept:` lines (what it left in place and why) were dropped. | They are kept and shown under "Left in place (N)". |
+| 6 | The reclaim card treated any non-JSON text, any JSON without a recognised status, and every non-"not-running" status as a plain failure. | Pre-flight refusals (`busy`, `not-running`, `unknown-disk`, `engine-unreachable`) are "Not carried out"; `unsupported`, `failed`, `error` are failures; anything else, including non-JSON, is "Result unknown" in the runtime's own words. Mac figures that are missing, negative or mistyped are "not measured". |
+| 7 | Text duplicated across layers (the same "review again" instruction three times; "No byte figure" twice). | Said once. |
+
+### Requirements, case by case (each is a test on the real captures unless noted)
+- **Success**: only reported measurements; counts apart from bytes; reclaimed bytes never inferred from image sizes (the inventory's sizes are on the page and the figure line contains none).
+- **Nothing eligible**: zero eligible at review offers no removal and says so; an apply that removes nothing is "Nothing was removed"; a measured 0 B cache prune is "nothing", distinct from a success.
+- **Partial**: one container removed, two images kept: "1 of 3", both kept lines listed, not "Completed".
+- **Protection refusal**: unfinished deployment and missing confirmation phrase: "Not carried out. Nothing was changed." with the engine's reason, no removed counts, `role="alert"`.
+- **Timeout, lost connection, lost reply, rejected request**: "unknown", with no claim of success or failure, and the old figure cannot be pruned again without a new check.
+- **Interrupted deletion**: "Result unknown" and the reviewed list is dropped; another attempt needs a fresh review and confirmation.
+- **Measurement unavailable**: guest figures missing from the engine's output and Mac readings that fail both show "Not measured", never 0.
+- **Reclaim after cleanup**: a failed reclaim (a rejection carrying the JSON) leaves the cleanup's recorded result byte-for-byte unchanged.
+- **Stale or late replies**: a reply that arrives after the page was left and re-opened does not land on the new page; a second request cannot start while one is pending.
+- **Lock**: released after success, nothing-to-do, refusal, failure, a lost connection, a rejected request and a cancelled confirmation (looped on the real captures).
+- **Inventory refresh**: refreshing the storage inventory after a cleanup, and following every breakdown link, offers no removal and opens no dialog; a new removal needs Review and then the confirmation again.
+
+### Remaining limitations
+- A cache-prune timeout is exercised through a lost connection (the 300 s limit cannot be waited out in a test); both reach the same code path.
+- The reclaim JSON is checked against the Swift source's status names, not by running the Swift runtime.
+- A dry run prints would-remove counts under the same names as an apply (`reclaimed-containers`); the panel only reads them from an apply, and a test pins that.
+- In `src-tauri`, the pre-existing rustfmt differences were not reformatted; the branch has no more than `main`.

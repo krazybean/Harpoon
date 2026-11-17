@@ -592,9 +592,20 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
         return Ok(exit::OK);
     }
     let before = guest_free(p, &socket);
-    let freed = api
-        .prune_build_cache(Duration::from_secs(300))
-        .map_err(|e| Fail::failed(format!("Docker did not complete the prune: {e}")))?;
+    let freed = api.prune_build_cache(Duration::from_secs(300)).map_err(|e| {
+        use harpoon_deploy_docker::api::ApiError;
+        use harpoon_deploy_docker::http::HttpError;
+        match &e {
+            // Docker never received the request: nothing happened
+            ApiError::Transport(HttpError::Connect(_)) => Fail::failed(format!("Docker did not complete the prune: {e}. Nothing was changed.")),
+            // The request may have reached Docker and been carried out; the answer is what is missing. Never reported as a plain failure.
+            ApiError::Transport(_) | ApiError::Malformed { .. } => Fail::failed(format!(
+                "result unknown: Docker did not give a usable answer to the prune ({e}). The prune may have completed fully, partly or not at all; nothing is assumed."
+            )),
+            // Docker answered that it failed; some cache may already have gone before the error
+            ApiError::Status { .. } => Fail::failed(format!("Docker did not complete the prune: {e}. Cache removed before the error is not restored.")),
+        }
+    })?;
     let _ = writeln!(out, "build-cache-reclaimed-bytes: {freed}");
     match (before, guest_free(p, &socket)) {
         (Some(b), Some(a)) => {
