@@ -1059,3 +1059,62 @@ mod git_records {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// The desktop writes a deployment while its screens and the application router read the same journal, all in one process.
+/// Apple's SQLite fails the writer's lock (`SQLITE_IOERR_LOCK`, "disk I/O error") when another connection of the same
+/// process is being opened, read or closed at that moment; before the in-process guard a deployment lost journal writes this
+/// way and stopped without a trace. Other processes are not affected, so only in-process access is serialised.
+fn writes_lost_to_readers_in_the_same_process() -> Vec<String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let dir = temp_dir();
+    let (app, dep) = ids();
+    let (mut journal, _) = SqliteJournal::open(&dir).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (dir, stop, reads) = (dir.clone(), stop.clone(), reads.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    SqliteJournal::read_only(&dir).unwrap();
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+            })
+        })
+        .collect();
+    let mut lost = Vec::new();
+    for i in 0..100u32 {
+        let record = LedgerRecord::Intent {
+            key: ResourceKey::new(ResourceKind::PortLease, (10_000 + i).to_string()),
+            app: app.clone(),
+            deployment: dep.clone(),
+            disposition: Disposition::RemoveAlways,
+            at_ms: u64::from(i),
+        };
+        if let Err(e) = journal.record(&record) {
+            lost.push(format!("write {i}: {e:?}"));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for r in readers {
+        r.join().unwrap();
+    }
+    assert!(reads.load(Ordering::Relaxed) > 0, "the readers never ran");
+    lost
+}
+
+#[test]
+fn readers_in_the_writers_process_never_make_it_lose_a_write() {
+    // Before the guard one round lost writes about two times in three; five rounds make that certain, and a fixed run is cheap.
+    for round in 0..5 {
+        let lost = writes_lost_to_readers_in_the_same_process();
+        assert!(
+            lost.is_empty(),
+            "round {round}: {} of 100 writes were lost to concurrent readers; first: {}",
+            lost.len(),
+            lost[0]
+        );
+    }
+}

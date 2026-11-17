@@ -14,6 +14,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::ptr;
+use std::sync::{Mutex, MutexGuard};
 
 pub const SQLITE_FILE: &str = "deployments.sqlite3";
 const LOCK_FILE: &str = "sqlite.lock";
@@ -71,6 +72,16 @@ unsafe extern "C" {
     fn sqlite3_column_text(stmt: *mut sqlite3_stmt, column: c_int) -> *const u8;
     fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, column: c_int) -> i64;
     fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int;
+}
+
+/// Every connection to the journal lives in this one process: the desktop writes a deployment while its screens and the
+/// application router read the same file. Apple's SQLite, in rollback-journal mode, fails a write transaction's lock
+/// (`SQLITE_IOERR_LOCK`, "disk I/O error") when another connection of the same process is being opened, read or closed at that
+/// moment, and a failed journal write aborts a deployment. Other processes are not affected. So in-process access is taken
+/// one at a time; each section is a single open, read or write transaction, so nothing waits long.
+static IN_PROCESS: Mutex<()> = Mutex::new(());
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    IN_PROCESS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[derive(Debug)]
@@ -254,6 +265,7 @@ pub struct JournalFileFacts {
 
 /// Inspect a journal file read-only (a backup, typically).
 pub fn inspect_file(path: &Path) -> Result<JournalFileFacts, SqliteOpenError> {
+    let _one = one_at_a_time();
     let db = Db::open(path, SQLITE_OPEN_READONLY)?;
     let integrity = strings_of(&db, "PRAGMA integrity_check")?.join("; ");
     Ok(JournalFileFacts {
@@ -265,6 +277,7 @@ pub fn inspect_file(path: &Path) -> Result<JournalFileFacts, SqliteOpenError> {
 
 /// Replay a journal file read-only into its full state (a backup, typically).
 pub fn replay_file(path: &Path) -> Result<Restored, SqliteOpenError> {
+    let _one = one_at_a_time();
     restore(&Db::open(path, SQLITE_OPEN_READONLY)?)
 }
 
@@ -367,6 +380,7 @@ pub struct SqliteJournal {
 
 impl SqliteJournal {
     pub fn open(dir: &Path) -> Result<(SqliteJournal, Restored), SqliteOpenError> {
+        let _one = one_at_a_time();
         let lock = lock_dir(dir)?;
         let path = dir.join(SQLITE_FILE);
         // Create the file privately first: SQLite would use the process umask (typically 0644).
@@ -414,6 +428,7 @@ impl SqliteJournal {
     /// Read without locking or writing. A runtime that has only the legacy journal (no writer has
     /// upgraded it yet) is read from that journal, exactly as before the SQLite store existed.
     pub fn read_only(dir: &Path) -> Result<Restored, SqliteOpenError> {
+        let _one = one_at_a_time();
         let path = dir.join(SQLITE_FILE);
         if !path.exists() {
             return legacy_read(dir);
@@ -430,6 +445,7 @@ impl SqliteJournal {
 
     /// The stored record lines in order, for diagnostics and tests. Reads only.
     pub fn record_lines(dir: &Path) -> Result<Vec<String>, SqliteOpenError> {
+        let _one = one_at_a_time();
         strings_of(
             &Db::open(&dir.join(SQLITE_FILE), SQLITE_OPEN_READONLY)?,
             "SELECT body FROM records ORDER BY seq",
@@ -443,6 +459,7 @@ impl SqliteJournal {
 
     /// Every stored record body in order, read through this writer's own connection.
     pub fn record_rows(&self) -> Result<Vec<String>, SqliteOpenError> {
+        let _one = one_at_a_time();
         strings_of(&self.db, "SELECT body FROM records ORDER BY seq")
     }
 
@@ -450,6 +467,7 @@ impl SqliteJournal {
     /// (outside any transaction). `target` must not exist (SQLite refuses an existing file, which some versions accept only when it is empty,
     /// so callers must not depend on that), so an existing backup is never overwritten. The copy is compacted, not byte-identical: compare it by record, not by hash.
     pub fn backup_into(&self, target: &Path) -> Result<(), SqliteOpenError> {
+        let _one = one_at_a_time();
         let stmt = statement(&self.db, "VACUUM INTO ?1")?;
         bind(&stmt, 1, &target.to_string_lossy())?;
         if unsafe { sqlite3_step(stmt.0) } != SQLITE_DONE {
@@ -469,6 +487,7 @@ impl SqliteJournal {
         &mut self,
         rec: &harpoon_deploy::git::RemovedRec,
     ) -> Result<bool, JournalError> {
+        let _one = one_at_a_time();
         let io = |e: String| JournalError::Io(e);
         self.db
             .exec("BEGIN IMMEDIATE")
@@ -535,6 +554,7 @@ impl SqliteJournal {
     }
 
     fn insert(&mut self, kind: &str, body: &str) -> Result<(), JournalError> {
+        let _one = one_at_a_time();
         self.db
             .exec("BEGIN IMMEDIATE")
             .map_err(|e| JournalError::Io(e.to_string()))?;

@@ -121,6 +121,7 @@
       "route": "external",
       "serving": {
         "container": "hp-dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
+        "containerOwner": "dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
         "deployment": "dep_01M6DPQ543ASWBHW7PW17ZAJ3C",
         "healthPath": null,
         "hostPort": null,

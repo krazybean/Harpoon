@@ -2725,3 +2725,57 @@ mod cleanup_contracts {
             .contains("Nothing was changed"));
     }
 }
+
+/// A release restored by an explicit restoration is served by a container recorded (and labelled) under the deployment that
+/// restored it, not under the release's own deployment. The desktop must be told which, or it cannot match the container.
+mod restored_release {
+    use super::*;
+    use harpoon_deploy::ids::{ApplicationId, DeploymentId};
+    use harpoon_deploy::ledger::{Disposition, LedgerRecord, ResourceKey, ResourceKind};
+    use harpoon_deploy::state::{RecoveryOutcome, Step};
+
+    #[test]
+    fn the_snapshot_names_the_deployment_that_owns_a_restored_releases_container() {
+        let dir = rt("restored-release");
+        prepare(&dir).unwrap();
+        let (app, good, failed): (ApplicationId, DeploymentId, DeploymentId) = (APP.parse().unwrap(), D1.parse().unwrap(), D2.parse().unwrap());
+        {
+            let (mut j, _) = open_journal(&dir);
+            // D1 succeeded and served from hp-D1.
+            let mut d = harpoon_deploy::state::Deployment::new(good.clone(), app.clone(), Trigger::Manual, 100);
+            d.transition(DeploymentStatus::Queued, 101).unwrap();
+            d.transition(DeploymentStatus::Running, 102).unwrap();
+            d.release = Some(ReleaseId::from_deployment(&good));
+            d.pinned = Some(harpoon_deploy::release::ReleaseConfig::simulated(38000));
+            d.transition(DeploymentStatus::Succeeded, 103).unwrap();
+            j.persist(&d).unwrap();
+            let record = |j: &mut SqliteJournal, dep: &DeploymentId, name: &str, id: &str| {
+                let key = ResourceKey::new(ResourceKind::Container, name);
+                j.record(&LedgerRecord::Intent { key: key.clone(), app: app.clone(), deployment: dep.clone(), disposition: Disposition::Retain, at_ms: 200 }).unwrap();
+                j.record(&LedgerRecord::Receipt { key, deployment: dep.clone(), id: id.into(), at_ms: 201 }).unwrap();
+            };
+            record(&mut j, &good, &format!("hp-{good}"), "cid-good");
+            // D2's cutover began, failed, and its restoration put D1's release back, in a container recorded under D2.
+            let mut f = harpoon_deploy::state::Deployment::new(failed.clone(), app.clone(), Trigger::Manual, 300);
+            f.transition(DeploymentStatus::Queued, 301).unwrap();
+            f.transition(DeploymentStatus::Running, 302).unwrap();
+            f.start_step(Step::Cutover, 303).unwrap();
+            f.replaces = Some(ReleaseId::from_deployment(&good));
+            f.begin_cutover(304).unwrap();
+            f.fail_cutover(305).unwrap();
+            f.start_step(Step::Recovery, 306).unwrap();
+            f.start_recovery(60_000, 306).unwrap();
+            f.finish_recovery(RecoveryOutcome::Restored, 700).unwrap();
+            f.transition(DeploymentStatus::Failed, 701).unwrap();
+            j.persist(&f).unwrap();
+            record(&mut j, &failed, &harpoon_deploy::serving::restored_container_name(&failed), "cid-restored");
+        }
+        let snap = snapshot_when_released(&dir, 1_000);
+        let s = snap.apps[0].serving.as_ref().expect("a serving release");
+        assert_eq!(s.release, ReleaseId::from_deployment(&good).to_string());
+        assert_eq!(s.via, "restored");
+        assert_eq!(s.deployment, good.to_string(), "the release is still D1's");
+        assert_eq!(s.container, harpoon_deploy::serving::restored_container_name(&failed));
+        assert_eq!(s.container_owner, failed.to_string(), "the container belongs to the deployment that restored it");
+    }
+}

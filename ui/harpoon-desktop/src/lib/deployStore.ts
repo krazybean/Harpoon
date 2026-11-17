@@ -301,7 +301,7 @@ export function attention(app: AppModel, runtime: RuntimeState): Attention | nul
   if (st.kind === "down") return { tone: "err", title: "Application down", text: "The new release failed and the previous release could not be restored. This application is down." };
   const running = app.deployments.find((x) => x.status === "running");
   if (running) return { tone: "info", title: "Deploying", text: `Deploying ${running.id}. The running release (${app.currentReleaseId}) is untouched until the new build passes its preliminary check.` };
-  if (d && d.status === "failed" && d.recovery?.outcome === "restored") return { tone: "warn", title: "Needs attention", text: `Cutover to ${d.id} failed; ${app.currentReleaseId} was restored.` };
+  if (d && (d.status === "failed" || d.status === "interrupted") && d.recovery?.outcome === "restored") return { tone: "warn", title: "Needs attention", text: `Cutover to ${d.id} failed; ${app.currentReleaseId} was restored.` };
   if (d && d.status === "failed" && d.failedAt === "build") return { tone: "warn", title: "Needs attention", text: `Latest deployment ${d.id} failed at Build. ${app.currentReleaseId ? `${app.currentReleaseId} is still running` : "No release is running"} — nothing was stopped.` };
   if (d && d.status === "failed" && d.failedAt === "preliminary_check") return { tone: "warn", title: "Needs attention", text: `Latest deployment ${d.id} failed its preliminary check. Nothing was stopped.` };
   if (app.automation.state === "paused" && app.automation.reason?.kind === "rollback") return { tone: "warn", title: "Needs attention", text: `Running ${app.currentReleaseId} after a rollback you requested.` };

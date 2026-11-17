@@ -3287,3 +3287,5 @@ fn restart_policy_with_no_journal_or_a_damaged_one_never_guesses_ownership() {
     assert_eq!(t.docker_requests(), n);
     assert_eq!(docker_mutations(&t), 0);
 }
+
+mod inprocess;
