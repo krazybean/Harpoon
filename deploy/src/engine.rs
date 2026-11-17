@@ -79,6 +79,7 @@ pub struct MemoryJournal {
     pub step_logs: Vec<crate::steplog::StepLogRec>,
     writes: usize,
     crash_at: Option<usize>,
+    fail_once: Option<usize>,
     trace: Option<Trace>,
     ops: Option<OpTrace>,
 }
@@ -93,6 +94,15 @@ impl MemoryJournal {
     pub fn crash_at(n: usize) -> MemoryJournal {
         MemoryJournal {
             crash_at: Some(n),
+            ..MemoryJournal::default()
+        }
+    }
+
+    /// The write with this zero-based index fails once with `Io` and is **not** stored; later writes succeed. A journal that
+    /// failed for a moment (unlike `crash_at`, where the process is gone and nothing more is written).
+    pub fn fail_once_at(n: usize) -> MemoryJournal {
+        MemoryJournal {
+            fail_once: Some(n),
             ..MemoryJournal::default()
         }
     }
@@ -121,6 +131,10 @@ impl MemoryJournal {
     fn gate(&mut self) -> Result<(), JournalError> {
         if self.crash_at == Some(self.writes) {
             return Err(JournalError::Crash);
+        }
+        if self.fail_once == Some(self.writes) {
+            self.fail_once = None;
+            return Err(JournalError::Io("injected journal failure".into()));
         }
         self.writes += 1;
         Ok(())
@@ -446,6 +460,8 @@ pub enum EngineError {
     Transition(TransitionError),
     /// A bug in the caller or the engine: an invalid ledger record was attempted.
     Ledger(LedgerError),
+    /// The run panicked. Caught at the run's boundary so the deployment can still be recorded.
+    Panicked(String),
 }
 
 impl fmt::Display for EngineError {
@@ -454,6 +470,7 @@ impl fmt::Display for EngineError {
             EngineError::Journal(e) => write!(f, "journal write failed: {e:?}"),
             EngineError::Transition(e) => write!(f, "{e}"),
             EngineError::Ledger(e) => write!(f, "{e}"),
+            EngineError::Panicked(m) => write!(f, "the run panicked: {m}"),
         }
     }
 }
@@ -1305,6 +1322,90 @@ pub fn run_deployment_with(
 /// reports it in [`Report::prepared`]. Never asked for a first deployment.
 #[allow(clippy::too_many_arguments)]
 pub fn run_deployment_confirmed(
+    d: &mut Deployment,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    cfg: &RunConfig,
+    cancel: &dyn Fn() -> bool,
+    confirm: &dyn Fn(&CutoverPlan) -> bool,
+) -> Result<Report, EngineError> {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drive(&mut *d, ctx, &mut *backend, &mut *journal, clock, cfg, cancel, confirm)
+    }));
+    let err = match ran {
+        Ok(Ok(report)) => return Ok(report),
+        Ok(Err(e)) => e,
+        Err(p) => EngineError::Panicked(
+            p.downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no message".into()),
+        ),
+    };
+    abort_record(d, journal, clock, &err);
+    Err(err)
+}
+
+/// A run that stops on an error or a panic must not leave its deployment `running` with nothing said: the next `?` out of the
+/// run used to skip every terminal write. This is one best-effort attempt to record the failure, and only where the outcome is
+/// not ambiguous. Once a cutover began (the previous release may be stopped, the candidate may be started) the state is left for
+/// the explicit `recover` and `restore`, which decide with the facts; marking it failed here would be a guess. If the journal
+/// cannot be written the attempt is lost, which is why the caller also reports the error outside the journal.
+fn abort_record(d: &mut Deployment, journal: &mut dyn Journal, clock: &dyn Clock, why: &EngineError) {
+    // The run reached its end but the write that said so failed: what happened is known, so it is written once more.
+    if d.status.is_terminal() {
+        let _ = journal.persist(d);
+        return;
+    }
+    if d.status != DeploymentStatus::Running
+        || matches!(
+            d.cutover,
+            crate::state::CutoverState::Begun { .. } | crate::state::CutoverState::Failed { .. }
+        )
+    {
+        return;
+    }
+    // The step that was open; before the first step started, the one that was about to.
+    let open = d
+        .steps
+        .iter()
+        .find(|s| s.status == crate::state::StepStatus::Running)
+        .map(|s| s.step);
+    let Some(step) = open.or_else(|| {
+        d.steps
+            .iter()
+            .find(|s| s.status == crate::state::StepStatus::Pending)
+            .map(|s| s.step)
+    }) else {
+        return;
+    };
+    let now = clock.now_ms();
+    let message = format!("the run stopped before it could record its own result: {why}");
+    let kind = match step {
+        Step::Source => FailureKind::Source,
+        Step::Build => FailureKind::Build,
+        Step::PreliminaryCheck => FailureKind::PreliminaryCheck,
+        Step::FinalCheck => FailureKind::FinalCheck,
+        Step::Cutover | Step::Recovery => FailureKind::Cutover,
+    };
+    if open.is_some() {
+        let _ = d.finish_step(step, false, &message, now);
+    }
+    d.failure = Some(Failure {
+        step,
+        kind,
+        message,
+        timed_out: false,
+    });
+    if d.transition(DeploymentStatus::Failed, now).is_ok() {
+        let _ = journal.persist(d);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive(
     d: &mut Deployment,
     ctx: &Context,
     backend: &mut dyn Backend,

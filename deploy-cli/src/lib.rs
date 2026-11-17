@@ -15,6 +15,7 @@ mod args;
 mod cleanup;
 mod commands;
 mod config_cmds;
+pub mod diagnostics;
 mod git_cmds;
 mod journal_upgrade;
 mod next_steps;

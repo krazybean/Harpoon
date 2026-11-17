@@ -1471,6 +1471,13 @@ fn existing_release_blocker(ledger: &Ledger, app: &str) -> Option<String> {
 
 // ------------------------------------------------------------------ recover
 
+/// Where the run's stop was also written, outside the journal.
+fn diag_hint(at: Option<PathBuf>) -> String {
+    at.map_or_else(String::new, |p| {
+        format!("\nThe reason was also written to {}.", p.display())
+    })
+}
+
 fn recover(p: &Parsed, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     if !rt.initialised() {
@@ -1968,9 +1975,18 @@ pub(crate) fn deploy(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Stri
         )
     };
     let report = report.map_err(|e| {
-        Fail::failed(format!(
-            "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
-        ))
+        let at = crate::diagnostics::note(
+            &rt.dir,
+            &format!(
+                "deployment {} stopped on a journal or engine error: {e}",
+                d.id
+            ),
+        );
+        Fail::failed(
+            format!(
+                "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
+            ) + &diag_hint(at),
+        )
     })?;
     print_report(out, &d, &report);
     record_logs(out, &mut journal, &d, &report);
@@ -2275,9 +2291,18 @@ pub(crate) fn replace(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut Str
         &|_: &CutoverPlan| confirmed,
     )
     .map_err(|e| {
-        Fail::failed(format!(
-            "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
-        ))
+        let at = crate::diagnostics::note(
+            &rt.dir,
+            &format!(
+                "deployment {} stopped on a journal or engine error: {e}",
+                d.id
+            ),
+        );
+        Fail::failed(
+            format!(
+                "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
+            ) + &diag_hint(at),
+        )
     })?;
     print_report(out, &d, &report);
     record_logs(out, &mut journal, &d, &report);
@@ -2605,9 +2630,10 @@ fn rollback(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R 
         &|_: &CutoverPlan| confirmed,
     )
     .map_err(|e| {
+        let at = crate::diagnostics::note(&rt.dir, &format!("deployment {} stopped on a journal or engine error: {e}", d.id));
         Fail::failed(format!(
             "the run stopped on a journal or engine error: {e}\nRun `recover`, then `status`. A rollback is never repeated automatically."
-        ))
+        ) + &diag_hint(at))
     })?;
     print_report(out, &d, &report);
     record_logs(out, &mut journal, &d, &report);
@@ -2813,9 +2839,10 @@ fn restore(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -> R {
         None => (&mut fake, &*sim_clock),
     };
     let report = recover_cutover(&mut d, prev, b, &mut journal, clock, &cfg).map_err(|e| {
+        let at = crate::diagnostics::note(&rt.dir, &format!("deployment {} stopped on a journal or engine error: {e}", d.id));
         Fail::failed(format!(
             "the restoration stopped on a journal or engine error: {e}\nRun `recover`, then `status`."
-        ))
+        ) + &diag_hint(at))
     })?;
     if !report.blocked.is_empty() {
         let _ = writeln!(out, "restoration not started; nothing was recorded or changed, and the one attempt is not spent:");
