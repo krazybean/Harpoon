@@ -817,3 +817,66 @@ test("refreshing the storage inventory after a cleanup cannot authorise another 
   assert.ok(m.dialog(), "and a new confirmation");
   assert.equal(apply().length, 1);
 });
+
+// ================================================================ cache accounting and rollback retention (real captured outputs)
+import { cacheExplanation, reasonLabel } from "./artifactCleanup.ts";
+const MB = 1000 * 1000;
+const sz = (b) => `${(b / MB).toFixed(0)} MB`;
+
+test("cache: records shared with images are shown apart from what a prune can remove, and are never offered as space", () => {
+  const c = parseCache(fx("cache-preview-all-shared").detail);
+  assert.equal(c.reclaimable, 0, "nothing is both unused and unshared");
+  assert.equal(c.total, 1_683_000_000);
+  assert.equal(c.shared, 1_683_000_000);
+  assert.equal(c.records, 2);
+  const why = cacheExplanation(c, sz);
+  assert.match(why, /not free space/); assert.match(why, /would free about 0 B/); assert.match(why, /removing old releases/);
+});
+
+test("cache: a mixed cache offers only the unshared part and says the rest stays", () => {
+  const c = { reclaimable: 40 * MB, reclaimed: null, guestFreeBefore: null, guestFreeAfter: null, records: 4, total: 1700 * MB, inUse: 10 * MB, shared: 1650 * MB, blocked: null };
+  const why = cacheExplanation(c, sz);
+  assert.match(why, /up to 40 MB/); assert.match(why, /1650 MB is shared with images/); assert.match(why, /stays/);
+});
+
+test("cache: nothing to explain when the engine reported no records or no figure", () => {
+  assert.equal(cacheExplanation(parseCache("x"), sz), null);
+  assert.equal(cacheExplanation(parseCache("build-cache-reclaimable-bytes: 0\nbuild-cache-total-bytes: 0"), sz), null);
+  assert.equal(cacheExplanation({ ...parseCache(fx("cache-preview-clear").detail) }, sz), null, "an unshared cache has nothing to apologise for");
+});
+
+test("cache: a zero-byte prune of shared records is a zero result, not an error", () => {
+  const r = fx("cache-apply-all-shared-frees-nothing");
+  assert.equal(r.ok, true);
+  const o = cacheOutcome(parseCache(r.detail), { before: null, after: null }, sz);
+  assert.equal(o.status, "nothing");
+  assert.match(o.headline, /0 B/);
+});
+
+test("cache, mounted: the check explains why a prune will free nothing and offers no prune", async () => {
+  const m = await mount();
+  deployReply = () => fx("cache-preview-all-shared");
+  await m.click(m.btn("Check build cache")); await m.settle();
+  const text = m.host.textContent;
+  assert.match(text, /not free space/); assert.match(text, /about 0 B/);
+  assert.equal(m.btn("Prune"), undefined, "no prune button for a cache that holds nothing a prune can free");
+  await m.unmount();
+});
+
+test("rollback: the release dry run names the rollback target apart from serving and disposable releases", () => {
+  const rep = parseCleanup(fx("releases-dry-run-rollback-target").detail);
+  const by = (reason) => rep.items.filter((i) => i.reason === reason);
+  assert.ok(by("serving-release").length > 0, "serving is named");
+  assert.ok(by("rollback-target").length > 0, "the rollback target is named");
+  assert.ok(rep.items.some((i) => i.verdict === "ready"), "something disposable remains");
+  for (const i of by("rollback-target")) {
+    assert.equal(i.verdict, "protected");
+    assert.match(reasonLabel(i), /Rollback target/);
+  }
+  assert.ok(!rep.items.some((i) => i.verdict === "ready" && by("rollback-target").some((p) => p.deployment === i.deployment)), "a rollback target is never also offered for removal");
+});
+
+test("rollback: reasons the desktop does not know yet stay visible as review text, not silently relabelled", () => {
+  assert.match(reasonLabel({ kind: "image", reason: "rollback-unverified", detail: "x" }), /could not be verified/);
+  assert.match(reasonLabel({ kind: "image", reason: "something-new", detail: "because" }), /Needs review: because/);
+});

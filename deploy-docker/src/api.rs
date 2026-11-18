@@ -325,6 +325,54 @@ fn req_str<'a>(j: &'a Json, key: &str, op: &'static str) -> Result<&'a str, ApiE
         })
 }
 
+/// What `GET /system/df` says about the BuildKit cache. A record's `Size` is not space a prune frees: records overlap
+/// each other and, when Docker marks one `Shared`, its layers belong to an image and stay for as long as the image does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheUsage {
+    pub records: u64,
+    /// Sum of every record's size. Not disk space (see above).
+    pub total_bytes: u64,
+    pub in_use_records: u64,
+    pub in_use_bytes: u64,
+    pub shared_records: u64,
+    pub shared_bytes: u64,
+    pub prunable_records: u64,
+    /// Not in use, not shared with an image and of the plain `regular` type: what `/build/prune?all=false` can remove.
+    /// A field Docker did not report counts against a record, so this never overstates. An estimate, not a promise.
+    pub prunable_bytes: u64,
+}
+
+pub fn cache_usage_from_df(df: &Json) -> CacheUsage {
+    let mut u = CacheUsage::default();
+    for e in df.get("BuildCache").and_then(Json::as_array).unwrap_or(&[]) {
+        let size = e.get("Size").and_then(Json::as_i64).unwrap_or(0).max(0) as u64;
+        let (in_use, shared) = (
+            e.get("InUse").and_then(Json::as_bool),
+            e.get("Shared").and_then(Json::as_bool),
+        );
+        // the fake and older daemons omit `Type`; Docker's own records always carry it, and only `regular` is pruned without --all
+        let regular = e
+            .get("Type")
+            .and_then(Json::as_str)
+            .is_none_or(|t| t == "regular");
+        u.records += 1;
+        u.total_bytes += size;
+        if in_use == Some(true) {
+            u.in_use_records += 1;
+            u.in_use_bytes += size;
+        }
+        if shared == Some(true) {
+            u.shared_records += 1;
+            u.shared_bytes += size;
+        }
+        if in_use == Some(false) && shared == Some(false) && regular {
+            u.prunable_records += 1;
+            u.prunable_bytes += size;
+        }
+    }
+    u
+}
+
 fn parse(r: &Response, op: &'static str) -> Result<Json, ApiError> {
     Json::parse(&r.text()).map_err(|e| ApiError::Malformed {
         op,
@@ -851,23 +899,13 @@ impl DockerApi {
         }
     }
 
-    /// `GET /system/df`: bytes of BuildKit cache in total and the part nothing is using (what a prune would remove).
-    pub fn build_cache_usage(&self, left: Duration) -> Result<(u64, u64), ApiError> {
+    /// `GET /system/df`: the BuildKit cache, split into what a record's size means and what a prune can actually remove.
+    pub fn build_cache_usage(&self, left: Duration) -> Result<CacheUsage, ApiError> {
         let r = self.call("GET", "/system/df", None, left)?;
         if r.status != 200 {
             return Err(Self::unexpected("disk usage", &r));
         }
-        let j = parse(&r, "disk usage")?;
-        let entries = j.get("BuildCache").and_then(Json::as_array).unwrap_or(&[]);
-        let (mut total, mut free) = (0u64, 0u64);
-        for e in entries {
-            let size = e.get("Size").and_then(Json::as_i64).unwrap_or(0).max(0) as u64;
-            total += size;
-            if !e.get("InUse").and_then(Json::as_bool).unwrap_or(false) {
-                free += size;
-            }
-        }
-        Ok((total, free))
+        Ok(cache_usage_from_df(&parse(&r, "disk usage")?))
     }
 
     /// `POST /build/prune`: removes BuildKit cache nothing is using (what `docker builder prune` does without `--all`
@@ -1039,5 +1077,66 @@ mod network_tests {
         let joined = spec(Some("proj_default")).body().to_json();
         assert!(joined.contains("\"NetworkMode\":\"proj_default\""));
         assert!(joined.contains("\"Memory\":0") && joined.contains("\"PidsLimit\":0"));
+    }
+}
+
+#[cfg(test)]
+mod cache_usage_tests {
+    use super::*;
+
+    fn df(records: &str) -> Json {
+        Json::parse(&format!("{{\"BuildCache\":[{records}]}}")).unwrap()
+    }
+    fn rec(size: u64, in_use: bool, shared: bool, ty: &str) -> String {
+        format!("{{\"Size\":{size},\"InUse\":{in_use},\"Shared\":{shared},\"Type\":\"{ty}\"}}")
+    }
+
+    #[test]
+    fn records_shared_with_images_are_not_reclaimable_however_large_they_are() {
+        // the shape of the real guest: every record unused, shared with an image, plain type
+        let u = cache_usage_from_df(&df(&[
+            rec(1_450_000_000, false, true, "regular"),
+            rec(233_000_000, false, true, "regular"),
+        ]
+        .join(",")));
+        assert_eq!(
+            (u.records, u.total_bytes, u.shared_records, u.shared_bytes),
+            (2, 1_683_000_000, 2, 1_683_000_000)
+        );
+        assert_eq!((u.prunable_records, u.prunable_bytes), (0, 0));
+    }
+
+    #[test]
+    fn only_unused_unshared_plain_records_are_prunable() {
+        let u = cache_usage_from_df(&df(&[
+            rec(100, false, false, "regular"),  // prunable
+            rec(200, true, false, "regular"),   // in use
+            rec(400, false, true, "regular"),   // shared with an image
+            rec(800, false, false, "internal"), // not removed without --all
+            rec(1600, false, false, "frontend"),
+        ]
+        .join(",")));
+        assert_eq!(
+            (u.total_bytes, u.in_use_bytes, u.shared_bytes),
+            (3100, 200, 400)
+        );
+        assert_eq!((u.prunable_records, u.prunable_bytes), (1, 100));
+    }
+
+    #[test]
+    fn a_field_docker_did_not_report_never_makes_a_record_prunable() {
+        let u = cache_usage_from_df(&df(
+            "{\"Size\":500,\"InUse\":false},{\"Size\":700,\"Shared\":false},{\"Size\":900}",
+        ));
+        assert_eq!((u.records, u.total_bytes, u.prunable_bytes), (3, 2100, 0));
+    }
+
+    #[test]
+    fn an_empty_or_missing_cache_is_zero_everywhere() {
+        assert_eq!(cache_usage_from_df(&df("")), CacheUsage::default());
+        assert_eq!(
+            cache_usage_from_df(&Json::parse("{}").unwrap()),
+            CacheUsage::default()
+        );
     }
 }

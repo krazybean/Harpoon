@@ -113,6 +113,9 @@ export function reasonLabel(i: CleanupItem): string {
     case "serving-release": return `Serving now: this ${what} belongs to the running release`;
     case "serving-pins-image": return "Image the running release is built from";
     case "shared-with-protected": return "Image retained because a protected deployment still references it";
+    case "rollback-target": return "Rollback target: the most recent previous release proven restorable, kept so the application can be rolled back";
+    case "rollback-pins-image": return "Image a rollback of this application would start from";
+    case "rollback-unverified": return "Kept: whether this release can be rolled back to could not be verified";
     case "nothing-proven-serving": return `No release of this application is recorded as serving, so its ${what} is left alone`;
     default: return i.detail ? `Needs review: ${i.detail}` : "Needs review";
   }
@@ -184,11 +187,29 @@ export function freedSummary(r: Pick<CleanupReport, "guestFreeBefore" | "guestFr
   return `Guest free space: ${size(r.guestFreeBefore)} before, ${size(r.guestFreeAfter)} after (${d >= 0 ? "+" : "−"}${size(Math.abs(d))}).`;
 }
 
-export type CacheReport = { reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null; /** Why an apply would be refused right now (an unfinished deployment, an unreadable journal), or `null` when the guard is clear or was not reported. */ blocked: string | null };
+export type CacheReport = {
+  /** What a prune can remove: records that are unused and not shared with an image. An estimate, not a promise. */
+  reclaimable: number | null; reclaimed: number | null; guestFreeBefore: number | null; guestFreeAfter: number | null;
+  /** Docker's records, kept apart from `reclaimable`: their own sizes overlap each other and the images they share layers with. */
+  records: number | null; total: number | null; inUse: number | null; shared: number | null;
+  /** Why an apply would be refused right now (an unfinished deployment, an unreadable journal), or `null` when the guard is clear or was not reported. */
+  blocked: string | null;
+};
 
 /** The engine's `prune-build-cache` report. Docker's reclaimed figure is shown as Docker's; the guest's own free space is the measured change. */
 export function parseCache(detail: string): CacheReport {
   // a size is a whole, non-negative number of bytes; anything else (missing, negative, fractional, text) is "not reported", never a number
   const n = (key: string) => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith(`${key}:`)); const s = l ? l.slice(key.length + 1).trim() : ""; return /^\d+$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null; };
-  return { reclaimable: n("build-cache-reclaimable-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes"), blocked: (() => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith("prune-guard: blocked")); return l ? l.replace(/^prune-guard: blocked:?\s*/, "") || "the engine did not say why" : null; })() };
+  return { reclaimable: n("build-cache-reclaimable-bytes"), records: n("build-cache-records"), total: n("build-cache-total-bytes"), inUse: n("build-cache-in-use-bytes"), shared: n("build-cache-shared-bytes"), reclaimed: n("build-cache-reclaimed-bytes"), guestFreeBefore: n("guest-free-before-bytes"), guestFreeAfter: n("guest-free-after-bytes"), blocked: (() => { const l = detail.split("\n").map((x) => x.trim()).find((x) => x.startsWith("prune-guard: blocked")); return l ? l.replace(/^prune-guard: blocked:?\s*/, "") || "the engine did not say why" : null; })() };
+}
+
+/** Why a prune frees what it frees, from the engine's own figures. Null when there is nothing to explain (no records, or none shared with an
+ *  image). Record sizes overlap each other and the images they share layers with, so they are never offered as space. */
+export function cacheExplanation(c: CacheReport, size: (bytes: number) => string): string | null {
+  if (c.reclaimable === null || !c.total || !c.shared) return null;
+  const inUse = c.inUse ? ` and ${size(c.inUse)} is in use` : "";
+  if (c.reclaimable === 0) {
+    return `Docker lists ${c.records ?? "some"} build-cache record${c.records === 1 ? "" : "s"} whose own sizes add up to ${size(c.total)}, but that is not free space: the records overlap, and ${size(c.shared)} is shared with images${inUse}. A prune would free about 0 B. The space is held by images, so removing old releases is what frees it.`;
+  }
+  return `A prune can remove up to ${size(c.reclaimable)}. The rest of Docker's ${size(c.total)} of record sizes is not free space: ${size(c.shared)} is shared with images${inUse}, and stays.`;
 }

@@ -2422,6 +2422,17 @@ pub enum ImageVerdict {
     NotExclusive(String),
 }
 
+/// Whether Docker still holds the image a rollback would start from, and whether it is provably Harpoon's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackImage {
+    /// Docker has this exact image id and it carries this deployment's three Harpoon labels.
+    Verified,
+    /// Docker has no image with this id: the release cannot be restored from it.
+    Absent,
+    /// Docker could not be asked, or its answer does not prove the image is this release's. Never treated as absent.
+    Unverifiable(String),
+}
+
 impl<T: HttpTransport> DockerBackend<T> {
     /// Read-only: inspect the image by its immutable id and list every container (running and
     /// stopped). An unreachable or malformed answer is an error, never "absent" and never
@@ -2503,6 +2514,38 @@ impl<T: HttpTransport> DockerBackend<T> {
             )));
         }
         Ok(ImageVerdict::Eligible)
+    }
+
+    /// Read-only: is the image a rollback to `dep` would start from present, by its immutable id, with the labels that show it
+    /// is this deployment's? Used by cleanup to decide what it must not remove; it never changes anything.
+    pub fn verify_rollback_image(
+        &self,
+        id: &str,
+        app: &harpoon_deploy::ids::ApplicationId,
+        dep: &DeploymentId,
+    ) -> RollbackImage {
+        let budget = Budget {
+            start: Instant::now(),
+            total: self.cfg.cleanup_timeout,
+        };
+        let left = match budget.left("inspecting the rollback image") {
+            Ok(l) => l,
+            Err(e) => return RollbackImage::Unverifiable(e.message),
+        };
+        match self.api.image_inspect(id, left) {
+            Err(e) => RollbackImage::Unverifiable(format!("Docker could not be asked: {e}")),
+            Ok(None) => RollbackImage::Absent,
+            Ok(Some(img)) if img.id != id => RollbackImage::Unverifiable(format!(
+                "Docker answered for image {} when asked about {}",
+                short(&img.id),
+                short(id)
+            )),
+            Ok(Some(img)) if !has_labels(&img.labels, app, dep) => RollbackImage::Unverifiable(format!(
+                "image {} does not carry this deployment's Harpoon labels (managed, app, deployment)",
+                short(id)
+            )),
+            Ok(Some(_)) => RollbackImage::Verified,
+        }
     }
 
     /// The only image-removal path of `cleanup-image`: re-assesses immediately before deleting and

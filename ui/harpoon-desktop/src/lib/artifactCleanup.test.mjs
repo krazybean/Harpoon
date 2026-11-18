@@ -93,7 +93,10 @@ test("freed space is the guest filesystem's own before/after, never a sum of ima
 });
 
 test("the build cache report carries Docker's figure and the guest's measured free space separately", () => {
-  assert.deepEqual(parseCache("build-cache-reclaimable-bytes: 1250"), { reclaimable: 1250, reclaimed: null, guestFreeBefore: null, guestFreeAfter: null, blocked: null });
+  assert.deepEqual(parseCache("build-cache-reclaimable-bytes: 1250"), { reclaimable: 1250, reclaimed: null, guestFreeBefore: null, guestFreeAfter: null, records: null, total: null, inUse: null, shared: null, blocked: null });
+  // the record figures travel beside the reclaimable one and are never mistaken for it
+  const full = parseCache("build-cache-records: 39\nbuild-cache-total-bytes: 3392326938\nbuild-cache-in-use-bytes: 0\nbuild-cache-shared-bytes: 3392326938\nbuild-cache-prunable-records: 0\nbuild-cache-reclaimable-bytes: 0");
+  assert.deepEqual([full.reclaimable, full.records, full.total, full.shared, full.inUse], [0, 39, 3392326938, 3392326938, 0]);
   const done = parseCache("build-cache-reclaimed-bytes: 1250\nguest-free-before-bytes: 10\nguest-free-after-bytes: 20");
   assert.equal(done.reclaimed, 1250);
   assert.equal(done.guestFreeAfter - done.guestFreeBefore, 10);
