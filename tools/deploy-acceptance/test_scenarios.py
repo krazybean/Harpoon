@@ -113,6 +113,16 @@ class Precondition(unittest.TestCase):
         self.assertTrue(Scripted(pathlib.Path(tempfile.mkdtemp())).ready_for_change("x"))
 
 
+class Audit(unittest.TestCase):
+    def test_prose_containing_the_word_running_is_not_an_active_deployment(self):      # 2026-11-17 17:48: "no running release is confirmed"
+        text = (HERE / "fixtures" / "status_restore_failed_prose_running.txt").read_text()
+        self.assertIn(" running ", text)
+        self.assertEqual(h.Run.active_deployments(text), [])
+
+    def test_a_running_deployment_row_is_active(self):
+        self.assertEqual(h.Run.active_deployments("deployments: 2\n  dep_01ABC running app=app_X created_ms=1\n  dep_01DEF succeeded app=app_X\n"), ["dep_01ABC"])
+
+
 class FaultInjection(unittest.TestCase):
     def test_only_the_preliminary_candidates_creation_is_targeted(self):
         t = h.Run.is_pre_create

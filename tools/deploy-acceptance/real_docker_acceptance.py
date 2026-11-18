@@ -392,13 +392,18 @@ class Run:
                 and c.execute("select count(*) from records where kind='ledger' and body like ?", (f"%\tintent\timage\t{tag}%",)).fetchone()[0] == 1 and c.execute("select count(*) from records").fetchone()[0] > self.baseline_seq
         self.after_kill(name, *self.kill_when("kill-after-image-intent", pred))
 
-    def kill_during_cutover(self):
-        name = "sigkill-during-cutover"
+    def kill_during_cutover(self, early=False):
+        """Two kill points inside the cutover. `early`: the instant it begins, while the previous release's `stop` (10 s of grace for an
+        application that ignores SIGTERM) is still running in Docker, so the previous container is still `running` when recovery starts.
+        Otherwise: after the previous release stopped, when the engine records the intent to create the candidate's container."""
+        name = "sigkill-at-cutover-begin" if early else "sigkill-during-cutover"
         if not self.ready_for_change(name): return
         def pred(c):
             r = c.execute("select body from records where kind='snapshot' order by seq desc limit 1").fetchone()
-            return bool(r) and "\tbegun\t" in r[0] and c.execute("select count(*) from records").fetchone()[0] > self.baseline_seq
-        self.after_kill(name, *self.kill_when("kill-during-cutover", pred), restore=True)
+            if not (bool(r) and "\tbegun\t" in r[0] and c.execute("select count(*) from records").fetchone()[0] > self.baseline_seq): return False
+            if early: return True
+            return c.execute("select count(*) from records where kind='ledger' and seq > ? and body like '%\tintent\tcontainer\thp-dep_%' and body not like '%-pre\t%'", (self.baseline_seq,)).fetchone()[0] > 0
+        self.after_kill(name, *self.kill_when(name, pred), restore=True)
 
     def after_kill(self, name, killed, before, rc, tail, restore=False):
         t0 = now()
@@ -440,9 +445,15 @@ class Run:
         removed = {k: sorted(set(before[k]) - set(after[k])) for k in after}
         foreign = [x for k in added for x in added[k] if self.app and self.app.lower() not in x.lower() and not re.search(r"hp-dep_|busybox|harpoon/app_", x)]
         db = self.journal(); integ = db.execute("pragma integrity_check").fetchone()[0] if db else "n/a"
-        st = self.status()
-        self.record("ownership-audit", not removed["containers"] + removed["images"] + removed["volumes"] + removed["networks"] and not foreign and integ == "ok" and " running " not in st,
-                    added=added, removed=removed, foreign_additions=foreign, journal_integrity=integ, active_deployments=len(re.findall(r" running ", st)))
+        active = self.active_deployments(self.status())
+        self.record("ownership-audit", not removed["containers"] + removed["images"] + removed["volumes"] + removed["networks"] and not foreign and integ == "ok" and not active,
+                    added=added, removed=removed, foreign_additions=foreign, journal_integrity=integ, active_deployments=len(active), active=active)
+
+    @staticmethod
+    def active_deployments(status):
+        """Deployment rows still `running`. Not a substring test: `status` also says "no running release is confirmed" in prose, which
+        made a failed restoration look like an active deployment in the 2026-11-17 17:48 audit."""
+        return re.findall(r"^\s+(dep_\w+) running\b", status, re.M)
 
     def main(self):
         missing = self.prerequisites()
@@ -460,7 +471,7 @@ class Run:
         steps = [("replace", lambda: self.replacements(self.a.iterations)),
                  ("buildfail", lambda: self.expect_failed_and_serving("build-failure-before-cutover", "buildfail", expect="build")),
                  ("healthfail", lambda: self.expect_failed_and_serving("health-failure-before-cutover", "wrongport", "--health-timeout-secs", "20", expect="preliminary_check")),
-                 ("dockerapi", self.docker_api_failure), ("dockerconflict", self.docker_name_conflict), ("killintent", self.kill_after_image_intent), ("killcutover", self.kill_during_cutover),
+                 ("dockerapi", self.docker_api_failure), ("dockerconflict", self.docker_name_conflict), ("killintent", self.kill_after_image_intent), ("killcutover", self.kill_during_cutover), ("killearly", lambda: self.kill_during_cutover(early=True)),
                  ("forwarder", self.forwarder_probes)]
         for key, fn in steps:
             if self.a.only and key not in self.a.only: continue

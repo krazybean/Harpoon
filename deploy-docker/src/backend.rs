@@ -102,6 +102,10 @@ pub struct DockerConfig {
     pub api_timeout: Duration,
     /// Time allowed for one removal outside a step (recovery, post-deployment cleanup).
     pub cleanup_timeout: Duration,
+    /// How long a restoration watches a previous release's container that is still `running` before it decides the container is
+    /// serving rather than being stopped. Docker gives no sign that a `stop` is in flight, and Harpoon's own stop allows 10 s of
+    /// grace, so this must exceed it.
+    pub restore_settle: Duration,
     pub log_tail_lines: u32,
     pub log_max_bytes: usize,
     /// Allow this backend to replace a running release (stop it, start the new one, restore the old
@@ -148,6 +152,7 @@ impl DockerConfig {
             min_free_bytes: 2 * 1024 * 1024 * 1024,
             api_timeout: Duration::from_secs(30),
             cleanup_timeout: Duration::from_secs(60),
+            restore_settle: Duration::from_secs(12),
             log_tail_lines: 200,
             log_max_bytes: 256 * 1024,
             enable_replacement: false,
@@ -1934,6 +1939,75 @@ impl<T: HttpTransport> DockerBackend<T> {
         v
     }
 
+    /// `Some(result)` when the previous release's container is still running and the restoration is settled without creating anything;
+    /// `None` when it is stopped, gone or unreadable (the usual restoration then proceeds, exactly as before).
+    ///
+    /// A container that stops while watched is being stopped: the caller recreates it. One that stays up, unchanged (same `StartedAt`),
+    /// for longer than Harpoon's own stop grace was never stopped, and is verified through the same path-attributed check a restored
+    /// container gets. Healthy: it is the serving release, recorded as restored with no new container. Anything else (it restarted, it
+    /// cannot be read back, it fails its check) creates nothing and uses no attempt: a second container could not bind the port.
+    fn previous_still_running(
+        &mut self,
+        io: &mut StepIo<'_>,
+        b: &Budget,
+        id: &str,
+        owner: &DeploymentId,
+        cfg: &ReleaseConfig,
+    ) -> Result<Option<RestoreResult>, StepError> {
+        let read = |s: &Self, b: &Budget| -> Result<Option<ContainerInfo>, StepError> {
+            s.api
+                .container_inspect(id, b.left("checking the previous release's container")?)
+                .map_err(|e| api_err("checking the previous release's container", e))
+        };
+        let first = match read(self, b) {
+            Ok(Some(c)) if c.running && has_labels(&c.labels, io.app(), owner) => c,
+            _ => return Ok(None),
+        };
+        let blocked = |io: &mut StepIo<'_>, why: &str| {
+            io.log.push_line(&format!(
+                "restoration: the previous release's container {} is still running and {why}; nothing was created, because a second container could not bind port {}",
+                first.name, cfg.host_port
+            ));
+            Ok(Some(RestoreResult::NotAttempted(Reason::PortInUse)))
+        };
+        let until = Instant::now() + self.cfg.restore_settle;
+        loop {
+            std::thread::sleep(Duration::from_millis(100).min(self.cfg.restore_settle));
+            match read(self, b) {
+                Ok(Some(c)) if c.running && c.started_at == first.started_at => {}
+                Ok(Some(c)) if c.running => return blocked(io, "restarted while being watched"),
+                Ok(_) => return Ok(None), // stopped or removed: it was being stopped, and the port is free
+                Err(_) => return blocked(io, "could not be read back"),
+            }
+            if Instant::now() >= until {
+                break;
+            }
+        }
+        match self.health(
+            io,
+            b,
+            id,
+            &first.name,
+            cfg.host_port,
+            "the restoration check",
+        ) {
+            Ok(ev) => {
+                io.log.push_line(&format!(
+                    "restoration: the previous release's container {} was still running and stayed up for {} ms without a restart; nothing was created. restoration check: {}",
+                    first.name,
+                    self.cfg.restore_settle.as_millis(),
+                    ev.summary()
+                ));
+                Ok(Some(RestoreResult::Healthy))
+            }
+            Err(e) if e.fatal.is_some() => Err(e),
+            Err(e) => blocked(
+                io,
+                &format!("did not pass its health check ({})", e.message),
+            ),
+        }
+    }
+
     fn restore_inner(
         &mut self,
         io: &mut StepIo<'_>,
@@ -2021,10 +2095,10 @@ impl<T: HttpTransport> DockerBackend<T> {
                     && e.id.is_some()
             })
             .and_then(|e| e.id.clone());
-        if let Some(id) = serving_id {
+        if let Some(id) = &serving_id {
             if let Ok(ports) = self
                 .api
-                .configured_host_ports(&id, b.left("reading the serving container's port")?)
+                .configured_host_ports(id, b.left("reading the serving container's port")?)
             {
                 if !ports.is_empty() && !ports.contains(&cfg.host_port) {
                     io.log.push_line(&format!(
@@ -2083,6 +2157,14 @@ impl<T: HttpTransport> DockerBackend<T> {
                 if let Err(e) = io.lease_port(lease) {
                     return judged(io, e, Reason::StartFailed);
                 }
+            }
+        }
+        // The previous release's own container is deliberately not a blocker (see `restore_blockers`), which assumes the cutover stopped
+        // it. If it is still `running`, a second container on its port cannot start. It is either being stopped (the killed process's
+        // `stop` is still running in Docker) or was never stopped. Watch it, then act on what is seen.
+        if let Some(id) = &serving_id {
+            if let Some(done) = self.previous_still_running(io, b, id, serving_owner, cfg)? {
+                return Ok(done);
             }
         }
         let name = harpoon_deploy::serving::restored_container_name(io.deployment());

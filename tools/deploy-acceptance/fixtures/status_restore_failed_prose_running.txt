@@ -1,0 +1,28 @@
+runtime: ~/harpoon-acceptance-20261117-174808/runtime
+kind: docker
+journal: ~/harpoon-acceptance-20261117-174808/runtime/deploy-journal/deployments.sqlite3 (lock: free)
+deployments: 2
+latest: dep_01M7NYJTF8SPJ4EKZDES8MPJ7P interrupted
+  dep_01M7NYJTF8SPJ4EKZDES8MPJ7P interrupted app=app_01M7NYJANNTZMD99QV3EYT3RXX created_ms=1794959305192
+    recovery: restore_failed in 248 ms
+    cutover failed and no running release is confirmed afterwards: the application MAY BE DOWN
+    image harpoon/app_01m7nyjanntzmd99qv3eyt3rxx:dep_01M7NYJTF8SPJ4EKZDES8MPJ7P-8132f2c012467e095d46231f722cbe26 id=sha256:a212e06936598f688b4737840925f9bbf2fa2e53ce61827e355cedb750ce1a42 state=created keep=retain
+    port 39000 id=39000 state=released keep=remove-always
+    container hp-dep_01M7NYJTF8SPJ4EKZDES8MPJ7P-pre id=66f9bdcf85d185a8e1a5b3b6ac98f674d6716fc21c3d26e31ca881d3f0fdc27b state=released keep=remove-always
+    port 38027 id=38027 state=released keep=remove-on-failure
+    container hp-dep_01M7NYJTF8SPJ4EKZDES8MPJ7P-restored id=5d0a7b91f761cc73377165b731ac6af916e3e46715cae6ab4db7df4d13228c3f state=created keep=retain
+  dep_01M7NYJANNTZMD99QV3EYT3RXY succeeded app=app_01M7NYJANNTZMD99QV3EYT3RXX created_ms=1794959289013
+    image harpoon/app_01m7nyjanntzmd99qv3eyt3rxx:dep_01M7NYJANNTZMD99QV3EYT3RXY-960654b33f19af2eb48f1f0d2b30e8ae id=sha256:fa7e2fbcbcb5f7504081cf1333b7f34b13837c76d53f71be14ae0e2ddf5815d1 state=created keep=retain
+    port 39000 id=39000 state=released keep=remove-always
+    container hp-dep_01M7NYJANNTZMD99QV3EYT3RXY-pre id=3ba53f07a05ad17cbd6c1f2fc51d8e952bb9196b6fa57c4940a00c5963c59f27 state=released keep=remove-always
+    port 38026 id=38026 state=created keep=remove-on-failure
+    container hp-dep_01M7NYJANNTZMD99QV3EYT3RXY id=dceee6845893dc77be939764053151424359814d34cd1d728ac29b020200a1b9 state=created keep=remove-on-failure
+outstanding leases:
+  port 38026 held by deployment dep_01M7NYJANNTZMD99QV3EYT3RXY (Created)
+unresolved cleanup: none
+retained images of unsuccessful deployments (they do not block deployments; remove one with `cleanup-image`):
+  image harpoon/app_01m7nyjanntzmd99qv3eyt3rxx:dep_01M7NYJTF8SPJ4EKZDES8MPJ7P-8132f2c012467e095d46231f722cbe26 (id sha256:a212e06936598f688b4737840925f9bbf2fa2e53ce61827e355cedb750ce1a42) of deployment dep_01M7NYJTF8SPJ4EKZDES8MPJ7P (interrupted): retained
+serving: application app_01M7NYJANNTZMD99QV3EYT3RXX runs release rel_01M7NYJANNTZMD99QV3EYT3RXY (deployment dep_01M7NYJANNTZMD99QV3EYT3RXY) in container hp-dep_01M7NYJANNTZMD99QV3EYT3RXY of deployment dep_01M7NYJANNTZMD99QV3EYT3RXY — per the records only: a cutover began after this and has no confirmed outcome, so this release's container may be stopped and the application DOWN
+automatic triggers paused for application app_01M7NYJANNTZMD99QV3EYT3RXX: deployment dep_01M7NYJTF8SPJ4EKZDES8MPJ7P began a cutover that never finished (recovery restore_failed); since 1794959319058 ms (epoch), recorded
+application app_01M7NYJANNTZMD99QV3EYT3RXX: PAUSED — held events: 0
+  actions (each records a decision and deploys nothing): harpoon-deploy resume --app app_01M7NYJANNTZMD99QV3EYT3RXX --dismiss
