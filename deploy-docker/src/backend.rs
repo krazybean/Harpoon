@@ -2038,7 +2038,9 @@ impl<T: HttpTransport> DockerBackend<T> {
                 "does not carry the labels of the release it should belong to".into(),
             ));
         }
-        if !first.image_id.is_empty() && first.image_id != cfg.image_id {
+        // Docker must say which image it runs, and it must be the pinned one: that is the image a marker-free response is attributed to
+        // (the in-memory record of images this process created does not cover a container an earlier run created).
+        if first.image_id != cfg.image_id {
             return Ok(block(
                 "was not created from the previous release's pinned image".into(),
             ));
@@ -2097,6 +2099,9 @@ impl<T: HttpTransport> DockerBackend<T> {
                 break;
             }
         }
+        self.st
+            .created_images
+            .insert(first.name.clone(), cfg.image_id.clone());
         let checked = self.health(
             io,
             b,
@@ -2106,6 +2111,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             "the restoration check",
         );
         self.st.markers.remove(&first.name);
+        self.st.created_images.remove(&first.name);
         match checked {
             Ok(ev) => {
                 // Identity, state and start time again, after the check: a stop that began meanwhile is not a stable release.

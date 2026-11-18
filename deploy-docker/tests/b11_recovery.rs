@@ -2316,3 +2316,83 @@ fn a_previous_container_that_cannot_be_read_blocks_the_restoration_instead_of_cr
         rep.blocked
     );
 }
+
+/// Live attribution for an ordinary application (it ignores the marker, as busybox httpd does): responses carry no marker, so they count
+/// only through the proven path and the pinned image.
+fn unmarked_recovery_backend(r: &Rig, deny: Option<u16>) -> DockerBackend<PlainPorts> {
+    let mut cfg = config(&r.h.ws, &r.h.docker);
+    cfg.enable_replacement = true;
+    cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
+    cfg.restore_settle = Duration::from_millis(150);
+    DockerBackend::with_transport(
+        cfg,
+        Some(&r.h.ws.resources()),
+        PlainPorts {
+            restored_port: PREV_PORT,
+            candidate_ok: false,
+        },
+    )
+    .unwrap()
+    .with_entropy(test_entropy())
+    .with_port_probe(NoListeners)
+    .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+    .with_path_proof(RecordingProof {
+        ports: Default::default(),
+        deny,
+    })
+}
+
+#[test]
+fn a_previous_release_created_by_an_earlier_run_is_verified_through_the_path_and_its_pinned_image()
+{
+    // the run that created the container is gone: nothing in memory knows its image, and the application never echoes the marker
+    let mut r = rig();
+    previous_created_with_marker(&r, Some("ignored-by-the-application"));
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = unmarked_recovery_backend(&r, None);
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert!(rep.blocked.is_empty(), "{:?}", rep.blocked);
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+    assert_eq!(
+        created_or_started_or_stopped_anything(&r),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_unmarked_response_is_still_refused_without_a_proven_path() {
+    let mut r = rig();
+    previous_created_with_marker(&r, Some("ignored-by-the-application"));
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = unmarked_recovery_backend(&r, Some(PREV_PORT));
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+}
+
+#[test]
+fn a_previous_container_running_another_image_is_never_verified() {
+    let mut r = rig();
+    previous_created_with_marker(&r, Some("ignored-by-the-application"));
+    let name = r.prev_name.clone();
+    r.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .find(|c| c.name == name)
+            .unwrap()
+            .image = fake_iid(9999);
+    });
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = unmarked_recovery_backend(&r, None);
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+    assert!(
+        rep.blocked.iter().any(|m| m.contains("pinned image")),
+        "{:?}",
+        rep.blocked
+    );
+}
