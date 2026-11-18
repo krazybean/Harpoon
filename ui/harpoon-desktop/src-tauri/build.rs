@@ -53,15 +53,19 @@ fn main() {
       .status();
   }
 
-  let required_assets = [&harpoon_bin, &docker_cli, &docker_buildx, &kernel, &initramfs, &rootimg, &asset_manifest];
-  let missing_assets: Vec<_> = required_assets
-    .iter()
-    .filter(|asset| !asset.exists())
-    .collect();
+  // Two independent groups. The deployment tools (the runtime binary, Docker CLI and the pinned Buildx, with its license) are what a
+  // development desktop needs to run a deployment preflight; the guest assets (kernel, initramfs, 2 GiB root image, manifest) are only
+  // needed to boot a VM from the bundle. A checkout that lacks the large guest assets (a git worktree, a clean clone) must still stage
+  // the tools it has, or the desktop reports "the bundled Buildx is missing" while the verified binary sits in harpoon/build.
+  let tool_assets = [&harpoon_bin, &docker_cli, &docker_buildx];
+  let guest_assets = [&kernel, &initramfs, &rootimg, &asset_manifest];
+  let missing_of = |group: &[&std::path::PathBuf]| -> Vec<String> {
+    group.iter().filter(|a| !a.exists()).map(|a| a.display().to_string()).collect()
+  };
+  let (missing_tools, missing_guest) = (missing_of(&tool_assets), missing_of(&guest_assets));
 
-  if missing_assets.is_empty() {
+  if missing_tools.is_empty() {
     std::fs::create_dir_all(&bin_dir).expect("failed to create bundle bin directory");
-    std::fs::create_dir_all(&lib_dir).expect("failed to create bundle lib directory");
     std::fs::copy(&harpoon_bin, bin_dir.join("harpoon"))
       .expect("failed to stage Harpoon runtime binary");
     std::fs::copy(&docker_cli, bin_dir.join("docker"))
@@ -74,6 +78,13 @@ fn main() {
       std::fs::copy(buildx_license_dir.join(name), license_dir.join(name))
         .expect("failed to stage Docker Buildx license notice");
     }
+    let _ = Command::new("chmod")
+      .args(["+x", bin_dir.join("harpoon").to_str().unwrap(), bin_dir.join("docker").to_str().unwrap(), bin_dir.join("docker-buildx").to_str().unwrap()])
+      .status();
+  }
+
+  if missing_guest.is_empty() {
+    std::fs::create_dir_all(&lib_dir).expect("failed to create bundle lib directory");
     std::fs::copy(&kernel, lib_dir.join("Image-virt"))
       .expect("failed to stage guest kernel");
     std::fs::copy(&initramfs, lib_dir.join("harpoon-initramfs.cpio.gz"))
@@ -94,21 +105,15 @@ fn main() {
         std::fs::copy(&rootimg, &dest).expect("failed to stage guest root image");
       }
     }
+  }
 
-    let _ = Command::new("chmod")
-      .args(["+x", bin_dir.join("harpoon").to_str().unwrap(), bin_dir.join("docker").to_str().unwrap(), bin_dir.join("docker-buildx").to_str().unwrap()])
-      .status();
-  } else if env::var("PROFILE").as_deref() == Ok("release") {
-    let missing = missing_assets
-      .iter()
-      .map(|asset| asset.display().to_string())
-      .collect::<Vec<_>>()
-      .join(", ");
+  if env::var("PROFILE").as_deref() == Ok("release") && (!missing_tools.is_empty() || !missing_guest.is_empty()) {
+    let missing = missing_tools.iter().chain(&missing_guest).cloned().collect::<Vec<_>>().join(", ");
     panic!("release bundle assets are missing: {missing}");
-  } else {
-    println!(
-      "cargo:warning=guest bundle assets are not fully staged; continuing non-release build/check"
-    );
+  } else if !missing_tools.is_empty() {
+    println!("cargo:warning=deployment tools are not staged (missing: {}); a deployment preflight will report the bundled Buildx as missing", missing_tools.join(", "));
+  } else if !missing_guest.is_empty() {
+    println!("cargo:warning=guest bundle assets are not staged (missing: {}); the deployment tools are staged; continuing non-release build/check", missing_guest.join(", "));
   }
 
   // Universal bundles also ship the x86_64 guest, staged by prepare-bundle.sh.
