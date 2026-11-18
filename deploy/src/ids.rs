@@ -142,19 +142,23 @@ macro_rules! define_id {
 
 define_id!(
     /// A group of applications.
-    ProjectId, "prj"
+    ProjectId,
+    "prj"
 );
 define_id!(
     /// One deployable unit. Written to the `io.harpoon.app` Docker label.
-    ApplicationId, "app"
+    ApplicationId,
+    "app"
 );
 define_id!(
     /// One deployment attempt. Written to the `io.harpoon.deployment` Docker label.
-    DeploymentId, "dep"
+    DeploymentId,
+    "dep"
 );
 define_id!(
     /// The immutable result of a successful build; shares its characters with the deployment.
-    ReleaseId, "rel"
+    ReleaseId,
+    "rel"
 );
 
 impl ReleaseId {
