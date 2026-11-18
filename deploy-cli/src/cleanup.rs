@@ -31,7 +31,7 @@ use harpoon_deploy::ledger::{
 };
 use harpoon_deploy::rollback::retained_releases;
 use harpoon_deploy::serving::{restored_container_name, serving_release};
-use harpoon_deploy::state::{Deployment, DeploymentStatus, RecoveryOutcome};
+use harpoon_deploy::state::{CutoverState, Deployment, DeploymentStatus, RecoveryOutcome};
 use harpoon_deploy::time::SystemClock;
 use harpoon_deploy_docker::backend::{AbandonedContainer, ImageVerdict, RollbackImage};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
@@ -47,17 +47,42 @@ pub(crate) struct Tidied {
     pub containers: usize,
     pub leases: usize,
     pub images: usize,
+    /// Journal records for objects Docker no longer has, reconciled without removing anything.
+    pub reconciled: usize,
+    /// What removing the images is expected to free, from layer sharing; `None` when Docker's layer data was not available.
+    pub estimated_bytes: Option<u64>,
+    pub estimate_exact: bool,
+    /// Every action this run decided on, one stable key each (what a Review is identified by).
+    pub plan: BTreeSet<String>,
+    /// An apply met an action that was not in the reviewed plan and left it alone.
+    pub drifted: bool,
 }
 
 /// Plan (`apply == false`: nothing is changed, the journal is not written) or carry out the cleanup. A refusal
 /// leaves everything as it was.
+/// How one release cleanup runs: whether it changes anything, how many previous releases it keeps, whether it reports the guest's
+/// free space itself, and the plan an apply is bound to (anything else it finds is left alone).
+#[derive(Clone, Copy)]
+pub(crate) struct Opts<'a> {
+    pub apply: bool,
+    pub keep_rollbacks: usize,
+    pub report_guest: bool,
+    pub expected: Option<&'a BTreeSet<String>>,
+}
+
 pub(crate) fn run(
     p: &Parsed,
     rt: &Runtime,
     socket: &Path,
-    apply: bool,
+    o: Opts,
     out: &mut String,
 ) -> Result<Tidied, Fail> {
+    let Opts {
+        apply,
+        keep_rollbacks,
+        report_guest,
+        expected,
+    } = o;
     let mut backend = docker_backend(p, rt, socket)?;
     let (mut writer, restored) = if apply {
         let (j, r) = store::open_writer(rt, Kind::Docker)?;
@@ -82,11 +107,18 @@ pub(crate) fn run(
     let apps: BTreeSet<ApplicationId> = deps.iter().map(|d| d.application_id.clone()).collect();
     let mut protected: BTreeSet<DeploymentId> = BTreeSet::new();
     let mut protected_images: BTreeSet<String> = BTreeSet::new();
+    let mut owner_only: BTreeSet<DeploymentId> = BTreeSet::new();
     for app in &apps {
         match serving_release(&restored.ledger, deps, app) {
             Some(s) => {
                 protected.insert(s.deployment.clone());
                 protected.insert(s.container_owner.clone());
+                // A restoration (or rollback) container serves for a release another deployment built. Its owner is kept because
+                // it owns that container; what the owner built for itself, such as the failed candidate's own image, is judged
+                // on its own below.
+                if s.container_owner != s.deployment {
+                    owner_only.insert(s.container_owner.clone());
+                }
                 if let Some(c) = &s.config {
                     protected_images.insert(c.image_id.clone());
                 }
@@ -98,15 +130,56 @@ pub(crate) fn run(
             ),
         }
     }
-    // Rollback targets. For each application that serves a release, the most recent PREVIOUS release that is proven
-    // restorable is kept, so that cleanup never removes the image a rollback would start from. "Proven" is the journal's own
-    // rollback eligibility (succeeded, earlier than the serving release, a pinned immutable image id, a retained image in the
-    // ledger) AND Docker holding exactly that id with this deployment's labels. Order only ranks releases that are proven; it
-    // never makes one a target. What cannot be shown is kept, not guessed: a journal image that is not the pinned one, a Docker
-    // that cannot be asked, an image whose labels do not match, or two proven releases that cannot be ordered keep every
-    // remaining candidate. An image Docker proves absent is not a rollback and protects nothing.
+    // An interrupted or failed cutover is settled when its bounded restoration finished and passed its health check
+    // (`restored`: not unverified, failed, not attempted or still running) and no pause caused by it is still in force. Its
+    // leftovers belong to no running release then: whatever now serves is protected above and the rollback target below.
+    let paused: BTreeSet<DeploymentId> = active_pauses(deps, &restored.control)
+        .into_iter()
+        .map(|p| p.origin)
+        .collect();
+    let settled = |d: &Deployment| {
+        d.recovery
+            .is_some_and(|r| r.outcome == RecoveryOutcome::Restored)
+            && !paused.contains(&d.id)
+    };
+    // Recovery is not optional, and is not a historical retention choice. A deployment whose cutover began or failed and that is
+    // not settled (its restoration is unfinished, unverified or failed, or no decision cleared its pause) may still need the
+    // release it replaced: that release, and the image it would be restored from, are kept whatever the retention below says.
     let mut rollback_why: BTreeMap<DeploymentId, (&'static str, String)> = BTreeMap::new();
     let mut rollback_images: BTreeSet<String> = BTreeSet::new();
+    let mut recovery_kept: BTreeMap<ApplicationId, usize> = BTreeMap::new();
+    for d in deps
+        .iter()
+        .filter(|d| d.status != DeploymentStatus::Succeeded)
+    {
+        let began = matches!(
+            d.cutover,
+            CutoverState::Begun { .. } | CutoverState::Failed { .. }
+        ) || d.recovery.is_some();
+        let Some(replaced) = d.replaces.as_ref().filter(|_| began && !settled(d)) else {
+            continue;
+        };
+        let release_dep = replaced.deployment();
+        protected.insert(release_dep.clone());
+        if let Some(pin) = deps
+            .iter()
+            .find(|x| x.id == release_dep)
+            .and_then(|x| x.pinned.as_ref())
+        {
+            rollback_images.insert(pin.image_id.clone());
+        }
+        rollback_why.entry(release_dep).or_insert_with(|| {
+            ("recovery-pending", format!("deployment {} began a cutover and its recovery is not settled, so the release it replaced is needed to restore the application; kept", d.id))
+        });
+        *recovery_kept.entry(d.application_id.clone()).or_default() += 1;
+    }
+    // Historical rollback retention (`--keep-rollbacks N`, default 0). For each application that serves a release, the N most
+    // recent PREVIOUS releases that are proven restorable are kept so a rollback to them stays possible. "Proven" is the journal's
+    // own rollback eligibility (succeeded, earlier than the serving release, a pinned immutable image id, a retained image in the
+    // ledger) AND Docker holding exactly that id with this deployment's labels. Order only ranks releases that are proven; it never
+    // makes one a target. What cannot be shown is kept, not guessed: a journal image that is not the pinned one, a Docker that
+    // cannot be asked, an image whose labels do not match, or two proven releases that cannot be ordered keep every remaining
+    // candidate. An image Docker proves absent is not a rollback and protects nothing. With 0 nothing historical is kept.
     let mut retention: Vec<(ApplicationId, DeploymentId, String)> = Vec::new();
     for app in &apps {
         let Some(serving) = serving_release(&restored.ledger, deps, app) else {
@@ -117,8 +190,16 @@ pub(crate) fn run(
             .filter(|r| r.eligible())
             .collect();
         let mut keep: Vec<(usize, &'static str, String)> = Vec::new();
-        let mut state = "no previous release is provably restorable".to_string();
+        let mut targets: Vec<DeploymentId> = Vec::new();
+        let mut state = if keep_rollbacks == 0 {
+            "historical rollback retention is 0".to_string()
+        } else {
+            "no previous release is provably restorable".to_string()
+        };
         for (i, r) in eligible.iter().enumerate() {
+            if targets.len() >= keep_rollbacks {
+                break;
+            }
             let pinned = r
                 .config
                 .as_ref()
@@ -144,8 +225,8 @@ pub(crate) fn run(
             };
             match doubt {
                 None => {
-                    keep.push((i, "rollback-target", format!("the most recent previous release proven restorable: pinned image {pinned} present in Docker with this deployment's labels; kept so the application can be rolled back")));
-                    state = format!("rollback target {}", r.deployment);
+                    keep.push((i, "rollback-target", format!("one of the {keep_rollbacks} most recent previous release(s) proven restorable (retention {keep_rollbacks}): pinned image {pinned} present in Docker with this deployment's labels; kept so the application can be rolled back")));
+                    targets.push(r.deployment.clone());
                 }
                 Some(why) => {
                     // fail closed: this and every older candidate stay
@@ -160,9 +241,26 @@ pub(crate) fn run(
                         "rollback eligibility unverified ({why}); {} release(s) kept",
                         eligible.len() - i
                     );
+                    break;
                 }
             }
-            break;
+        }
+        if !targets.is_empty() {
+            state = if targets.len() == 1 {
+                format!("rollback target {}", targets[0])
+            } else {
+                format!(
+                    "rollback targets {}",
+                    targets
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+        }
+        if let Some(n) = recovery_kept.get(app) {
+            state = format!("{state}; {n} release(s) kept for a recovery that is not settled");
         }
         for (i, reason, detail) in keep {
             let r = &eligible[i];
@@ -170,22 +268,12 @@ pub(crate) fn run(
             if let Some(c) = &r.config {
                 rollback_images.insert(c.image_id.clone());
             }
-            rollback_why.insert(r.deployment.clone(), (reason, detail));
+            rollback_why
+                .entry(r.deployment.clone())
+                .or_insert((reason, detail));
         }
         retention.push((app.clone(), serving.deployment.clone(), state));
     }
-    // An interrupted or failed cutover is settled when its bounded restoration finished and passed its health check
-    // (`restored`: not unverified, failed, not attempted or still running) and no pause caused by it is still in force. Its
-    // leftovers belong to no running release then: whatever now serves is protected above and the rollback target below.
-    let paused: BTreeSet<DeploymentId> = active_pauses(deps, &restored.control)
-        .into_iter()
-        .map(|p| p.origin)
-        .collect();
-    let settled = |d: &Deployment| {
-        d.recovery
-            .is_some_and(|r| r.outcome == RecoveryOutcome::Restored)
-            && !paused.contains(&d.id)
-    };
     // in scope: succeeded releases that no longer serve (treated as ended without success for the planner), and
     // failed or interrupted deployments. Cancelled (prepared) candidates are left for the person to confirm or remove.
     let scope: Vec<(DeploymentId, EndState)> = deps
@@ -318,6 +406,9 @@ pub(crate) fn run(
                     e.key.kind,
                     ResourceKind::Container | ResourceKind::Image | ResourceKind::PortLease
                 )
+                && !(owner_only.contains(id)
+                    && e.key.kind == ResourceKind::Image
+                    && !rollback_why.contains_key(id))
         }) {
             let proven = serving_release(&restored.ledger, deps, &e.app).is_some();
             let (reason, detail) = if let Some((reason, detail)) = rollback_why.get(id) {
@@ -522,6 +613,29 @@ pub(crate) fn run(
         .iter()
         .filter(|a| matches!(a, Action::ReleaseLease { .. }))
         .count();
+    tidied.reconciled = actions
+        .iter()
+        .filter(|a| matches!(a, Action::MarkAbsent { .. }))
+        .count();
+    for a in &actions {
+        let key = match a {
+            Action::Remove { observed, .. } => {
+                format!("remove-{}:{}", observed.kind.as_str(), observed.id)
+            }
+            Action::MarkAbsent { entry: (d, k) } => {
+                format!("reconcile:{d}/{}/{}", k.kind.as_str(), k.name)
+            }
+            Action::ReleaseLease { entry: (d, k) } => format!("lease:{d}/{}", k.name),
+            _ => continue,
+        };
+        // An apply acts only on what was reviewed. Anything else found now means the state moved: nothing is executed.
+        if apply && expected.is_some_and(|e| !e.contains(&key)) {
+            return Err(Fail::refused(format!(
+                "the plan changed since it was reviewed ({key} was not in it); nothing was changed. Review again."
+            )));
+        }
+        tidied.plan.insert(key);
+    }
     if let Some(j) = writer.as_mut() {
         execute_actions(&actions, &mut ledger, j, &mut backend, &SystemClock).map_err(|e| {
             Fail::failed(format!(
@@ -559,7 +673,7 @@ pub(crate) fn run(
             e.key.kind == ResourceKind::Image
                 && e.disposition == Disposition::Retain
                 && !e.is_released()
-                && in_scope.contains(&e.deployment)
+                && (in_scope.contains(&e.deployment) || owner_only.contains(&e.deployment))
         })
         .filter(|e| !matches!(e.state, EntryState::Refused(_)))
         .filter_map(|e| {
@@ -609,6 +723,8 @@ pub(crate) fn run(
                     && o.key != key
                     && !o.is_released()
                     && !will_release.contains(&(o.deployment.clone(), o.key.clone()))
+                    // the serving restoration container stays; any other container of it blocks only if Docker says it uses the image
+                    && !(owner_only.contains(&dep) && o.key.kind == ResourceKind::Container)
             })
             .map(|o| format!("{} {}", o.key.kind.as_str(), o.key.name))
             .collect();
@@ -658,6 +774,7 @@ pub(crate) fn run(
                     "Docker no longer has this image; only the journal still lists it",
                     Some(false),
                 );
+                tidied.reconciled += 1;
                 Action::MarkAbsent {
                     entry: (dep.clone(), key.clone()),
                 }
@@ -679,6 +796,23 @@ pub(crate) fn run(
                 }
             }
         };
+        let akey = match &action {
+            Action::MarkAbsent { entry: (d, k) } => {
+                format!("reconcile:{d}/{}/{}", k.kind.as_str(), k.name)
+            }
+            _ => format!("remove-image:{id}"),
+        };
+        if apply && expected.is_some_and(|e| !e.contains(&akey)) {
+            skip_as(
+                out,
+                "review",
+                "not-in-reviewed-plan",
+                "this was not in the plan you reviewed, so it is left alone; review again",
+            );
+            tidied.drifted = true;
+            continue;
+        }
+        tidied.plan.insert(akey);
         let _ = writeln!(
             out,
             "{}{}",
@@ -730,6 +864,8 @@ pub(crate) fn run(
             if !removed_images.is_empty() && e.bytes == 0 {
                 let _ = writeln!(out, "estimate: removing these image reference(s) is expected to free no space, because every layer is still used by an image that stays");
             }
+            tidied.estimated_bytes = Some(e.bytes);
+            tidied.estimate_exact = e.exact;
             Some(e)
         }
         Err(why) => {
@@ -748,7 +884,7 @@ pub(crate) fn run(
         "reclaimed-containers: {}\nreclaimed-images: {}",
         tidied.containers, tidied.images
     );
-    if apply {
+    if apply && report_guest {
         match (free_before, guest_free()) {
             (Some(b), Some(a)) => {
                 let _ = writeln!(
@@ -862,11 +998,37 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "this is a simulated runtime; there is nothing real to prune",
         ));
     }
+    prune_build_cache_step(p, &rt, &socket, apply, true, out)?;
+    Ok(exit::OK)
+}
+
+/// What a build-cache check or prune found and did, for the caller that reports it (alone, or as part of `cleanup`).
+pub(crate) struct CacheOutcome {
+    /// The estimate: unused, unshared records. Not a promise.
+    pub prunable_bytes: u64,
+    pub prunable_records: u64,
+    /// Docker's own figure, after an apply that completed.
+    pub reclaimed: Option<u64>,
+    /// Why an apply would be refused now (dry run only).
+    pub blocked: Option<String>,
+}
+
+/// The build-cache check (dry run) or prune (apply) behind both `prune-build-cache` and `cleanup`. `standalone` adds the footer and the
+/// guest-space reading that `prune-build-cache` prints on its own; `cleanup` reports those once for the whole operation.
+fn prune_build_cache_step(
+    p: &Parsed,
+    rt: &Runtime,
+    socket: &Path,
+    apply: bool,
+    standalone: bool,
+    out: &mut String,
+) -> Result<CacheOutcome, Fail> {
+    // `cleanup` (not standalone) never asks Docker to change anything when no record is prunable: a second run is then a no-op.
     // Checked here, on the apply path itself, so no caller (desktop, terminal, script) can skip it by skipping a preview. The hold
     // lives until this function returns, that is, through the prune.
-    let guard = if apply { Ok(()) } else { cache_guard(&rt) };
+    let guard = if apply { Ok(()) } else { cache_guard(rt) };
     let _hold = if apply {
-        match cache_hold(&rt) {
+        match cache_hold(rt) {
             Ok(h) => h,
             Err(why) => {
                 return Err(Fail::refused(format!(
@@ -877,7 +1039,7 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     } else {
         None
     };
-    let api = harpoon_deploy_docker::api::DockerApi::new(&socket, Duration::from_secs(30));
+    let api = harpoon_deploy_docker::api::DockerApi::new(socket, Duration::from_secs(30));
     let runtime_err = |e: harpoon_deploy_docker::api::ApiError| {
         Fail::runtime(format!(
             "cannot reach Docker at {}: {e}\nNothing was changed.",
@@ -913,14 +1075,30 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
                 let _ = writeln!(out, "prune-guard: blocked: {why}");
             }
         }
-        let _ = writeln!(
-            out,
-            "dry run: nothing was changed. Add --apply and --{}=… to carry this out.",
-            crate::AUTH_FLAG
-        );
-        return Ok(exit::OK);
+        if standalone {
+            let _ = writeln!(
+                out,
+                "dry run: nothing was changed. Add --apply and --{}=… to carry this out.",
+                crate::AUTH_FLAG
+            );
+        }
+        return Ok(CacheOutcome {
+            prunable_bytes: usage.prunable_bytes,
+            prunable_records: usage.prunable_records,
+            reclaimed: None,
+            blocked: guard.err(),
+        });
     }
-    let before = guest_free(p, &socket);
+    if !standalone && usage.prunable_records == 0 {
+        let _ = writeln!(out, "build-cache-reclaimed-bytes: 0\nbuild cache: nothing is prunable, so no prune was requested");
+        return Ok(CacheOutcome {
+            prunable_bytes: 0,
+            prunable_records: 0,
+            reclaimed: Some(0),
+            blocked: None,
+        });
+    }
+    let before = guest_free(p, socket);
     let freed = api.prune_build_cache(Duration::from_secs(300)).map_err(|e| {
         use harpoon_deploy_docker::api::ApiError;
         use harpoon_deploy_docker::http::HttpError;
@@ -936,21 +1114,28 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
         }
     })?;
     let _ = writeln!(out, "build-cache-reclaimed-bytes: {freed}");
-    match (before, guest_free(p, &socket)) {
-        (Some(b), Some(a)) => {
-            let _ = writeln!(
-                out,
-                "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}"
-            );
-        }
-        _ => {
-            let _ = writeln!(
-                out,
-                "guest-free: not measurable (the management channel did not answer)"
-            );
+    if standalone {
+        match (before, guest_free(p, socket)) {
+            (Some(b), Some(a)) => {
+                let _ = writeln!(
+                    out,
+                    "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}"
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "guest-free: not measurable (the management channel did not answer)"
+                );
+            }
         }
     }
-    Ok(exit::OK)
+    Ok(CacheOutcome {
+        prunable_bytes: usage.prunable_bytes,
+        prunable_records: usage.prunable_records,
+        reclaimed: Some(freed),
+        blocked: None,
+    })
 }
 
 /// `cleanup-releases`: dry run by default; `--apply` needs the live-changes authorization.
@@ -973,7 +1158,18 @@ pub(crate) fn cleanup_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
             "this is a simulated runtime; there is nothing real to clean up",
         ));
     }
-    run(p, &rt, &socket, apply, out)?;
+    run(
+        p,
+        &rt,
+        &socket,
+        Opts {
+            apply,
+            keep_rollbacks: keep_rollbacks(p)?,
+            report_guest: true,
+            expected: None,
+        },
+        out,
+    )?;
     if !apply {
         let _ = writeln!(
             out,
@@ -982,4 +1178,231 @@ pub(crate) fn cleanup_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
         );
     }
     Ok(exit::OK)
+}
+
+/// `cleanup`: the one operation. It removes everything Harpoon can prove is disposable and keeps everything essential, by running the
+/// existing release cleanup (every object re-verified by id and labels, journaled before and after, retried by the next run) and then
+/// the existing prune-build-cache step (after the images are gone, so records they held are no longer shared). Dry run by default; `--apply`
+/// needs the live-changes authorization. What is essential is not a setting: whatever serves, anything a deployment still needs to
+/// recover, volumes, journals, configuration and anything Harpoon did not create. What IS a setting is how many previous releases to
+/// keep for a rollback (`--keep-rollbacks`, default 0).
+pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
+    let rt = Runtime::from_flag(p.value("runtime-dir"))?;
+    let apply = p.switch("apply");
+    if apply {
+        crate::commands::authorized(p)?;
+    }
+    let socket = crate::commands::socket_flag(p)?.ok_or_else(|| {
+        Fail::runtime(
+            "cleanup needs an explicit --docker-socket PATH; nothing is assumed about the runtime",
+        )
+    })?;
+    if !rt.initialised() {
+        return Err(Fail::refused(format!(
+            "there is no journal at {}; nothing is recorded to clean up",
+            rt.journal_dir().display()
+        )));
+    }
+    if rt.kind()? == Some(Kind::Simulated) {
+        return Err(Fail::refused(
+            "this is a simulated runtime; there is nothing real to clean up",
+        ));
+    }
+    let keep = keep_rollbacks(p)?;
+    let plan_arg = p.value("plan");
+    if apply && plan_arg.is_none() {
+        return Err(Fail::usage(
+            "cleanup --apply needs --plan ID: the cleanup-plan value printed by the review. Run cleanup without --apply first.",
+        ));
+    }
+    let _ = writeln!(
+        out,
+        "clean up — {}; previous releases kept for rollback: {keep}",
+        if apply {
+            "APPLYING"
+        } else {
+            "dry run: nothing will be changed"
+        }
+    );
+    // An apply acts on the plan that was reviewed and on nothing else. The plan is derived again, read-only, right now; if it is not
+    // the reviewed one nothing is changed and a fresh review is required. The apply then repeats every ownership check per object
+    // and leaves alone anything that was not in the reviewed plan.
+    let reviewed: Option<(BTreeSet<String>, bool)> = if apply {
+        let mut scratch = String::new();
+        let now = run(
+            p,
+            &rt,
+            &socket,
+            Opts {
+                apply: false,
+                keep_rollbacks: keep,
+                report_guest: false,
+                expected: None,
+            },
+            &mut scratch,
+        )?;
+        let cache_now = prune_build_cache_step(p, &rt, &socket, false, false, &mut scratch)?;
+        let id = plan_id(keep, &now.plan, cache_now.prunable_records > 0);
+        if plan_arg != Some(id.as_str()) {
+            return Err(Fail::refused(format!(
+                "the plan changed since it was reviewed (reviewed {}, now {id}); nothing was changed. Review again.",
+                plan_arg.unwrap_or("none")
+            )));
+        }
+        Some((now.plan, cache_now.prunable_records > 0))
+    } else {
+        None
+    };
+    let free_before = guest_free(p, &socket);
+
+    // 1. releases, settled interrupted deployments, failed attempts and unused owned images (journaled, one object at a time)
+    let mut releases = String::new();
+    let opts = Opts {
+        apply,
+        keep_rollbacks: keep,
+        report_guest: false,
+        expected: reviewed.as_ref().map(|(p, _)| p),
+    };
+    let tidied = run(p, &rt, &socket, opts, &mut releases)?;
+    out.push_str(&releases);
+
+    // 2. build cache, after the images: records an image held become unshared once it is gone. Only if the review included it.
+    let _ = writeln!(out, "build cache:");
+    let run_cache = apply && reviewed.as_ref().is_some_and(|(_, c)| *c);
+    let cache = match prune_build_cache_step(p, &rt, &socket, run_cache, false, out) {
+        Ok(c) => c,
+        Err(f) => {
+            if apply {
+                let _ = writeln!(
+                    out,
+                    "cleanup: partial. The releases step finished ({} container(s), {} image(s) removed); the build-cache step did not: {}. Run it again to finish.",
+                    tidied.containers,
+                    tidied.images,
+                    f.message.lines().next().unwrap_or("")
+                );
+            }
+            return Err(f);
+        }
+    };
+    if apply && !run_cache {
+        let _ = writeln!(out, "build cache: not pruned, because it was not part of the reviewed plan. Review again to see it.");
+    }
+    let plan_now = plan_id(keep, &tidied.plan, cache.prunable_records > 0);
+    let _ = writeln!(out, "cleanup-plan: {plan_now}");
+    if tidied.drifted {
+        let _ = writeln!(out, "cleanup: stopped short. Some objects were not in the reviewed plan and were left alone; what was reviewed has been done. Review again.");
+    }
+    if let Some(why) = &cache.blocked {
+        let _ = writeln!(
+            out,
+            "cleanup: the build-cache step would be refused now: {why}"
+        );
+    }
+    // what stays, and why, counted from the engine's own verdicts
+    let mut protected: BTreeMap<String, usize> = BTreeMap::new();
+    for l in releases.lines().filter_map(|l| l.strip_prefix("item: ")) {
+        if let Ok(j) = Json::parse(l) {
+            if j.get("verdict").and_then(Json::as_str) == Some("protected") {
+                let reason = j
+                    .get("reason")
+                    .and_then(Json::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                *protected.entry(reason).or_default() += 1;
+            }
+        }
+    }
+    if !protected.is_empty() {
+        let tally: Vec<String> = protected.iter().map(|(r, n)| format!("{r}={n}")).collect();
+        let _ = writeln!(out, "protected-summary: {}", tally.join(", "));
+    }
+
+    let eligible = tidied.containers
+        + tidied.leases
+        + tidied.images
+        + tidied.reconciled
+        + cache.prunable_records as usize;
+    let _ = writeln!(out, "cleanup-eligible: {eligible}");
+    // expected savings: layers no image that stays keeps, plus unused unshared cache. Said apart from what is measured.
+    let est_total = tidied.estimated_bytes.map(|b| b + cache.prunable_bytes);
+    if let Some(t) = est_total {
+        let _ = writeln!(
+            out,
+            "cleanup-estimated-bytes: {t}\ncleanup-estimate-basis: images {} bytes ({}), build cache {} bytes (unused and unshared records); before-the-fact estimates, not measurements",
+            tidied.estimated_bytes.unwrap_or(0),
+            if tidied.estimate_exact { "from layer sharing" } else { "a lower bound from layer sharing" },
+            cache.prunable_bytes
+        );
+    } else {
+        let _ = writeln!(out, "cleanup-estimated-bytes: not estimated");
+    }
+    if eligible == 0 {
+        let _ = writeln!(out, "cleanup: nothing to clean up. Everything left is in use or protected, or is not provably disposable.");
+    }
+    if apply {
+        match (free_before, guest_free(p, &socket)) {
+            (Some(b), Some(a)) => {
+                let freed = a.saturating_sub(b);
+                let _ = writeln!(out, "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}\nmeasured-reclaimed-bytes: {freed}");
+                let check = if tidied.containers + tidied.images == 0
+                    && cache.reclaimed.unwrap_or(0) == 0
+                {
+                    "nothing was removed, so there is nothing to compare".to_string()
+                } else {
+                    match est_total {
+                        Some(0) => "no space was expected: image layers are used by images that stay. None is claimed".to_string(),
+                        Some(t) if freed >= t / 10 * 9 => "the measured change matches the estimate".to_string(),
+                        Some(_) => "the measured change is lower than estimated: Docker may keep layers, or something else used space meanwhile. Only the measured figure is real".to_string(),
+                        None => "no estimate was available; only the measured figure is real".to_string(),
+                    }
+                };
+                let _ = writeln!(out, "reclaim-check: {check}");
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "guest-free: not measurable (the management channel did not answer)"
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(
+            out,
+            "dry run: nothing was changed. Add --apply and --{}=… to carry this out.",
+            crate::AUTH_FLAG
+        );
+    }
+    if tidied.drifted {
+        return Err(Fail::failed(
+            "the clean up stopped short: some objects were not in the reviewed plan. Review again.",
+        ));
+    }
+    Ok(exit::OK)
+}
+
+/// What a Review is identified by: the retention, whether the cache step is part of it, and every action decided on, in a fixed order.
+fn plan_id(keep: usize, plan: &BTreeSet<String>, cache_step: bool) -> String {
+    let mut text = format!(
+        "keep:{keep}\ncache:{}\n",
+        if cache_step { "step" } else { "none" }
+    );
+    for k in plan {
+        text.push_str(k);
+        text.push('\n');
+    }
+    harpoon_deploy_git::sha256::to_hex(&harpoon_deploy_git::sha256::sha256(text.as_bytes()))[..16]
+        .to_string()
+}
+
+/// `--keep-rollbacks N`: how many previous releases to keep for a rollback (default 0). Recovery of an unsettled deployment is
+/// never governed by this.
+pub(crate) fn keep_rollbacks(p: &Parsed) -> Result<usize, Fail> {
+    match p.value("keep-rollbacks") {
+        None => Ok(0),
+        Some(v) => v
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n <= 20)
+            .ok_or_else(|| Fail::usage("--keep-rollbacks must be a whole number from 0 to 20")),
+    }
 }

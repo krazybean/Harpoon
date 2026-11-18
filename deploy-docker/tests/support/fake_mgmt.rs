@@ -35,6 +35,9 @@ pub struct Model {
     pub df_stdout: Option<String>,
     /// argv (space-joined) → fault.
     pub faults: Vec<(String, Fault)>,
+    /// When set, the filesystem's free bytes are asked of this at every `df`, so a test can model a disk that changes with what the
+    /// (fake) Docker holds. `used` is then `total - avail`.
+    pub avail_fn: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Default for Model {
@@ -48,6 +51,7 @@ impl Default for Model {
             mount: "/".into(),
             df_stdout: None,
             faults: Vec::new(),
+            avail_fn: None,
         }
     }
 }
@@ -178,10 +182,12 @@ fn handle(
         ["uname", "-r"] => reply(&mut c, 0, &format!("{}\n", m.kernel), ""),
         ["df", "-B1", _path] => {
             let out = m.df_stdout.clone().unwrap_or_else(|| {
-                let pct = (m.used * 100).checked_div(m.total).unwrap_or(0);
+                let avail = m.avail_fn.as_ref().map_or(m.avail, |f| f());
+                let used = if m.avail_fn.is_some() { m.total.saturating_sub(avail) } else { m.used };
+                let pct = (used * 100).checked_div(m.total).unwrap_or(0);
                 format!(
                     "Filesystem           1B-blocks         Used    Available Use% Mounted on\n/dev/vda1     {} {} {} {pct}% {}\n",
-                    m.total, m.used, m.avail, m.mount
+                    m.total, used, avail, m.mount
                 )
             });
             reply(&mut c, 0, &out, "")

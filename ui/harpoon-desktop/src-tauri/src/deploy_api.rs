@@ -1180,6 +1180,19 @@ pub enum DeployOp {
     RunQueue {
         repo: Option<String>,
     },
+    /// The one Clean Up: everything Harpoon can prove disposable (old releases, settled interrupted deployments, unused owned images
+    /// and prunable build cache), in one operation. `apply: false` only reports it. `keep_rollbacks` is how many previous releases to
+    /// keep for a rollback (0 by default); what serves and what a deployment still needs to recover are always kept.
+    #[serde(rename_all = "camelCase")]
+    Cleanup {
+        #[serde(default)]
+        apply: bool,
+        #[serde(default)]
+        keep_rollbacks: u32,
+        /// The plan id the review printed. An apply carries it, and the engine refuses if what it would do now is not that plan.
+        #[serde(default)]
+        plan: Option<String>,
+    },
     /// Remove superseded and abandoned Harpoon-owned containers, port leases and images. `apply: false` only lists them.
     #[serde(rename_all = "camelCase")]
     CleanupReleases {
@@ -1437,6 +1450,18 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             }
             (a, vec![])
         }
+        DeployOp::Cleanup { apply, keep_rollbacks, plan } => {
+            let mut a = s(&["cleanup", "--keep-rollbacks"]);
+            a.push(keep_rollbacks.to_string());
+            if *apply {
+                a.push("--apply".into());
+                if let Some(id) = plan {
+                    a.push("--plan".into());
+                    a.push(id.clone());
+                }
+            }
+            (a, vec![])
+        }
         DeployOp::CleanupReleases { apply } => {
             let mut a = s(&["cleanup-releases"]);
             if *apply {
@@ -1610,7 +1635,7 @@ pub fn process_command(pid: u32) -> Option<String> {
 fn needs_runtime(op: &DeployOp) -> bool {
     matches!(
         op,
-        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. } | DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }
+        DeployOp::Deploy { .. } | DeployOp::RunQueue { .. } | DeployOp::Rollback { .. } | DeployOp::Restore { .. } | DeployOp::Cleanup { .. } | DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }
     )
 }
 
@@ -1729,6 +1754,9 @@ pub fn actionable(op: &DeployOp, code: i32, stdout: &str, stderr: &str) -> Optio
         c if c == exit::REFUSED && stderr.contains(harpoon_deploy_cli::AUTH_FLAG) => {
             format!("Harpoon needs your confirmation before it changes Docker, and none was given. Open the operation again and confirm it. {nothing}")
         }
+        c if c == exit::REFUSED && stderr.contains("the plan changed since it was reviewed") => {
+            format!("What Clean Up would remove changed since you reviewed it, so it removed nothing. Review again to see the current plan. {nothing}")
+        }
         c if c == exit::REFUSED && stderr.contains("Gate U") => {
             "Running queued Git events is closed in this build because unattended execution has not been approved. Use Deploy to build a revision you choose; checking for new commits only queues them. Nothing was changed.".to_string()
         }
@@ -1753,7 +1781,11 @@ pub fn actionable(op: &DeployOp, code: i32, stdout: &str, stderr: &str) -> Optio
         c if c == exit::RUNTIME => {
             format!("Harpoon could not reach Docker or its management channel: {first} Check that Harpoon shows Docker as ready and try again. {nothing}")
         }
-        c if c == exit::FAILED && matches!(op, DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }) => {
+        c if c == exit::FAILED && matches!(op, DeployOp::Cleanup { .. }) && stdout.contains("cleanup: partial") => {
+            // the releases step finished and is journaled; only the build cache did not: say exactly that
+            format!("Part of the clean up finished: {first} Run Clean Up again to finish the rest. What was already removed is not restored.")
+        }
+        c if c == exit::FAILED && matches!(op, DeployOp::Cleanup { .. } | DeployOp::CleanupReleases { .. } | DeployOp::PruneBuildCache { .. }) => {
             // these are not deployments: a generic "the deployment did not succeed" would be wrong, and a missing answer is not a failure
             if let Some(unknown) = stderr.lines().map(str::trim).find_map(|l| l.strip_prefix("result unknown:")) {
                 format!("The engine could not confirm what happened:{unknown} Review again before trying anything else.")

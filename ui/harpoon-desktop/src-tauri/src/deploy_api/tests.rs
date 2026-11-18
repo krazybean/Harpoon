@@ -600,6 +600,7 @@ mod runtime {
             DeployOp::Restore {
                 deployment: "dep_x".into(),
             },
+            DeployOp::Cleanup { apply: true, keep_rollbacks: 1, plan: Some("0123456789abcdef".into()) },
             DeployOp::CleanupReleases { apply: true },
             DeployOp::PruneBuildCache { apply: true },
         ] {
@@ -637,6 +638,25 @@ mod runtime {
         assert!(!preview.contains(&"--apply".to_string()) && !has_auth(&preview), "{preview:?}");
         let applied = args_with(&DeployOp::CleanupReleases { apply: true }, &CONFIRMED, &Gate::shipping(), Ok(info())).unwrap();
         assert!(applied.contains(&"--apply".to_string()) && has_auth(&applied), "{applied:?}");
+    }
+
+    #[test]
+    fn clean_up_carries_its_retention_and_apply_only_when_asked_and_confirmed() {
+        let preview = args_of(&DeployOp::Cleanup { apply: false, keep_rollbacks: 0, plan: None }, &Gate::shipping(), Ok(info())).unwrap();
+        assert_eq!(&preview[..3], ["cleanup", "--keep-rollbacks", "0"], "{preview:?}");
+        assert!(!preview.contains(&"--apply".to_string()) && !has_auth(&preview), "{preview:?}");
+        let applied = args_with(&DeployOp::Cleanup { apply: true, keep_rollbacks: 2, plan: Some("abc123".into()) }, &CONFIRMED, &Gate::shipping(), Ok(info())).unwrap();
+        assert_eq!(&applied[..3], ["cleanup", "--keep-rollbacks", "2"], "{applied:?}");
+        assert!(applied.contains(&"--apply".to_string()) && has_auth(&applied), "{applied:?}");
+        let at = applied.iter().position(|a| a == "--plan").expect("the reviewed plan travels with the apply");
+        assert_eq!(applied[at + 1], "abc123", "{applied:?}");
+        // a review never carries a plan; an operation JSON from the UI: unknown fields are refused, missing ones default
+        assert!(!preview.contains(&"--plan".to_string()));
+        let op: DeployOp = serde_json::from_str(r#"{"op":"cleanup"}"#).unwrap();
+        assert!(matches!(op, DeployOp::Cleanup { apply: false, keep_rollbacks: 0, plan: None }));
+        let op: DeployOp = serde_json::from_str(r#"{"op":"cleanup","apply":true,"keepRollbacks":1,"plan":"p1"}"#).unwrap();
+        assert!(matches!(op, DeployOp::Cleanup { apply: true, keep_rollbacks: 1, plan: Some(_) }));
+        assert!(serde_json::from_str::<DeployOp>(r#"{"op":"cleanup","keepAll":true}"#).is_err());
     }
 
     #[test]
@@ -2624,7 +2644,9 @@ mod cleanup_contracts {
 
     fn op_for(name: &str) -> DeployOp {
         let apply = name.contains("-apply-");
-        if name.starts_with("releases-") {
+        if name.starts_with("cleanup-") {
+            DeployOp::Cleanup { apply, keep_rollbacks: 0, plan: None }
+        } else if name.starts_with("releases-") {
             DeployOp::CleanupReleases { apply }
         } else {
             DeployOp::PruneBuildCache { apply }

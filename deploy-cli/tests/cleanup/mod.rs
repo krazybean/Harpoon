@@ -771,7 +771,7 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
     capture(
         &t2,
         "releases-dry-run-rollback-target",
-        &go(&t2, &SHIPPING, &args(&t2, &[])),
+        &go(&t2, &SHIPPING, &args(&t2, &["--keep-rollbacks", "1"])),
         &mut all,
     );
     // an interrupted-and-restored deployment whose leftovers share layers with the protected rollback image
@@ -782,7 +782,7 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
     capture(
         &t3,
         "releases-dry-run-abandoned-restoration",
-        &go(&t3, &SHIPPING, &args(&t3, &[])),
+        &go(&t3, &SHIPPING, &args(&t3, &["--keep-rollbacks", "1"])),
         &mut all,
     );
     capture(
@@ -871,6 +871,59 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
         &t,
         "releases-apply-engine-unreachable",
         &go(&t, &SHIPPING, &a),
+        &mut all,
+    );
+
+    // ---- cleanup (the one Clean Up), against the acceptance application: releases A, B, C, an interrupted D, and a build cache
+    let t = T::new();
+    acceptance_world(&t);
+    capture(&t, "cleanup-dry-run", &clean(&t, &[]), &mut all);
+    capture(
+        &t,
+        "cleanup-dry-run-keep-one",
+        &clean(&t, &["--keep-rollbacks", "1"]),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cleanup-apply-refused-unauthorized",
+        &clean_noauth(&t),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cleanup-apply-refused-plan-changed",
+        &go(
+            &t,
+            &SHIPPING,
+            &uargs(&t, &["--apply", "--plan", "0000000000000000", &auth()]),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cleanup-apply-success",
+        &clean(&t, &["--apply"]),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cleanup-apply-nothing-left",
+        &clean(&t, &["--apply"]),
+        &mut all,
+    );
+    let t = T::new();
+    acceptance_world(&t);
+    t.h.docker.fault(
+        Some("POST"),
+        "/build/prune",
+        1,
+        support::fake_docker::Action::Respond(500, r#"{"message":"prune failed"}"#.into()),
+    );
+    capture(
+        &t,
+        "cleanup-apply-partial-cache-failure",
+        &clean(&t, &["--apply"]),
         &mut all,
     );
 
@@ -1277,13 +1330,32 @@ fn objects_docker_no_longer_has_are_reconciliation_not_removal() {
 
 // ---------------------------------------------------------------- rollback retention
 
+/// The rollback and restoration tests below were written for one previous release kept; retention is now explicit and defaults to
+/// 0, so they say so. The retention tests use `dry_keep` / `apply_keep` with the value they mean.
 fn dry(t: &T) -> Outcome {
-    let o = go(t, &SHIPPING, &args(t, &[]));
+    dry_keep(t, 1)
+}
+fn apply(t: &T) -> Outcome {
+    apply_keep(t, 1)
+}
+fn dry_keep(t: &T, keep: usize) -> Outcome {
+    let o = go(
+        t,
+        &SHIPPING,
+        &args(t, &["--keep-rollbacks", &keep.to_string()]),
+    );
     assert_exit(&o, 0);
     o
 }
-fn apply(t: &T) -> Outcome {
-    let o = go(t, &SHIPPING, &args(t, &["--apply", &auth()]));
+fn apply_keep(t: &T, keep: usize) -> Outcome {
+    let o = go(
+        t,
+        &SHIPPING,
+        &args(
+            t,
+            &["--keep-rollbacks", &keep.to_string(), "--apply", &auth()],
+        ),
+    );
     assert_exit(&o, 0);
     o
 }
@@ -1730,7 +1802,11 @@ fn a_settled_restoration_is_cleaned_while_the_serving_release_and_the_rollback_t
     // nothing was changed by the dry run
     assert!(container_present(&t, &r.container) && image_present(&t, &r.image));
     // applied
-    let o = go(&t, &SHIPPING, &mgmt(&t, args(&t, &["--apply", &auth()])));
+    let o = go(
+        &t,
+        &SHIPPING,
+        &mgmt(&t, args(&t, &["--keep-rollbacks", "1", "--apply", &auth()])),
+    );
     assert_exit(&o, 0);
     assert!(
         !container_present(&t, &r.container),
@@ -1978,27 +2054,984 @@ fn repeating_the_cleanup_changes_nothing_after_the_first_run() {
 
 #[test]
 fn a_restoration_container_that_is_what_serves_now_is_never_removed() {
-    // the restoration finished after the last release did: its container serves the application, so the whole deployment is protected
+    // the restoration finished after the last release did: its container serves the application, so the container is kept
     let t = T::new();
     let w = world_full(&t, false, Some(2000));
     let r = restored_interrupted_at(&t, &w, RecoveryOutcome::Restored, true, true, 25_000);
     let o = apply(&t);
-    assert!(
-        container_present(&t, &r.container) && image_present(&t, &r.image),
-        "{}",
-        o.stdout
-    );
+    assert!(container_present(&t, &r.container), "{}", o.stdout);
     assert_eq!(
         reason_of(&items(&o.stdout), &r.dep, "container"),
         ("protected", "serving-release"),
         "{}",
         o.stdout
     );
+    // what the owner built for itself (its failed candidate's image) is not what serves: it is judged on its own and goes
+    assert!(!image_present(&t, &r.image), "{}", o.stdout);
     assert!(
         !items(&o.stdout)
             .iter()
-            .any(|i| field(i, "deployment") == r.dep.as_str() && field(i, "verdict") == "ready"),
+            .any(|i| field(i, "deployment") == r.dep.as_str()
+                && field(i, "kind") == "container"
+                && field(i, "verdict") == "ready"),
         "{}",
         o.stdout
+    );
+}
+
+// ---------------------------------------------------------------- retention, recovery protection and the one Clean Up
+
+#[test]
+fn historical_rollback_retention_defaults_to_zero_so_a_previous_release_is_disposable() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    let dry_run = go(&t, &SHIPPING, &args(&t, &[]));
+    assert_exit(&dry_run, 0);
+    assert!(
+        dry_run
+            .stdout
+            .contains("historical rollback retention is 0"),
+        "{}",
+        dry_run.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&dry_run.stdout), &w.old, "image").0,
+        "ready",
+        "{}",
+        dry_run.stdout
+    );
+    let o = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert!(
+        !image_present(&t, &old_i) && !container_present(&t, &old_c),
+        "{}",
+        o.stdout
+    );
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    assert!(
+        image_present(&t, &srv_i) && container_present(&t, &srv_c),
+        "the serving release is never touched"
+    );
+}
+
+#[test]
+fn retention_is_a_whole_number_and_never_governs_recovery() {
+    let t = T::new();
+    world_full(&t, false, Some(2000));
+    for bad in ["-1", "x", "21", ""] {
+        let o = go(&t, &SHIPPING, &args(&t, &["--keep-rollbacks", bad]));
+        assert_ne!(o.code, 0, "{bad}: {}", o.stdout);
+    }
+}
+
+#[test]
+fn a_release_an_unsettled_recovery_may_need_is_kept_whatever_the_retention() {
+    // the restoration is unfinished, unverified, or its pause was never cleared: the release it replaced may have to be restored again
+    for (outcome, cleared) in [
+        (RecoveryOutcome::InProgress, true),
+        (RecoveryOutcome::RestoredUnverified, true),
+        (
+            RecoveryOutcome::RestoreFailed(harpoon_deploy::state::Reason::ImageMissing),
+            true,
+        ),
+        (RecoveryOutcome::Restored, false),
+    ] {
+        let t = T::new();
+        let w = world_full(&t, false, Some(2000));
+        let r = restored_interrupted(&t, &w, outcome, cleared, false);
+        let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+        let o = apply_keep(&t, 0);
+        assert!(
+            image_present(&t, &old_i) && container_present(&t, &old_c),
+            "{outcome:?} cleared={cleared}: {}",
+            o.stdout
+        );
+        assert_eq!(
+            reason_of(&items(&o.stdout), &w.old, "image"),
+            ("protected", "recovery-pending"),
+            "{}",
+            o.stdout
+        );
+        assert!(
+            container_present(&t, &r.container) && image_present(&t, &r.image),
+            "the unsettled deployment's own resources stay too"
+        );
+        assert!(
+            o.stdout.contains("kept for a recovery that is not settled"),
+            "{}",
+            o.stdout
+        );
+    }
+    // once the recovery is settled the same release is ordinary history and, at retention 0, disposable
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let _ = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    apply_keep(&t, 0);
+    assert!(
+        !image_present(&t, &old_i),
+        "a settled recovery no longer needs it"
+    );
+}
+
+fn uargs(t: &T, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "cleanup".into(),
+        "--docker-socket".into(),
+        t.socket(),
+        "--resources-dir".into(),
+        t.resources(),
+        "--mgmt-socket".into(),
+        t.mgmt.path().display().to_string(),
+    ];
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v
+}
+fn kv(out: &str, key: &str) -> Option<u64> {
+    out.lines()
+        .find_map(|l| l.strip_prefix(&format!("{key}: ")))
+        .and_then(|v| v.trim().parse().ok())
+}
+/// A review (no `--apply`), or an apply that carries the plan id of a review made just before it: that is how the desktop uses it.
+fn clean(t: &T, extra: &[&str]) -> Outcome {
+    let mut e: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    if e.iter().any(|a| a == "--apply") {
+        if !e.iter().any(|a| a == "--plan") {
+            let review: Vec<String> = e.iter().filter(|a| *a != "--apply").cloned().collect();
+            let r = go(t, &SHIPPING, &uargs_owned(t, &review));
+            if let Some(id) = r
+                .stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("cleanup-plan: "))
+            {
+                e.push("--plan".into());
+                e.push(id.to_string());
+            }
+        }
+        e.push(auth());
+    }
+    go(t, &SHIPPING, &uargs_owned(t, &e))
+}
+fn uargs_owned(t: &T, extra: &[String]) -> Vec<String> {
+    let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    uargs(t, &refs)
+}
+fn plan_of(o: &Outcome) -> String {
+    o.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("cleanup-plan: "))
+        .expect("a review prints its plan")
+        .to_string()
+}
+fn deletes(t: &T) -> usize {
+    t.h.docker
+        .requests()
+        .iter()
+        .filter(|r| r.method == "DELETE" || (r.method == "POST" && r.path.contains("/build/prune")))
+        .count()
+}
+
+const MB: u64 = 1_000_000;
+
+/// A disposable application with the whole history the Clean Up has to make sense of: releases A, B and C (C serves), a deployment D
+/// that was interrupted while replacing C and whose restoration completed (C now serves from D's restoration container, which D
+/// owns), an unrelated database container, and a build cache. Docker images have layers: a shared Node base and one layer of
+/// 400 MB per release, so what removal frees is exactly known. The guest's free space is a model of what Docker holds.
+struct Acc {
+    a: DeploymentId,
+    b: DeploymentId,
+    c: DeploymentId,
+    d: DeploymentId,
+    img: std::collections::BTreeMap<&'static str, String>,
+    ctr: std::collections::BTreeMap<&'static str, String>,
+}
+
+fn acceptance_world(t: &T) -> Acc {
+    t.docker_runtime();
+    let (app, _) = ids(30);
+    let (_, a) = ids(31);
+    let (_, b) = ids(32);
+    let (_, c) = ids(33);
+    let (_, d) = ids(34);
+    let sizes: std::collections::BTreeMap<String, u64> = [
+        ("b1", 150),
+        ("b2", 100),
+        ("a1", 400),
+        ("b1x", 400),
+        ("c1", 400),
+        ("d1", 400),
+        ("p1", 500),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v * MB))
+    .collect();
+    let layers_of = |own: &str| -> Vec<String> { vec!["b1".into(), "b2".into(), own.into()] };
+    let total_of = |l: &[String]| l.iter().map(|x| sizes[x]).sum::<u64>();
+    let mut acc = Acc {
+        a: a.clone(),
+        b: b.clone(),
+        c: c.clone(),
+        d: d.clone(),
+        img: Default::default(),
+        ctr: Default::default(),
+    };
+
+    // the Node base image every release is built on, and an unrelated database with its own image and a running container
+    t.h.docker.with(|s| {
+        s.add_image_with_id("sha256:base", &["node:22-slim"], Default::default(), vec![]);
+        let i = s.images.iter_mut().find(|i| i.id == "sha256:base").unwrap();
+        i.layers = vec!["b1".into(), "b2".into()];
+        i.size = 250 * MB;
+        s.add_image_with_id(
+            "sha256:pg",
+            &["postgres:15"],
+            Default::default(),
+            vec!["/var/lib/postgresql/data".into()],
+        );
+        let i = s.images.iter_mut().find(|i| i.id == "sha256:pg").unwrap();
+        i.layers = vec!["p1".into()];
+        i.size = 500 * MB;
+        let id = s.add_container("collectiv-db", Default::default(), true);
+        s.containers.iter_mut().find(|c| c.id == id).unwrap().image = "sha256:pg".into();
+    });
+
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    let mut release = |name: &'static str, dep: &DeploymentId, own: &str, seed: u64, at: u64| {
+        let iid = support::fake_iid(seed);
+        let tag = format!(
+            "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+            app.as_str().to_ascii_lowercase(),
+            dep
+        );
+        let lbl = harpoon_deploy::backend::harpoon_labels(&app, dep);
+        let layers = layers_of(own);
+        let size = total_of(&layers);
+        t.h.docker.with(|s| {
+            s.add_image_with_id(&iid, &[&tag], lbl.clone(), vec![]);
+            let i = s.images.iter_mut().find(|i| i.id == iid).unwrap();
+            i.layers = layers;
+            i.size = size;
+        });
+        let mut dep_rec = finished(&app, dep, DeploymentStatus::Succeeded);
+        dep_rec.release = Some(ReleaseId::from_deployment(dep));
+        dep_rec.pinned = Some(pin(iid.clone(), 38000 + seed as u16 % 100));
+        dep_rec.finished_ms = Some(at);
+        j.persist(&dep_rec).unwrap();
+        j.record(&intent(
+            &app,
+            dep,
+            ResourceKind::Image,
+            &tag,
+            Disposition::Retain,
+        ))
+        .unwrap();
+        j.record(&receipt(dep, ResourceKind::Image, &tag, &iid))
+            .unwrap();
+        let cname = format!("hp-{dep}");
+        let cid = t.h.docker.with(|s| s.add_container(&cname, lbl, false));
+        j.record(&intent(
+            &app,
+            dep,
+            ResourceKind::Container,
+            &cname,
+            Disposition::RemoveOnFailure,
+        ))
+        .unwrap();
+        j.record(&receipt(dep, ResourceKind::Container, &cname, &cid))
+            .unwrap();
+        (name, iid, cid)
+    };
+    for (name, dep, own, seed, at) in [
+        ("a", &a, "a1", 4001u64, 10_000u64),
+        ("b", &b, "b1x", 4002, 20_000),
+        ("c", &c, "c1", 4003, 30_000),
+    ] {
+        let (n, iid, cid) = release(name, dep, own, seed, at);
+        acc.img.insert(n, iid);
+        acc.ctr.insert(n, cid);
+    }
+
+    // D: interrupted while replacing C; C was restored in a container D owns, and that container now serves
+    let lbl = harpoon_deploy::backend::harpoon_labels(&app, &d);
+    let d_img = support::fake_iid(4004);
+    let d_tag = format!(
+        "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+        app.as_str().to_ascii_lowercase(),
+        d
+    );
+    t.h.docker.with(|s| {
+        s.add_image_with_id(&d_img, &[&d_tag], lbl.clone(), vec![]);
+        let i = s.images.iter_mut().find(|i| i.id == d_img).unwrap();
+        i.layers = vec!["b1".into(), "b2".into(), "d1".into()];
+        i.size = 650 * MB;
+    });
+    let rname = format!("hp-{d}-restored");
+    let c_img = acc.img["c"].clone();
+    let rid = t.h.docker.with(|s| {
+        let id = s.add_container(&rname, lbl, true);
+        s.containers.iter_mut().find(|x| x.id == id).unwrap().image = c_img;
+        id
+    });
+    let mut dd = finished(&app, &d, DeploymentStatus::Interrupted);
+    dd.cutover = CutoverState::Begun { at_ms: 35_000 };
+    dd.replaces = Some(ReleaseId::from_deployment(&c));
+    dd.recovery = Some(Recovery {
+        outcome: RecoveryOutcome::Restored,
+        started_ms: 36_000,
+        finished_ms: Some(40_000),
+        budget_ms: 60_000,
+    });
+    dd.finished_ms = Some(40_000);
+    j.persist(&dd).unwrap();
+    j.record(&intent(
+        &app,
+        &d,
+        ResourceKind::Image,
+        &d_tag,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&d, ResourceKind::Image, &d_tag, &d_img))
+        .unwrap();
+    j.record(&intent(
+        &app,
+        &d,
+        ResourceKind::Container,
+        &rname,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&d, ResourceKind::Container, &rname, &rid))
+        .unwrap();
+    j.control(&ControlRecord::Resume(ResumeRec {
+        app: app.clone(),
+        at_ms: 41_000,
+        choice: Choice::Dismiss,
+        selected: None,
+        dismissed: vec![],
+        superseded: vec![],
+        cleared: vec![d.clone()],
+    }))
+    .unwrap();
+    acc.img.insert("d", d_img);
+    acc.ctr.insert("d-restored", rid);
+
+    // a build cache: one unused record nothing shares, one that C's image holds
+    t.h.docker.with(|s| {
+        s.build_cache = vec![(500 * MB, false), (400 * MB, false)];
+        s.build_cache_shared = vec![false, true];
+    });
+    // the guest's disk: an 8 GB filesystem with 3 GB of system and data, plus every distinct layer Docker holds and the cache
+    let st = t.h.docker.st.clone();
+    t.mgmt.set(|m| {
+        m.total = 8_000 * MB;
+        m.avail_fn = Some(std::sync::Arc::new(move || {
+            let s = st.lock().unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut used = 3_000 * MB;
+            for i in &s.images {
+                for l in &i.layers {
+                    if seen.insert(l.clone()) {
+                        used += sizes[l.as_str()];
+                    }
+                }
+            }
+            used += s.build_cache.iter().map(|(n, _)| *n).sum::<u64>();
+            (8_000 * MB).saturating_sub(used)
+        }));
+    });
+    acc
+}
+
+fn present(t: &T, a: &Acc, k: &str) -> bool {
+    image_present(t, &a.img[k])
+}
+
+#[test]
+fn clean_up_removes_everything_disposable_in_one_run_and_measures_what_it_freed() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let free0 = {
+        let o = go(&t, &SHIPPING, &uargs(&t, &[]));
+        kv(&o.stdout, "cleanup-estimated-bytes")
+    };
+    // review: nothing changes, and the estimate is exact: three 400 MB layers and 500 MB of unshared cache
+    let before = deletes(&t);
+    let review = clean(&t, &[]);
+    assert_exit(&review, 0);
+    assert_eq!(deletes(&t), before, "a review changes nothing");
+    assert_eq!(
+        kv(&review.stdout, "cleanup-estimated-bytes"),
+        Some(3 * 400 * MB + 500 * MB),
+        "{}",
+        review.stdout
+    );
+    assert_eq!(
+        free0,
+        kv(&review.stdout, "cleanup-estimated-bytes"),
+        "reviewing twice says the same"
+    );
+    assert!(
+        review
+            .stdout
+            .contains("previous releases kept for rollback: 0"),
+        "{}",
+        review.stdout
+    );
+    let its = items(&review.stdout);
+    assert_eq!(
+        reason_of(&its, &a.c, "image").0,
+        "protected",
+        "the serving release"
+    );
+    assert_eq!(reason_of(&its, &a.a, "image").0, "ready");
+    assert_eq!(reason_of(&its, &a.b, "image").0, "ready");
+    assert_eq!(
+        reason_of(&its, &a.d, "container"),
+        ("protected", "serving-release"),
+        "the restoration container serves"
+    );
+    assert_eq!(
+        reason_of(&its, &a.d, "image").0,
+        "ready",
+        "the failed candidate's own image is disposable"
+    );
+
+    // apply: one run
+    let o = clean(&t, &["--apply"]);
+    assert_exit(&o, 0);
+    // only C and what it needs remain
+    assert!(
+        present(&t, &a, "c")
+            && !present(&t, &a, "a")
+            && !present(&t, &a, "b")
+            && !present(&t, &a, "d"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        container_present(&t, &a.ctr["d-restored"]),
+        "the restoration container that serves stays"
+    );
+    assert!(
+        container_present(&t, &a.ctr["c"])
+            && !container_present(&t, &a.ctr["a"])
+            && !container_present(&t, &a.ctr["b"])
+    );
+    assert!(
+        image_present(&t, "sha256:base") && image_present(&t, "sha256:pg"),
+        "the base image and the database image are untouched"
+    );
+    // persistent data and the unrelated application: the database container is untouched, and no volume was ever addressed
+    assert!(t.h.docker.with(|s| s
+        .containers
+        .iter()
+        .any(|c| c.name == "collectiv-db" && c.running)));
+    assert!(
+        t.h.docker
+            .requests()
+            .iter()
+            .all(|r| !r.path.contains("/volumes")),
+        "volumes are never touched"
+    );
+    // the unshared cache record went; the one an image holds stayed
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.clone()),
+        vec![(400 * MB, false)]
+    );
+    // measured on the modelled disk, and equal to what was estimated: 1.7 GB
+    assert_eq!(
+        kv(&o.stdout, "measured-reclaimed-bytes"),
+        Some(1_700 * MB),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("the measured change matches the estimate"),
+        "{}",
+        o.stdout
+    );
+    // the journal: history stays, what was removed is released
+    let j = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    assert_eq!(j.deployments.len(), 4, "deployment history is kept");
+    assert!(j
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == a.a || e.deployment == a.b)
+        .all(|e| e.is_released()));
+
+    // a second Clean Up finds nothing, changes nothing and claims nothing
+    let n = deletes(&t);
+    let again = clean(&t, &["--apply"]);
+    assert_exit(&again, 0);
+    assert_eq!(
+        deletes(&t),
+        n,
+        "nothing more was asked of Docker to delete: {}",
+        again.stdout
+    );
+    assert!(
+        again.stdout.contains("cleanup: nothing to clean up"),
+        "{}",
+        again.stdout
+    );
+    assert_eq!(kv(&again.stdout, "cleanup-eligible"), Some(0));
+    assert_eq!(kv(&again.stdout, "measured-reclaimed-bytes"), Some(0));
+}
+
+#[test]
+fn clean_up_with_retention_one_keeps_the_previous_release_and_frees_only_the_rest() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let o = clean(&t, &["--keep-rollbacks", "1", "--apply"]);
+    assert_exit(&o, 0);
+    assert!(
+        present(&t, &a, "b") && container_present(&t, &a.ctr["b"]),
+        "B stays: {}",
+        o.stdout
+    );
+    assert!(present(&t, &a, "c") && !present(&t, &a, "a") && !present(&t, &a, "d"));
+    assert_eq!(
+        reason_of(&items(&o.stdout), &a.b, "image"),
+        ("protected", "rollback-target")
+    );
+    assert_eq!(
+        kv(&o.stdout, "measured-reclaimed-bytes"),
+        Some(2 * 400 * MB + 500 * MB),
+        "A, D's candidate and the cache: {}",
+        o.stdout
+    );
+    let again = clean(&t, &["--keep-rollbacks", "1", "--apply"]);
+    assert!(
+        again.stdout.contains("cleanup: nothing to clean up"),
+        "{}",
+        again.stdout
+    );
+    // raising retention never resurrects anything, and lowering it later frees B
+    let lower = clean(&t, &["--keep-rollbacks", "0", "--apply"]);
+    assert!(!present(&t, &a, "b"), "{}", lower.stdout);
+    assert_eq!(
+        kv(&lower.stdout, "measured-reclaimed-bytes"),
+        Some(400 * MB)
+    );
+}
+
+#[test]
+fn clean_up_finishes_after_a_partial_failure_and_never_claims_what_it_did_not_free() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // Docker drops the connection when asked to remove A's image: the run goes on, A's image stays recorded
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/images/{}", a.img["a"]),
+        1,
+        support::fake_docker::Action::Disconnect,
+    );
+    let first = clean(&t, &["--apply"]);
+    assert!(present(&t, &a, "a"), "{}", first.stdout);
+    assert!(
+        !present(&t, &a, "b") && !present(&t, &a, "d"),
+        "the others were still done: {}",
+        first.stdout
+    );
+    let freed = kv(&first.stdout, "measured-reclaimed-bytes").unwrap();
+    assert_eq!(
+        freed,
+        400 * MB + 400 * MB + 500 * MB,
+        "A's 400 MB is not claimed: {}",
+        first.stdout
+    );
+    // the next run retries exactly that
+    let second = clean(&t, &["--apply"]);
+    assert_exit(&second, 0);
+    assert!(!present(&t, &a, "a"), "{}", second.stdout);
+    assert_eq!(
+        kv(&second.stdout, "measured-reclaimed-bytes"),
+        Some(400 * MB)
+    );
+    let third = clean(&t, &["--apply"]);
+    assert!(
+        third.stdout.contains("cleanup: nothing to clean up"),
+        "{}",
+        third.stdout
+    );
+}
+
+#[test]
+fn clean_up_reports_a_failed_cache_step_as_partial_and_the_rerun_finishes_it() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    t.h.docker.fault(
+        Some("POST"),
+        "/build/prune",
+        1,
+        support::fake_docker::Action::Respond(500, r#"{"message":"prune failed"}"#.into()),
+    );
+    let first = clean(&t, &["--apply"]);
+    assert_ne!(first.code, 0, "{}", first.stdout);
+    assert!(
+        first.stdout.contains("cleanup: partial"),
+        "{}",
+        first.stdout
+    );
+    assert!(
+        !present(&t, &a, "a") && !present(&t, &a, "d"),
+        "the releases step had finished"
+    );
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.len()),
+        2,
+        "the cache is untouched"
+    );
+    let second = clean(&t, &["--apply"]);
+    assert_exit(&second, 0);
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.len()),
+        1,
+        "{}",
+        second.stdout
+    );
+}
+
+#[test]
+fn clean_up_is_refused_without_authorization_or_while_a_deployment_is_unfinished() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let before = deletes(&t);
+    let refused = clean_noauth(&t);
+    assert_ne!(refused.code, 0, "{}", refused.stdout);
+    assert_eq!(deletes(&t), before);
+    // a deployment that is still running: nothing, including the cache, is touched
+    with_deployment(&t, DeploymentStatus::Running);
+    let o = clean(&t, &["--apply"]);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert_eq!(
+        deletes(&t),
+        before,
+        "no cleanup while a deployment is unfinished"
+    );
+    assert!(present(&t, &a, "a"));
+}
+
+fn clean_noauth(t: &T) -> Outcome {
+    go(t, &SHIPPING, &uargs(t, &["--apply"]))
+}
+
+#[test]
+fn clean_up_after_a_lost_reply_reconciles_what_docker_already_did_and_claims_nothing_for_it() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // Docker removes B's container but the reply never arrives: the journal still lists it, Docker no longer has it
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", a.ctr["b"]),
+        1,
+        support::fake_docker::Action::ApplyThenDrop,
+    );
+    let first = clean(&t, &["--apply"]);
+    assert!(
+        !container_present(&t, &a.ctr["b"]),
+        "Docker did remove it: {}",
+        first.stdout
+    );
+    // the next run reconciles the record instead of removing again, finishes the rest, and the total is still exact
+    let second = clean(&t, &["--apply"]);
+    assert_exit(&second, 0);
+    assert!(
+        !present(&t, &a, "b") && !present(&t, &a, "a") && !present(&t, &a, "d"),
+        "{}",
+        second.stdout
+    );
+    let j = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    assert!(
+        j.ledger
+            .entries()
+            .iter()
+            .filter(|e| e.deployment == a.b)
+            .all(|e| e.is_released()),
+        "the journal agrees with Docker"
+    );
+    let third = clean(&t, &["--apply"]);
+    assert!(
+        third.stdout.contains("cleanup: nothing to clean up"),
+        "{}",
+        third.stdout
+    );
+}
+
+// ---------------------------------------------------------------- an apply acts on the plan that was reviewed
+
+#[test]
+fn an_apply_needs_the_reviewed_plan_and_acts_on_nothing_else() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let before = deletes(&t);
+    // no plan at all
+    let none = go(&t, &SHIPPING, &uargs(&t, &["--apply", &auth()]));
+    assert_eq!(
+        none.code, 2,
+        "a usage error: {}{}",
+        none.stdout, none.stderr
+    );
+    // a plan that is not the reviewed one
+    let wrong = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", "0000000000000000", &auth()]),
+    );
+    assert_eq!(wrong.code, 6, "refused: {}{}", wrong.stdout, wrong.stderr);
+    assert!(
+        wrong
+            .stderr
+            .contains("the plan changed since it was reviewed")
+            && wrong.stderr.contains("Review again"),
+        "{}",
+        wrong.stderr
+    );
+    assert_eq!(deletes(&t), before, "nothing was asked of Docker");
+    assert!(present(&t, &a, "a") && present(&t, &a, "b"));
+    // the plan is stable, and depends on the retention
+    let r1 = clean(&t, &[]);
+    let r2 = clean(&t, &[]);
+    assert_eq!(
+        plan_of(&r1),
+        plan_of(&r2),
+        "reviewing twice names the same plan"
+    );
+    assert_ne!(
+        plan_of(&r1),
+        plan_of(&clean(&t, &["--keep-rollbacks", "1"])),
+        "another retention is another plan"
+    );
+    // the right plan applies
+    let ok = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &plan_of(&r1), &auth()]),
+    );
+    assert_exit(&ok, 0);
+    assert!(
+        !present(&t, &a, "a") && !present(&t, &a, "b"),
+        "{}",
+        ok.stdout
+    );
+    assert_eq!(
+        plan_of(&ok),
+        plan_of(&r1),
+        "what was done is what was reviewed"
+    );
+}
+
+#[test]
+fn a_plan_that_changed_after_the_review_is_refused_and_a_fresh_review_applies() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let reviewed = plan_of(&clean(&t, &[]));
+    // between the review and the apply, A's image disappears from Docker: what Clean Up would do for it is now different
+    t.h.docker.with(|s| s.images.retain(|i| i.id != a.img["a"]));
+    let before = deletes(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &reviewed, &auth()]),
+    );
+    assert_eq!(o.code, 6, "{}{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("Review again"), "{}", o.stderr);
+    assert_eq!(deletes(&t), before, "nothing was changed");
+    assert!(
+        present(&t, &a, "b") && present(&t, &a, "d"),
+        "nothing was removed"
+    );
+    // a fresh review names the new plan, and applying that works
+    let applied = clean(&t, &["--apply"]);
+    assert_exit(&applied, 0);
+    assert!(
+        !present(&t, &a, "b") && !present(&t, &a, "d"),
+        "{}",
+        applied.stdout
+    );
+}
+
+#[test]
+fn an_object_that_becomes_removable_during_an_apply_is_left_alone_and_the_run_says_so() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // B's image is kept at review because a container (not Harpoon's) was made from it
+    let b_img = a.img["b"].clone();
+    t.h.docker.with(|s| {
+        let id = s.add_container("scratch-shell", Default::default(), false);
+        s.containers.iter_mut().find(|c| c.id == id).unwrap().image = b_img.clone();
+    });
+    let review = clean(&t, &[]);
+    assert_eq!(
+        reason_of(&items(&review.stdout), &a.b, "image").0,
+        "review",
+        "{}",
+        review.stdout
+    );
+    // when the first removal arrives, that container is removed by someone else: B's image would now be removable
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", a.ctr["a"]),
+        1,
+        support::fake_docker::Action::Race(std::sync::Arc::new(
+            |s: &mut support::fake_docker::St| s.containers.retain(|c| c.name != "scratch-shell"),
+        )),
+    );
+    let o = clean(&t, &["--apply"]);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(
+        present(&t, &a, "b"),
+        "B's image was not in the reviewed plan, so it stays: {}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("cleanup: stopped short"), "{}", o.stdout);
+    assert!(!present(&t, &a, "a"), "what was reviewed was done");
+    // a fresh review now includes it
+    let again = clean(&t, &["--apply"]);
+    assert_exit(&again, 0);
+    assert!(!present(&t, &a, "b"), "{}", again.stdout);
+}
+
+#[test]
+fn the_build_cache_is_pruned_only_if_the_review_included_it() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // at review every cache record is shared with an image: nothing is prunable, so the cache is not part of the plan
+    t.h.docker.with(|s| s.build_cache_shared = vec![true, true]);
+    let review = clean(&t, &[]);
+    assert_eq!(kv(&review.stdout, "build-cache-prunable-records"), Some(0));
+    // when the first removal arrives, a record stops being shared: it would now be prunable
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", a.ctr["a"]),
+        1,
+        support::fake_docker::Action::Race(std::sync::Arc::new(
+            |s: &mut support::fake_docker::St| s.build_cache_shared = vec![false, true],
+        )),
+    );
+    let o = clean(&t, &["--apply"]);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("not part of the reviewed plan"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.len()),
+        2,
+        "the cache was not pruned"
+    );
+    assert!(t
+        .h
+        .docker
+        .requests()
+        .iter()
+        .all(|r| !(r.method == "POST" && r.path.contains("/build/prune"))));
+}
+
+// ---------------------------------------------------------------- failing closed
+
+#[test]
+fn clean_up_never_runs_while_a_deployment_is_in_the_middle_of_a_cutover_or_the_journal_is_held() {
+    // a deployment that began a cutover and has not finished: the previous release may be the only thing that can restore it
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let (_, dep) = ids(60);
+        let mut d = finished(&w.app, &dep, DeploymentStatus::Running);
+        d.cutover = CutoverState::Begun { at_ms: 25_000 };
+        d.replaces = Some(ReleaseId::from_deployment(&w.serving));
+        j.persist(&d).unwrap();
+    }
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    for keep in ["0", "1"] {
+        let o = go(
+            &t,
+            &SHIPPING,
+            &args(&t, &["--keep-rollbacks", keep, "--apply", &auth()]),
+        );
+        assert_ne!(o.code, 0, "{}", o.stdout);
+        assert!(
+            image_present(&t, &srv_i)
+                && container_present(&t, &srv_c)
+                && image_present(&t, &old_i)
+                && container_present(&t, &old_c),
+            "{}",
+            o.stdout
+        );
+    }
+    let review = go(&t, &SHIPPING, &uargs(&t, &[]));
+    assert_ne!(review.code, 0, "even the review refuses: {}", review.stdout);
+    // another process holds the deployment journal: a deployment may be running, so nothing is applied
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let id = plan_of(&clean(&t, &[]));
+    let hold =
+        harpoon_deploy_journal::hold_writer_lock(&t.journal_dir()).expect("take the writer lock");
+    let before = deletes(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &id, &auth()]),
+    );
+    assert_ne!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert_eq!(deletes(&t), before);
+    assert!(present(&t, &a, "a"));
+    drop(hold);
+}
+
+#[test]
+fn an_unreachable_docker_or_an_unreadable_runtime_fails_a_review_without_a_guess() {
+    let t = T::new();
+    acceptance_world(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &[
+            "cleanup".to_string(),
+            "--docker-socket".into(),
+            "/nonexistent/docker.sock".into(),
+            "--resources-dir".into(),
+            t.resources(),
+        ],
+    );
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(
+        !o.stdout.contains("cleanup-plan:"),
+        "no plan is offered when the runtime could not be read: {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_prepared_candidate_that_was_never_confirmed_leaves_the_serving_release_untouched_at_retention_zero(
+) {
+    // `replace` without a confirmation only prepares a candidate (status cancelled, cutover not started): the release that
+    // serves is still the only thing running, and nothing about it or the candidate may be removed by Clean Up
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (_, cand) = ids(61);
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let mut d = finished(&w.app, &cand, DeploymentStatus::Cancelled);
+        d.replaces = Some(ReleaseId::from_deployment(&w.serving));
+        j.persist(&d).unwrap();
+    }
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let o = apply_keep(&t, 0);
+    assert!(
+        image_present(&t, &srv_i) && container_present(&t, &srv_c),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&o.stdout), &w.serving, "image"),
+        ("protected", "serving-release")
     );
 }

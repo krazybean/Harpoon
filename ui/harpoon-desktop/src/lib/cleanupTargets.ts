@@ -1,8 +1,9 @@
 // Where each existing cleanup control lives on the Resources page. The Storage Breakdown only moves focus here: it starts nothing,
 // and every action still goes through the existing control and its own confirmation.
-export type CleanupTarget = "old-releases" | "build-cache" | "disk-blocks";
+export type CleanupTarget = "clean-up" | "old-releases" | "build-cache" | "disk-blocks";
 
 export const CLEANUP_TARGETS: Record<CleanupTarget, { section: string; button: string }> = {
+  "clean-up": { section: "cleanup-clean-up", button: "cleanup-review-all" },
   "old-releases": { section: "cleanup-old-releases", button: "cleanup-review-releases" },
   "build-cache": { section: "cleanup-build-cache", button: "cleanup-check-cache" },
   "disk-blocks": { section: "cleanup-disk-blocks", button: "cleanup-reclaim" },
