@@ -1,6 +1,7 @@
 {
   "apps": [
     {
+      "alias": "none",
       "deployments": [
         {
           "config": null,

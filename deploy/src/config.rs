@@ -294,11 +294,29 @@ pub enum ConfigRecord {
 
 // ------------------------------------------------------------------ validation
 
+/// Routing metadata kept in the configuration model: `on` at an application scope gives that application
+/// `localhost:<router port>` (see `route::RouteTable::with_alias`). It is never part of a resolved
+/// configuration: no snapshot, build argument or container environment ever carries it.
+pub const LOCALHOST_ALIAS: &str = "HARPOON_LOCALHOST_ALIAS";
+pub const LOCALHOST_ALIAS_ON: &str = "on";
+
 pub fn check_name(name: &str) -> Result<(), String> {
+    if name == LOCALHOST_ALIAS {
+        return Ok(());
+    }
     envvars::check_name(name)
 }
 
 pub fn check_config_value(name: &str, value: &str) -> Result<(), String> {
+    if name == LOCALHOST_ALIAS {
+        return if value == LOCALHOST_ALIAS_ON {
+            Ok(())
+        } else {
+            Err(format!(
+                "{LOCALHOST_ALIAS} only takes the value {LOCALHOST_ALIAS_ON:?}; remove it with config-unset"
+            ))
+        };
+    }
     envvars::check_value(name, value)
 }
 
@@ -569,6 +587,39 @@ impl ConfigState {
         m
     }
 
+    /// The applications that currently claim the alias. Only an application scope counts (a global or project
+    /// definition is ignored, so it can never give the alias to everything), in any environment.
+    pub fn alias_owners(&self) -> Vec<ApplicationId> {
+        let mut v: Vec<ApplicationId> = self
+            .current()
+            .into_iter()
+            .filter(|((s, n), d)| {
+                *n == LOCALHOST_ALIAS
+                    && s.level == Level::Application
+                    && matches!(&d.setting, Setting::Set { value: Value::Config(v), .. } if v == LOCALHOST_ALIAS_ON)
+            })
+            .filter_map(|((s, _), _)| s.id.parse().ok())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Refuse a claim that cannot be honoured: not an application scope, or another application already owns it.
+    pub fn check_alias_claim(&self, scope: &Scope) -> Result<(), String> {
+        if scope.level != Level::Application {
+            return Err(format!(
+                "{LOCALHOST_ALIAS} belongs to one application: use --scope app:APPLICATION_ID"
+            ));
+        }
+        match self.alias_owners().into_iter().find(|o| o.to_string() != scope.id) {
+            Some(o) => Err(format!(
+                "localhost is already the alias of application {o}; only one application can own it. Nothing was changed. Remove it there first with config-unset"
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn snapshot_of(&self, d: &DeploymentId) -> Option<&Snapshot> {
         self.snapshots.iter().find(|s| s.deployment == *d)
     }
@@ -593,7 +644,7 @@ impl ConfigState {
         let mut out: BTreeMap<String, Entry> = BTreeMap::new();
         for scope in &order {
             for ((s, name), d) in &cur {
-                if *s != scope {
+                if *s != scope || *name == LOCALHOST_ALIAS {
                     continue;
                 }
                 match &d.setting {
@@ -1094,5 +1145,111 @@ mod tests {
             vec![("A".to_string(), "cli".to_string()), ("B".to_string(), "2".to_string())]
         );
         assert!(build_args(&merged).is_empty());
+    }
+
+    // ---- the localhost alias
+
+    fn other() -> ApplicationId {
+        "app_00000000000000000000000002".parse().unwrap()
+    }
+    fn claim(a: &ApplicationId, env: Option<&str>) -> ConfigRecord {
+        set(Scope::application(a, env), LOCALHOST_ALIAS, c(LOCALHOST_ALIAS_ON), "r")
+    }
+
+    #[test]
+    fn the_alias_is_owned_by_the_application_scope_that_set_it_in_any_environment() {
+        let (a, b) = (app(), other());
+        assert!(ConfigState::default().alias_owners().is_empty());
+        assert_eq!(st(&[claim(&a, None)]).alias_owners(), vec![a.clone()]);
+        assert_eq!(st(&[claim(&a, Some("production"))]).alias_owners(), vec![a.clone()]);
+        // Two scopes of the same application are still one owner; two applications are two claimants.
+        assert_eq!(
+            st(&[claim(&a, None), claim(&a, Some("production"))]).alias_owners(),
+            vec![a.clone()]
+        );
+        assert_eq!(st(&[claim(&b, None), claim(&a, None)]).alias_owners(), vec![a, b]);
+    }
+
+    #[test]
+    fn a_global_or_project_definition_never_gives_the_alias_to_anyone() {
+        let s = st(&[
+            set(Scope::global(None), LOCALHOST_ALIAS, c("on"), "r"),
+            set(Scope::project("shop", None), LOCALHOST_ALIAS, c("on"), "r"),
+        ]);
+        assert!(s.alias_owners().is_empty());
+        assert!(s.check_alias_claim(&Scope::global(None)).is_err());
+        assert!(s.check_alias_claim(&Scope::project("shop", None)).is_err());
+    }
+
+    #[test]
+    fn an_unset_or_a_secret_or_another_value_is_not_a_claim() {
+        let a = app();
+        assert!(
+            st(&[claim(&a, None), unset(Scope::application(&a, None), LOCALHOST_ALIAS)])
+                .alias_owners()
+                .is_empty()
+        );
+        // The latest record wins: set again after an unset claims it again.
+        assert_eq!(
+            st(&[unset(Scope::application(&a, None), LOCALHOST_ALIAS), claim(&a, None)]).alias_owners(),
+            vec![a.clone()]
+        );
+        assert!(st(&[set(Scope::application(&a, None), LOCALHOST_ALIAS, c("off"), "r")])
+            .alias_owners()
+            .is_empty());
+        assert!(check_config_value(LOCALHOST_ALIAS, "off").is_err());
+        assert!(check_config_value(LOCALHOST_ALIAS, "on").is_ok());
+    }
+
+    #[test]
+    fn a_second_claimant_is_refused_and_the_owner_may_repeat_its_own_claim() {
+        let (a, b) = (app(), other());
+        let s = st(&[claim(&a, None)]);
+        let e = s.check_alias_claim(&Scope::application(&b, None)).unwrap_err();
+        assert!(e.contains(&a.to_string()) && e.contains("Nothing was changed"), "{e}");
+        assert!(s.check_alias_claim(&Scope::application(&a, Some("production"))).is_ok());
+        assert!(ConfigState::default()
+            .check_alias_claim(&Scope::application(&b, None))
+            .is_ok());
+        // After the owner lets go, the other application may claim it.
+        let released = st(&[claim(&a, None), unset(Scope::application(&a, None), LOCALHOST_ALIAS)]);
+        assert!(released.check_alias_claim(&Scope::application(&b, None)).is_ok());
+    }
+
+    #[test]
+    fn the_alias_is_never_resolved_into_a_deployment() {
+        let a = app();
+        let s = st(&[
+            claim(&a, Some("production")),
+            set(Scope::application(&a, Some("production")), "K", c("v"), "r"),
+        ]);
+        let names = |e: Option<&str>| {
+            s.resolve(None, &a, e)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Some("production")), vec!["K".to_string()]);
+        assert!(runtime_env(&s.resolve(None, &a, Some("production")).unwrap())
+            .iter()
+            .all(|(n, _)| n != LOCALHOST_ALIAS));
+        assert!(build_args(&s.resolve(None, &a, Some("production")).unwrap())
+            .iter()
+            .all(|(n, _)| n != LOCALHOST_ALIAS));
+    }
+
+    #[test]
+    fn the_alias_key_survives_the_journal_codec_and_other_reserved_names_stay_reserved() {
+        let r = claim(&app(), Some("production"));
+        let line = encode(&r);
+        let f: Vec<&str> = line.split_once('\t').unwrap().1.split('\t').collect();
+        assert_eq!(decode(&f).unwrap(), r);
+        assert!(check_name("HARPOON_DEPLOYMENT_MARKER").is_err());
+        assert!(check_name("HARPOON_SOMETHING_ELSE").is_err());
+        assert!(
+            crate::envvars::check_name(LOCALHOST_ALIAS).is_err(),
+            "--env cannot set it"
+        );
     }
 }

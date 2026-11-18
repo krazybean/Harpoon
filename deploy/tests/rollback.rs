@@ -725,3 +725,57 @@ fn a_recorded_port_outside_the_leased_ranges_is_never_a_forwarding_target() {
         serving_on(&w, &before(&w), port);
     }
 }
+
+// ------------------------------------------------------------------ localhost alias
+
+/// The alias is not a second route: it is the owner's own route, so it must be exactly what its hostname resolves to.
+fn assert_alias_follows(w: &W, t: &RouteTable, what: &str) {
+    let t = t.clone().with_alias(std::slice::from_ref(&w.app));
+    let by_name = t.resolve_at(&hostname(&w.app), 7480);
+    assert!(by_name.is_some(), "{what}");
+    assert_eq!(t.resolve_at("localhost:7480", 7480), by_name, "{what}");
+}
+
+#[test]
+fn the_localhost_alias_follows_the_serving_release_through_replacement_rollback_and_restoration() {
+    // before anything changes
+    assert_alias_follows(&world(), &before(&world()), "before");
+
+    // a successful replacement moves the route to the new release's port
+    let mut w = world();
+    let id = w.gen.deployment().unwrap();
+    let mut d = Deployment::new(id, w.app.clone(), Trigger::Cli, w.clock.now_ms());
+    d.transition(DeploymentStatus::Queued, w.clock.now_ms()).unwrap();
+    let mut b = FakeBackend::new(w.clock.clone()).with_runtime(FakeRuntime::world());
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(r.status, DeploymentStatus::Succeeded);
+    let t = routes(&w, &r, &d);
+    serving_on(&w, &t, d.pinned.as_ref().unwrap().host_port);
+    assert_alias_follows(&w, &t, "replacement");
+
+    // a successful rollback
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let r = run(&w, &mut d, &mut backend(&w));
+    assert_eq!(r.status, DeploymentStatus::Succeeded);
+    assert_alias_follows(&w, &routes(&w, &r, &d), "rollback");
+
+    // a failed post-cutover replacement that was restored: back on the old port
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let mut b = backend(&w)
+        .fail_final_check("HTTP 503")
+        .restore_with(RestoreResult::Healthy, 300);
+    let r = run(&w, &mut d, &mut b);
+    assert_eq!(d.recovery.unwrap().outcome, RecoveryOutcome::Restored);
+    let t = routes(&w, &r, &d);
+    serving_on(&w, &t, 38200);
+    assert_alias_follows(&w, &t, "restoration");
+
+    // a candidate rejected before the cutover changes nothing
+    let mut w = world();
+    let mut d = rollback_dep(&mut w);
+    let r = run(&w, &mut d, &mut backend(&w).fail_preliminary("HTTP 503"));
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    assert_alias_follows(&w, &routes(&w, &r, &d), "rejected candidate");
+}

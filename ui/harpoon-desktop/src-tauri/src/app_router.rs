@@ -81,10 +81,16 @@ fn probe_resolution() -> Result<(), String> {
 /// Only Harpoon's own application addresses may be handed to the system opener: `http://<label>.harpoon.localhost:<port>`
 /// or the direct `http://127.0.0.1:<port>`; no path, credentials or other host.
 pub fn openable(url: &str) -> bool {
+    openable_at(url, status().0)
+}
+
+/// `http://localhost:<port>` is Harpoon's own address only when `<port>` is the port the router is listening on.
+pub fn openable_at(url: &str, router_port: Option<u16>) -> bool {
     let Some(rest) = url.strip_prefix("http://") else { return false };
     let Some((host, port)) = rest.trim_end_matches('/').split_once(':') else { return false };
     let label = host.strip_suffix(&format!(".{}", harpoon_deploy::route::DOMAIN));
-    let host_ok = host == "127.0.0.1" || label.is_some_and(|l| (1..=32).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+    let alias = host == harpoon_deploy::route::ALIAS_HOST && port.parse::<u16>().ok() == router_port;
+    let host_ok = alias || host == "127.0.0.1" || label.is_some_and(|l| (1..=32).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
     host_ok && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok_and(|p| p >= 1024)
 }
 
@@ -229,7 +235,7 @@ fn serve(mut client: TcpStream, state: &State) -> io::Result<()> {
     let mut table = state.table(false);
     let mut tried: Option<u16> = None;
     let upstream = loop {
-        match table.resolve(&host) {
+        match table.resolve_at(&host, state.port) {
             None => return respond(client, "404 Not Found", "This is not a Harpoon application address."),
             Some(Route::Conflict { .. }) => {
                 return respond(client, "409 Conflict", "Two applications were assigned this address. Harpoon refuses to guess; neither is routed.")
@@ -247,7 +253,7 @@ fn serve(mut client: TcpStream, state: &State) -> io::Result<()> {
                 Err(_) if tried.is_none() => {
                     tried = Some(*port);
                     table = state.table(true);
-                    if matches!(table.resolve(&host), Some(Route::Serving { port: p, .. }) if Some(*p) == tried) {
+                    if matches!(table.resolve_at(&host, state.port), Some(Route::Serving { port: p, .. }) if Some(*p) == tried) {
                         return respond(client, "503 Service Unavailable", "The release recorded as serving this application is not responding. It may be stopped or restarting; Harpoon has not routed to anything else.");
                     }
                 }
@@ -569,5 +575,63 @@ mod tests {
         let mut got = [0u8; 4];
         c.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"ping");
+    }
+
+    // ---- the localhost alias
+
+    #[test]
+    fn the_alias_reaches_only_its_owner_and_follows_the_serving_release() {
+        let (p1, h1) = upstream("release-1");
+        let (p2, _) = upstream("release-2");
+        let (other, other_hits) = upstream("someone-else");
+        let (a, b) = (app("1"), app("2"));
+        let table = |p| RouteTable::build([(a.clone(), Some(p)), (b.clone(), Some(other))]).with_alias(std::slice::from_ref(&a));
+        let (r, shared) = router_for(table(p1));
+        let alias = format!("localhost:{}", r.addr().port());
+        assert!(get(&r, &alias).ends_with("release-1"));
+        assert!(get(&r, &hostname(&a)).ends_with("release-1"), "the hostname keeps working beside the alias");
+        // a replacement, rollback or restoration only changes the owner's port
+        *shared.lock().unwrap() = table(p2);
+        settle();
+        assert!(get(&r, &alias).ends_with("release-2"));
+        assert_eq!(h1.load(Ordering::SeqCst), 2);
+        assert_eq!(other_hits.load(Ordering::SeqCst), 0, "the alias never reached another application");
+    }
+
+    #[test]
+    fn nothing_else_answers_for_localhost_and_127_0_0_1_is_not_aliased() {
+        let (p, hits) = upstream("owner");
+        let a = app("1");
+        let (r, _) = router_for(RouteTable::build([(a.clone(), Some(p))]).with_alias(std::slice::from_ref(&a)));
+        let port = r.addr().port();
+        for bad in ["localhost".to_string(), format!("localhost:{}", port.wrapping_add(1)), format!("127.0.0.1:{port}"), format!("[::1]:{port}"), format!("x.localhost:{port}"), format!("localhost.evil.test:{port}")] {
+            assert!(get(&r, &bad).starts_with("HTTP/1.1 404"), "{bad}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing was forwarded");
+        // and without an owner `localhost:<port>` is unknown, exactly as before
+        let (r, _) = router_for(RouteTable::build([(a, Some(p))]));
+        assert!(get(&r, &format!("localhost:{}", r.addr().port())).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn a_contested_alias_is_refused_for_both_claimants_and_their_names_still_work() {
+        let (p, hits) = upstream("page");
+        let (a, b) = (app("1"), app("2"));
+        let (r, _) = router_for(RouteTable::build([(a.clone(), Some(p)), (b.clone(), Some(p))]).with_alias(&[a.clone(), b]));
+        let out = get(&r, &format!("localhost:{}", r.addr().port()));
+        assert!(out.starts_with("HTTP/1.1 409"), "{out}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(get(&r, &hostname(&a)).ends_with("page"));
+    }
+
+    #[test]
+    fn the_localhost_address_is_openable_only_on_the_routers_port() {
+        assert!(openable_at("http://localhost:7480", Some(7480)));
+        assert!(openable_at("http://localhost:7480/", Some(7480)));
+        for bad in ["http://localhost:7481", "http://localhost", "https://localhost:7480", "http://localhost:7480/x", "http://user@localhost:7480", "http://localhost.evil.test:7480"] {
+            assert!(!openable_at(bad, Some(7480)), "{bad}");
+        }
+        assert!(!openable_at("http://localhost:7480", None), "no router, no Harpoon address");
+        assert!(openable_at("http://abc124xyz0.harpoon.localhost:7480", Some(7480)), "names are unchanged");
     }
 }
