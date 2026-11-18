@@ -80,6 +80,7 @@ fn rig() -> Rig {
         s.add_image_with_id(&prev_image, &["harpoon/previous:1"], l.clone(), vec![]);
         let c = s.add_container(&prev_name, l.clone(), true);
         s.containers.last_mut().unwrap().host_port = Some(PREV_PORT);
+        s.containers.last_mut().unwrap().image = prev_image.clone();
         // an unrelated application's container and an unlabelled one, both running
         let other_app = {
             let mut g = harpoon_deploy::ids::IdGenerator::new(
@@ -1600,7 +1601,7 @@ fn when_docker_cannot_report_the_serving_containers_port_the_lease_rules_still_r
     r.h.docker.fault_after(
         Some("GET"),
         &format!("{rb_container}/json"),
-        probe - 1,
+        probe - 2, // the read before the last look, which is the restoration's own last-moment check
         1,
         Action::Disconnect,
     );
@@ -1997,32 +1998,321 @@ fn a_previous_release_whose_stop_completes_while_restoring_is_then_recreated_onc
     assert_eq!(creates, 1);
 }
 
-#[test]
-fn a_running_previous_release_that_cannot_be_verified_is_not_replaced_and_costs_no_attempt() {
-    let mut r = rig();
-    let (mut d, prev) = interrupted_with_previous_running(&mut r);
-    let mut b = recovery_backend(&r, transport(Observation::Status(503)));
-    let rep = recover_cutover(
-        &mut d,
+/// Answers 200 only to the marker it was given, as a real application answering with its own `HARPOON_DEPLOYMENT_MARKER` does.
+struct OnlyMarker(String);
+
+impl HttpTransport for OnlyMarker {
+    fn get(&self, _p: u16, _path: &str, _t: Duration) -> Observation {
+        Observation::Status(200)
+    }
+    fn get_expecting(
+        &self,
+        _port: u16,
+        _path: &str,
+        _t: Duration,
+        m: Option<&harpoon_deploy_docker::probe::ResponseMarker>,
+    ) -> Observation {
+        use harpoon_deploy_docker::probe::ResponseMarker;
+        match m {
+            Some(ResponseMarker::Header { value, .. }) if *value != self.0 => {
+                Observation::ConnectFailed("another container's marker".into())
+            }
+            _ => Observation::Status(200),
+        }
+    }
+    fn get_marked(
+        &self,
+        _port: u16,
+        _path: &str,
+        _t: Duration,
+        m: &harpoon_deploy_docker::probe::ResponseMarker,
+    ) -> harpoon_deploy_docker::probe::MarkedResponse {
+        use harpoon_deploy_docker::probe::{MarkedResponse, ResponseMarker};
+        match m {
+            ResponseMarker::Header { value, .. } if *value == self.0 => {
+                MarkedResponse::Matched(200)
+            }
+            _ => MarkedResponse::Failed(Observation::Status(200)),
+        }
+    }
+    fn is_simulated(&self) -> bool {
+        true
+    }
+}
+
+/// The live CLI's attribution: every response must carry the marker of the container that gave it. No path proof, so only the marker counts.
+fn marked_recovery_backend(r: &Rig, expect: &str) -> DockerBackend<OnlyMarker> {
+    let mut cfg = config(&r.h.ws, &r.h.docker);
+    cfg.enable_replacement = true;
+    cfg.attribution = harpoon_deploy_docker::backend::Attribution::PerContainer;
+    cfg.restore_settle = Duration::from_millis(150);
+    DockerBackend::with_transport(cfg, Some(&r.h.ws.resources()), OnlyMarker(expect.into()))
+        .unwrap()
+        .with_entropy(test_entropy())
+        .with_port_probe(NoListeners)
+        .with_disk_probe(FakeDisk(10 * 1024 * 1024 * 1024))
+}
+
+/// Give the previous release's container the environment Harpoon created it with.
+fn previous_created_with_marker(r: &Rig, marker: Option<&str>) {
+    let name = r.prev_name.clone();
+    r.h.docker.with(|s| {
+        let c = s.containers.iter_mut().find(|c| c.name == name).unwrap();
+        c.create_body = harpoon_deploy_docker::json::obj(vec![(
+            "Env",
+            harpoon_deploy_docker::json::Json::Arr(
+                marker
+                    .map(|m| {
+                        harpoon_deploy_docker::json::Json::Str(format!(
+                            "{}={m}",
+                            harpoon_deploy_docker::backend::MARKER_ENV
+                        ))
+                    })
+                    .into_iter()
+                    .collect(),
+            ),
+        )]);
+    });
+}
+
+fn recover(
+    r: &Rig,
+    d: &mut Deployment,
+    prev: harpoon_deploy::backend::PreviousRelease,
+    b: &mut dyn harpoon_deploy::backend::Backend,
+) -> harpoon_deploy::engine::Report {
+    recover_cutover(
+        d,
         prev,
-        &mut b,
+        b,
         &mut MemoryJournal::new(),
         &harpoon_deploy::time::SystemClock,
         &r.cfg,
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// A blocked restoration records nothing and keeps the one permitted attempt.
+fn assert_blocked_and_attempt_kept(r: &Rig, d: &Deployment, rep: &harpoon_deploy::engine::Report) {
+    assert!(!rep.blocked.is_empty(), "{:?}", rep.warnings);
+    assert!(d.recovery.is_none(), "{:?}", d.recovery);
     assert!(
-        matches!(
-            d.recovery.unwrap().outcome,
-            RecoveryOutcome::NotAttempted(harpoon_deploy::state::Reason::PortInUse)
-        ),
+        d.can_recover_explicitly(),
+        "the one explicit restoration must still be available"
+    );
+    assert_eq!(
+        created_or_started_or_stopped_anything(r),
+        Vec::<String>::new()
+    );
+    assert!(r.h.docker.container(&r.prev_name).unwrap().running);
+}
+
+#[test]
+fn a_running_previous_release_that_fails_its_check_blocks_and_keeps_the_attempt() {
+    let mut r = rig();
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = recovery_backend(&r, transport(Observation::Status(503)));
+    let rep = recover(&r, &mut d, prev.clone(), &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+    // the release is stopped later by whatever was stopping it: the same explicit restoration now recreates it, once
+    r.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .filter(|c| c.name == r.prev_name)
+            .for_each(|c| c.running = false);
+        s.taken_ports.remove(&PREV_PORT);
+    });
+    let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
         "{:?} {:?}",
-        d.recovery,
+        rep.blocked,
+        rep.warnings
+    );
+}
+
+#[test]
+fn a_previous_release_is_verified_by_the_marker_it_was_created_with_under_per_container_attribution(
+) {
+    let mut r = rig();
+    previous_created_with_marker(&r, Some("marker-of-the-previous-release"));
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = marked_recovery_backend(&r, "marker-of-the-previous-release");
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert!(rep.blocked.is_empty(), "{:?}", rep.blocked);
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
         rep.warnings
     );
     assert_eq!(
         created_or_started_or_stopped_anything(&r),
         Vec::<String>::new()
     );
-    assert!(r.h.docker.container(&r.prev_name).unwrap().running);
+}
+
+#[test]
+fn a_response_with_another_marker_does_not_verify_the_previous_release() {
+    let mut r = rig();
+    previous_created_with_marker(&r, Some("marker-of-the-previous-release"));
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = marked_recovery_backend(&r, "some-other-containers-marker");
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+}
+
+#[test]
+fn a_previous_release_with_no_marker_in_its_environment_is_never_verified() {
+    let mut r = rig();
+    previous_created_with_marker(&r, None);
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let mut b = marked_recovery_backend(&r, "anything");
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+    assert!(rep.blocked.iter().any(|m| m.contains("no response marker")));
+}
+
+#[test]
+fn a_container_that_stops_right_after_a_successful_check_is_not_recorded_as_restored() {
+    // In an accepted run, find the read that follows the first pre-check's health check: the last read of the previous container
+    // before the engine lists containers a second time (its own check, just before the restoration).
+    let after_check = {
+        let mut r = rig();
+        let (mut d, prev) = interrupted_with_previous_running(&mut r);
+        let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+        let rep = recover(&r, &mut d, prev, &mut b);
+        assert_eq!(
+            d.recovery.unwrap().outcome,
+            RecoveryOutcome::Restored,
+            "{:?}",
+            rep.blocked
+        );
+        let reqs = r.h.docker.requests();
+        let lists: Vec<usize> = reqs
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| q.method == "GET" && q.path.starts_with("/containers/json"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(lists.len() >= 2, "the engine checks twice: {lists:?}");
+        reqs[..lists[1]]
+            .iter()
+            .filter(|q| q.method == "GET" && q.path.contains(&format!("{}/json", r.prev_container)))
+            .count()
+            - 1
+    };
+    let mut r = rig();
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let id = r.prev_container.clone();
+    r.h.docker.fault_after(
+        Some("GET"),
+        &format!("{id}/json"),
+        after_check,
+        1,
+        Action::Race(std::sync::Arc::new(
+            move |st: &mut support::fake_docker::St| {
+                st.containers
+                    .iter_mut()
+                    .filter(|c| c.id == id)
+                    .for_each(|c| c.running = false);
+            },
+        )),
+    );
+    let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert!(
+        r.h.docker
+            .with(|s| s.faults.iter().all(|f| f.remaining == 0)),
+        "the fault hit the read after the check"
+    );
+    // it stopped while the check was being made: whether that was a stop in flight is not known, so nothing is recorded or created
+    assert!(
+        !rep.blocked.is_empty(),
+        "{:?} {:?}",
+        rep.warnings,
+        d.recovery
+    );
+    assert!(d.recovery.is_none());
+    assert!(d.can_recover_explicitly());
+    assert_eq!(
+        created_or_started_or_stopped_anything(&r),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_container_that_stops_between_the_precheck_and_the_restoration_is_recreated_once() {
+    let total = {
+        let mut r = rig();
+        let (mut d, prev) = interrupted_with_previous_running(&mut r);
+        let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+        recover(&r, &mut d, prev, &mut b);
+        r.h.docker
+            .requests()
+            .iter()
+            .filter(|q| q.method == "GET" && q.path.contains(&format!("{}/json", r.prev_container)))
+            .count()
+    };
+    let mut r = rig();
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let id = r.prev_container.clone();
+    r.h.docker.fault_after(
+        Some("GET"),
+        &format!("{id}/json"),
+        total - 1, // the restoration's own last look, taken just before anything is created
+        1,
+        Action::Race(std::sync::Arc::new(
+            move |st: &mut support::fake_docker::St| {
+                st.containers
+                    .iter_mut()
+                    .filter(|c| c.id == id)
+                    .for_each(|c| c.running = false);
+                st.taken_ports.remove(&PREV_PORT);
+            },
+        )),
+    );
+    let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert!(r
+        .h
+        .docker
+        .with(|s| s.faults.iter().all(|f| f.remaining == 0)));
+    assert_eq!(
+        d.recovery.unwrap().outcome,
+        RecoveryOutcome::Restored,
+        "{:?}",
+        rep.warnings
+    );
+    assert_eq!(
+        created_or_started_or_stopped_anything(&r)
+            .iter()
+            .filter(|q| q.contains("/containers/create"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_previous_container_that_cannot_be_read_blocks_the_restoration_instead_of_creating_one() {
+    let mut r = rig();
+    let (mut d, prev) = interrupted_with_previous_running(&mut r);
+    let id = r.prev_container.clone();
+    r.h.docker.fault_after(
+        Some("GET"),
+        &format!("{id}/json"),
+        0,
+        1_000,
+        Action::Disconnect,
+    );
+    let mut b = recovery_backend(&r, transport(Observation::Status(200)));
+    let rep = recover(&r, &mut d, prev, &mut b);
+    assert_blocked_and_attempt_kept(&r, &d, &rep);
+    assert!(
+        rep.blocked.iter().any(|m| m.contains("could not be read")),
+        "{:?}",
+        rep.blocked
+    );
 }

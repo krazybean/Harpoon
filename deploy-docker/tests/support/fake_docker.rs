@@ -471,6 +471,14 @@ pub fn container_inspect_json(c: &Ctr) -> String {
             obj(vec![
                 ("Image", Json::Str(c.image.clone())),
                 ("Labels", labels_json(&c.labels)),
+                // as Docker reports it: the environment the container was created with
+                (
+                    "Env",
+                    c.create_body
+                        .get("Env")
+                        .cloned()
+                        .unwrap_or(Json::Arr(vec![])),
+                ),
             ]),
         ),
         (
