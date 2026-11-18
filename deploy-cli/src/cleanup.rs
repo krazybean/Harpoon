@@ -52,19 +52,37 @@ pub(crate) struct Tidied {
     /// What removing the images is expected to free, from layer sharing; `None` when Docker's layer data was not available.
     pub estimated_bytes: Option<u64>,
     pub estimate_exact: bool,
+    /// Every action this run decided on, one stable key each (what a Review is identified by).
+    pub plan: BTreeSet<String>,
+    /// An apply met an action that was not in the reviewed plan and left it alone.
+    pub drifted: bool,
 }
 
 /// Plan (`apply == false`: nothing is changed, the journal is not written) or carry out the cleanup. A refusal
 /// leaves everything as it was.
+/// How one release cleanup runs: whether it changes anything, how many previous releases it keeps, whether it reports the guest's
+/// free space itself, and the plan an apply is bound to (anything else it finds is left alone).
+#[derive(Clone, Copy)]
+pub(crate) struct Opts<'a> {
+    pub apply: bool,
+    pub keep_rollbacks: usize,
+    pub report_guest: bool,
+    pub expected: Option<&'a BTreeSet<String>>,
+}
+
 pub(crate) fn run(
     p: &Parsed,
     rt: &Runtime,
     socket: &Path,
-    apply: bool,
-    keep_rollbacks: usize,
-    report_guest: bool,
+    o: Opts,
     out: &mut String,
 ) -> Result<Tidied, Fail> {
+    let Opts {
+        apply,
+        keep_rollbacks,
+        report_guest,
+        expected,
+    } = o;
     let mut backend = docker_backend(p, rt, socket)?;
     let (mut writer, restored) = if apply {
         let (j, r) = store::open_writer(rt, Kind::Docker)?;
@@ -599,6 +617,25 @@ pub(crate) fn run(
         .iter()
         .filter(|a| matches!(a, Action::MarkAbsent { .. }))
         .count();
+    for a in &actions {
+        let key = match a {
+            Action::Remove { observed, .. } => {
+                format!("remove-{}:{}", observed.kind.as_str(), observed.id)
+            }
+            Action::MarkAbsent { entry: (d, k) } => {
+                format!("reconcile:{d}/{}/{}", k.kind.as_str(), k.name)
+            }
+            Action::ReleaseLease { entry: (d, k) } => format!("lease:{d}/{}", k.name),
+            _ => continue,
+        };
+        // An apply acts only on what was reviewed. Anything else found now means the state moved: nothing is executed.
+        if apply && expected.is_some_and(|e| !e.contains(&key)) {
+            return Err(Fail::refused(format!(
+                "the plan changed since it was reviewed ({key} was not in it); nothing was changed. Review again."
+            )));
+        }
+        tidied.plan.insert(key);
+    }
     if let Some(j) = writer.as_mut() {
         execute_actions(&actions, &mut ledger, j, &mut backend, &SystemClock).map_err(|e| {
             Fail::failed(format!(
@@ -759,6 +796,23 @@ pub(crate) fn run(
                 }
             }
         };
+        let akey = match &action {
+            Action::MarkAbsent { entry: (d, k) } => {
+                format!("reconcile:{d}/{}/{}", k.kind.as_str(), k.name)
+            }
+            _ => format!("remove-image:{id}"),
+        };
+        if apply && expected.is_some_and(|e| !e.contains(&akey)) {
+            skip_as(
+                out,
+                "review",
+                "not-in-reviewed-plan",
+                "this was not in the plan you reviewed, so it is left alone; review again",
+            );
+            tidied.drifted = true;
+            continue;
+        }
+        tidied.plan.insert(akey);
         let _ = writeln!(
             out,
             "{}{}",
@@ -944,7 +998,7 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "this is a simulated runtime; there is nothing real to prune",
         ));
     }
-    prune_cache(p, &rt, &socket, apply, true, out)?;
+    prune_build_cache_step(p, &rt, &socket, apply, true, out)?;
     Ok(exit::OK)
 }
 
@@ -961,7 +1015,7 @@ pub(crate) struct CacheOutcome {
 
 /// The build-cache check (dry run) or prune (apply) behind both `prune-build-cache` and `cleanup`. `standalone` adds the footer and the
 /// guest-space reading that `prune-build-cache` prints on its own; `cleanup` reports those once for the whole operation.
-fn prune_cache(
+fn prune_build_cache_step(
     p: &Parsed,
     rt: &Runtime,
     socket: &Path,
@@ -1104,7 +1158,18 @@ pub(crate) fn cleanup_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
             "this is a simulated runtime; there is nothing real to clean up",
         ));
     }
-    run(p, &rt, &socket, apply, keep_rollbacks(p)?, true, out)?;
+    run(
+        p,
+        &rt,
+        &socket,
+        Opts {
+            apply,
+            keep_rollbacks: keep_rollbacks(p)?,
+            report_guest: true,
+            expected: None,
+        },
+        out,
+    )?;
     if !apply {
         let _ = writeln!(
             out,
@@ -1117,7 +1182,7 @@ pub(crate) fn cleanup_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail> {
 
 /// `cleanup`: the one operation. It removes everything Harpoon can prove is disposable and keeps everything essential, by running the
 /// existing release cleanup (every object re-verified by id and labels, journaled before and after, retried by the next run) and then
-/// the existing build-cache prune (after the images are gone, so records they held are no longer shared). Dry run by default; `--apply`
+/// the existing prune-build-cache step (after the images are gone, so records they held are no longer shared). Dry run by default; `--apply`
 /// needs the live-changes authorization. What is essential is not a setting: whatever serves, anything a deployment still needs to
 /// recover, volumes, journals, configuration and anything Harpoon did not create. What IS a setting is how many previous releases to
 /// keep for a rollback (`--keep-rollbacks`, default 0).
@@ -1144,6 +1209,12 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
         ));
     }
     let keep = keep_rollbacks(p)?;
+    let plan_arg = p.value("plan");
+    if apply && plan_arg.is_none() {
+        return Err(Fail::usage(
+            "cleanup --apply needs --plan ID: the cleanup-plan value printed by the review. Run cleanup without --apply first.",
+        ));
+    }
     let _ = writeln!(
         out,
         "clean up — {}; previous releases kept for rollback: {keep}",
@@ -1153,16 +1224,52 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             "dry run: nothing will be changed"
         }
     );
+    // An apply acts on the plan that was reviewed and on nothing else. The plan is derived again, read-only, right now; if it is not
+    // the reviewed one nothing is changed and a fresh review is required. The apply then repeats every ownership check per object
+    // and leaves alone anything that was not in the reviewed plan.
+    let reviewed: Option<(BTreeSet<String>, bool)> = if apply {
+        let mut scratch = String::new();
+        let now = run(
+            p,
+            &rt,
+            &socket,
+            Opts {
+                apply: false,
+                keep_rollbacks: keep,
+                report_guest: false,
+                expected: None,
+            },
+            &mut scratch,
+        )?;
+        let cache_now = prune_build_cache_step(p, &rt, &socket, false, false, &mut scratch)?;
+        let id = plan_id(keep, &now.plan, cache_now.prunable_records > 0);
+        if plan_arg != Some(id.as_str()) {
+            return Err(Fail::refused(format!(
+                "the plan changed since it was reviewed (reviewed {}, now {id}); nothing was changed. Review again.",
+                plan_arg.unwrap_or("none")
+            )));
+        }
+        Some((now.plan, cache_now.prunable_records > 0))
+    } else {
+        None
+    };
     let free_before = guest_free(p, &socket);
 
     // 1. releases, settled interrupted deployments, failed attempts and unused owned images (journaled, one object at a time)
     let mut releases = String::new();
-    let tidied = run(p, &rt, &socket, apply, keep, false, &mut releases)?;
+    let opts = Opts {
+        apply,
+        keep_rollbacks: keep,
+        report_guest: false,
+        expected: reviewed.as_ref().map(|(p, _)| p),
+    };
+    let tidied = run(p, &rt, &socket, opts, &mut releases)?;
     out.push_str(&releases);
 
-    // 2. build cache, after the images: records an image held become unshared once it is gone
+    // 2. build cache, after the images: records an image held become unshared once it is gone. Only if the review included it.
     let _ = writeln!(out, "build cache:");
-    let cache = match prune_cache(p, &rt, &socket, apply, false, out) {
+    let run_cache = apply && reviewed.as_ref().is_some_and(|(_, c)| *c);
+    let cache = match prune_build_cache_step(p, &rt, &socket, run_cache, false, out) {
         Ok(c) => c,
         Err(f) => {
             if apply {
@@ -1177,7 +1284,14 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             return Err(f);
         }
     };
-
+    if apply && !run_cache {
+        let _ = writeln!(out, "build cache: not pruned, because it was not part of the reviewed plan. Review again to see it.");
+    }
+    let plan_now = plan_id(keep, &tidied.plan, cache.prunable_records > 0);
+    let _ = writeln!(out, "cleanup-plan: {plan_now}");
+    if tidied.drifted {
+        let _ = writeln!(out, "cleanup: stopped short. Some objects were not in the reviewed plan and were left alone; what was reviewed has been done. Review again.");
+    }
     if let Some(why) = &cache.blocked {
         let _ = writeln!(
             out,
@@ -1258,7 +1372,26 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             crate::AUTH_FLAG
         );
     }
+    if tidied.drifted {
+        return Err(Fail::failed(
+            "the clean up stopped short: some objects were not in the reviewed plan. Review again.",
+        ));
+    }
     Ok(exit::OK)
+}
+
+/// What a Review is identified by: the retention, whether the cache step is part of it, and every action decided on, in a fixed order.
+fn plan_id(keep: usize, plan: &BTreeSet<String>, cache_step: bool) -> String {
+    let mut text = format!(
+        "keep:{keep}\ncache:{}\n",
+        if cache_step { "step" } else { "none" }
+    );
+    for k in plan {
+        text.push_str(k);
+        text.push('\n');
+    }
+    harpoon_deploy_git::sha256::to_hex(&harpoon_deploy_git::sha256::sha256(text.as_bytes()))[..16]
+        .to_string()
 }
 
 /// `--keep-rollbacks N`: how many previous releases to keep for a rollback (default 0). Recovery of an unsettled deployment is

@@ -294,7 +294,8 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const otherCleanup = useCleanupActive() !== null;
   const inFlight = useRef(false);
-  const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "cleanup", apply: true, keepRollbacks: keep }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "cleanup", apply: false, keepRollbacks: keep } });
+  // An apply carries the plan id of the review it follows, so it can only do what was reviewed.
+  const call = (apply: boolean, planId?: string) => invoke<OpResult>("deploy_op", apply ? { op: { op: "cleanup", apply: true, keepRollbacks: keep, plan: planId }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "cleanup", apply: false, keepRollbacks: keep } });
   const chooseKeep = (n: number) => { setKeep(n); setPlan(null); setCache(null); try { window.localStorage.setItem(KEEP_KEY, String(n)); } catch { /* a per-viewer convenience only */ } };
   const review = async () => {
     if (inFlight.current) return;
@@ -307,7 +308,7 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
     } catch (e) { setError(`Could not review the clean up: ${String(e)}`); } finally { inFlight.current = false; setBusy(null); }
   };
   const apply = async () => {
-    if (!plan || !cache || plan.eligible === 0 || inFlight.current) return;
+    if (!plan || !cache || !plan.plan || plan.eligible === 0 || inFlight.current) return;
     const release = acquireCleanup("clean-up");
     if (!release) return;
     inFlight.current = true;
@@ -319,14 +320,16 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
       const before = await hostAllocationNow();
       let result: CleanupOutcome;
       try {
-        const r = await call(true);
+        const r = await call(true, plan.plan);
         const after = await hostAllocationNow();
         result = r.ok ? cleanUpOutcome(parseCleanup(r.detail), parseCache(r.detail), { before, after }, fmtBytes) : failureOutcome("clean-up", r, null, { before, after });
       } catch (e) { result = failureOutcome("clean-up", null, e, { before, after: await hostAllocationNow() }); }
       setOutcome(result); setPlan(null); setCache(null);
     } finally { inFlight.current = false; release(); setBusy(null); onDone(); }
   };
-  const groups = plan ? groupByApplication(plan).filter((g) => g.ready.containers + g.ready.images + g.reconcile > 0) : [];
+  const groups = plan ? groupByApplication(plan) : [];
+  const selected = plan ? plan.items.filter((i) => i.verdict === "ready" || i.verdict === "reconcile").length : 0;
+  const kept = plan ? plan.items.filter((i) => i.verdict === "protected").length : 0;
   const toggle = (k: string) => setOpen((o) => { const n = new Set(o); if (!n.delete(k)) n.add(k); return n; });
   const cacheNote = plan && cache ? cacheExplanation(cache, fmtBytes) : null;
   const layersNote = plan ? estimateLine(plan, fmtBytes) : null;
@@ -340,7 +343,7 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
           {[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n === 0 ? "None (frees the most space)" : `${n} previous release${n === 1 ? "" : "s"}`}</option>)}
         </select>
         <button id={CLEANUP_TARGETS["clean-up"].button} className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Reviewing…" : "Review clean up"}</button>
-        {plan && plan.eligible !== null && plan.eligible > 0 && <button className="btn btn--primary" disabled={busy !== null || otherCleanup} onClick={apply}>{busy === "apply" ? "Cleaning up…" : "Clean up now…"}</button>}
+        {plan && plan.eligible !== null && plan.eligible > 0 && plan.plan && <button className="btn btn--primary" disabled={busy !== null || otherCleanup} onClick={apply}>{busy === "apply" ? "Cleaning up…" : "Clean up now…"}</button>}
       </div>
       {plan && cache && (
         <div role="region" aria-label="Clean up review" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
@@ -351,6 +354,8 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
           {layersNote && <div role="status" className="text-meta">{layersNote}</div>}
           {cacheNote && <div role="status" className="text-meta">{cacheNote}</div>}
           {cache.blocked && <div role="status" className="text-body">The build cache cannot be pruned right now: {cache.blocked}. Nothing was changed.</div>}
+          <div className="text-meta" data-cleanup-lists>Selected for removal: <b>{selected}</b> · Protected: <b>{kept}</b>. Open an application below to see each object and why.</div>
+          {plan.eligible !== null && plan.eligible > 0 && !plan.plan && <div role="status" className="text-body">This engine did not identify the plan, so it cannot be applied safely. Review again.</div>}
           {plan.protectedSummary.length > 0 && (
             <div>
               <div className="text-meta"><b>Stays protected</b></div>

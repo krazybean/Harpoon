@@ -925,6 +925,7 @@ test("clean up: the review reads what will go, what stays and why, and the estim
   assert.equal(rep.eligible, 6);
   assert.equal(rep.estimatedTotal, 1_700_000_000);
   assert.equal(rep.keepRollbacks, 0);
+  assert.match(rep.plan, /^[0-9a-f]{16}$/, "a review names its plan");
   assert.deepEqual(rep.protectedSummary, [{ reason: "serving-release", count: 3 }]);
   assert.equal(cache.reclaimable, 500_000_000);
   assert.equal(rep.measuredReclaimed, null, "a review measures nothing");
@@ -977,12 +978,13 @@ test("clean up, mounted: review, then apply sends exactly the reviewed retention
   assert.match(text, /Clean Up will remove 2 containers and 3 images, prune unused build cache/);
   assert.match(text, /Estimated space freed: about 1700 MB|Estimated space freed: about 1\.6 GiB|Estimated space freed: about/);
   assert.match(text, /Stays protected/); assert.match(text, /3 items in use right now/);
+  assert.match(text, /Selected for removal: 5 · Protected: 3/, "what goes and what stays are both counted");
   assert.equal(calls.length, 1, "nothing was applied by reviewing");
   await m.click(m.btn("Clean up now")); await m.settle();
   assert.ok(m.dialog(), "applying asks first"); assert.equal(calls.length, 1);
   await act(async () => { m.dialogBtn("Clean up now").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
   await m.settle();
-  assert.deepEqual(calls[1], { op: { op: "cleanup", apply: true, keepRollbacks: 0 }, confirmation: { liveChanges: true, cutover: false } });
+  assert.deepEqual(calls[1], { op: { op: "cleanup", apply: true, keepRollbacks: 0, plan: parseCleanup(fx("cleanup-dry-run").detail).plan }, confirmation: { liveChanges: true, cutover: false } }, "the apply carries the reviewed plan");
   const r = m.q('[data-result-kind="clean-up"]');
   assert.equal(r.dataset.resultStatus, "success");
   await m.unmount();
@@ -1000,5 +1002,39 @@ test("clean up, mounted: the retention setting is sent as chosen and a changed s
   await act(async () => { sel.value = "2"; sel.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
   await m.settle();
   assert.equal(m.btn("Clean up now"), undefined, "a review made for another setting is not applied");
+  await m.unmount();
+});
+
+test("clean up: a plan the engine says changed is not carried out, and it asks for a fresh review", async () => {
+  const m = await mount();
+  let first = true;
+  deployReply = (a) => a.op.apply ? fx("cleanup-apply-refused-plan-changed") : fx("cleanup-dry-run");
+  await m.click(m.btn("Review clean up")); await m.settle();
+  await m.click(m.btn("Clean up now")); await m.settle();
+  await act(async () => { m.dialogBtn("Clean up now").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  await m.settle();
+  const r = m.q('[data-result-kind="clean-up"]');
+  assert.equal(r.dataset.resultStatus, "refused");
+  assert.match(m.host.textContent, /changed since you reviewed it, so it removed nothing/);
+  assert.match(m.host.textContent, /Review again/);
+  assert.equal(m.btn("Clean up now"), undefined, "the old review cannot be applied again: a fresh Review is required");
+  await m.unmount();
+});
+
+test("clean up, mounted: the review shows what is selected, what is protected and why, the estimate, and later the measured result", async () => {
+  const m = await mount();
+  deployReply = (a) => a.op.apply ? fx("cleanup-apply-success") : fx("cleanup-dry-run");
+  await m.click(m.btn("Review clean up")); await m.settle();
+  for (const g of [...m.host.querySelectorAll(".artifact-group__toggle, [aria-expanded=false]")]) await m.click(g);
+  const review = m.host.textContent;
+  assert.match(review, /Estimated space freed: about/);
+  assert.match(review, /Serving now: this (container|image) belongs to the running release/, "protected objects are listed with their reason");
+  assert.match(review, /(Unused image from a previous release|Stopped container from an older deployment|Image kept from a failed deployment)/, "objects selected for removal are listed");
+  await m.click(m.btn("Clean up now")); await m.settle();
+  await act(async () => { m.dialogBtn("Clean up now").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  await m.settle();
+  const r = m.q('[data-result-kind="clean-up"]');
+  assert.match(r.textContent, /Estimated space freed/);       // the estimate
+  assert.match(r.textContent, /Measured: the guest's free space grew by/); // the measured result, apart from it
   await m.unmount();
 });

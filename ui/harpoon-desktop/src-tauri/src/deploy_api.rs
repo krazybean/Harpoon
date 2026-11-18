@@ -1189,6 +1189,9 @@ pub enum DeployOp {
         apply: bool,
         #[serde(default)]
         keep_rollbacks: u32,
+        /// The plan id the review printed. An apply carries it, and the engine refuses if what it would do now is not that plan.
+        #[serde(default)]
+        plan: Option<String>,
     },
     /// Remove superseded and abandoned Harpoon-owned containers, port leases and images. `apply: false` only lists them.
     #[serde(rename_all = "camelCase")]
@@ -1447,11 +1450,15 @@ fn plan(op: &DeployOp) -> (Vec<String>, Vec<u8>) {
             }
             (a, vec![])
         }
-        DeployOp::Cleanup { apply, keep_rollbacks } => {
+        DeployOp::Cleanup { apply, keep_rollbacks, plan } => {
             let mut a = s(&["cleanup", "--keep-rollbacks"]);
             a.push(keep_rollbacks.to_string());
             if *apply {
                 a.push("--apply".into());
+                if let Some(id) = plan {
+                    a.push("--plan".into());
+                    a.push(id.clone());
+                }
             }
             (a, vec![])
         }
@@ -1746,6 +1753,9 @@ pub fn actionable(op: &DeployOp, code: i32, stdout: &str, stderr: &str) -> Optio
     Some(match code {
         c if c == exit::REFUSED && stderr.contains(harpoon_deploy_cli::AUTH_FLAG) => {
             format!("Harpoon needs your confirmation before it changes Docker, and none was given. Open the operation again and confirm it. {nothing}")
+        }
+        c if c == exit::REFUSED && stderr.contains("the plan changed since it was reviewed") => {
+            format!("What Clean Up would remove changed since you reviewed it, so it removed nothing. Review again to see the current plan. {nothing}")
         }
         c if c == exit::REFUSED && stderr.contains("Gate U") => {
             "Running queued Git events is closed in this build because unattended execution has not been approved. Use Deploy to build a revision you choose; checking for new commits only queues them. Nothing was changed.".to_string()

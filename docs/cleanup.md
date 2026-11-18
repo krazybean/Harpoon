@@ -4,11 +4,18 @@ One operation removes what Harpoon can prove it no longer needs, and keeps every
 
 ```
 harpoon-deploy cleanup --runtime-dir DIR --docker-socket PATH --resources-dir DIR --mgmt-socket PATH            # review (changes nothing)
-harpoon-deploy cleanup … --keep-rollbacks N --apply --authorize-live-docker-changes=…                           # carry it out
+harpoon-deploy cleanup … --keep-rollbacks N --plan ID --apply --authorize-live-docker-changes=…                # carry out exactly what was reviewed
 ```
 
 The desktop offers the same as **Clean up** on the Resources page: *Review clean up*, then *Clean up now*. The older single-purpose
 controls (old releases, build cache, one image) remain under "More control".
+
+## Review and Apply are the same plan
+A review prints `cleanup-plan: ID`, an identifier of exactly what would be done (every container, image, lease and journal record, the
+cache step, and the retention). `--apply` requires `--plan ID` and first derives the plan again, read-only: if it is not the reviewed
+one, nothing is changed and a fresh review is required. During the apply, anything that was not in the reviewed plan is left alone
+and the run reports `stopped short`. The build cache is pruned only if the review included it. The desktop sends the id of the
+review it is showing, and a refusal clears that review.
 
 ## What is removed
 - Containers and images of releases that no longer serve (historical rollback releases, by default none are kept).

@@ -393,6 +393,7 @@ const SPECS: &[Spec] = &[
             "forwarder-command",
             "forward-address",
             "keep-rollbacks",
+            "plan",
             AUTH_FLAG,
         ],
         switches: &["apply"],

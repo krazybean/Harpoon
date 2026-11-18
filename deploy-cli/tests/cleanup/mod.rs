@@ -892,6 +892,16 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
     );
     capture(
         &t,
+        "cleanup-apply-refused-plan-changed",
+        &go(
+            &t,
+            &SHIPPING,
+            &uargs(&t, &["--apply", "--plan", "0000000000000000", &auth()]),
+        ),
+        &mut all,
+    );
+    capture(
+        &t,
         "cleanup-apply-success",
         &clean(&t, &["--apply"]),
         &mut all,
@@ -2183,13 +2193,36 @@ fn kv(out: &str, key: &str) -> Option<u64> {
         .find_map(|l| l.strip_prefix(&format!("{key}: ")))
         .and_then(|v| v.trim().parse().ok())
 }
+/// A review (no `--apply`), or an apply that carries the plan id of a review made just before it: that is how the desktop uses it.
 fn clean(t: &T, extra: &[&str]) -> Outcome {
-    let mut e: Vec<&str> = extra.to_vec();
-    let a = auth();
-    if e.contains(&"--apply") {
-        e.push(&a);
+    let mut e: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    if e.iter().any(|a| a == "--apply") {
+        if !e.iter().any(|a| a == "--plan") {
+            let review: Vec<String> = e.iter().filter(|a| *a != "--apply").cloned().collect();
+            let r = go(t, &SHIPPING, &uargs_owned(t, &review));
+            if let Some(id) = r
+                .stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("cleanup-plan: "))
+            {
+                e.push("--plan".into());
+                e.push(id.to_string());
+            }
+        }
+        e.push(auth());
     }
-    go(t, &SHIPPING, &uargs(t, &e))
+    go(t, &SHIPPING, &uargs_owned(t, &e))
+}
+fn uargs_owned(t: &T, extra: &[String]) -> Vec<String> {
+    let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    uargs(t, &refs)
+}
+fn plan_of(o: &Outcome) -> String {
+    o.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("cleanup-plan: "))
+        .expect("a review prints its plan")
+        .to_string()
 }
 fn deletes(t: &T) -> usize {
     t.h.docker
@@ -2726,5 +2759,279 @@ fn clean_up_after_a_lost_reply_reconciles_what_docker_already_did_and_claims_not
         third.stdout.contains("cleanup: nothing to clean up"),
         "{}",
         third.stdout
+    );
+}
+
+// ---------------------------------------------------------------- an apply acts on the plan that was reviewed
+
+#[test]
+fn an_apply_needs_the_reviewed_plan_and_acts_on_nothing_else() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let before = deletes(&t);
+    // no plan at all
+    let none = go(&t, &SHIPPING, &uargs(&t, &["--apply", &auth()]));
+    assert_eq!(
+        none.code, 2,
+        "a usage error: {}{}",
+        none.stdout, none.stderr
+    );
+    // a plan that is not the reviewed one
+    let wrong = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", "0000000000000000", &auth()]),
+    );
+    assert_eq!(wrong.code, 6, "refused: {}{}", wrong.stdout, wrong.stderr);
+    assert!(
+        wrong
+            .stderr
+            .contains("the plan changed since it was reviewed")
+            && wrong.stderr.contains("Review again"),
+        "{}",
+        wrong.stderr
+    );
+    assert_eq!(deletes(&t), before, "nothing was asked of Docker");
+    assert!(present(&t, &a, "a") && present(&t, &a, "b"));
+    // the plan is stable, and depends on the retention
+    let r1 = clean(&t, &[]);
+    let r2 = clean(&t, &[]);
+    assert_eq!(
+        plan_of(&r1),
+        plan_of(&r2),
+        "reviewing twice names the same plan"
+    );
+    assert_ne!(
+        plan_of(&r1),
+        plan_of(&clean(&t, &["--keep-rollbacks", "1"])),
+        "another retention is another plan"
+    );
+    // the right plan applies
+    let ok = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &plan_of(&r1), &auth()]),
+    );
+    assert_exit(&ok, 0);
+    assert!(
+        !present(&t, &a, "a") && !present(&t, &a, "b"),
+        "{}",
+        ok.stdout
+    );
+    assert_eq!(
+        plan_of(&ok),
+        plan_of(&r1),
+        "what was done is what was reviewed"
+    );
+}
+
+#[test]
+fn a_plan_that_changed_after_the_review_is_refused_and_a_fresh_review_applies() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let reviewed = plan_of(&clean(&t, &[]));
+    // between the review and the apply, A's image disappears from Docker: what Clean Up would do for it is now different
+    t.h.docker.with(|s| s.images.retain(|i| i.id != a.img["a"]));
+    let before = deletes(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &reviewed, &auth()]),
+    );
+    assert_eq!(o.code, 6, "{}{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("Review again"), "{}", o.stderr);
+    assert_eq!(deletes(&t), before, "nothing was changed");
+    assert!(
+        present(&t, &a, "b") && present(&t, &a, "d"),
+        "nothing was removed"
+    );
+    // a fresh review names the new plan, and applying that works
+    let applied = clean(&t, &["--apply"]);
+    assert_exit(&applied, 0);
+    assert!(
+        !present(&t, &a, "b") && !present(&t, &a, "d"),
+        "{}",
+        applied.stdout
+    );
+}
+
+#[test]
+fn an_object_that_becomes_removable_during_an_apply_is_left_alone_and_the_run_says_so() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // B's image is kept at review because a container (not Harpoon's) was made from it
+    let b_img = a.img["b"].clone();
+    t.h.docker.with(|s| {
+        let id = s.add_container("scratch-shell", Default::default(), false);
+        s.containers.iter_mut().find(|c| c.id == id).unwrap().image = b_img.clone();
+    });
+    let review = clean(&t, &[]);
+    assert_eq!(
+        reason_of(&items(&review.stdout), &a.b, "image").0,
+        "review",
+        "{}",
+        review.stdout
+    );
+    // when the first removal arrives, that container is removed by someone else: B's image would now be removable
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", a.ctr["a"]),
+        1,
+        support::fake_docker::Action::Race(std::sync::Arc::new(
+            |s: &mut support::fake_docker::St| s.containers.retain(|c| c.name != "scratch-shell"),
+        )),
+    );
+    let o = clean(&t, &["--apply"]);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(
+        present(&t, &a, "b"),
+        "B's image was not in the reviewed plan, so it stays: {}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("cleanup: stopped short"), "{}", o.stdout);
+    assert!(!present(&t, &a, "a"), "what was reviewed was done");
+    // a fresh review now includes it
+    let again = clean(&t, &["--apply"]);
+    assert_exit(&again, 0);
+    assert!(!present(&t, &a, "b"), "{}", again.stdout);
+}
+
+#[test]
+fn the_build_cache_is_pruned_only_if_the_review_included_it() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    // at review every cache record is shared with an image: nothing is prunable, so the cache is not part of the plan
+    t.h.docker.with(|s| s.build_cache_shared = vec![true, true]);
+    let review = clean(&t, &[]);
+    assert_eq!(kv(&review.stdout, "build-cache-prunable-records"), Some(0));
+    // when the first removal arrives, a record stops being shared: it would now be prunable
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", a.ctr["a"]),
+        1,
+        support::fake_docker::Action::Race(std::sync::Arc::new(
+            |s: &mut support::fake_docker::St| s.build_cache_shared = vec![false, true],
+        )),
+    );
+    let o = clean(&t, &["--apply"]);
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("not part of the reviewed plan"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.len()),
+        2,
+        "the cache was not pruned"
+    );
+    assert!(t
+        .h
+        .docker
+        .requests()
+        .iter()
+        .all(|r| !(r.method == "POST" && r.path.contains("/build/prune"))));
+}
+
+// ---------------------------------------------------------------- failing closed
+
+#[test]
+fn clean_up_never_runs_while_a_deployment_is_in_the_middle_of_a_cutover_or_the_journal_is_held() {
+    // a deployment that began a cutover and has not finished: the previous release may be the only thing that can restore it
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let (_, dep) = ids(60);
+        let mut d = finished(&w.app, &dep, DeploymentStatus::Running);
+        d.cutover = CutoverState::Begun { at_ms: 25_000 };
+        d.replaces = Some(ReleaseId::from_deployment(&w.serving));
+        j.persist(&d).unwrap();
+    }
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    for keep in ["0", "1"] {
+        let o = go(
+            &t,
+            &SHIPPING,
+            &args(&t, &["--keep-rollbacks", keep, "--apply", &auth()]),
+        );
+        assert_ne!(o.code, 0, "{}", o.stdout);
+        assert!(
+            image_present(&t, &srv_i)
+                && container_present(&t, &srv_c)
+                && image_present(&t, &old_i)
+                && container_present(&t, &old_c),
+            "{}",
+            o.stdout
+        );
+    }
+    let review = go(&t, &SHIPPING, &uargs(&t, &[]));
+    assert_ne!(review.code, 0, "even the review refuses: {}", review.stdout);
+    // another process holds the deployment journal: a deployment may be running, so nothing is applied
+    let t = T::new();
+    let a = acceptance_world(&t);
+    let id = plan_of(&clean(&t, &[]));
+    let hold =
+        harpoon_deploy_journal::hold_writer_lock(&t.journal_dir()).expect("take the writer lock");
+    let before = deletes(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &id, &auth()]),
+    );
+    assert_ne!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert_eq!(deletes(&t), before);
+    assert!(present(&t, &a, "a"));
+    drop(hold);
+}
+
+#[test]
+fn an_unreachable_docker_or_an_unreadable_runtime_fails_a_review_without_a_guess() {
+    let t = T::new();
+    acceptance_world(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &[
+            "cleanup".to_string(),
+            "--docker-socket".into(),
+            "/nonexistent/docker.sock".into(),
+            "--resources-dir".into(),
+            t.resources(),
+        ],
+    );
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(
+        !o.stdout.contains("cleanup-plan:"),
+        "no plan is offered when the runtime could not be read: {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_prepared_candidate_that_was_never_confirmed_leaves_the_serving_release_untouched_at_retention_zero(
+) {
+    // `replace` without a confirmation only prepares a candidate (status cancelled, cutover not started): the release that
+    // serves is still the only thing running, and nothing about it or the candidate may be removed by Clean Up
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (_, cand) = ids(61);
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let mut d = finished(&w.app, &cand, DeploymentStatus::Cancelled);
+        d.replaces = Some(ReleaseId::from_deployment(&w.serving));
+        j.persist(&d).unwrap();
+    }
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let o = apply_keep(&t, 0);
+    assert!(
+        image_present(&t, &srv_i) && container_present(&t, &srv_c),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&o.stdout), &w.serving, "image"),
+        ("protected", "serving-release")
     );
 }
