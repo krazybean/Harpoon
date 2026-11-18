@@ -78,6 +78,11 @@ harpoon-deploy config-unset --scope app:<APPLICATION_ID>@<ENV> --name HARPOON_LO
 * **Cookies.** Cookies are scoped by host, not port: every application on `localhost` (including other ports) shares one cookie jar.
   Two applications using cookies of the same name on `localhost` overwrite each other's. The `<id>.harpoon.localhost` names do not
   have this problem, which is why the alias is for one application at a time.
+* **Taking effect.** Assigning, handing over and revoking are journal writes; the running router re-reads the journal within a
+  second (`TABLE_TTL`), so no restart of the desktop app or the engine is needed. A connection already open to `localhost:<port>`
+  stays on its upstream until it closes (as for every address), so a revoked alias can answer on kept-alive connections for a
+  moment; new connections get 404. A claim is per scope: the owner holds it until **every** `app:ID[@ENV]` scope that set it is
+  unset. After revocation nothing answers for `localhost`; it is never handed to another application on its own.
 * **Downgrade.** An older Harpoon replaying a journal that contains this definition refuses the reserved name and fails closed;
   unset it before running an older version.
 

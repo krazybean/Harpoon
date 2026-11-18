@@ -634,4 +634,45 @@ mod tests {
         assert!(!openable_at("http://localhost:7480", None), "no router, no Harpoon address");
         assert!(openable_at("http://abc124xyz0.harpoon.localhost:7480", Some(7480)), "names are unchanged");
     }
+
+    #[test]
+    fn assigning_and_revoking_the_alias_takes_effect_in_a_running_router_without_a_restart() {
+        let (p, hits) = upstream("owner");
+        let (other, other_hits) = upstream("someone-else");
+        let (a, b) = (app("1"), app("2"));
+        let apps = || [(a.clone(), Some(p)), (b.clone(), Some(other))];
+        let (r, shared) = router_for(RouteTable::build(apps()));
+        let alias = format!("localhost:{}", r.addr().port());
+        assert!(get(&r, &alias).starts_with("HTTP/1.1 404"), "unassigned");
+        // assigned: the next table read (at most TABLE_TTL later) routes it, with the same router and listener
+        *shared.lock().unwrap() = RouteTable::build(apps()).with_alias(std::slice::from_ref(&a));
+        settle();
+        assert!(get(&r, &alias).ends_with("owner"));
+        // handed to the other application: it follows the assignment, never the previous owner
+        *shared.lock().unwrap() = RouteTable::build(apps()).with_alias(std::slice::from_ref(&b));
+        settle();
+        assert!(get(&r, &alias).ends_with("someone-else"));
+        // revoked: nothing answers for localhost any more, and neither application is reached by it
+        *shared.lock().unwrap() = RouteTable::build(apps());
+        settle();
+        let (hits_a, hits_b) = (hits.load(Ordering::SeqCst), other_hits.load(Ordering::SeqCst));
+        assert!(get(&r, &alias).starts_with("HTTP/1.1 404"));
+        assert_eq!((hits.load(Ordering::SeqCst), other_hits.load(Ordering::SeqCst)), (hits_a, hits_b));
+        // both names kept working throughout
+        assert!(get(&r, &hostname(&a)).ends_with("owner") && get(&r, &hostname(&b)).ends_with("someone-else"));
+    }
+
+    #[test]
+    fn unexpected_host_spellings_never_reach_the_alias_owner() {
+        let (p, hits) = upstream("owner");
+        let a = app("1");
+        let (r, _) = router_for(RouteTable::build([(a.clone(), Some(p))]).with_alias(std::slice::from_ref(&a)));
+        let port = r.addr().port();
+        for bad in [format!("localhost:{port}:{port}"), format!("localhost:{port}x"), format!("localhost:+{port}"), format!("localhost%2e:{port}"), format!("localhost@evil.test:{port}"), format!("evil.test:{port}"), format!("{port}"), format!("localhost:{port},evil.test")] {
+            assert!(get(&r, &bad).starts_with("HTTP/1.1 404"), "{bad}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing was forwarded");
+        // spellings of the same host: case and a trailing dot
+        assert!(get(&r, &format!("LocalHost.:{port}")).ends_with("owner"));
+    }
 }
