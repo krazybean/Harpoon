@@ -52,9 +52,44 @@ browser ──► 127.0.0.1:7480 (router, desktop app) ──► 127.0.0.1:<rele
   under 16 KiB; at most 256 simultaneous connections (extra ones are refused); the router never forwards to its own port; the
   route table only holds ports from Harpoon's leased ranges (38000–38999 applications, 39000–39099 tests).
 
+## Localhost alias (one application, for OAuth)
+
+`http://localhost:7480` can be given to **exactly one** application. It is the same application as its `<id>.harpoon.localhost`
+name, so its address does not change across replacement, rollback or restoration, and a provider that only accepts `localhost`
+redirect URIs (Google accepts plain `http` only for `localhost`) can be given one stable callback.
+
+```
+harpoon-deploy config-set --scope app:<APPLICATION_ID>@<ENV> --name HARPOON_LOCALHOST_ALIAS --value on
+harpoon-deploy config-unset --scope app:<APPLICATION_ID>@<ENV> --name HARPOON_LOCALHOST_ALIAS
+```
+
+* **Where it lives.** An ordinary configuration definition in the journal (the existing config model), so it survives restarts and
+  is read by the router from the same journal as the serving release. It is routing metadata: it is never resolved into a
+  snapshot, a build argument or a container environment, and `config-show` does not list it. The name is reserved: `--env` and
+  `secret-set` refuse it, only the value `on` is accepted, and only an application scope (`app:ID[@ENV]`) can claim it.
+* **Routing.** `Host: localhost:<router port>` resolves to the owner's own route, so it moves exactly when the serving release
+  does; there is no second proxy, listener or port allocator. The router's port must be spelled out in `Host` (`localhost` alone
+  or another port is 404), and the request is forwarded unchanged (`Host` stays `localhost:7480`).
+* **One owner.** `config-set` refuses a second application (exit 6, naming the owner, nothing recorded); the check runs under the
+  journal writer lock. If two claims are in the journal anyway (written by another tool), `localhost:<port>` answers 409 for both
+  and neither is routed through it; each keeps its own name. Setting it again for the owner (another environment) is fine.
+* **`127.0.0.1` is not aliased.** Browsers keep cookies and storage per host, so `127.0.0.1:7480` would be a second origin for the
+  same application, and `127.0.0.1` redirect URIs are a different registration. It stays 404 until that behaviour is decided and tested.
+* **Cookies.** Cookies are scoped by host, not port: every application on `localhost` (including other ports) shares one cookie jar.
+  Two applications using cookies of the same name on `localhost` overwrite each other's. The `<id>.harpoon.localhost` names do not
+  have this problem, which is why the alias is for one application at a time.
+* **Taking effect.** Assigning, handing over and revoking are journal writes; the running router re-reads the journal within a
+  second (`TABLE_TTL`), so no restart of the desktop app or the engine is needed. A connection already open to `localhost:<port>`
+  stays on its upstream until it closes (as for every address), so a revoked alias can answer on kept-alive connections for a
+  moment; new connections get 404. A claim is per scope: the owner holds it until **every** `app:ID[@ENV]` scope that set it is
+  unset. After revocation nothing answers for `localhost`; it is never handed to another application on its own.
+* **Downgrade.** An older Harpoon replaying a journal that contains this definition refuses the reserved name and fails closed;
+  unset it before running an older version.
+
 ## UI
 
-The application header shows **Application URL** with Copy and Open acting on exactly the URL shown. The internal port is not in
+The application header shows **Application URL** with Copy and Open acting on exactly the URL shown. The application that owns the
+localhost alias also shows **Stable localhost URL** (`http://localhost:<router port>`) the same way; a contested claim says so and shows no URL. The internal port is not in
 the primary view; the Recorded-vs-observed panel keeps "Direct URL (diagnostic)". States: running; stopped (URL shown, with
 "will not respond until the release is running"); hostname collision (no URL); router unavailable (no URL, reason shown).
 Open goes through a Tauri command that accepts only `http://<label>.harpoon.localhost:<port>` or `http://127.0.0.1:<port>`.

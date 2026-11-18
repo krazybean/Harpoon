@@ -187,6 +187,9 @@ pub struct AppDto {
     /// `serving`, `idle` (nothing recorded as serving), `conflict` (another application derives the same name) or
     /// `external` (read-only attached runtime: not routed).
     pub route: &'static str,
+    /// `owner` (this application owns `localhost:<router port>`), `contested` (more than one claims it: none is
+    /// routed through it) or `none`.
+    pub alias: &'static str,
     pub repo: Option<String>,
     /// Set while the application has no registered repository because its registration was removed: the name it
     /// had, and the address it last had. The application, its history and its serving release are unaffected.
@@ -561,7 +564,7 @@ pub fn route_table(rt: &Path) -> Result<harpoon_deploy::route::RouteTable, Strin
         return Ok(Default::default());
     }
     let r = SqliteJournal::read_only(&jd).map_err(|e| e.0)?;
-    Ok(harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids_of(&r)))
+    Ok(harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids_of(&r)).with_alias(&r.config.alias_owners()))
 }
 
 /// Either journal file is there: the SQLite store, or the legacy `journal.wal` that `SqliteJournal::read_only` reads where it is.
@@ -668,7 +671,7 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
         });
     }
     let app_ids = app_ids_of(&r);
-    let routes = harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids);
+    let routes = harpoon_deploy::route::table_of(&r.ledger, &r.deployments, &app_ids).with_alias(&r.config.alias_owners());
     let pauses = control::active_pauses(&r.deployments, &r.control);
     for app in app_ids {
         let mut deps: Vec<&Deployment> = r.deployments.iter().filter(|d| d.application_id == app).collect();
@@ -699,6 +702,11 @@ fn build_snapshot(rt: &Path, now_ms: u64, kind: &'static str) -> EngineSnapshot 
         snap.apps.push(AppDto {
             id: app.to_string(),
             hostname: harpoon_deploy::route::hostname(&app),
+            alias: match routes.alias_state(&app) {
+                harpoon_deploy::route::AliasState::None => "none",
+                harpoon_deploy::route::AliasState::Owner => "owner",
+                harpoon_deploy::route::AliasState::Contested => "contested",
+            },
             // The router reads Harpoon's own journal only: an attached external runtime is never routed.
             route: match routes.route_of(&app) {
                 _ if kind == "external" => "external",

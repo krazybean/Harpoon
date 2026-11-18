@@ -33,18 +33,27 @@ const NO_PREVIEWS = "Branch previews are not part of this build: Harpoon can't y
 
 /** The application's stable address, with Copy and Open acting on exactly the URL shown. */
 function AddressBar({ a, openUrl }: { a: AppAddress; openUrl?: (url: string) => void }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => { try { await navigator.clipboard.writeText(a.url); setCopied(true); window.setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ } };
-  const open = () => { if (openUrl) openUrl(a.url); else window.open(a.url, "_blank", "noopener"); };
   return (
-    <div className="dp-address" data-status={a.status}>
-      <span className="dp-address__label">Application URL</span>
-      {a.url ? <span className="dp-address__url mono">{a.url}</span> : <span className="dp-address__url dp-address__url--none">No address</span>}
-      {a.url ? <>
-        <button className="btn btn--secondary btn--sm" onClick={() => void copy()} aria-label={`Copy ${a.url}`}>{copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy</>}</button>
-        <button className="btn btn--secondary btn--sm" onClick={open} aria-label={`Open ${a.url}`}><ArrowSquareOut size={14} /> Open</button>
+    <>
+      <AddressRow label="Application URL" url={a.url} note={a.note} status={a.status} openUrl={openUrl} />
+      {a.alias ? <AddressRow label="Stable localhost URL" url={a.alias.url} note={a.alias.note} status={a.alias.url ? "running" : "conflict"} openUrl={openUrl} /> : null}
+    </>
+  );
+}
+
+function AddressRow({ label, url, note, status, openUrl }: { label: string; url: string; note: string; status: AppAddress["status"]; openUrl?: (url: string) => void }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => { try { await navigator.clipboard.writeText(url); setCopied(true); window.setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ } };
+  const open = () => { if (openUrl) openUrl(url); else window.open(url, "_blank", "noopener"); };
+  return (
+    <div className="dp-address" data-status={status}>
+      <span className="dp-address__label">{label}</span>
+      {url ? <span className="dp-address__url mono">{url}</span> : <span className="dp-address__url dp-address__url--none">No address</span>}
+      {url ? <>
+        <button className="btn btn--secondary btn--sm" onClick={() => void copy()} aria-label={`Copy ${url}`}>{copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy</>}</button>
+        <button className="btn btn--secondary btn--sm" onClick={open} aria-label={`Open ${url}`}><ArrowSquareOut size={14} /> Open</button>
       </> : null}
-      <span className="dp-address__note dp-faint">{a.note}</span>
+      <span className="dp-address__note dp-faint">{note}</span>
     </div>
   );
 }

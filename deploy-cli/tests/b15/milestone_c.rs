@@ -1027,3 +1027,145 @@ fn build_secret_files_left_by_a_hard_kill_are_reported_read_only_and_removed_by_
     );
     assert!(!stale.exists());
 }
+
+// ------------------------------------------------------------------ localhost alias
+
+const OTHER_APP: &str = "app_00000000000000000000000002";
+
+#[test]
+fn only_one_application_can_own_the_localhost_alias_and_it_never_reaches_a_deployment() {
+    let t = T::new();
+    let kc = MemorySecretStore::new();
+    let (a, b) = (
+        format!("app:{APP}@production"),
+        format!("app:{OTHER_APP}@production"),
+    );
+    let set = |scope: &str, value: &str| {
+        cfg(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                scope,
+                "--name",
+                "HARPOON_LOCALHOST_ALIAS",
+                "--value",
+                value,
+            ],
+        )
+    };
+
+    // a claim is recorded, in the existing configuration model, and survives re-reading the journal
+    let o = set(&a, "on");
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout
+            .contains("never passed to the build or the container"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(state(&t).config.alias_owners(), vec![APP.parse().unwrap()]);
+    assert_exit(&set(&format!("app:{APP}@staging"), "on"), 0); // the owner may repeat it
+
+    // a second application is refused explicitly, and nothing is recorded
+    let before = state(&t).config.defs.len();
+    let o = set(&b, "on");
+    assert_exit(&o, 6);
+    assert!(
+        o.stderr.contains(APP) && o.stderr.contains("only one application"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(state(&t).config.defs.len(), before);
+
+    // other scopes and values are refused too
+    assert_exit(&set("global", "on"), 6);
+    assert_exit(&set("project:shop", "on"), 6);
+    assert_exit(&set(&a, "off"), 2);
+    assert_exit(
+        &secret(
+            &t,
+            &kc,
+            &[
+                "secret-set",
+                "--scope",
+                &a,
+                "--name",
+                "HARPOON_LOCALHOST_ALIAS",
+            ],
+            "x\n",
+        ),
+        2,
+    );
+    // it is not an environment variable of the application
+    assert_exit(
+        &cfg(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                &a,
+                "--name",
+                "HARPOON_OTHER",
+                "--value",
+                "x",
+            ],
+        ),
+        2,
+    );
+
+    // it is never part of the resolved configuration
+    assert_exit(
+        &cfg(
+            &t,
+            &kc,
+            &[
+                "config-set",
+                "--scope",
+                &a,
+                "--name",
+                "REGION",
+                "--value",
+                "eu",
+            ],
+        ),
+        0,
+    );
+    let shown = cfg(
+        &t,
+        &kc,
+        &["config-show", "--app", APP, "--environment", "production"],
+    );
+    assert_exit(&shown, 0);
+    assert!(
+        shown.stdout.contains("REGION") && !shown.stdout.contains("HARPOON_LOCALHOST_ALIAS"),
+        "{}",
+        shown.stdout
+    );
+
+    // after the owner lets go, the other application may claim it
+    for scope in [&a, &format!("app:{APP}@staging")] {
+        assert_exit(
+            &cfg(
+                &t,
+                &kc,
+                &[
+                    "config-unset",
+                    "--scope",
+                    scope,
+                    "--name",
+                    "HARPOON_LOCALHOST_ALIAS",
+                ],
+            ),
+            0,
+        );
+    }
+    assert!(state(&t).config.alias_owners().is_empty());
+    assert_exit(&set(&b, "on"), 0);
+    assert_eq!(
+        state(&t).config.alias_owners(),
+        vec![OTHER_APP.parse().unwrap()]
+    );
+}

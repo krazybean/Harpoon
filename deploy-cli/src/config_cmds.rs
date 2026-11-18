@@ -90,7 +90,14 @@ pub fn config_set(p: &Parsed, out: &mut String) -> R {
     })?;
     config::check_config_value(&name, value).map_err(Fail::usage)?;
     let flags = flags(p);
-    let (mut j, _) = store::open_writer(&rt, kind_of(&rt, p)?)?;
+    let (mut j, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;
+    // Checked under the writer lock, so two claims cannot both pass.
+    if name == config::LOCALHOST_ALIAS {
+        restored
+            .config
+            .check_alias_claim(&scope)
+            .map_err(Fail::refused)?;
+    }
     j.config(&ConfigRecord::Def(Def {
         scope: scope.clone(),
         name: name.clone(),
@@ -101,6 +108,10 @@ pub fn config_set(p: &Parsed, out: &mut String) -> R {
         at_ms: now_ms(),
     }))
     .map_err(|e| journal_err("the definition", e))?;
+    if name == config::LOCALHOST_ALIAS {
+        let _ = writeln!(out, "set {name} at {scope}: localhost on the router port now routes to this application. It takes effect without a deployment and is never passed to the build or the container");
+        return Ok(exit::OK);
+    }
     let _ = writeln!(
         out,
         "set config {name} at {scope} ({}); new deployments use it, existing releases keep their own snapshot",
@@ -151,6 +162,11 @@ fn read_secret(svc: &mut Services) -> Result<SecretValue, Fail> {
 pub fn secret_set(p: &Parsed, svc: &mut Services, out: &mut String) -> R {
     let rt = Runtime::from_flag(p.value("runtime-dir"))?;
     let (scope, name) = (scope_flag(p)?, name_flag(p)?);
+    if name == config::LOCALHOST_ALIAS {
+        return Err(Fail::usage(format!(
+            "{name} is routing metadata, not a secret; use config-set"
+        )));
+    }
     let flags = flags(p);
     let value = read_secret(svc)?;
     let (mut j, restored) = store::open_writer(&rt, kind_of(&rt, p)?)?;

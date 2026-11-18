@@ -2803,3 +2803,62 @@ fn the_debug_desktop_stages_the_pinned_buildx_without_the_guest_assets() {
         .expect("the engine's resolver accepts the staged Buildx (a regular, executable file)");
     assert_eq!(resolved.path, staged);
 }
+
+// ------------------------------------------------------------------ localhost alias
+
+fn claim_alias(dir: &Path, app: &str, on: bool) {
+    let (mut j, _) = open_journal(dir);
+    let scope = config::Scope::application(&app.parse().unwrap(), Some("production"));
+    let setting = if on {
+        config::Setting::Set { flags: config::Flags::parse("r").unwrap(), value: config::Value::Config("on".into()) }
+    } else {
+        config::Setting::Unset
+    };
+    j.config(&config::ConfigRecord::Def(config::Def { scope, name: config::LOCALHOST_ALIAS.into(), setting, at_ms: 200 })).unwrap();
+}
+
+#[test]
+fn the_alias_is_read_from_the_journal_so_it_survives_a_restart_and_reads_write_nothing() {
+    let dir = rt("alias");
+    const OTHER: &str = "app_00000000000000000000000002";
+    let mut d2 = Deployment::new("dep_00000000000000000000000003".parse().unwrap(), OTHER.parse().unwrap(), Trigger::Cli, 100);
+    d2.transition(DeploymentStatus::Queued, 101).unwrap();
+    seed(&dir, &[dep(D1, Some(DeploymentStatus::Succeeded)), d2]);
+    let (app, other): (ApplicationId, ApplicationId) = (APP.parse().unwrap(), OTHER.parse().unwrap());
+    let host = harpoon_deploy::route::hostname(&app);
+    let alias = |dir: &Path| route_table(dir).unwrap().resolve_at("localhost:7480", 7480).cloned();
+    let sizes = || {
+        let mut v: Vec<_> = std::fs::read_dir(journal_dir(&dir)).unwrap().flatten().map(|e| (e.file_name(), e.metadata().unwrap().len())).collect();
+        v.sort();
+        v
+    };
+    let states = |s: &EngineSnapshot| s.apps.iter().map(|a| (a.id.clone(), a.alias)).collect::<Vec<_>>();
+
+    // nothing claimed: localhost is unknown and no application says it owns it
+    assert!(alias(&dir).is_none());
+    assert!(states(&snapshot_when_released(&dir, 5)).iter().all(|(_, a)| *a == "none"));
+
+    // a claim is recorded; "restarting" (fresh reads of the same journal) keeps it, and the alias is the owner's own route
+    claim_alias(&dir, APP, true);
+    let before = sizes();
+    for _ in 0..2 {
+        let s = snapshot_when_released(&dir, 5);
+        assert_eq!(states(&s), vec![(APP.to_string(), "owner"), (OTHER.to_string(), "none")]);
+        let t = route_table(&dir).unwrap();
+        assert_eq!(t.resolve_at("localhost:7480", 7480), t.resolve(&host));
+        assert_eq!(t.resolve_at("localhost:7480", 7480), Some(&harpoon_deploy::route::Route::Idle { app: app.clone() }));
+        assert!(t.resolve_at("127.0.0.1:7480", 7480).is_none(), "127.0.0.1 is not aliased");
+    }
+    assert_eq!(sizes(), before, "reading the alias wrote nothing");
+
+    // a second claim that got into the journal anyway (the CLI refuses it) is contested: neither is routed through it
+    claim_alias(&dir, OTHER, true);
+    let s = snapshot_when_released(&dir, 5);
+    assert_eq!(states(&s), vec![(APP.to_string(), "contested"), (OTHER.to_string(), "contested")]);
+    assert_eq!(alias(&dir), Some(harpoon_deploy::route::Route::Conflict { apps: vec![app.clone(), other.clone()] }));
+    assert!(route_table(&dir).unwrap().resolve(&host).is_some(), "the hostname still resolves");
+
+    // letting go leaves the other as the sole owner
+    claim_alias(&dir, APP, false);
+    assert_eq!(states(&snapshot_when_released(&dir, 5)), vec![(APP.to_string(), "none"), (OTHER.to_string(), "owner")]);
+}

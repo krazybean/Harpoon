@@ -35,7 +35,7 @@ export type SnapApp = {
   /** Present while the application has no registered repository because its registration was removed. */
   disconnected?: { name: string; url: string; registeredMs: number; removedMs: number } | null;
   /** The stable `<label>.harpoon.localhost` name of the application, and whether it routes (serving / idle / conflict / external). */
-  hostname?: string; route?: "serving" | "idle" | "conflict" | "external"; deployments: SnapDeployment[];
+  hostname?: string; route?: "serving" | "idle" | "conflict" | "external"; /** Whether this application owns `localhost:<router port>`: `owner`, `contested` (two claim it: neither is routed) or `none`. */ alias?: "none" | "owner" | "contested"; deployments: SnapDeployment[];
   serving: { release: string; deployment: string; container: string; /** the deployment that created the container: differs from `deployment` after a restoration or rollback */ containerOwner?: string; via: string; sinceMs: number; hostPort: number | null; healthPath: string | null } | null;
   pauses: { origin: string; kind: string; sinceMs: number; context: string; recorded: boolean }[];
   events: { delivery: string; source: string; revision: string; receivedMs: number; status: string; decidedMs: number | null; related: string | null }[];
@@ -210,6 +210,15 @@ const NOT: ConfigFact = { value: null, from: "none" };
  * being observed running. An attached external runtime is never routed, so it never gets one.
  */
 export function addressOf(a: SnapApp, router: SnapRouter | undefined, running: boolean, external: boolean): AppAddress | undefined {
+  const base = hostnameAddress(a, router, running, external);
+  if (!base || !router || a.alias === undefined || a.alias === "none") return base;
+  // `localhost` always resolves, so the alias does not depend on the *.harpoon.localhost resolution check.
+  if (a.alias === "contested") return { ...base, alias: { url: "", note: "Another application also claims localhost on the router port, so Harpoon routes neither through it. Nothing was changed. Remove one claim with config-unset HARPOON_LOCALHOST_ALIAS." } };
+  if (router.port == null) return base;
+  return { ...base, alias: { url: `http://localhost:${router.port}`, note: "Stable across deployments, rollback and restoration. Cookies for localhost are shared with every other localhost port; this address is the one to register for OAuth." } };
+}
+
+function hostnameAddress(a: SnapApp, router: SnapRouter | undefined, running: boolean, external: boolean): AppAddress | undefined {
   if (external || !a.hostname || !router) return undefined;
   if (a.route === "conflict") return { url: "", status: "conflict", note: "Another application was assigned the same address, so Harpoon routes neither of them. Nothing was changed." };
   if (a.route !== "serving") return undefined;

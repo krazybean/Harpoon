@@ -362,10 +362,36 @@ test("the address note says it needs Harpoon open (the router lives in the deskt
   assert.match(addressOf(withHost("serving"), ROUTER, false, false).note, /needs Harpoon open/);
 });
 
+test("the owner of the localhost alias shows it beside its name; the router port is the only port in it", () => {
+  const a = addressOf(withHost("serving", { alias: "owner" }), ROUTER, true, false);
+  assert.equal(a.url, "http://abc124xyz0.harpoon.localhost:7480");
+  assert.equal(a.alias.url, "http://localhost:7480");
+  assert.doesNotMatch(a.alias.url, /38\d\d\d|127\.0\.0\.1/);
+  // the alias is the same for every release
+  const serving = (rel, hostPort) => ({ release: rel, deployment: "d", container: "c", via: "original", sinceMs: NOW, hostPort, healthPath: "/healthz" });
+  const urls = [["rel_a", 38001], ["rel_b", 38002]].map(([r, p]) => Object.values(st(snap([withHost("serving", { alias: "owner", serving: serving(r, p) })], { router: ROUTER })).apps)[0].address.alias.url);
+  assert.equal(urls[0], urls[1]);
+});
+
+test("no alias is shown to applications that do not own it, with no router, or for a contested claim (which says so and has no URL)", () => {
+  for (const alias of ["none", undefined]) assert.equal(addressOf(withHost("serving", { alias }), ROUTER, true, false).alias, undefined);
+  assert.equal(addressOf(withHost("serving", { alias: "owner" }), { ...ROUTER, port: null, error: "in use" }, true, false).alias, undefined);
+  const c = addressOf(withHost("serving", { alias: "contested" }), ROUTER, true, false);
+  assert.equal(c.alias.url, "");
+  assert.match(c.alias.note, /neither|Nothing was changed/);
+  assert.ok(c.url, "its own name still works");
+});
+
+test("localhost always resolves, so the alias does not depend on the *.harpoon.localhost resolution check", () => {
+  const a = addressOf(withHost("serving", { alias: "owner" }), { ...ROUTER, resolves: false, resolveError: "no" }, true, false);
+  assert.equal(a.status, "unresolvable");
+  assert.equal(a.alias.url, "http://localhost:7480");
+});
+
 test("Copy and Open act on exactly the URL shown, and the primary view hides the internal port", () => {
   const src = readFileSync(new URL("../views/deploy/Screens.tsx", import.meta.url), "utf8");
-  assert.match(src, /writeText\(a\.url\)/);
-  assert.match(src, /openUrl\(a\.url\)/);
+  assert.match(src, /writeText\(url\)/);
+  assert.match(src, /openUrl\(url\)/);
   assert.match(readFileSync(new URL("../App.tsx", import.meta.url), "utf8"), /invoke\("open_app_url", \{ url \}\)/);
   assert.match(src, /app\.address \? null : <>\{app\.url/, "the direct 127.0.0.1 URL is only the fallback when there is no address");
   assert.match(src, /Direct URL \(diagnostic\)/);
