@@ -2779,3 +2779,27 @@ mod restored_release {
         assert_eq!(s.container_owner, failed.to_string(), "the container belongs to the deployment that restored it");
     }
 }
+
+/// Packaging validation (a development desktop with no guest root image, e.g. a git worktree). `build.rs` stages the deployment tools
+/// independently of the large guest assets, so when the pinned Buildx is in `harpoon/build` the debug desktop's resource directory must
+/// hold exactly that binary, and the engine's own resolver must accept it. Before the fix nothing was staged without the 2 GiB root image,
+/// and the desktop reported "the bundled Buildx is missing at …/bundle-resources/harpoon/bin/docker-buildx".
+#[test]
+fn the_debug_desktop_stages_the_pinned_buildx_without_the_guest_assets() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pinned = manifest.join("../../../harpoon/build/docker-buildx");
+    if !pinned.exists() {
+        eprintln!("skipped: {} is not fetched on this checkout", pinned.display());
+        return;
+    }
+    let resources = manifest.join("bundle-resources");
+    let staged = resources.join(harpoon_deploy::buildx::BUNDLED_RELATIVE);
+    assert_eq!(
+        std::fs::read(&staged).unwrap_or_else(|e| panic!("{} is not staged: {e}", staged.display())),
+        std::fs::read(&pinned).unwrap(),
+        "the staged Buildx must be byte-identical to the verified pinned binary"
+    );
+    let resolved = harpoon_deploy::buildx::resolve(Some(&resources), &harpoon_deploy_docker::buildx_run::StdFileProbe)
+        .expect("the engine's resolver accepts the staged Buildx (a regular, executable file)");
+    assert_eq!(resolved.path, staged);
+}
