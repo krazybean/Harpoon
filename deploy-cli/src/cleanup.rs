@@ -8,6 +8,7 @@
 //! * the release each application serves now, and the deployment that owns its container;
 //! * the most recent previous release proven restorable (pinned configuration, retained image in the journal, the image in
 //!   Docker by its immutable id with this deployment's labels), and, when that cannot be shown, every candidate (fail closed);
+//! * a deployment whose cutover began and whose restoration is not finished and verified, or whose pause no decision cleared;
 //! * the image id the serving release pins, even when an older deployment recorded the same id;
 //! * a deployment that has not finished (a writer holding the journal proves nothing else is deploying);
 //! * a prepared-but-unconfirmed candidate (cancelled), which the person may still confirm;
@@ -21,6 +22,7 @@ use crate::commands::{describe, docker_backend, unfinished};
 use crate::store::{self, Kind, Runtime};
 use crate::{exit, Fail};
 use harpoon_deploy::backend::ResourceOps;
+use harpoon_deploy::control::active_pauses;
 use harpoon_deploy::engine::{end_state, execute_actions};
 use harpoon_deploy::ids::{ApplicationId, DeploymentId};
 use harpoon_deploy::ledger::ResourceKey;
@@ -28,12 +30,13 @@ use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Observed, ResourceKind,
 };
 use harpoon_deploy::rollback::retained_releases;
-use harpoon_deploy::serving::serving_release;
-use harpoon_deploy::state::DeploymentStatus;
+use harpoon_deploy::serving::{restored_container_name, serving_release};
+use harpoon_deploy::state::{Deployment, DeploymentStatus, RecoveryOutcome};
 use harpoon_deploy::time::SystemClock;
-use harpoon_deploy_docker::backend::{ImageVerdict, RollbackImage};
+use harpoon_deploy_docker::backend::{AbandonedContainer, ImageVerdict, RollbackImage};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::json::{n, obj, s as js, Json};
+use harpoon_deploy_docker::reclaim::estimate_reclaim;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -171,6 +174,18 @@ pub(crate) fn run(
         }
         retention.push((app.clone(), serving.deployment.clone(), state));
     }
+    // An interrupted or failed cutover is settled when its bounded restoration finished and passed its health check
+    // (`restored`: not unverified, failed, not attempted or still running) and no pause caused by it is still in force. Its
+    // leftovers belong to no running release then: whatever now serves is protected above and the rollback target below.
+    let paused: BTreeSet<DeploymentId> = active_pauses(deps, &restored.control)
+        .into_iter()
+        .map(|p| p.origin)
+        .collect();
+    let settled = |d: &Deployment| {
+        d.recovery
+            .is_some_and(|r| r.outcome == RecoveryOutcome::Restored)
+            && !paused.contains(&d.id)
+    };
     // in scope: succeeded releases that no longer serve (treated as ended without success for the planner), and
     // failed or interrupted deployments. Cancelled (prepared) candidates are left for the person to confirm or remove.
     let scope: Vec<(DeploymentId, EndState)> = deps
@@ -178,9 +193,10 @@ pub(crate) fn run(
         .filter(|d| !protected.contains(&d.id))
         .filter_map(|d| match d.status {
             DeploymentStatus::Succeeded => Some((d.id.clone(), EndState::NotSucceeded)),
-            // one whose cutover began is left for `status`/`restore`: the application may be mid-recovery
+            // one whose cutover began is left for `status`/`restore`: the application may be mid-recovery. Only a deployment
+            // whose restoration finished and was verified, and whose pause a decision cleared, is settled and in scope.
             DeploymentStatus::Failed | DeploymentStatus::Interrupted
-                if d.replaces.is_none() && d.recovery.is_none() =>
+                if (d.replaces.is_none() && d.recovery.is_none()) || settled(d) =>
             {
                 end_state(d.status).map(|e| (d.id.clone(), e))
             }
@@ -276,7 +292,23 @@ pub(crate) fn run(
                 })
             })
             .count();
-        let _ = writeln!(out, "retention: application {app}: serving {serving}; {state}; {eligible} other release(s) eligible for cleanup");
+        let settled_left = scope
+            .iter()
+            .filter(|(d, _)| {
+                deps.iter().any(|x| {
+                    x.id == *d
+                        && x.application_id == *app
+                        && x.status != DeploymentStatus::Succeeded
+                        && settled(x)
+                })
+            })
+            .count();
+        let tail = if settled_left > 0 {
+            format!("; {settled_left} settled interrupted deployment(s) (restored, pause cleared) eligible")
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "retention: application {app}: serving {serving}; {state}; {eligible} other release(s) eligible for cleanup{tail}");
     }
     for id in &protected {
         for e in restored.ledger.entries().iter().filter(|e| {
@@ -328,6 +360,91 @@ pub(crate) fn run(
         .into_iter()
         .filter(|a| !matches!(a, Action::ReportOnly { .. } | Action::Refuse { .. }))
         .collect();
+    // The container a restoration recreated is recorded as retained, so the planner never removes it. Once its deployment is
+    // settled and out of scope of everything that serves, it is abandoned; it is removed only when Docker shows it is
+    // Harpoon's by id and all three labels and that it is stopped. A running or unverifiable one is kept and says why.
+    let mut abandoned: Vec<(
+        ApplicationId,
+        DeploymentId,
+        String,
+        &'static str,
+        &'static str,
+        String,
+    )> = Vec::new();
+    let mut actions = actions;
+    for (dep, _) in &scope {
+        let Some(d) = deps.iter().find(|d| d.id == *dep) else {
+            continue;
+        };
+        if d.status == DeploymentStatus::Succeeded || !settled(d) {
+            continue;
+        }
+        let name = restored_container_name(dep);
+        for e in ledger.entries().iter().filter(|e| {
+            e.deployment == *dep
+                && e.key.kind == ResourceKind::Container
+                && e.key.name == name
+                && !e.is_released()
+                && !matches!(e.state, EntryState::Refused(_))
+        }) {
+            let Some(id) = e.id.clone() else {
+                abandoned.push((
+                    e.app.clone(),
+                    dep.clone(),
+                    name.clone(),
+                    "review",
+                    "needs-review",
+                    "the journal has no receipt for this container, so what it is cannot be shown"
+                        .into(),
+                ));
+                continue;
+            };
+            let entry = (dep.clone(), e.key.clone());
+            let Some(o) = observed
+                .iter()
+                .find(|o| o.kind == ResourceKind::Container && o.id == id)
+            else {
+                actions.push(Action::MarkAbsent { entry });
+                continue;
+            };
+            if !o.labelled_for(&e.app, dep) {
+                abandoned.push((e.app.clone(), dep.clone(), name.clone(), "review", "needs-review", "Docker's container does not carry this deployment's Harpoon labels; not touched".into()));
+                continue;
+            }
+            match backend.verify_abandoned_container(&id, &e.app, dep) {
+                AbandonedContainer::Stopped => actions.push(Action::Remove {
+                    entry,
+                    observed: o.clone(),
+                    adopt: false,
+                }),
+                AbandonedContainer::Absent => actions.push(Action::MarkAbsent { entry }),
+                AbandonedContainer::Running(why) | AbandonedContainer::Unverifiable(why) => {
+                    abandoned.push((
+                        e.app.clone(),
+                        dep.clone(),
+                        name.clone(),
+                        "review",
+                        "needs-review",
+                        format!("{why}; kept"),
+                    ));
+                }
+            }
+        }
+    }
+    for (app, dep, name, verdict, reason, why) in &abandoned {
+        let _ = writeln!(out, "kept: container {name} of {dep}: {why}");
+        item(
+            out,
+            app,
+            dep,
+            "container",
+            name,
+            verdict,
+            reason,
+            why,
+            Some(true),
+        );
+    }
     for a in &actions {
         let _ = writeln!(out, "{}{}", if apply { "" } else { "would: " }, describe(a));
     }
@@ -343,7 +460,28 @@ pub(crate) fn run(
                     .iter()
                     .any(|d| d.id == *dep && d.status != DeploymentStatus::Succeeded);
                 if let Some(app) = app {
-                    item(out, &app, dep, observed.kind.as_str(), &key.name, "ready", if failed { "failed-attempt" } else { "superseded" }, "Docker still holds this object with the recorded id and all three Harpoon labels", Some(true));
+                    let restoration = key.name == restored_container_name(dep);
+                    item(
+                        out,
+                        &app,
+                        dep,
+                        observed.kind.as_str(),
+                        &key.name,
+                        "ready",
+                        if restoration {
+                            "abandoned-restoration"
+                        } else if failed {
+                            "failed-attempt"
+                        } else {
+                            "superseded"
+                        },
+                        if restoration {
+                            "the container a restoration recreated for a release that no longer serves: stopped, and Docker shows it is Harpoon's by id and all three labels"
+                        } else {
+                            "Docker still holds this object with the recorded id and all three Harpoon labels"
+                        },
+                        Some(true),
+                    );
                 }
             }
             Action::MarkAbsent { entry: (dep, key) } => {
@@ -391,6 +529,22 @@ pub(crate) fn run(
             ))
         })?;
     }
+
+    // What Docker says about every image's layers, taken before anything is removed. Removing an image removes a reference;
+    // space is freed only for layers no image that stays keeps, which is what the estimate below is made of.
+    let layers = backend.image_layers();
+    let mut removed_images: BTreeSet<String> = BTreeSet::new();
+
+    // containers this run removes: an image they were made from is judged as it will be once they are gone
+    let going: BTreeSet<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Remove { observed, .. } if observed.kind == ResourceKind::Container => {
+                Some(observed.id.clone())
+            }
+            _ => None,
+        })
+        .collect();
 
     // 2. retained images, one at a time, each re-verified against Docker
     let candidates: Vec<(
@@ -483,7 +637,7 @@ pub(crate) fn run(
             );
             continue;
         }
-        let action = match backend.assess_retained_image(&id, &key.name, &app, &dep) {
+        let action = match backend.assess_retained_image_after(&id, &key.name, &app, &dep, &going) {
             Err(e) => {
                 skip(out, &format!("Docker could not be asked ({})", e.message));
                 continue;
@@ -543,13 +697,50 @@ pub(crate) fn run(
                 return Err(Fail::failed(format!("journal write failed during cleanup: {e}; run `recover`, then `status`, and retry")));
             }
             match ledger.find(&dep, &key).map(|e| &e.state) {
-                Some(EntryState::Released(_)) => tidied.images += 1,
+                Some(EntryState::Released(_)) => {
+                    tidied.images += 1;
+                    removed_images.insert(id.clone());
+                }
                 _ => skip(out, "Docker did not remove it; it stays recorded and is retried by the next cleanup"),
             }
         } else if matches!(action, Action::Remove { .. }) {
             tidied.images += 1;
+            removed_images.insert(id.clone());
         }
     }
+    // Estimated space, from layer sharing. Never inferred from how many image references go: two images with the same layers
+    // free nothing while one stays. Said apart from the measured change in the guest's free space printed after an apply.
+    let estimate = match &layers {
+        Ok(all) => {
+            let e = estimate_reclaim(all, &removed_images);
+            let _ = writeln!(
+                out,
+                "estimated-reclaim-bytes: {}\nestimated-reclaim-exact: {}",
+                e.bytes, e.exact
+            );
+            for gone in all.iter().filter(|i| removed_images.contains(&i.id)) {
+                if let Some(held) = all.iter().find(|k| {
+                    !removed_images.contains(&k.id)
+                        && k.layers == gone.layers
+                        && (protected_images.contains(&k.id) || rollback_images.contains(&k.id))
+                }) {
+                    let _ = writeln!(out, "shared-layers: image {} has the same layers as protected image {}; removing it frees nothing by itself, and its space is freed only if that image ever goes too", gone.id, held.id);
+                }
+            }
+            if !removed_images.is_empty() && e.bytes == 0 {
+                let _ = writeln!(out, "estimate: removing these image reference(s) is expected to free no space, because every layer is still used by an image that stays");
+            }
+            Some(e)
+        }
+        Err(why) => {
+            let _ = writeln!(
+                out,
+                "estimated-reclaim-bytes: not estimated ({})",
+                why.message
+            );
+            None
+        }
+    };
     let verb = if apply { "removed" } else { "would remove" };
     let _ = writeln!(out, "cleanup: {verb} {} container(s), release {} port lease(s), {verb} {} image(s). Volumes, networks, build cache and other applications' artifacts are never touched.", tidied.containers, tidied.leases, tidied.images);
     let _ = writeln!(
@@ -564,6 +755,16 @@ pub(crate) fn run(
                     out,
                     "guest-free-before-bytes: {b}\nguest-free-after-bytes: {a}"
                 );
+                let freed = a.saturating_sub(b);
+                let _ = writeln!(out, "measured-reclaimed-bytes: {freed}");
+                let check = match estimate {
+                    _ if tidied.images == 0 => "no image was removed, so there is nothing to compare".to_string(),
+                    Some(e) if e.bytes == 0 && e.exact => "image reference(s) were removed but no space was expected: their layers are used by images that stay. None is claimed".to_string(),
+                    Some(e) if freed >= e.bytes / 10 * 9 => "the measured change matches the estimate".to_string(),
+                    Some(_) => "the measured change is lower than estimated: Docker may keep the layers, or something else used space meanwhile. Only the measured figure is real".to_string(),
+                    None => "no estimate was available; only the measured figure is real".to_string(),
+                };
+                let _ = writeln!(out, "reclaim-check: {check}");
             }
             _ => {
                 let _ = writeln!(

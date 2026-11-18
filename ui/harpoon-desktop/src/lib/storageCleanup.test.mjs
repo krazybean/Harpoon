@@ -340,7 +340,7 @@ test("a reclaim that fails after a successful Docker cleanup does not hide or ch
   assert.equal(reclaim.dataset.resultStatus, "failed");
   assert.equal(reclaim.getAttribute("role"), "alert");
   assert.match(text(reclaim.querySelector('[data-figure="docker"]')), /Not applicable: this operation does not change Docker/);
-  assert.match(text(cleanup.querySelector('[data-figure="docker"]')), /1 container and 1 image removed/);
+  assert.match(text(cleanup.querySelector('[data-figure="docker"]')), /1 container and 1 image reference removed/);
   await m.unmount();
 });
 
@@ -536,7 +536,7 @@ test("releases, success: only what the engine reported, counts apart from every 
   assert.equal(r.dataset.resultStatus, "success");
   assert.match(text(r), /Removed 1 container\(s\) and 2 image\(s\); reconciled 0 journal record\(s\)\./);
   const docker = text(r.querySelector('[data-figure="docker"]'));
-  assert.match(docker, /1 container and 2 images removed\. No byte figure exists/);
+  assert.match(docker, /1 container and 2 image references removed\. No byte estimate was available/);
   assert.doesNotMatch(docker, /MiB|GiB|KiB/, "reclaimed bytes are never inferred from image sizes");
   assert.match(text(r.querySelector('[data-figure="guest"]')), /27\.9 GiB before, 27\.9 GiB after \(unchanged\)/);
   assert.equal(r.getAttribute("role"), "status");
@@ -819,7 +819,7 @@ test("refreshing the storage inventory after a cleanup cannot authorise another 
 });
 
 // ================================================================ cache accounting and rollback retention (real captured outputs)
-import { cacheExplanation, reasonLabel } from "./artifactCleanup.ts";
+import { cacheExplanation, estimateLine, reasonLabel } from "./artifactCleanup.ts";
 const MB = 1000 * 1000;
 const sz = (b) => `${(b / MB).toFixed(0)} MB`;
 
@@ -879,4 +879,41 @@ test("rollback: the release dry run names the rollback target apart from serving
 test("rollback: reasons the desktop does not know yet stay visible as review text, not silently relabelled", () => {
   assert.match(reasonLabel({ kind: "image", reason: "rollback-unverified", detail: "x" }), /could not be verified/);
   assert.match(reasonLabel({ kind: "image", reason: "something-new", detail: "because" }), /Needs review: because/);
+});
+
+// ================================================================ interrupted and restored deployments, estimates and measurements
+test("restoration leftovers: the review says what is removed, what stays protected, and that shared layers free nothing", () => {
+  const rep = parseCleanup(fx("releases-dry-run-abandoned-restoration").detail);
+  const reasons = (v) => rep.items.filter((i) => i.verdict === v).map((i) => i.reason);
+  assert.ok(reasons("ready").includes("abandoned-restoration"), "the abandoned restoration container is offered for removal");
+  assert.ok(reasons("protected").includes("rollback-target") && reasons("protected").includes("serving-release"), "serving and rollback stay protected");
+  assert.match(reasonLabel(rep.items.find((i) => i.reason === "abandoned-restoration")), /restoration left behind/);
+  assert.equal(rep.estimatedBytes, 80); assert.equal(rep.estimateExact, true);
+  assert.equal(rep.sharedLayers.length, 1);
+  const line = estimateLine(rep, sz);
+  assert.match(line, /Estimated space freed: about 0 MB|Estimated space freed: about/);
+  assert.match(line, /1 image shares its layers with a protected image/);
+});
+
+test("restoration leftovers: an apply states the estimate apart from the measured change, and removed references are not space", async () => {
+  const r = fx("releases-apply-abandoned-restoration");
+  const rep = parseCleanup(r.detail);
+  assert.equal(rep.measuredReclaimed, 0);
+  assert.match(rep.reclaimCheck, /lower than estimated/);
+  const o = releasesOutcome(rep, rep, { before: null, after: null });
+  assert.equal(o.status, "success");
+  assert.equal(o.figures.docker.estimated, true);
+  const lines = figureLines(o, sz);
+  assert.equal(lines[0].title, "Estimated space freed");
+  assert.match(lines[0].text, /image references? removed/); assert.match(lines[0].text, /estimate from layer sharing/);
+  assert.match(o.detail, /Only the measured figure is real/);
+});
+
+test("estimates: an estimate Docker's layer data could not support is not shown as a saving of zero", () => {
+  const rep = { ...parseCleanup(fx("releases-dry-run-abandoned-restoration").detail), estimatedBytes: 0, estimateExact: false, sharedLayers: [] };
+  assert.equal(estimateLine(rep, sz), null, "no claim either way");
+  const o = releasesOutcome(rep, rep, { before: null, after: null });
+  assert.equal(o.figures.docker.bytes, null);
+  assert.match(o.figures.docker.note, /No byte estimate was available/);
+  assert.match(estimateLine({ ...rep, estimatedBytes: null }, sz), /cannot be estimated beforehand/);
 });

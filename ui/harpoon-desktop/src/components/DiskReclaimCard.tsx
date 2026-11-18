@@ -10,7 +10,7 @@ import { CLEANUP_TARGETS } from "../lib/cleanupTargets";
 import { acquireCleanup, useCleanupActive } from "../lib/cleanupLock";
 import { formatSize, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { ExpansionState } from "../lib/diskCapacity";
-import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, cacheExplanation, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
+import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, cacheExplanation, estimateLine, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
@@ -110,6 +110,7 @@ export function DockerArtifacts({ enabled, onDone }: { enabled: boolean; onDone:
             ))}
           </div>
           <div className="text-meta">{inv.dockerObjects} Docker object{inv.dockerObjects === 1 ? "" : "s"} to remove · {inv.journalOnly} journal record{inv.journalOnly === 1 ? "" : "s"} to reconcile · {inv.review} need review. Reconciling journal records frees no Docker disk space; disk savings cannot be estimated before removal, and the measured change is shown afterwards.</div>
+          {estimateLine(plan, fmtBytes) && <div role="status" className="text-meta">{estimateLine(plan, fmtBytes)}</div>}
           {groups.length > 1 && (
             <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
               <button type="button" className="artifact-link" onClick={() => setOpen(new Set(groups.map((g) => g.key)))}>Expand all</button>

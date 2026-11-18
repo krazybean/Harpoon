@@ -2422,6 +2422,19 @@ pub enum ImageVerdict {
     NotExclusive(String),
 }
 
+/// Whether an abandoned restoration container may be removed: it must still be Harpoon's, by id and labels, and stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbandonedContainer {
+    /// Docker has this id with this deployment's three Harpoon labels, and it is not running.
+    Stopped,
+    /// Docker no longer has it (only the journal does).
+    Absent,
+    /// It is running (or paused or restarting): it may be serving something, so it is not removed.
+    Running(String),
+    /// Docker could not be asked, or the labels do not show it is this deployment's.
+    Unverifiable(String),
+}
+
 /// Whether Docker still holds the image a rollback would start from, and whether it is provably Harpoon's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackImage {
@@ -2443,6 +2456,19 @@ impl<T: HttpTransport> DockerBackend<T> {
         tag: &str,
         app: &harpoon_deploy::ids::ApplicationId,
         dep: &DeploymentId,
+    ) -> Result<ImageVerdict, StepError> {
+        self.assess_retained_image_after(id, tag, app, dep, &std::collections::BTreeSet::new())
+    }
+
+    /// As [`Self::assess_retained_image`], judging the image as it will be once the containers in `going` (ids this same
+    /// cleanup is about to remove) are gone, so a dry run answers what the apply will.
+    pub fn assess_retained_image_after(
+        &self,
+        id: &str,
+        tag: &str,
+        app: &harpoon_deploy::ids::ApplicationId,
+        dep: &DeploymentId,
+        going: &std::collections::BTreeSet<String>,
     ) -> Result<ImageVerdict, StepError> {
         let budget = Budget {
             start: Instant::now(),
@@ -2494,7 +2520,7 @@ impl<T: HttpTransport> DockerBackend<T> {
             .map_err(|e| api_err("listing containers", e))?;
         let mut users = Vec::new();
         let mut unknown = Vec::new();
-        for c in &containers {
+        for c in containers.iter().filter(|c| !going.contains(&c.id)) {
             if c.image_id.is_empty() {
                 unknown.push(c.name.clone());
             } else if c.image_id == id {
@@ -2546,6 +2572,70 @@ impl<T: HttpTransport> DockerBackend<T> {
             )),
             Ok(Some(_)) => RollbackImage::Verified,
         }
+    }
+
+    /// Read-only: is this container, recorded for `dep`, still Harpoon's (by id and all three labels) and stopped?
+    pub fn verify_abandoned_container(
+        &self,
+        id: &str,
+        app: &harpoon_deploy::ids::ApplicationId,
+        dep: &DeploymentId,
+    ) -> AbandonedContainer {
+        let budget = Budget {
+            start: Instant::now(),
+            total: self.cfg.cleanup_timeout,
+        };
+        let left = match budget.left("listing containers") {
+            Ok(l) => l,
+            Err(e) => return AbandonedContainer::Unverifiable(e.message),
+        };
+        let all = match self.api.list_containers(left) {
+            Ok(a) => a,
+            Err(e) => {
+                return AbandonedContainer::Unverifiable(format!("Docker could not be asked: {e}"))
+            }
+        };
+        match all.iter().find(|c| c.id == id) {
+            None => AbandonedContainer::Absent,
+            Some(c) if !has_labels(&c.labels, app, dep) => AbandonedContainer::Unverifiable(format!(
+                "container {} does not carry this deployment's Harpoon labels (managed, app, deployment)",
+                short(id)
+            )),
+            Some(c) if matches!(c.state.as_str(), "exited" | "created" | "dead") => AbandonedContainer::Stopped,
+            Some(c) => AbandonedContainer::Running(format!("container {} is {}", short(id), c.state)),
+        }
+    }
+
+    /// Read-only: every image's size and layer ids, for estimating what removing some of them frees. An error means the
+    /// estimate is unavailable, never that nothing would be freed.
+    pub fn image_layers(&self) -> Result<Vec<crate::reclaim::ImageLayers>, StepError> {
+        let budget = Budget {
+            start: Instant::now(),
+            total: self.cfg.cleanup_timeout,
+        };
+        let listed = self
+            .api
+            .list_images(budget.left("listing images")?)
+            .map_err(|e| api_err("listing images", e))?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for (id, _, _) in listed {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(img) = self
+                .api
+                .image_inspect(&id, budget.left("inspecting an image")?)
+                .map_err(|e| api_err("inspecting an image", e))?
+            {
+                out.push(crate::reclaim::ImageLayers {
+                    id: img.id,
+                    size: img.size,
+                    layers: img.layers,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The only image-removal path of `cleanup-image`: re-assesses immediately before deleting and

@@ -774,6 +774,27 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
         &go(&t2, &SHIPPING, &args(&t2, &[])),
         &mut all,
     );
+    // an interrupted-and-restored deployment whose leftovers share layers with the protected rollback image
+    let t3 = T::new();
+    let w3 = world_full(&t3, false, Some(2000));
+    let r3 = restored_interrupted(&t3, &w3, RecoveryOutcome::Restored, true, false);
+    share_layers(&t3, &w3, &r3);
+    capture(
+        &t3,
+        "releases-dry-run-abandoned-restoration",
+        &go(&t3, &SHIPPING, &args(&t3, &[])),
+        &mut all,
+    );
+    capture(
+        &t3,
+        "releases-apply-abandoned-restoration",
+        &go(
+            &t3,
+            &SHIPPING,
+            &with_mgmt(&t3, args(&t3, &["--apply", &auth()])),
+        ),
+        &mut all,
+    );
     capture(
         &t,
         "releases-apply-refused-unauthorized",
@@ -1525,4 +1546,459 @@ fn an_interrupted_deployment_that_records_or_uses_the_rollback_image_cannot_caus
     assert!(container_present(&t, &cid), "{}", o.stdout);
     let (srv_i, _) = w.ids[&w.serving.to_string()].clone();
     assert!(image_present(&t, &srv_i));
+}
+
+// ---------------------------------------------------------------- interrupted and restored deployments
+
+use harpoon_deploy::control::{Choice, ControlRecord, ResumeRec};
+use harpoon_deploy::state::{CutoverState, Recovery, RecoveryOutcome};
+
+struct Restored {
+    dep: DeploymentId,
+    image: String,
+    container: String,
+}
+
+/// A deployment whose cutover began, which restored the old release in a container of its own (made from the OLD release's
+/// image, as the real restoration does) and left an image of its own behind: what an interrupted-and-restored deployment leaves.
+fn restored_interrupted(
+    t: &T,
+    w: &W,
+    outcome: RecoveryOutcome,
+    cleared: bool,
+    running: bool,
+) -> Restored {
+    restored_interrupted_at(t, w, outcome, cleared, running, 15_000)
+}
+
+/// `restored_at`: when the restoration finished. After the serving release finished (20_000), the restored container is what
+/// serves the application.
+fn restored_interrupted_at(
+    t: &T,
+    w: &W,
+    outcome: RecoveryOutcome,
+    cleared: bool,
+    running: bool,
+    restored_at: u64,
+) -> Restored {
+    let app = w.app.clone();
+    let (_, dep) = ids(9);
+    let (old_image, _) = w.ids[&w.old.to_string()].clone();
+    let lbl = harpoon_deploy::backend::harpoon_labels(&app, &dep);
+    let tag = format!(
+        "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+        app.as_str().to_ascii_lowercase(),
+        dep
+    );
+    let image = support::fake_iid(3000);
+    t.h.docker
+        .with(|s| s.add_image_with_id(&image, &[&tag], lbl.clone(), vec![]));
+    let name = format!("hp-{dep}-restored");
+    let container = t.h.docker.with(|s| {
+        let id = s.add_container(&name, lbl, running);
+        s.containers.iter_mut().find(|c| c.id == id).unwrap().image = old_image.clone();
+        id
+    });
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    let mut d = finished(&app, &dep, DeploymentStatus::Interrupted);
+    d.cutover = CutoverState::Begun { at_ms: 12_000 };
+    d.replaces = Some(ReleaseId::from_deployment(&w.old));
+    d.recovery = Some(Recovery {
+        outcome,
+        started_ms: 12_500,
+        finished_ms: Some(restored_at),
+        budget_ms: 60_000,
+    });
+    d.finished_ms = Some(15_000);
+    j.persist(&d).unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::Image,
+        &tag,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::Image, &tag, &image))
+        .unwrap();
+    j.record(&intent(
+        &app,
+        &dep,
+        ResourceKind::Container,
+        &name,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&dep, ResourceKind::Container, &name, &container))
+        .unwrap();
+    if cleared {
+        j.control(&ControlRecord::Resume(ResumeRec {
+            app,
+            at_ms: 16_000,
+            choice: Choice::Dismiss,
+            selected: None,
+            dismissed: vec![],
+            superseded: vec![],
+            cleared: vec![dep.clone()],
+        }))
+        .unwrap();
+    }
+    Restored {
+        dep,
+        image,
+        container,
+    }
+}
+
+fn set_layers(t: &T, id: &str, size: u64, layers: &[&str]) {
+    t.h.docker.with(|s| {
+        let i = s.images.iter_mut().find(|i| i.id == id).unwrap();
+        i.size = size;
+        i.layers = layers.iter().map(|l| l.to_string()).collect();
+    });
+}
+
+fn mgmt(t: &T, mut a: Vec<String>) -> Vec<String> {
+    a.extend([
+        "--mgmt-socket".to_string(),
+        t.mgmt.path().display().to_string(),
+    ]);
+    a
+}
+
+/// Layers as the real guest has them: one base image, and application images built on it. The leftover image of the interrupted
+/// deployment has exactly the rollback image's layers.
+fn share_layers(t: &T, w: &W, r: &Restored) {
+    t.h.docker.with(|s| {
+        s.add_image_with_id("sha256:base", &["node:22-slim"], Default::default(), vec![])
+    });
+    set_layers(t, "sha256:base", 250, &["b1", "b2"]);
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    let (srv_i, _) = w.ids[&w.serving.to_string()].clone();
+    let (fail_i, _) = w.ids[&w.failed.to_string()].clone();
+    set_layers(t, &old_i, 1_940, &["b1", "b2", "r1", "r2"]);
+    set_layers(t, &r.image, 1_940, &["b1", "b2", "r1", "r2"]);
+    set_layers(t, &srv_i, 1_950, &["b1", "b2", "s1", "s2"]);
+    set_layers(t, &fail_i, 80, &["f1"]);
+}
+
+#[test]
+fn a_settled_restoration_is_cleaned_while_the_serving_release_and_the_rollback_target_stay() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    share_layers(&t, &w, &r);
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let o = dry(&t);
+    let its = items(&o.stdout);
+    assert_eq!(
+        reason_of(&its, &r.dep, "container"),
+        ("ready", "abandoned-restoration"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(reason_of(&its, &r.dep, "image").0, "ready", "{}", o.stdout);
+    assert_eq!(
+        reason_of(&its, &w.old, "image"),
+        ("protected", "rollback-target")
+    );
+    assert_eq!(
+        reason_of(&its, &w.serving, "image"),
+        ("protected", "serving-release")
+    );
+    // layers: the leftover has the rollback image's layers, so removing it frees nothing by itself, and the failed attempt's
+    // own image is the only thing that frees space
+    assert!(
+        o.stdout.contains(&format!(
+            "shared-layers: image {} has the same layers as protected image {old_i}",
+            r.image
+        )),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("estimated-reclaim-bytes: 80\n"),
+        "only the unshared image counts: {}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("estimated-reclaim-exact: true"),
+        "{}",
+        o.stdout
+    );
+    // nothing was changed by the dry run
+    assert!(container_present(&t, &r.container) && image_present(&t, &r.image));
+    // applied
+    let o = go(&t, &SHIPPING, &mgmt(&t, args(&t, &["--apply", &auth()])));
+    assert_exit(&o, 0);
+    assert!(
+        !container_present(&t, &r.container),
+        "the abandoned restoration container is removed: {}",
+        o.stdout
+    );
+    assert!(!image_present(&t, &r.image), "{}", o.stdout);
+    assert!(
+        image_present(&t, &old_i) && container_present(&t, &old_c),
+        "the rollback target stays"
+    );
+    assert!(
+        image_present(&t, &srv_i) && container_present(&t, &srv_c),
+        "the serving release stays"
+    );
+    // removed references are counted apart from space: a measured figure and the reason it can be less than the references
+    assert!(
+        o.stdout.contains("measured-reclaimed-bytes:"),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("reclaim-check:"), "{}", o.stdout);
+    // the journal says so and history stays
+    let j = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    assert!(j
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == r.dep)
+        .all(|e| e.is_released()));
+    assert!(
+        j.deployments.iter().any(|d| d.id == r.dep),
+        "the deployment record is kept"
+    );
+    let kept = harpoon_deploy::rollback::retained_releases(&j.ledger, &j.deployments, &w.app);
+    assert!(
+        kept.iter()
+            .find(|x| x.deployment == w.old)
+            .unwrap()
+            .eligible(),
+        "rollback still offered"
+    );
+}
+
+#[test]
+fn removing_every_image_that_holds_a_layer_set_is_estimated_by_its_layers_not_by_how_many_references_go(
+) {
+    // the rollback target is not proven (it pinned no configuration), so it and the leftover are both disposable and the
+    // two images with the same layers free their content once, minus the base they share with an image that stays
+    let t = T::new();
+    let w = world_full(&t, false, None);
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    share_layers(&t, &w, &r);
+    let o = dry(&t);
+    assert!(
+        o.stdout
+            .contains(&format!("estimated-reclaim-bytes: {}", 1_940 - 250 + 80)),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("estimated-reclaim-exact: true"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        !o.stdout.contains("shared-layers:"),
+        "nothing protected shares them: {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn an_unsettled_restoration_is_never_touched() {
+    // not verified, failed, not attempted, still running, or settled but its pause was never cleared
+    for (outcome, cleared) in [
+        (RecoveryOutcome::RestoredUnverified, true),
+        (RecoveryOutcome::InProgress, true),
+        (RecoveryOutcome::Restored, false),
+    ] {
+        let t = T::new();
+        let w = world_full(&t, false, Some(2000));
+        let r = restored_interrupted(&t, &w, outcome, cleared, false);
+        let o = apply(&t);
+        assert!(
+            container_present(&t, &r.container) && image_present(&t, &r.image),
+            "{outcome:?} cleared={cleared}: {}",
+            o.stdout
+        );
+        assert!(!items(&o.stdout).iter().any(|i| field(i, "deployment") == r.dep.as_str() && field(i, "verdict") == "ready"), "{}", o.stdout);
+    }
+}
+
+#[test]
+fn a_restoration_container_that_is_running_or_not_provably_harpoons_is_kept_and_says_why() {
+    // running: it may be serving something
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, true);
+    let o = apply(&t);
+    assert!(container_present(&t, &r.container), "{}", o.stdout);
+    assert!(
+        o.stdout
+            .contains(&format!("kept: container hp-{}-restored", r.dep)),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&o.stdout), &r.dep, "container"),
+        ("review", "needs-review")
+    );
+    // labels that do not match: not Harpoon's by proof
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    t.h.docker.with(|s| {
+        s.containers
+            .iter_mut()
+            .find(|c| c.id == r.container)
+            .unwrap()
+            .labels = Vec::new()
+    });
+    let o = apply(&t);
+    assert!(container_present(&t, &r.container), "{}", o.stdout);
+    assert_eq!(
+        reason_of(&items(&o.stdout), &r.dep, "container").0,
+        "review"
+    );
+}
+
+#[test]
+fn an_image_the_interrupted_deployment_shares_with_the_rollback_target_is_never_removed() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    // the leftover's image is, by id, the rollback image itself (one image, two journal records)
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    {
+        let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+        let tag = format!(
+            "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+            w.app.as_str().to_ascii_lowercase(),
+            r.dep
+        );
+        j.record(&intent(
+            &w.app,
+            &r.dep,
+            ResourceKind::Image,
+            &format!("{tag}-twin"),
+            Disposition::Retain,
+        ))
+        .unwrap();
+        j.record(&receipt(
+            &r.dep,
+            ResourceKind::Image,
+            &format!("{tag}-twin"),
+            &old_i,
+        ))
+        .unwrap();
+    }
+    let o = apply(&t);
+    assert!(
+        image_present(&t, &old_i),
+        "the rollback image survives a second record of the same id: {}",
+        o.stdout
+    );
+    assert!(
+        !container_present(&t, &r.container),
+        "the abandoned container still goes: {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn an_interrupted_cleanup_is_finished_by_the_next_run_and_a_lost_reply_is_reconciled_not_claimed() {
+    // the removal request is dropped: Docker never sees it
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", r.container),
+        1,
+        support::fake_docker::Action::Disconnect,
+    );
+    let first = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert!(container_present(&t, &r.container), "{}", first.stdout);
+    let again = apply(&t);
+    assert!(
+        !container_present(&t, &r.container),
+        "the next run finishes it: {}",
+        again.stdout
+    );
+    let j = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    assert!(j
+        .ledger
+        .entries()
+        .iter()
+        .filter(|e| e.deployment == r.dep && e.key.kind == ResourceKind::Container)
+        .all(|e| e.is_released()));
+
+    // Docker removed it but the reply was lost: the next run finds it gone and reconciles the journal, it does not claim a removal
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    t.h.docker.fault(
+        Some("DELETE"),
+        &format!("/containers/{}", r.container),
+        1,
+        support::fake_docker::Action::ApplyThenDrop,
+    );
+    let _ = go(&t, &SHIPPING, &args(&t, &["--apply", &auth()]));
+    assert!(!container_present(&t, &r.container), "Docker did remove it");
+    let again = apply(&t);
+    assert_eq!(
+        reason_of(&items(&again.stdout), &r.dep, "container").1,
+        "already-absent",
+        "{}",
+        again.stdout
+    );
+    assert!(
+        again.stdout.contains("reclaimed-containers: 1")
+            || again.stdout.contains("removed 0 container"),
+        "{}",
+        again.stdout
+    );
+}
+
+#[test]
+fn repeating_the_cleanup_changes_nothing_after_the_first_run() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted(&t, &w, RecoveryOutcome::Restored, true, false);
+    apply(&t);
+    let again = apply(&t);
+    assert!(
+        again.stdout.contains("removed 0 container(s)")
+            && again.stdout.contains("removed 0 image(s)"),
+        "{}",
+        again.stdout
+    );
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    assert!(image_present(&t, &old_i) && !container_present(&t, &r.container));
+}
+
+#[test]
+fn a_restoration_container_that_is_what_serves_now_is_never_removed() {
+    // the restoration finished after the last release did: its container serves the application, so the whole deployment is protected
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let r = restored_interrupted_at(&t, &w, RecoveryOutcome::Restored, true, true, 25_000);
+    let o = apply(&t);
+    assert!(
+        container_present(&t, &r.container) && image_present(&t, &r.image),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&o.stdout), &r.dep, "container"),
+        ("protected", "serving-release"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        !items(&o.stdout)
+            .iter()
+            .any(|i| field(i, "deployment") == r.dep.as_str() && field(i, "verdict") == "ready"),
+        "{}",
+        o.stdout
+    );
 }

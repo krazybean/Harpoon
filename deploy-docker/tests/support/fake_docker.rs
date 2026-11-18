@@ -53,6 +53,9 @@ pub struct Img {
     pub digests: Vec<String>,
     /// The image this one was built on top of (a "dependent child image" of it).
     pub parent: Option<String>,
+    /// `RootFS.Layers` (diff ids, base first) and `Size`: what a layer-sharing estimate reads. Empty / 0 when a test does not care.
+    pub layers: Vec<String>,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +133,8 @@ impl St {
             volumes: Vec::new(),
             digests: Vec::new(),
             parent: None,
+            layers: Vec::new(),
+            size: 0,
         });
         id
     }
@@ -148,6 +153,8 @@ impl St {
             volumes,
             digests: Vec::new(),
             parent: None,
+            layers: Vec::new(),
+            size: 0,
         });
     }
     pub fn add_container(&mut self, name: &str, labels: Labels, running: bool) -> String {
@@ -648,6 +655,14 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                         (
                             "RepoDigests",
                             Json::Arr(i.digests.iter().map(|t| Json::Str(t.clone())).collect()),
+                        ),
+                        ("Size", Json::Num(i.size as f64)),
+                        (
+                            "RootFS",
+                            obj(vec![(
+                                "Layers",
+                                Json::Arr(i.layers.iter().map(|l| Json::Str(l.clone())).collect()),
+                            )]),
                         ),
                         (
                             "Config",
