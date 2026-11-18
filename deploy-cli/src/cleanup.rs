@@ -1007,6 +1007,8 @@ pub(crate) struct CacheOutcome {
     /// The estimate: unused, unshared records. Not a promise.
     pub prunable_bytes: u64,
     pub prunable_records: u64,
+    /// Records Docker marks shared with an image: not prunable now, possibly once the images in the plan are gone.
+    pub shared_records: u64,
     /// Docker's own figure, after an apply that completed.
     pub reclaimed: Option<u64>,
     /// Why an apply would be refused now (dry run only).
@@ -1085,6 +1087,7 @@ fn prune_build_cache_step(
         return Ok(CacheOutcome {
             prunable_bytes: usage.prunable_bytes,
             prunable_records: usage.prunable_records,
+            shared_records: usage.shared_records,
             reclaimed: None,
             blocked: guard.err(),
         });
@@ -1094,6 +1097,7 @@ fn prune_build_cache_step(
         return Ok(CacheOutcome {
             prunable_bytes: 0,
             prunable_records: 0,
+            shared_records: usage.shared_records,
             reclaimed: Some(0),
             blocked: None,
         });
@@ -1133,6 +1137,7 @@ fn prune_build_cache_step(
     Ok(CacheOutcome {
         prunable_bytes: usage.prunable_bytes,
         prunable_records: usage.prunable_records,
+        shared_records: usage.shared_records,
         reclaimed: Some(freed),
         blocked: None,
     })
@@ -1227,7 +1232,7 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     // An apply acts on the plan that was reviewed and on nothing else. The plan is derived again, read-only, right now; if it is not
     // the reviewed one nothing is changed and a fresh review is required. The apply then repeats every ownership check per object
     // and leaves alone anything that was not in the reviewed plan.
-    let reviewed: Option<(BTreeSet<String>, bool)> = if apply {
+    let reviewed: Option<(BTreeSet<String>, &'static str)> = if apply {
         let mut scratch = String::new();
         let now = run(
             p,
@@ -1242,14 +1247,15 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             &mut scratch,
         )?;
         let cache_now = prune_build_cache_step(p, &rt, &socket, false, false, &mut scratch)?;
-        let id = plan_id(keep, &now.plan, cache_now.prunable_records > 0);
+        let stage = cache_stage(&now.plan, &cache_now);
+        let id = plan_id(keep, &now.plan, stage);
         if plan_arg != Some(id.as_str()) {
             return Err(Fail::refused(format!(
                 "the plan changed since it was reviewed (reviewed {}, now {id}); nothing was changed. Review again.",
                 plan_arg.unwrap_or("none")
             )));
         }
-        Some((now.plan, cache_now.prunable_records > 0))
+        Some((now.plan, stage))
     } else {
         None
     };
@@ -1268,7 +1274,7 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
 
     // 2. build cache, after the images: records an image held become unshared once it is gone. Only if the review included it.
     let _ = writeln!(out, "build cache:");
-    let run_cache = apply && reviewed.as_ref().is_some_and(|(_, c)| *c);
+    let run_cache = apply && reviewed.as_ref().is_some_and(|(_, c)| *c != "none");
     let cache = match prune_build_cache_step(p, &rt, &socket, run_cache, false, out) {
         Ok(c) => c,
         Err(f) => {
@@ -1287,7 +1293,27 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     if apply && !run_cache {
         let _ = writeln!(out, "build cache: not pruned, because it was not part of the reviewed plan. Review again to see it.");
     }
-    let plan_now = plan_id(keep, &tidied.plan, cache.prunable_records > 0);
+    let stage = match &reviewed {
+        Some((_, s)) => *s,
+        None => cache_stage(&tidied.plan, &cache),
+    };
+    if !apply {
+        match stage {
+            "after-images" => {
+                let _ = writeln!(out, "cache-stage: after-images. {} build-cache record(s) are shared with images and cannot be pruned now. If the images in this plan are removed they may stop being shared; the cache is checked again after they are gone and only unused, unshared records are pruned, in this same operation. Not estimated.", cache.shared_records);
+            }
+            "now" => {
+                let _ = writeln!(out, "cache-stage: now");
+            }
+            _ => {
+                let _ = writeln!(out, "cache-stage: none");
+            }
+        }
+    }
+    if apply && stage == "after-images" {
+        let _ = writeln!(out, "cache-stage: after-images, checked again after the images were removed: {} record(s) were prunable then", cache.prunable_records);
+    }
+    let plan_now = plan_id(keep, &tidied.plan, stage);
     let _ = writeln!(out, "cleanup-plan: {plan_now}");
     if tidied.drifted {
         let _ = writeln!(out, "cleanup: stopped short. Some objects were not in the reviewed plan and were left alone; what was reviewed has been done. Review again.");
@@ -1350,6 +1376,7 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
                     "nothing was removed, so there is nothing to compare".to_string()
                 } else {
                     match est_total {
+                        _ if stage == "after-images" => "the build-cache stage's savings are not estimated; only the measured figure is real".to_string(),
                         Some(0) => "no space was expected: image layers are used by images that stay. None is claimed".to_string(),
                         Some(t) if freed >= t / 10 * 9 => "the measured change matches the estimate".to_string(),
                         Some(_) => "the measured change is lower than estimated: Docker may keep layers, or something else used space meanwhile. Only the measured figure is real".to_string(),
@@ -1380,12 +1407,22 @@ pub(crate) fn cleanup_all_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
     Ok(exit::OK)
 }
 
-/// What a Review is identified by: the retention, whether the cache step is part of it, and every action decided on, in a fixed order.
-fn plan_id(keep: usize, plan: &BTreeSet<String>, cache_step: bool) -> String {
-    let mut text = format!(
-        "keep:{keep}\ncache:{}\n",
-        if cache_step { "step" } else { "none" }
-    );
+/// Whether and when the cache prune is part of a plan: `now` (records are prunable already), `after-images` (records are shared with
+/// images and the plan removes images: they are re-checked once the images are gone) or `none`. Part of the plan's identity, so an
+/// Apply never prunes a cache the Review did not show.
+fn cache_stage(plan: &BTreeSet<String>, cache: &CacheOutcome) -> &'static str {
+    if cache.prunable_records > 0 {
+        "now"
+    } else if cache.shared_records > 0 && plan.iter().any(|k| k.starts_with("remove-image:")) {
+        "after-images"
+    } else {
+        "none"
+    }
+}
+
+/// What a Review is identified by: the retention, the cache stage, and every action decided on, in a fixed order.
+fn plan_id(keep: usize, plan: &BTreeSet<String>, cache_stage: &str) -> String {
+    let mut text = format!("keep:{keep}\ncache:{cache_stage}\n");
     for k in plan {
         text.push_str(k);
         text.push('\n');

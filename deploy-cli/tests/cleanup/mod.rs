@@ -2896,41 +2896,254 @@ fn an_object_that_becomes_removable_during_an_apply_is_left_alone_and_the_run_sa
     assert!(!present(&t, &a, "b"), "{}", again.stdout);
 }
 
+/// Every cache record is shared with an image, as BuildKit leaves it: two held by releases the plan removes, one by the serving release.
+fn cache_held_by_images(t: &T, a: &Acc) {
+    let (ia, ib, ic, id) = (
+        a.img["a"].clone(),
+        a.img["b"].clone(),
+        a.img["c"].clone(),
+        a.img["d"].clone(),
+    );
+    t.h.docker.with(|s| {
+        s.build_cache = vec![(300 * MB, false), (200 * MB, false), (400 * MB, false)];
+        s.build_cache_shared = vec![true, true, true];
+        s.build_cache_holders = vec![vec![ia, ib], vec![id], vec![ic]];
+    });
+}
+
 #[test]
-fn the_build_cache_is_pruned_only_if_the_review_included_it() {
+fn one_clean_up_removes_the_images_and_then_the_cache_they_held() {
     let t = T::new();
     let a = acceptance_world(&t);
-    // at review every cache record is shared with an image: nothing is prunable, so the cache is not part of the plan
-    t.h.docker.with(|s| s.build_cache_shared = vec![true, true]);
+    cache_held_by_images(&t, &a);
     let review = clean(&t, &[]);
+    assert_exit(&review, 0);
+    // nothing is prunable yet, but the plan says the cache is checked once the images are gone, and does not estimate it
     assert_eq!(kv(&review.stdout, "build-cache-prunable-records"), Some(0));
-    // when the first removal arrives, a record stops being shared: it would now be prunable
-    t.h.docker.fault(
-        Some("DELETE"),
-        &format!("/containers/{}", a.ctr["a"]),
-        1,
-        support::fake_docker::Action::Race(std::sync::Arc::new(
-            |s: &mut support::fake_docker::St| s.build_cache_shared = vec![false, true],
-        )),
+    assert!(
+        review.stdout.contains("cache-stage: after-images"),
+        "{}",
+        review.stdout
     );
+    assert_eq!(
+        kv(&review.stdout, "cleanup-estimated-bytes"),
+        Some(3 * 400 * MB),
+        "{}",
+        review.stdout
+    );
+    let gone: Vec<String> = ["a", "b", "d"].iter().map(|k| a.img[*k].clone()).collect();
     let o = clean(&t, &["--apply"]);
     assert_exit(&o, 0);
+    // the records the removed images held were released, re-checked and pruned in the same operation
     assert!(
-        o.stdout.contains("not part of the reviewed plan"),
+        o.stdout
+            .contains("checked again after the images were removed: 2 record(s) were prunable"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        kv(&o.stdout, "build-cache-reclaimed-bytes"),
+        Some(500 * MB),
         "{}",
         o.stdout
     );
     assert_eq!(
         t.h.docker.with(|s| s.build_cache.len()),
-        2,
-        "the cache was not pruned"
+        1,
+        "the record the serving release holds stays"
     );
+    for g in &gone {
+        assert!(!image_present(&t, g), "reviewed image removed");
+    }
+    // estimated and measured stay apart: the layers freed 1200 MB, the cache 500 MB, and nothing is claimed beyond the measurement
+    assert_eq!(
+        kv(&o.stdout, "measured-reclaimed-bytes"),
+        Some(3 * 400 * MB + 500 * MB),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("not estimated; only the measured figure is real"),
+        "{}",
+        o.stdout
+    );
+    // serving release, its container, the recovery container D owns and the database are untouched
+    assert!(present(&t, &a, "c") && !present(&t, &a, "d"));
     assert!(t
         .h
         .docker
-        .requests()
-        .iter()
-        .all(|r| !(r.method == "POST" && r.path.contains("/build/prune"))));
+        .with(|s| s.containers.iter().any(|c| c.id == a.ctr["d-restored"])));
+    assert!(image_present(&t, "sha256:pg"));
+    // a second review finds nothing further: no objects, no cache stage
+    let again = clean(&t, &[]);
+    assert_exit(&again, 0);
+    assert_eq!(
+        kv(&again.stdout, "cleanup-eligible"),
+        Some(0),
+        "{}",
+        again.stdout
+    );
+    assert!(
+        again.stdout.contains("cache-stage: none"),
+        "{}",
+        again.stdout
+    );
+    let before = deletes(&t);
+    assert_exit(&clean(&t, &["--apply"]), 0);
+    assert_eq!(
+        deletes(&t),
+        before,
+        "a second apply asks Docker for nothing"
+    );
+}
+
+#[test]
+fn the_cache_stage_removes_nothing_the_review_did_not_show() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    cache_held_by_images(&t, &a);
+    let review = clean(&t, &[]);
+    let plan = plan_of(&review);
+    // after the review a Harpoon-labelled image appears that no journal knows (an orphan) and a new unused container is created
+    let (oa, _) = ids(90);
+    let (_, od) = ids(91);
+    let lbl = harpoon_deploy::backend::harpoon_labels(&oa, &od);
+    t.h.docker.with(|s| {
+        s.add_image_with_id("sha256:orphan", &["harpoon/other:x"], lbl, vec![]);
+    });
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &plan, &auth()]),
+    );
+    assert!(
+        image_present(&t, "sha256:orphan"),
+        "an object nobody reviewed is never removed\n{}",
+        o.stdout
+    );
+    assert!(
+        !image_present(&t, &a.img["a"]),
+        "the reviewed removal still ran\n{}",
+        o.stdout
+    );
+    // the reviewed work, if it ran, was exactly the reviewed work
+    let removed: Vec<String> =
+        t.h.docker
+            .requests()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .map(|r| r.path.clone())
+            .collect();
+    assert!(removed.iter().all(|p| !p.contains("orphan")), "{removed:?}");
+}
+
+#[test]
+fn an_apply_refuses_when_the_cache_stage_is_no_longer_the_reviewed_one() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    cache_held_by_images(&t, &a);
+    let plan = plan_of(&clean(&t, &[]));
+    // between review and apply a record stops being shared: the plan's cache stage is now different
+    t.h.docker.with(|s| {
+        s.build_cache_holders[0].clear();
+        s.build_cache_shared[0] = false;
+    });
+    let before = deletes(&t);
+    let o = go(
+        &t,
+        &SHIPPING,
+        &uargs(&t, &["--apply", "--plan", &plan, &auth()]),
+    );
+    assert_exit(&o, 6);
+    assert!(
+        o.stdout.contains("plan changed") || o.stderr.contains("plan changed"),
+        "{}{}",
+        o.stdout,
+        o.stderr
+    );
+    assert_eq!(deletes(&t), before, "nothing was removed or pruned");
+}
+
+#[test]
+fn a_cache_prune_that_fails_after_the_images_are_gone_is_finished_by_the_next_clean_up() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    cache_held_by_images(&t, &a);
+    t.h.docker.fault(
+        Some("POST"),
+        "/build/prune",
+        1,
+        support::fake_docker::Action::Respond(500, "{\"message\":\"boom\"}".into()),
+    );
+    let o = clean(&t, &["--apply"]);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(
+        o.stdout
+            .contains("cleanup: partial. The releases step finished"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        !image_present(&t, &a.img["a"]),
+        "the images were removed and stay removed"
+    );
+    // the records are released now: the next review shows them as prunable, and nothing else
+    let review = clean(&t, &[]);
+    assert_eq!(
+        kv(&review.stdout, "build-cache-prunable-records"),
+        Some(2),
+        "{}",
+        review.stdout
+    );
+    assert!(
+        review.stdout.contains("cache-stage: now"),
+        "{}",
+        review.stdout
+    );
+    let o2 = clean(&t, &["--apply"]);
+    assert_exit(&o2, 0);
+    assert_eq!(
+        kv(&o2.stdout, "build-cache-reclaimed-bytes"),
+        Some(500 * MB),
+        "{}",
+        o2.stdout
+    );
+    let last = clean(&t, &[]);
+    assert_eq!(
+        kv(&last.stdout, "cleanup-eligible"),
+        Some(0),
+        "{}",
+        last.stdout
+    );
+}
+
+#[test]
+fn the_build_cache_is_not_pruned_when_the_review_had_no_cache_stage() {
+    let t = T::new();
+    let a = acceptance_world(&t);
+    assert_exit(&clean(&t, &["--apply"]), 0);
+    // everything disposable is gone; one record is still shared with the serving release's image
+    t.h.docker.with(|s| {
+        s.build_cache = vec![(400 * MB, false)];
+        s.build_cache_shared = vec![true];
+        s.build_cache_holders = vec![vec![a.img["c"].clone()]];
+    });
+    let review = clean(&t, &[]);
+    assert!(
+        review.stdout.contains("cache-stage: none"),
+        "{}",
+        review.stdout
+    );
+    let before = deletes(&t);
+    let o = clean(&t, &["--apply"]);
+    assert_exit(&o, 0);
+    assert_eq!(t.h.docker.with(|s| s.build_cache.len()), 1);
+    assert_eq!(
+        deletes(&t),
+        before,
+        "nothing is prunable, so Docker is not asked"
+    );
 }
 
 // ---------------------------------------------------------------- failing closed

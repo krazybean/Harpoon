@@ -14,7 +14,19 @@ controls (old releases, build cache, one image) remain under "More control".
 A review prints `cleanup-plan: ID`, an identifier of exactly what would be done (every container, image, lease and journal record, the
 cache step, and the retention). `--apply` requires `--plan ID` and first derives the plan again, read-only: if it is not the reviewed
 one, nothing is changed and a fresh review is required. During the apply, anything that was not in the reviewed plan is left alone
-and the run reports `stopped short`. The build cache is pruned only if the review included it. The desktop sends the id of the
+and the run reports `stopped short`. The build cache is pruned only if the review included it.
+
+## The cache stage
+Build-cache records that images hold are not prunable, so a review that removes images may show nothing to prune yet. The review
+says `cache-stage:` and it is part of the plan id:
+- `now`: records are prunable already; they are pruned after the images.
+- `after-images`: records are shared with images and the plan removes images. The cache is read again once those images are gone and
+  only the unused, unshared records are pruned, in the same authorized run. Nothing is estimated for it; the measured change is.
+- `none`: no cache step. Nothing is pruned, even if records became prunable meanwhile (the plan id changes, so the apply is refused
+  and a fresh review is needed).
+
+The stage prunes cache only. It never removes an image or container that was not in the reviewed plan. If the prune fails after the
+images are gone, the next review shows the released records as `now` and finishes it; once done, a review finds nothing further. The desktop sends the id of the
 review it is showing, and a refusal clears that review.
 
 ## What is removed
