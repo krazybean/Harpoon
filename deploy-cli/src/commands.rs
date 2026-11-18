@@ -326,7 +326,27 @@ fn unresolved(ledger: &Ledger, deps: &[Deployment]) -> Vec<String> {
                     || (e.disposition == Disposition::RemoveOnFailure
                         && end == EndState::Succeeded);
                 if !keep {
-                    v.push(format!("{what}: should have been cleaned and was not"));
+                    // `reconcile` releases a lease only after its deployment's containers are settled, so say what holds it.
+                    let restored = harpoon_deploy::serving::restored_container_name(&e.deployment);
+                    let held_by: Vec<&str> = ledger
+                        .entries()
+                        .iter()
+                        .filter(|c| {
+                            c.deployment == e.deployment
+                                && c.key.kind == ResourceKind::Container
+                                && c.key.name != restored
+                                && !c.is_released()
+                        })
+                        .map(|c| c.key.name.as_str())
+                        .collect();
+                    if e.key.kind == ResourceKind::PortLease && !held_by.is_empty() {
+                        v.push(format!(
+                            "{what}: held until its deployment's container {} is settled",
+                            held_by.join(", ")
+                        ));
+                    } else {
+                        v.push(format!("{what}: should have been cleaned and was not"));
+                    }
                 }
             }
         }
@@ -1554,7 +1574,7 @@ pub(crate) fn describe(a: &Action) -> String {
             entry.0
         ),
         Action::ReleaseLease { entry } => format!(
-            "release port lease {} of {} (ledger only)",
+            "release port lease {} of {} (ledger only; applied once that deployment's containers are settled)",
             entry.1.name, entry.0
         ),
         Action::MarkAbsent { entry } => format!(
@@ -4125,5 +4145,129 @@ mod evidence_line_tests {
         // an unhealthy check is never reported as verified, even if a label is attached to it
         let failed = evidence(Observation::Status(503)).with_attribution(ATTRIBUTION_PATH);
         assert!(!evidence_line(Step::FinalCheck, &failed).contains("verified"));
+    }
+}
+
+#[cfg(test)]
+mod lease_blocker_tests {
+    use super::*;
+    use harpoon_deploy::ids::IdGenerator;
+    use harpoon_deploy::ledger::{LedgerRecord, ResourceKey};
+
+    fn rec(l: &mut Ledger, r: LedgerRecord) {
+        l.apply(&r).unwrap();
+    }
+
+    /// `reconcile` defers a port lease until its deployment's containers are settled, and `--apply` used to say only that the lease
+    /// "should have been cleaned and was not" while the dry run had proposed releasing it. Both now say what holds it.
+    #[test]
+    fn a_lease_held_back_by_an_unsettled_container_says_so() {
+        let mut g = IdGenerator::new(SystemClock, OsEntropy::new());
+        let (app, dep) = (g.application().unwrap(), g.deployment().unwrap());
+        let mut d = Deployment::new(dep.clone(), app.clone(), Trigger::Cli, 1);
+        d.transition(DeploymentStatus::Queued, 2).unwrap();
+        d.transition(DeploymentStatus::Running, 3).unwrap();
+        d.transition(DeploymentStatus::Failed, 4).unwrap();
+        let (c, p) = (
+            ResourceKey::new(ResourceKind::Container, format!("hp-{dep}")),
+            ResourceKey::new(ResourceKind::PortLease, "38025"),
+        );
+        let mut l = Ledger::new();
+        for k in [&c, &p] {
+            rec(
+                &mut l,
+                LedgerRecord::Intent {
+                    key: k.clone(),
+                    app: app.clone(),
+                    deployment: dep.clone(),
+                    disposition: Disposition::RemoveOnFailure,
+                    at_ms: 5,
+                },
+            );
+        }
+        rec(
+            &mut l,
+            LedgerRecord::Receipt {
+                key: p.clone(),
+                deployment: dep.clone(),
+                id: "38025".into(),
+                at_ms: 6,
+            },
+        );
+        rec(
+            &mut l,
+            LedgerRecord::CleanupAttempt {
+                key: c.clone(),
+                deployment: dep.clone(),
+                at_ms: 7,
+            },
+        );
+        rec(
+            &mut l,
+            LedgerRecord::CleanupResult {
+                key: c.clone(),
+                deployment: dep.clone(),
+                outcome: harpoon_deploy::ledger::CleanupOutcome::Refused("foreign".into()),
+                at_ms: 8,
+            },
+        );
+        let u = unresolved(&l, std::slice::from_ref(&d));
+        assert!(
+            u.iter().any(|m| m.starts_with("port 38025")
+                && m.contains("held until its deployment's container")
+                && m.contains(&format!("hp-{dep}"))),
+            "{u:?}"
+        );
+        assert!(
+            !u.iter()
+                .any(|m| m.contains("should have been cleaned and was not")),
+            "{u:?}"
+        );
+        // once the container is settled the lease is an ordinary leftover again
+        let mut l = Ledger::new();
+        for k in [&c, &p] {
+            rec(
+                &mut l,
+                LedgerRecord::Intent {
+                    key: k.clone(),
+                    app: app.clone(),
+                    deployment: dep.clone(),
+                    disposition: Disposition::RemoveOnFailure,
+                    at_ms: 5,
+                },
+            );
+        }
+        rec(
+            &mut l,
+            LedgerRecord::Receipt {
+                key: p.clone(),
+                deployment: dep.clone(),
+                id: "38025".into(),
+                at_ms: 6,
+            },
+        );
+        rec(
+            &mut l,
+            LedgerRecord::CleanupAttempt {
+                key: c.clone(),
+                deployment: dep.clone(),
+                at_ms: 7,
+            },
+        );
+        rec(
+            &mut l,
+            LedgerRecord::CleanupResult {
+                key: c.clone(),
+                deployment: dep.clone(),
+                outcome: harpoon_deploy::ledger::CleanupOutcome::AlreadyAbsent,
+                at_ms: 8,
+            },
+        );
+        let u = unresolved(&l, std::slice::from_ref(&d));
+        assert!(
+            u.iter().any(|m| m.starts_with("port 38025")
+                && m.contains("should have been cleaned and was not")),
+            "{u:?}"
+        );
     }
 }

@@ -1,0 +1,33 @@
+runtime: ~/harpoon-acceptance-20261117-173656/runtime
+kind: docker
+journal: ~/harpoon-acceptance-20261117-173656/runtime/deploy-journal/deployments.sqlite3 (lock: free)
+deployments: 3
+latest: dep_01M7NXZ3G17815W7WNYDTJ1MF0 interrupted
+  dep_01M7NXZ3G17815W7WNYDTJ1MF0 interrupted app=app_01M7NXXTJKRBS8P080JZT4CXJM created_ms=1794958659073
+    image harpoon/app_01m7nxxtjkrbs8p080jzt4cxjm:dep_01M7NXZ3G17815W7WNYDTJ1MF0-5751dec7200d26ba5e3d6e1d497d6df7 id=- state=released keep=retain
+  dep_01M7NXYAWNZNRB90DG44S0NANS failed app=app_01M7NXXTJKRBS8P080JZT4CXJM created_ms=1794958633877
+    failed at cutover: the container name hp-dep_01M7NXYAWNZNRB90DG44S0NANS is already in use by something this deployment did not create; it was not touched (Conflict. The container name "/hp-dep_01M7NXYAWNZNRB90DG44S0NANS" is already in use by container "456cc27b1fc7ea2284b0b2de01fc4245c6772a0a0264a49783b8ee68f06fed82". You have to remove (or rename) that container to be able to reuse that name.)
+    recovery: restored in 1607 ms
+    interruption: 11769 ms between stopping the previous release and the confirmed new one
+    this deployment did NOT succeed: its candidate was never confirmed as the successful serving release (it may have answered a health check before the final confirmation); the previous release was restored by the automatic bounded recovery of that run and passed its own health check (recovery: restored)
+    image harpoon/app_01m7nxxtjkrbs8p080jzt4cxjm:dep_01M7NXYAWNZNRB90DG44S0NANS-0abe4b579044fe2cab169d8db5dee3eb id=sha256:6e05e405f2d73794b4fdc7918e22a9469ed61e12ef565c28f0278628b2a62496 state=created keep=retain
+    port 39000 id=39000 state=released keep=remove-always
+    container hp-dep_01M7NXYAWNZNRB90DG44S0NANS-pre id=c01538f1bae7269379b2507fe508afe070fc5f58aad985bdad287b43ec8f5400 state=released keep=remove-always
+    port 38026 id=38026 state=released keep=remove-on-failure
+    container hp-dep_01M7NXYAWNZNRB90DG44S0NANS id=- state=released keep=remove-on-failure
+    container hp-dep_01M7NXYAWNZNRB90DG44S0NANS-restored id=08bbf9f16df6e7c44b1539971f943e04a35f2d75d92426ca888233c64b5c09c6 state=created keep=retain
+  dep_01M7NXXTJKRBS8P080JZT4CXJN succeeded app=app_01M7NXXTJKRBS8P080JZT4CXJM created_ms=1794958617171
+    image harpoon/app_01m7nxxtjkrbs8p080jzt4cxjm:dep_01M7NXXTJKRBS8P080JZT4CXJN-f8b4933771cdb7fa98379f00b937893a id=sha256:521c153d894f848c1af8af0b1a3099422843965f6b40d09c2961875669ae8e00 state=created keep=retain
+    port 39000 id=39000 state=released keep=remove-always
+    container hp-dep_01M7NXXTJKRBS8P080JZT4CXJN-pre id=909bfd2e0d4bb69db19cea24af572b34e5c0f0712e9326267308f0adc84d3825 state=released keep=remove-always
+    port 38025 id=38025 state=created keep=remove-on-failure
+    container hp-dep_01M7NXXTJKRBS8P080JZT4CXJN id=f6c5a98591c2e7660dad5205482f4fefd6cddce08df4b94542f4f88345d4a493 state=created keep=remove-on-failure
+outstanding leases:
+  port 38025 held by deployment dep_01M7NXXTJKRBS8P080JZT4CXJN (Created)
+unresolved cleanup: none
+retained images of unsuccessful deployments (they do not block deployments; remove one with `cleanup-image`):
+  image harpoon/app_01m7nxxtjkrbs8p080jzt4cxjm:dep_01M7NXYAWNZNRB90DG44S0NANS-0abe4b579044fe2cab169d8db5dee3eb (id sha256:6e05e405f2d73794b4fdc7918e22a9469ed61e12ef565c28f0278628b2a62496) of deployment dep_01M7NXYAWNZNRB90DG44S0NANS (failed): retained
+serving: application app_01M7NXXTJKRBS8P080JZT4CXJM runs release rel_01M7NXXTJKRBS8P080JZT4CXJN (deployment dep_01M7NXXTJKRBS8P080JZT4CXJN) in container hp-dep_01M7NXYAWNZNRB90DG44S0NANS-restored of deployment dep_01M7NXYAWNZNRB90DG44S0NANS (restored by dep_01M7NXYAWNZNRB90DG44S0NANS)
+automatic triggers paused for application app_01M7NXXTJKRBS8P080JZT4CXJM: deployment dep_01M7NXYAWNZNRB90DG44S0NANS failed its cutover (recovery restored); since 1794958657223 ms (epoch), recorded
+application app_01M7NXXTJKRBS8P080JZT4CXJM: PAUSED — held events: 0
+  actions (each records a decision and deploys nothing): harpoon-deploy resume --app app_01M7NXXTJKRBS8P080JZT4CXJM --dismiss

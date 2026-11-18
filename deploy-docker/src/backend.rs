@@ -55,6 +55,10 @@ pub enum Attribution {
 }
 
 pub const MARKER_ENV: &str = "HARPOON_DEPLOYMENT_MARKER";
+
+/// Seconds Docker waits after SIGTERM before it kills a container Harpoon stops. Every stop Harpoon sends uses it, and the restoration's
+/// observation window is derived from it, so the two cannot drift apart.
+pub const STOP_GRACE_SECS: u32 = 10;
 pub const MARKER_HEADER: &str = "X-Harpoon-Deployment-Marker";
 /// Extra label on a container recreated by a restoration: the deployment whose release it restores.
 pub const RESTORES_LABEL: &str = "io.harpoon.restores";
@@ -102,6 +106,11 @@ pub struct DockerConfig {
     pub api_timeout: Duration,
     /// Time allowed for one removal outside a step (recovery, post-deployment cleanup).
     pub cleanup_timeout: Duration,
+    /// How long a restoration watches a previous release's container that is still `running` before it decides the container is
+    /// serving rather than being stopped. Docker gives no sign that a `stop` is in flight, and Harpoon's own stop allows
+    /// `STOP_GRACE_SECS` of grace, so this must exceed it. It is only a first filter: what is accepted is a container that is
+    /// re-read, unchanged, after its health check (see `observe_previous`), never one that merely outlasted this window.
+    pub restore_settle: Duration,
     pub log_tail_lines: u32,
     pub log_max_bytes: usize,
     /// Allow this backend to replace a running release (stop it, start the new one, restore the old
@@ -148,6 +157,7 @@ impl DockerConfig {
             min_free_bytes: 2 * 1024 * 1024 * 1024,
             api_timeout: Duration::from_secs(30),
             cleanup_timeout: Duration::from_secs(60),
+            restore_settle: Duration::from_secs(STOP_GRACE_SECS as u64 + 2),
             log_tail_lines: 200,
             log_max_bytes: 256 * 1024,
             enable_replacement: false,
@@ -169,6 +179,9 @@ struct State {
     markers: std::collections::BTreeMap<String, String>,
     /// The verified image id each container was created from (container name → id), to attribute a marker-free response.
     created_images: std::collections::BTreeMap<String, String>,
+    /// The previous release's container, observed by the read-only pre-check to have stayed up unchanged and to be healthy:
+    /// (id, `StartedAt`). The restoration records it as restored instead of creating a second container.
+    in_place: Option<(String, String)>,
     pre: Option<(String, u16)>, // container name, test port
     app: Option<(String, u16)>, // container name, application port
     replaced_from: Option<u16>,
@@ -561,9 +574,25 @@ impl<T: HttpTransport> DockerBackend<T> {
                 io.receipt(&intent, &id)?;
                 Ok(id)
             }
-            CreateOutcome::NameInUse(why) => Err(StepError::new(format!(
-                "the container name {name} is already in use by something this deployment did not create; it was not touched ({why})"
-            ))),
+            CreateOutcome::NameInUse(why) => {
+                // Docker answered this one create with 409: it created nothing. When the occupant demonstrably does not
+                // carry this deployment's labels, a container Harpoon never made holds the name and nothing of ours exists
+                // under it, so the intent is settled now. Left open, the later cleanup would find that container by name
+                // and record a refusal that never clears, and the deployment's port lease with it. Anything else stays
+                // unresolved for `reconcile`: an occupant that IS labelled for this deployment is a leftover of ours (to
+                // adopt by ownership), and an occupant that cannot be read back proves nothing.
+                let occupant = self
+                    .api
+                    .container_inspect(name, b.left("checking what holds the container name")?);
+                if matches!(&occupant, Ok(Some(c)) if !has_labels(&c.labels, io.app(), io.deployment()))
+                {
+                    io.cleanup_attempt(intent.key())?;
+                    io.cleanup_result(intent.key(), CleanupOutcome::AlreadyAbsent)?;
+                }
+                Err(StepError::new(format!(
+                    "the container name {name} is already in use by something this deployment did not create; it was not touched ({why})"
+                )))
+            }
         }
     }
 
@@ -1213,7 +1242,11 @@ impl<T: HttpTransport> ResourceOps for DockerBackend<T> {
                 if info.running {
                     let stopped = self
                         .api
-                        .stop_container(&req.id, 10, budget.left("stopping the container")?)
+                        .stop_container(
+                            &req.id,
+                            STOP_GRACE_SECS,
+                            budget.left("stopping the container")?,
+                        )
                         .map_err(|e| api_err(&format!("stopping {}", req.name), e))?;
                     if !stopped {
                         return Ok(RemoveResult::AlreadyAbsent);
@@ -1602,6 +1635,12 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
                 ));
             }
         }
+        if out.is_empty() {
+            self.st.restoring = Some(previous.clone());
+            let seen = self.observe_previous(io, &b, previous, cfg);
+            self.st.restoring = None;
+            out.extend(seen?);
+        }
         Ok(out)
     }
 
@@ -1673,7 +1712,11 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             )),
             Verified::Ok(_) => {
                 self.api
-                    .stop_container(&req.id, 10, b.left("stopping the current release")?)
+                    .stop_container(
+                        &req.id,
+                        STOP_GRACE_SECS,
+                        b.left("stopping the current release")?,
+                    )
                     .map_err(|e| api_err("stopping the current release", e))?;
                 Ok(())
             }
@@ -1812,7 +1855,7 @@ impl<T: HttpTransport> Backend for DockerBackend<T> {
             Verified::Refused(why) => Err(StepError::new(why)),
             Verified::Ok(_) => {
                 self.api
-                    .stop_container(&id, 10, b.left("stopping the container")?)
+                    .stop_container(&id, STOP_GRACE_SECS, b.left("stopping the container")?)
                     .map_err(|e| api_err("stopping the new release", e))?;
                 Ok(())
             }
@@ -1918,6 +1961,184 @@ impl<T: HttpTransport> DockerBackend<T> {
         v
     }
 
+    /// The container the previous release is served by, by ledger id, and the deployment that owns it.
+    fn serving_container(
+        io: &StepIo<'_>,
+        previous: &PreviousRelease,
+    ) -> Option<(String, DeploymentId)> {
+        let (owner, name) = match &previous.container {
+            Some(c) => (c.owner.clone(), Some(&c.name)),
+            None => (previous.deployment.clone(), None),
+        };
+        io.ledger()
+            .entries()
+            .iter()
+            .find(|e| {
+                e.deployment == owner
+                    && name.is_none_or(|n| e.key.name == *n)
+                    && e.app == *io.app()
+                    && e.key.kind == ResourceKind::Container
+                    && !e.is_released()
+                    && e.id.is_some()
+            })
+            .and_then(|e| e.id.clone().map(|id| (id, owner)))
+    }
+
+    /// Read-only. The previous release's container may still be `running` when a restoration begins: its stop is still in flight in
+    /// Docker (the process that sent it was killed) or it was never stopped. Either way a second container could not bind its port.
+    /// Returns what blocks the restoration; nothing here creates, starts, stops or removes anything, and it runs before the one
+    /// attempt is recorded, so a block costs no attempt.
+    ///
+    /// * stopped, gone or never created: nothing blocks, the usual restoration recreates it;
+    /// * running but not provably the previous release's container, unreadable, restarted, or not healthy: blocks (fail closed);
+    /// * running for the whole window with one `StartedAt`, healthy by its own response marker, and still the same container,
+    ///   running, with the same `StartedAt` when read again after the check: remembered in `in_place`.
+    ///
+    /// Docker reports no "stopping" state, so the window is only a first filter. A container that dies right after its check is
+    /// caught by the re-read; one that dies after that is a stop whose completion was never observed, which the restoration
+    /// re-reads once more before it records anything (`restore_inner`).
+    fn observe_previous(
+        &mut self,
+        io: &mut StepIo<'_>,
+        b: &Budget,
+        previous: &PreviousRelease,
+        cfg: &ReleaseConfig,
+    ) -> Result<Vec<String>, StepError> {
+        // The engine's restoration checks the blockers again just before it creates anything. A container already observed to be stable
+        // is then only re-verified (same container, same `StartedAt`, healthy), not watched for a second window.
+        let prior = self.st.in_place.take();
+        let Some((id, owner)) = Self::serving_container(io, previous) else {
+            return Ok(Vec::new());
+        };
+        let read = |s: &Self| -> Result<Option<ContainerInfo>, StepError> {
+            s.api
+                .container_inspect(&id, b.left("checking the previous release's container")?)
+                .map_err(|e| api_err("checking the previous release's container", e))
+        };
+        let first = match read(self) {
+            Ok(Some(c)) if !c.running => return Ok(Vec::new()),
+            Ok(Some(c)) => c,
+            Ok(None) => return Ok(Vec::new()),
+            Err(e) if e.fatal.is_some() => return Err(e),
+            Err(e) => {
+                return Ok(vec![format!(
+                    "the previous release's container could not be read ({}), so whether it is still running is not known; nothing was created",
+                    e.message
+                )])
+            }
+        };
+        let block = |why: String| {
+            vec![format!(
+                "the previous release's container {} is still running and {why}; nothing was created, because a second container could not bind port {}",
+                first.name, cfg.host_port
+            )]
+        };
+        if !has_labels(&first.labels, io.app(), &owner) {
+            return Ok(block(
+                "does not carry the labels of the release it should belong to".into(),
+            ));
+        }
+        // Docker must say which image it runs, and it must be the pinned one: that is the image a marker-free response is attributed to
+        // (the in-memory record of images this process created does not cover a container an earlier run created).
+        if first.image_id != cfg.image_id {
+            return Ok(block(
+                "was not created from the previous release's pinned image".into(),
+            ));
+        }
+        // Its own response marker is in the environment it was created with; the labels and ledger id above are what tie it to the release.
+        if self.cfg.attribution == Attribution::PerContainer {
+            let marker = self
+                .api
+                .container_inspect_json(&id, b.left("reading the container's response marker")?)
+                .map_err(|e| api_err("reading the container's response marker", e))
+                .map(|j| {
+                    j.and_then(|j| {
+                        let env = j.get("Config")?.get("Env")?.as_array()?.to_vec();
+                        env.iter().find_map(|e| {
+                            e.as_str()?
+                                .strip_prefix(&format!("{MARKER_ENV}="))
+                                .map(str::to_string)
+                        })
+                    })
+                });
+            match marker {
+                Ok(Some(m)) if !m.is_empty() => {
+                    self.st.markers.insert(first.name.clone(), m);
+                }
+                Ok(_) => {
+                    return Ok(block(
+                        "has no response marker, so its health cannot be attributed to it".into(),
+                    ))
+                }
+                Err(e) if e.fatal.is_some() => return Err(e),
+                Err(e) => {
+                    return Ok(block(format!(
+                        "its response marker could not be read ({})",
+                        e.message
+                    )))
+                }
+            }
+        }
+        let watched = prior.is_some_and(|(pid, started)| pid == id && started == first.started_at);
+        let until = Instant::now() + self.cfg.restore_settle;
+        loop {
+            if watched {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100).min(self.cfg.restore_settle));
+            match read(self) {
+                Ok(Some(c)) if c.running && c.started_at == first.started_at => {}
+                Ok(Some(c)) if c.running => {
+                    return Ok(block("restarted while being watched".into()))
+                }
+                Ok(_) => return Ok(Vec::new()), // stopped or removed: it was being stopped, and the port is free
+                Err(e) if e.fatal.is_some() => return Err(e),
+                Err(_) => return Ok(block("could not be read back while being watched".into())),
+            }
+            if Instant::now() >= until {
+                break;
+            }
+        }
+        self.st
+            .created_images
+            .insert(first.name.clone(), cfg.image_id.clone());
+        let checked = self.health(
+            io,
+            b,
+            &id,
+            &first.name,
+            cfg.host_port,
+            "the restoration check",
+        );
+        self.st.markers.remove(&first.name);
+        self.st.created_images.remove(&first.name);
+        match checked {
+            Ok(ev) => {
+                // Identity, state and start time again, after the check: a stop that began meanwhile is not a stable release.
+                match read(self) {
+                    Ok(Some(c)) if c.id == id && c.running && c.started_at == first.started_at => {
+                        io.log.push_line(&format!(
+                            "restoration: the previous release's container {} was still running and stayed up for {} ms without a restart, and passed its check; nothing was created. restoration check: {}",
+                            first.name,
+                            self.cfg.restore_settle.as_millis(),
+                            ev.summary()
+                        ));
+                        self.st.in_place = Some((id, first.started_at));
+                        Ok(Vec::new())
+                    }
+                    Ok(_) => Ok(block("was no longer the same running container after its health check, so whether it is being stopped is not known".into())),
+                    Err(e) if e.fatal.is_some() => Err(e),
+                    Err(_) => Ok(block("could not be read back after its health check".into())),
+                }
+            }
+            Err(e) if e.fatal.is_some() => Err(e),
+            Err(e) => Ok(block(format!(
+                "did not pass its health check ({})",
+                e.message
+            ))),
+        }
+    }
+
     fn restore_inner(
         &mut self,
         io: &mut StepIo<'_>,
@@ -2005,10 +2226,10 @@ impl<T: HttpTransport> DockerBackend<T> {
                     && e.id.is_some()
             })
             .and_then(|e| e.id.clone());
-        if let Some(id) = serving_id {
+        if let Some(id) = &serving_id {
             if let Ok(ports) = self
                 .api
-                .configured_host_ports(&id, b.left("reading the serving container's port")?)
+                .configured_host_ports(id, b.left("reading the serving container's port")?)
             {
                 if !ports.is_empty() && !ports.contains(&cfg.host_port) {
                     io.log.push_line(&format!(
@@ -2066,6 +2287,44 @@ impl<T: HttpTransport> DockerBackend<T> {
             None => {
                 if let Err(e) = io.lease_port(lease) {
                     return judged(io, e, Reason::StartFailed);
+                }
+            }
+        }
+        // The previous release's own container is deliberately not a blocker in the listing (see `restore_blockers`), which assumes the
+        // cutover stopped it; `observe_previous` ran in the read-only pre-check and either blocked or remembered a container that stayed
+        // up. Read it once more before anything is recorded or created: this is the last point at which nothing has been done.
+        if let Some(id) = &serving_id {
+            let verified = self.st.in_place.take();
+            let now = self
+                .api
+                .container_inspect(id, b.left("re-checking the previous release's container")?);
+            match (now, verified) {
+                (Ok(Some(c)), Some((vid, started))) if c.running => {
+                    if &vid == id && c.id == *id && c.started_at == started {
+                        io.log.push_line(&format!(
+                            "restoration: the previous release's container {} is the serving release; nothing was created",
+                            c.name
+                        ));
+                        return Ok(RestoreResult::Healthy);
+                    }
+                    io.log.push_line("restoration: the previous release's container changed after it was verified; nothing was created");
+                    return Ok(RestoreResult::NotAttempted(Reason::PortInUse));
+                }
+                // Running, and never observed to be stable: a second container could not bind its port.
+                (Ok(Some(c)), None) if c.running => {
+                    io.log.push_line(&format!(
+                        "restoration: the previous release's container {} is running and was not observed; nothing was created",
+                        c.name
+                    ));
+                    return Ok(RestoreResult::NotAttempted(Reason::PortInUse));
+                }
+                (Ok(_), _) => {} // stopped or gone: the port is free
+                (Err(e), _) => {
+                    io.log.push_line(&format!(
+                        "restoration: {}; whether the previous release is still running is not known, so nothing was created",
+                        api_err("re-checking the previous release's container", e).message
+                    ));
+                    return Ok(RestoreResult::NotAttempted(Reason::PortInUse));
                 }
             }
         }

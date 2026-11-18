@@ -832,8 +832,58 @@ fn a_foreign_container_with_the_same_name_is_never_touched() {
         .ledger
         .find(&h.dep.id, &ResourceKey::new(ResourceKind::Container, &pre))
         .unwrap();
+    // Docker rejected the create outright (409), so nothing of Harpoon's exists under that name: the intent is settled as
+    // absent. The foreign container is neither adopted nor recorded as a refusal that could never clear.
+    assert!(
+        matches!(
+            e.state,
+            EntryState::Released(harpoon_deploy::ledger::Released::AlreadyAbsent)
+        ),
+        "{:?}",
+        e.state
+    );
+    assert!(r.cleanup_problems().is_empty());
+}
+
+#[test]
+fn a_name_conflict_whose_occupant_cannot_be_read_back_stays_unresolved() {
+    // The 409 alone does not say who holds the name. If the occupant cannot be inspected, nothing is settled on a guess: the
+    // intent stays open and the later cleanup refuses the (unlabelled) container, exactly as before the rejection was typed.
+    let mut h = Harness::new();
+    h.seed_built_image();
+    let pre = name_of(&h, preliminary_name);
+    let foreign = h.docker.with(|s| s.add_container(&pre, vec![], true));
+    h.docker.with(|s| {
+        s.faults.push(support::fake_docker::Fault {
+            skip: 0,
+            method: Some("GET"),
+            path_has: format!("/containers/{pre}/json"),
+            remaining: 1,
+            action: Action::Respond(500, "{\"message\":\"boom\"}".into()),
+        })
+    });
+    let mut b = backend_with(&h, ok200(), |_| {});
+    let mut j = StampedJournal::new();
+    let r = h.run(&mut b, &mut j);
+    assert_eq!(r.status, DeploymentStatus::Failed);
+    let e = r
+        .ledger
+        .find(&h.dep.id, &ResourceKey::new(ResourceKind::Container, &pre))
+        .unwrap();
+    assert!(
+        !matches!(
+            e.state,
+            EntryState::Released(harpoon_deploy::ledger::Released::AlreadyAbsent)
+        ),
+        "{:?}",
+        e.state
+    );
     assert!(matches!(e.state, EntryState::Refused(_)), "{:?}", e.state);
-    assert!(!r.cleanup_problems().is_empty() && !r.is_clean());
+    assert_eq!(
+        h.docker.container(&pre).unwrap().id,
+        foreign,
+        "never touched"
+    );
 }
 
 #[test]
