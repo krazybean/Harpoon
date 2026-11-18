@@ -26,6 +26,15 @@ export type CleanupReport = {
   reported: boolean;
   /** The engine's "kept:" lines: objects it looked at and left in place, with its reason. */
   kept: string[];
+  /** Space the engine expects the removal to free, from layer sharing (not from how many image references go); `null` when it could not be estimated. */
+  estimatedBytes: number | null;
+  /** False when the estimate is only a lower bound. */
+  estimateExact: boolean | null;
+  /** Free-space change the guest measured around an apply (never negative); `null` when not measured. */
+  measuredReclaimed: number | null;
+  /** The engine's own comparison of the estimate with the measurement, and its "shared-layers" notes on why images that go free nothing. */
+  reclaimCheck: string | null;
+  sharedLayers: string[];
 };
 
 const VERDICTS: Verdict[] = ["ready", "reconcile", "protected", "review"];
@@ -56,7 +65,7 @@ export function parseCleanup(detail: string): CleanupReport {
     if (!l.startsWith("item: ")) continue;
     try { const it = itemOf(JSON.parse(l.slice(6))); if (it) items.push(it); } catch { /* a malformed line is skipped, never guessed at */ }
   }
-  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), reported: whole("reclaimed-containers") !== null && whole("reclaimed-images") !== null, kept: lines.filter((l) => l.startsWith("kept: ")).map((l) => l.slice(6)), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes") };
+  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), reported: whole("reclaimed-containers") !== null && whole("reclaimed-images") !== null, kept: lines.filter((l) => l.startsWith("kept: ")).map((l) => l.slice(6)), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes"), estimatedBytes: bytes("estimated-reclaim-bytes"), estimateExact: (() => { const l = lines.find((x) => x.startsWith("estimated-reclaim-exact:")); const v = l ? l.slice(24).trim() : ""; return v === "true" ? true : v === "false" ? false : null; })(), measuredReclaimed: bytes("measured-reclaimed-bytes"), reclaimCheck: (() => { const l = lines.find((x) => x.startsWith("reclaim-check:")); return l ? l.slice(14).trim() : null; })(), sharedLayers: lines.filter((l) => l.startsWith("shared-layers: ")).map((l) => l.slice(15)) };
 }
 
 /** What a person can act on: Docker objects to remove, and journal records that only need reconciling. */
@@ -110,6 +119,7 @@ export function reasonLabel(i: CleanupItem): string {
     case "failed-attempt": return i.kind === "container" ? "Container left by a failed deployment" : "Image kept from a failed deployment";
     case "already-absent": return i.kind === "container" ? "Container already removed; journal needs reconciliation" : "Image already removed; journal needs reconciliation";
     case "stale-port-lease": return "Stale port reservation";
+    case "abandoned-restoration": return "Container a restoration left behind: its release no longer serves it, and Docker shows it is Harpoon's and stopped";
     case "serving-release": return `Serving now: this ${what} belongs to the running release`;
     case "serving-pins-image": return "Image the running release is built from";
     case "shared-with-protected": return "Image retained because a protected deployment still references it";
@@ -212,4 +222,12 @@ export function cacheExplanation(c: CacheReport, size: (bytes: number) => string
     return `Docker lists ${c.records ?? "some"} build-cache record${c.records === 1 ? "" : "s"} whose own sizes add up to ${size(c.total)}, but that is not free space: the records overlap, and ${size(c.shared)} is shared with images${inUse}. A prune would free about 0 B. The space is held by images, so removing old releases is what frees it.`;
   }
   return `A prune can remove up to ${size(c.reclaimable)}. The rest of Docker's ${size(c.total)} of record sizes is not free space: ${size(c.shared)} is shared with images${inUse}, and stays.`;
+}
+
+/** Before an apply: what removal is expected to free, said as an estimate and never as a count of image references. */
+export function estimateLine(r: CleanupReport, size: (bytes: number) => string): string | null {
+  if (r.estimatedBytes === null) return "Space freed cannot be estimated beforehand; the change the guest measures afterwards is the real figure.";
+  const shared = r.sharedLayers.length ? ` ${r.sharedLayers.length} image${r.sharedLayers.length === 1 ? " shares" : "s share"} its layers with a protected image.` : "";
+  if (r.estimatedBytes === 0) return r.estimateExact === false ? null : `Estimated space freed: about 0 B. Removing these image references frees nothing, because their layers are still used by images that stay.${shared}`;
+  return `Estimated space freed: ${r.estimateExact === false ? "at least" : "about"} ${size(r.estimatedBytes)}, from layer sharing. What the guest actually frees is measured afterwards.${shared}`;
 }

@@ -19,7 +19,7 @@ export type ResultStatus = "success" | "nothing" | "partial" | "refused" | "fail
 
 export interface Figures {
   /** Docker's or the engine's own accounting. `bytes` is `null` when no figure was given; `note` says what was counted. */
-  docker: { applicable: boolean; bytes: Measured; note: string };
+  docker: { applicable: boolean; bytes: Measured; note: string; /** `bytes` is an estimate, not what Docker reported. */ estimated?: boolean };
   guest: Pair;
   mac: Pair;
 }
@@ -65,7 +65,11 @@ export function releasesOutcome(plan: CleanupReport, report: CleanupReport, host
   const doneDocker = report.containers + report.images;
   const reconciled = reconcilable(report).length;
   const figures: Figures = {
-    docker: { applicable: true, bytes: null, note: `${plural(report.containers, "container")} and ${plural(report.images, "image")} removed. No byte figure exists: image sizes are shared between images.` },
+    // The count is references: an image's space is freed only when no image that stays keeps its layers. The estimate comes from
+    // layer sharing and is said apart from the measured guest change below.
+    docker: report.estimatedBytes === null || (report.estimatedBytes === 0 && report.estimateExact === false)
+      ? { applicable: true, bytes: null, note: `${plural(report.containers, "container")} and ${plural(report.images, "image reference")} removed. No byte estimate was available: image sizes are shared between images.` }
+      : { applicable: true, bytes: report.estimatedBytes, estimated: true, note: `${plural(report.containers, "container")} and ${plural(report.images, "image reference")} removed. This is an estimate from layer sharing${report.estimateExact === false ? " (a lower bound)" : ""}: space is freed only for layers no remaining image keeps.` },
     guest: { before: report.guestFreeBefore, after: report.guestFreeAfter },
     mac: { before: host.before, after: host.after },
   };
@@ -77,7 +81,8 @@ export function releasesOutcome(plan: CleanupReport, report: CleanupReport, host
   if (plannedDocker > 0 && doneDocker === 0 && reconciled === 0) return { kind: "old-releases", status: "nothing", headline: "Nothing was removed.", detail: "The engine re-checked every object when applying and removed none of them. It keeps anything it can no longer prove is safe to remove.", figures, kept };
   if (doneDocker < plannedDocker) return { kind: "old-releases", status: "partial", headline: `${removed}`, detail: `${doneDocker} of ${plannedDocker} Docker objects were removed. The engine re-checks each object when applying and left the rest in place. ${REVIEW_AGAIN}`, figures, kept };
   if (plannedDocker === 0 && doneDocker === 0 && reconciled === 0) return { kind: "old-releases", status: "nothing", headline: "Nothing was removed.", detail: "There was nothing eligible.", figures, kept };
-  return { kind: "old-releases", status: "success", headline: removed, detail: null, figures, kept };
+  const why = [report.reclaimCheck, ...report.sharedLayers].filter(Boolean).join(" ");
+  return { kind: "old-releases", status: "success", headline: removed, detail: why || null, figures, kept };
 }
 
 /** `prune-build-cache`: Docker's own reclaimed figure is shown as Docker's; the guest and Mac measurements stand apart. */
@@ -128,7 +133,7 @@ export function figureLines(o: CleanupOutcome, fmt: (b: number) => string): { ke
   };
   const sign = (d: number) => (d === 0 ? "unchanged" : `${d > 0 ? "+" : "−"}${fmt(Math.abs(d))}`);
   return [
-    { key: "docker", title: "Docker reported", text: docker },
+    { key: "docker", title: f.docker.estimated ? "Estimated space freed" : "Docker reported", text: docker },
     { key: "guest", title: "Guest free space", text: pair(f.guest, "Not changed by this operation.", sign) },
     { key: "mac", title: "Mac disk-image allocation", text: `${pair(f.mac, "Not measured.", sign)}${o.kind === "disk-blocks" || f.mac === "not-applicable" ? "" : " Space freed inside Harpoon is only returned to macOS by Reclaim unused space, so this often stays the same."}` },
   ];

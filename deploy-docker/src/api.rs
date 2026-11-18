@@ -92,6 +92,10 @@ pub struct ImageInfo {
     /// `RepoDigests`: registry digests this image is known by. A locally built image has none; any
     /// entry means it was pulled or pushed and may be referenced from elsewhere.
     pub repo_digests: Vec<String>,
+    /// `Size`: the image's own total, shared layers included. 0 when Docker did not say.
+    pub size: u64,
+    /// `RootFS.Layers`: the layer diff ids, base first. Empty when Docker did not say (nothing can then be shown about sharing).
+    pub layers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +485,12 @@ impl DockerApi {
                         "image inspect",
                         "RepoDigests",
                     )?,
+                    size: j.get("Size").and_then(Json::as_i64).unwrap_or(0).max(0) as u64,
+                    // optional: without it nothing can be shown about layer sharing, and the image is otherwise valid
+                    layers: match j.get("RootFS").and_then(|r| r.get("Layers")) {
+                        None => Vec::new(),
+                        some => string_list(some, "image inspect", "RootFS.Layers")?,
+                    },
                 }))
             }
             404 => Ok(None),
