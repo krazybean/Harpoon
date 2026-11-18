@@ -35,6 +35,12 @@ export type CleanupReport = {
   /** The engine's own comparison of the estimate with the measurement, and its "shared-layers" notes on why images that go free nothing. */
   reclaimCheck: string | null;
   sharedLayers: string[];
+  /** Clean Up only: what is eligible in all (objects, journal records and cache records), the combined estimate, and what stays protected, by reason. */
+  eligible: number | null;
+  estimatedTotal: number | null;
+  protectedSummary: { reason: string; count: number }[];
+  /** How many previous releases the run kept for a rollback (its own header line). */
+  keepRollbacks: number | null;
 };
 
 const VERDICTS: Verdict[] = ["ready", "reconcile", "protected", "review"];
@@ -65,7 +71,7 @@ export function parseCleanup(detail: string): CleanupReport {
     if (!l.startsWith("item: ")) continue;
     try { const it = itemOf(JSON.parse(l.slice(6))); if (it) items.push(it); } catch { /* a malformed line is skipped, never guessed at */ }
   }
-  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), reported: whole("reclaimed-containers") !== null && whole("reclaimed-images") !== null, kept: lines.filter((l) => l.startsWith("kept: ")).map((l) => l.slice(6)), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes"), estimatedBytes: bytes("estimated-reclaim-bytes"), estimateExact: (() => { const l = lines.find((x) => x.startsWith("estimated-reclaim-exact:")); const v = l ? l.slice(24).trim() : ""; return v === "true" ? true : v === "false" ? false : null; })(), measuredReclaimed: bytes("measured-reclaimed-bytes"), reclaimCheck: (() => { const l = lines.find((x) => x.startsWith("reclaim-check:")); return l ? l.slice(14).trim() : null; })(), sharedLayers: lines.filter((l) => l.startsWith("shared-layers: ")).map((l) => l.slice(15)) };
+  return { items, containers: num("reclaimed-containers"), images: num("reclaimed-images"), reported: whole("reclaimed-containers") !== null && whole("reclaimed-images") !== null, kept: lines.filter((l) => l.startsWith("kept: ")).map((l) => l.slice(6)), guestFreeBefore: bytes("guest-free-before-bytes"), guestFreeAfter: bytes("guest-free-after-bytes"), estimatedBytes: bytes("estimated-reclaim-bytes"), estimateExact: (() => { const l = lines.find((x) => x.startsWith("estimated-reclaim-exact:")); const v = l ? l.slice(24).trim() : ""; return v === "true" ? true : v === "false" ? false : null; })(), measuredReclaimed: bytes("measured-reclaimed-bytes"), reclaimCheck: (() => { const l = lines.find((x) => x.startsWith("reclaim-check:")); return l ? l.slice(14).trim() : null; })(), sharedLayers: lines.filter((l) => l.startsWith("shared-layers: ")).map((l) => l.slice(15)), eligible: whole("cleanup-eligible"), estimatedTotal: whole("cleanup-estimated-bytes"), keepRollbacks: (() => { const l = lines.find((x) => x.startsWith("clean up — ")); const m = l ? /previous releases kept for rollback: (\d+)/.exec(l) : null; return m ? Number(m[1]) : null; })(), protectedSummary: (() => { const l = lines.find((x) => x.startsWith("protected-summary:")); if (!l) return []; return l.slice(18).split(",").map((x) => x.trim().split("=")).filter((x) => x.length === 2 && /^\d+$/.test(x[1])).map((x) => ({ reason: x[0], count: Number(x[1]) })); })() };
 }
 
 /** What a person can act on: Docker objects to remove, and journal records that only need reconciling. */
@@ -230,4 +236,31 @@ export function estimateLine(r: CleanupReport, size: (bytes: number) => string):
   const shared = r.sharedLayers.length ? ` ${r.sharedLayers.length} image${r.sharedLayers.length === 1 ? " shares" : "s share"} its layers with a protected image.` : "";
   if (r.estimatedBytes === 0) return r.estimateExact === false ? null : `Estimated space freed: about 0 B. Removing these image references frees nothing, because their layers are still used by images that stay.${shared}`;
   return `Estimated space freed: ${r.estimateExact === false ? "at least" : "about"} ${size(r.estimatedBytes)}, from layer sharing. What the guest actually frees is measured afterwards.${shared}`;
+}
+
+/** One plain sentence per protection reason the engine reports; an unknown reason is shown as it was sent, never hidden. */
+export function protectedLabel(reason: string, count: number): string {
+  const n = `${count} item${count === 1 ? "" : "s"}`;
+  switch (reason) {
+    case "serving-release": return `${n} in use right now (the running release, its container and its image)`;
+    case "rollback-target": return `${n} kept so you can roll back (the previous releases you chose to keep)`;
+    case "rollback-pins-image": return `${n} kept because a kept release is built from that image`;
+    case "rollback-unverified": return `${n} kept because Harpoon could not verify that a rollback to them would work`;
+    case "recovery-pending": return `${n} kept because a deployment's recovery is not settled and may still need the release it replaced`;
+    case "serving-pins-image": return `${n} kept because the running release is built from that image`;
+    case "shared-with-protected": return `${n} kept because a protected release records the same image`;
+    case "nothing-proven-serving": return `${n} left alone because nothing of that application is proven to be serving`;
+    default: return `${n} protected (${reason})`;
+  }
+}
+
+/** What Clean Up will do, in one sentence, from the engine's own counts. */
+export function cleanUpSummary(r: CleanupReport, cache: CacheReport): string {
+  const o = operationSummary(r);
+  const parts = [
+    o.containers + o.images > 0 ? `remove ${o.containers} container${o.containers === 1 ? "" : "s"} and ${o.images} image${o.images === 1 ? "" : "s"}` : "",
+    o.journalOnly > 0 ? `reconcile ${o.journalOnly} journal record${o.journalOnly === 1 ? "" : "s"}` : "",
+    cache.reclaimable ? "prune unused build cache" : "",
+  ].filter(Boolean);
+  return parts.length ? `Clean Up will ${parts.join(", ")}.` : "Nothing to clean up.";
 }

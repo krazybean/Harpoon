@@ -376,6 +376,23 @@ const SPECS: &[Spec] = &[
             "forwarder-pid",
             "forwarder-command",
             "forward-address",
+            "keep-rollbacks",
+            AUTH_FLAG,
+        ],
+        switches: &["apply"],
+    },
+    Spec {
+        command: "cleanup",
+        // one operation for everything disposable: releases, settled interrupted deployments, unused owned images and prunable build cache
+        values: &[
+            "runtime-dir",
+            "docker-socket",
+            "mgmt-socket",
+            "resources-dir",
+            "forwarder-pid",
+            "forwarder-command",
+            "forward-address",
+            "keep-rollbacks",
             AUTH_FLAG,
         ],
         switches: &["apply"],
@@ -524,6 +541,7 @@ COMMANDS
   export-journal  copy the journal to a new file for investigation (--to FILE)
   teardown        dismantle ONE succeeded deployment's container, image and leases (dry run by default; --apply)
   prune-build-cache remove the BuildKit cache that is unused and not shared with an image (Docker's own prune, no --all; the preview says when that is about 0 bytes; dry run by default; --apply). Later builds are slower
+  cleanup         the one clean-up: everything Harpoon can prove disposable (old releases, settled interrupted deployments, unused owned images, prunable build cache) in one dry-run-first operation; --keep-rollbacks N keeps N previous releases (default 0); what serves and what a deployment still needs to recover is always kept (dry run by default; --apply)
   cleanup-releases remove the stopped containers, port leases and images of releases that no longer serve, of failed deployments, and of an interrupted deployment whose restoration was verified and whose pause was cleared, each by its recorded id and re-verified labels (dry run by default; --apply). Never touches the serving release, the most recent previous release proven restorable (or every candidate when that cannot be shown), volumes, networks or build cache
   cleanup-image   remove the retained image of ONE failed or interrupted deployment, by its recorded id (dry run by default; --apply)
   inventory       read-only listing of containers, images, volumes, port mappings and host listeners (no --runtime-dir)

@@ -12,7 +12,7 @@ import { operationSummary, reconcilable } from "./artifactCleanup.ts";
 
 export type Measured = number | null;
 export type Pair = { before: Measured; after: Measured } | "not-applicable";
-export type ResultKind = "old-releases" | "build-cache" | "disk-blocks";
+export type ResultKind = "old-releases" | "build-cache" | "disk-blocks" | "clean-up";
 /** success; nothing (there was nothing to do); partial (some of it was done); refused (the operation declined, nothing changed);
  *  failed (the engine answered that it did not complete); unknown (no answer: it may have run fully, partly or not at all). */
 export type ResultStatus = "success" | "nothing" | "partial" | "refused" | "failed" | "unknown";
@@ -137,4 +137,28 @@ export function figureLines(o: CleanupOutcome, fmt: (b: number) => string): { ke
     { key: "guest", title: "Guest free space", text: pair(f.guest, "Not changed by this operation.", sign) },
     { key: "mac", title: "Mac disk-image allocation", text: `${pair(f.mac, "Not measured.", sign)}${o.kind === "disk-blocks" || f.mac === "not-applicable" ? "" : " Space freed inside Harpoon is only returned to macOS by Reclaim unused space, so this often stays the same."}` },
   ];
+}
+
+/** `cleanup --apply`: the one Clean Up. The estimate (from layer sharing and unshared cache) and the measured change in the guest's free
+ *  space are shown apart, and a count of removed image references is never presented as space. */
+export function cleanUpOutcome(report: CleanupReport, cache: CacheReport, host: HostPair, fmt: (b: number) => string): CleanupOutcome {
+  const figures: Figures = {
+    docker: report.estimatedTotal === null
+      ? { applicable: true, bytes: null, note: `${plural(report.containers, "container")} and ${plural(report.images, "image reference")} removed. No byte estimate was available.` }
+      : { applicable: true, bytes: report.estimatedTotal, estimated: true, note: `${plural(report.containers, "container")} and ${plural(report.images, "image reference")} removed. An estimate before the run, from layer sharing and unused, unshared build cache: only layers no remaining image keeps are freed.` },
+    guest: { before: report.guestFreeBefore, after: report.guestFreeAfter },
+    mac: { before: host.before, after: host.after },
+  };
+  if (!report.reported || report.eligible === null) {
+    return { kind: "clean-up", status: "unknown", headline: "The engine's report was not in a form this app understands, so the result is not known.", detail: `Nothing is assumed from the absence of an error. ${REVIEW_AGAIN}`, figures: { ...figures, docker: { applicable: true, bytes: null, note: "No count was reported." } }, kept: report.kept };
+  }
+  const why = [report.reclaimCheck, ...report.sharedLayers].filter(Boolean).join(" ");
+  if (report.eligible === 0) {
+    return { kind: "clean-up", status: "nothing", headline: "Nothing to clean up.", detail: "Everything left is in use, protected, or not provably disposable.", figures, kept: report.kept };
+  }
+  const cacheDone = cache.reclaimed;
+  const removed = `Removed ${plural(report.containers, "container")} and ${plural(report.images, "image reference")}${cacheDone !== null ? `; Docker reports ${fmt(cacheDone)} of build cache removed` : ""}.`;
+  const measured = report.measuredReclaimed === null ? "The guest's free space could not be measured." : `Measured: the guest's free space grew by ${fmt(report.measuredReclaimed)}.`;
+  const status: ResultStatus = report.kept.length > 0 ? "partial" : "success";
+  return { kind: "clean-up", status, headline: removed, detail: [measured, why, status === "partial" ? "Some objects were left in place; run Clean Up again to retry them." : ""].filter(Boolean).join(" "), figures, kept: report.kept };
 }

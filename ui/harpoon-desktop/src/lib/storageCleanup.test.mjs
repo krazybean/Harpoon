@@ -7,7 +7,7 @@ import { JSDOM } from "jsdom";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { cacheOutcome, failureOutcome, figureLines, releasesOutcome, reclaimOutcomeFromText, RECLAIM_FAILED, RECLAIM_REFUSED } from "./cleanupResult.ts";
+import { cacheOutcome, cleanUpOutcome, failureOutcome, figureLines, releasesOutcome, reclaimOutcomeFromText, RECLAIM_FAILED, RECLAIM_REFUSED } from "./cleanupResult.ts";
 import { parseCleanup, parseCache } from "./artifactCleanup.ts";
 import { CLEANUP_TARGETS } from "./cleanupTargets.ts";
 
@@ -389,7 +389,7 @@ test("the breakdown and its helpers cannot invoke anything, and no image, contai
   const card = read("../components/DiskReclaimCard.tsx");
   const cmds = [...card.matchAll(/invoke<[^>]*>\("([a-z_]+)"/g)].map((m) => m[1]).sort();
   assert.deepEqual([...new Set(cmds)], ["deploy_op", "reclaim_disk_confirmed"], "the cleanup card still reaches only the existing operations");
-  assert.deepEqual([...new Set([...card.matchAll(/op: "([a-z-]+)"/g)].map((m) => m[1]))].sort(), ["cleanup-releases", "prune-build-cache"]);
+  assert.deepEqual([...new Set([...card.matchAll(/op: "([a-z-]+)"/g)].map((m) => m[1]))].sort(), ["cleanup", "cleanup-releases", "prune-build-cache"]);
   assert.doesNotMatch(card, /remove_image|remove_volume|remove_container|rmi|--force|force=true|all=true/);
   const api = read("../../src-tauri/src/deploy_api.rs");
   assert.doesNotMatch(api, /RemoveImage|remove-image|RemoveVolume|RemoveContainer/, "no new deployment operation removes an image, volume or container");
@@ -819,7 +819,7 @@ test("refreshing the storage inventory after a cleanup cannot authorise another 
 });
 
 // ================================================================ cache accounting and rollback retention (real captured outputs)
-import { cacheExplanation, estimateLine, reasonLabel } from "./artifactCleanup.ts";
+import { cacheExplanation, estimateLine, reasonLabel, protectedLabel, cleanUpSummary } from "./artifactCleanup.ts";
 const MB = 1000 * 1000;
 const sz = (b) => `${(b / MB).toFixed(0)} MB`;
 
@@ -916,4 +916,89 @@ test("estimates: an estimate Docker's layer data could not support is not shown 
   assert.equal(o.figures.docker.bytes, null);
   assert.match(o.figures.docker.note, /No byte estimate was available/);
   assert.match(estimateLine({ ...rep, estimatedBytes: null }, sz), /cannot be estimated beforehand/);
+});
+
+// ================================================================ the one Clean Up (real captured outputs)
+test("clean up: the review reads what will go, what stays and why, and the estimate apart from any measurement", () => {
+  const rep = parseCleanup(fx("cleanup-dry-run").detail);
+  const cache = parseCache(fx("cleanup-dry-run").detail);
+  assert.equal(rep.eligible, 6);
+  assert.equal(rep.estimatedTotal, 1_700_000_000);
+  assert.equal(rep.keepRollbacks, 0);
+  assert.deepEqual(rep.protectedSummary, [{ reason: "serving-release", count: 3 }]);
+  assert.equal(cache.reclaimable, 500_000_000);
+  assert.equal(rep.measuredReclaimed, null, "a review measures nothing");
+  assert.match(cleanUpSummary(rep, cache), /remove 2 containers and 3 images/);
+  assert.match(cleanUpSummary(rep, cache), /prune unused build cache/);
+  assert.match(protectedLabel("serving-release", 3), /3 items in use right now/);
+  assert.match(protectedLabel("recovery-pending", 1), /recovery is not settled/);
+  assert.match(protectedLabel("brand-new-reason", 2), /2 items protected \(brand-new-reason\)/, "an unknown reason is shown, never hidden");
+});
+
+test("clean up: retention one keeps the previous release and says so", () => {
+  const rep = parseCleanup(fx("cleanup-dry-run-keep-one").detail);
+  assert.equal(rep.keepRollbacks, 1);
+  assert.ok(rep.protectedSummary.some((p) => p.reason === "rollback-target"));
+  assert.ok(rep.estimatedTotal < 1_700_000_000, "keeping a release frees less");
+});
+
+test("clean up: the result states the estimate and the measurement apart, and a count of references is not space", () => {
+  const r = fx("cleanup-apply-success");
+  const o = cleanUpOutcome(parseCleanup(r.detail), parseCache(r.detail), { before: null, after: null }, sz);
+  assert.equal(o.kind, "clean-up"); assert.equal(o.status, "success");
+  assert.match(o.headline, /Removed 2 containers and 3 image references/);
+  assert.match(o.headline, /500 MB of build cache removed/);
+  assert.match(o.detail, /Measured: the guest's free space grew by 1700 MB/);
+  assert.match(o.detail, /measured change matches the estimate/);
+  const lines = figureLines(o, sz);
+  assert.equal(lines[0].title, "Estimated space freed"); assert.match(lines[0].text, /^1700 MB\./);
+  assert.match(lines[1].text, /1750 MB before, 3450 MB after \(\+1700 MB\)/);
+});
+
+test("clean up: a second run is 'nothing', a refusal is not carried out, a half-finished run says what finished", () => {
+  const nothing = fx("cleanup-apply-nothing-left");
+  const o = cleanUpOutcome(parseCleanup(nothing.detail), parseCache(nothing.detail), { before: null, after: null }, sz);
+  assert.equal(o.status, "nothing"); assert.match(o.headline, /Nothing to clean up/);
+  const refused = failureOutcome("clean-up", fx("cleanup-apply-refused-unauthorized"), null);
+  assert.equal(refused.status, "refused");
+  const partial = fx("cleanup-apply-partial-cache-failure");
+  assert.equal(partial.ok, false);
+  assert.match(partial.hint, /Part of the clean up finished/); assert.match(partial.hint, /Run Clean Up again/);
+  assert.equal(failureOutcome("clean-up", partial, null).status, "failed");
+});
+
+test("clean up, mounted: review, then apply sends exactly the reviewed retention and nothing without confirmation", async () => {
+  const m = await mount();
+  const calls = [];
+  deployReply = (a) => { calls.push(a); return a.op.apply ? fx("cleanup-apply-success") : fx("cleanup-dry-run"); };
+  await m.click(m.btn("Review clean up")); await m.settle();
+  assert.deepEqual(calls[0], { op: { op: "cleanup", apply: false, keepRollbacks: 0 } }, "a review carries no confirmation and no apply");
+  const text = m.host.textContent;
+  assert.match(text, /Clean Up will remove 2 containers and 3 images, prune unused build cache/);
+  assert.match(text, /Estimated space freed: about 1700 MB|Estimated space freed: about 1\.6 GiB|Estimated space freed: about/);
+  assert.match(text, /Stays protected/); assert.match(text, /3 items in use right now/);
+  assert.equal(calls.length, 1, "nothing was applied by reviewing");
+  await m.click(m.btn("Clean up now")); await m.settle();
+  assert.ok(m.dialog(), "applying asks first"); assert.equal(calls.length, 1);
+  await act(async () => { m.dialogBtn("Clean up now").dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  await m.settle();
+  assert.deepEqual(calls[1], { op: { op: "cleanup", apply: true, keepRollbacks: 0 }, confirmation: { liveChanges: true, cutover: false } });
+  const r = m.q('[data-result-kind="clean-up"]');
+  assert.equal(r.dataset.resultStatus, "success");
+  await m.unmount();
+});
+
+test("clean up, mounted: the retention setting is sent as chosen and a changed setting invalidates the review", async () => {
+  const m = await mount();
+  const calls = [];
+  deployReply = (a) => { calls.push(a); return fx(a.op.apply ? "cleanup-apply-success" : "cleanup-dry-run-keep-one"); };
+  const sel = m.q("#cleanup-keep");
+  await act(async () => { sel.value = "1"; sel.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+  await m.click(m.btn("Review clean up")); await m.settle();
+  assert.equal(calls[0].op.keepRollbacks, 1);
+  assert.match(m.host.textContent, /Keeping 1 previous release for rollback/);
+  await act(async () => { sel.value = "2"; sel.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+  await m.settle();
+  assert.equal(m.btn("Clean up now"), undefined, "a review made for another setting is not applied");
+  await m.unmount();
 });

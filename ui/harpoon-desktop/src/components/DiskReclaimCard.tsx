@@ -3,15 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAction } from "./ConfirmDialog";
 import { useDiskView, diskTelemetry, hostAllocationNow } from "../hooks/useDiskTelemetry";
 import { CleanupResult } from "./CleanupResult";
-import { cacheOutcome, failureOutcome, releasesOutcome, reclaimOutcomeFromText } from "../lib/cleanupResult";
+import { cacheOutcome, cleanUpOutcome, failureOutcome, releasesOutcome, reclaimOutcomeFromText } from "../lib/cleanupResult";
 import type { CleanupOutcome } from "../lib/cleanupResult";
 import { fmtBytes } from "./StorageBreakdown";
 import { CLEANUP_TARGETS } from "../lib/cleanupTargets";
 import { acquireCleanup, useCleanupActive } from "../lib/cleanupLock";
 import { formatSize, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { ExpansionState } from "../lib/diskCapacity";
-import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, cacheExplanation, estimateLine, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
-import type { CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
+import { cleanUpSummary, protectedLabel, cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, cacheExplanation, estimateLine, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
+import type { CacheReport, CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
 /**
@@ -273,6 +273,99 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
   );
 }
 
+/**
+ * Clean Up: the one operation. Review asks the engine what it can prove disposable (old releases, settled interrupted deployments,
+ * unused owned images, prunable build cache) and what must stay, and changes nothing; Apply carries out exactly that, one object at a
+ * time with every ownership check repeated, and reports what the guest actually freed next to what was estimated. What serves and
+ * what a deployment still needs to recover are never removed. How many previous releases to keep for a rollback is the one setting
+ * (0 by default), remembered per viewer.
+ */
+const KEEP_KEY = "harpoon.cleanup.keepRollbacks";
+function readKeep(): number {
+  try { const v = Number(window.localStorage.getItem(KEEP_KEY)); return Number.isInteger(v) && v >= 0 && v <= 5 ? v : 0; } catch { return 0; }
+}
+export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => void }) {
+  const [keep, setKeep] = useState<number>(readKeep);
+  const [busy, setBusy] = useState<"review" | "apply" | null>(null);
+  const [plan, setPlan] = useState<CleanupReport | null>(null);
+  const [cache, setCache] = useState<CacheReport | null>(null);
+  const [outcome, setOutcome] = useState<CleanupOutcome | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const otherCleanup = useCleanupActive() !== null;
+  const inFlight = useRef(false);
+  const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "cleanup", apply: true, keepRollbacks: keep }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "cleanup", apply: false, keepRollbacks: keep } });
+  const chooseKeep = (n: number) => { setKeep(n); setPlan(null); setCache(null); try { window.localStorage.setItem(KEEP_KEY, String(n)); } catch { /* a per-viewer convenience only */ } };
+  const review = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy("review"); setError(null); setOutcome(null); setPlan(null); setCache(null);
+    try {
+      const r = await call(false);
+      if (!r.ok) setError(r.hint || r.summary || "The engine could not work out what can be cleaned up.");
+      else { setPlan(parseCleanup(r.detail)); setCache(parseCache(r.detail)); }
+    } catch (e) { setError(`Could not review the clean up: ${String(e)}`); } finally { inFlight.current = false; setBusy(null); }
+  };
+  const apply = async () => {
+    if (!plan || !cache || plan.eligible === 0 || inFlight.current) return;
+    const release = acquireCleanup("clean-up");
+    if (!release) return;
+    inFlight.current = true;
+    try {
+      const est = plan.estimatedTotal;
+      const ok = await confirmAction(`${cleanUpSummary(plan, cache)}\n\nKeeping ${keep} previous release${keep === 1 ? "" : "s"} for rollback. Whatever is running, and anything a deployment still needs to recover, stays.\n\n${est === null ? "Space freed cannot be estimated beforehand." : `Estimated space freed: ${plan.estimateExact === false ? "at least " : "about "}${fmtBytes(est)}. This is an estimate; the guest's real change is measured and shown afterwards.`}\n\nRemoved objects are not restored.`, "Clean up now");
+      if (!ok) return;
+      setBusy("apply"); setError(null); setOutcome(null);
+      const before = await hostAllocationNow();
+      let result: CleanupOutcome;
+      try {
+        const r = await call(true);
+        const after = await hostAllocationNow();
+        result = r.ok ? cleanUpOutcome(parseCleanup(r.detail), parseCache(r.detail), { before, after }, fmtBytes) : failureOutcome("clean-up", r, null, { before, after });
+      } catch (e) { result = failureOutcome("clean-up", null, e, { before, after: await hostAllocationNow() }); }
+      setOutcome(result); setPlan(null); setCache(null);
+    } finally { inFlight.current = false; release(); setBusy(null); onDone(); }
+  };
+  const groups = plan ? groupByApplication(plan).filter((g) => g.ready.containers + g.ready.images + g.reconcile > 0) : [];
+  const toggle = (k: string) => setOpen((o) => { const n = new Set(o); if (!n.delete(k)) n.add(k); return n; });
+  const cacheNote = plan && cache ? cacheExplanation(cache, fmtBytes) : null;
+  const layersNote = plan ? estimateLine(plan, fmtBytes) : null;
+  return (
+    <div id={CLEANUP_TARGETS["clean-up"].section} tabIndex={-1} style={{ marginBottom: 14 }}>
+      <div className="text-panel-title">Clean up</div>
+      <div className="text-meta">Removes what Harpoon can prove it no longer needs: old releases, leftovers of interrupted deployments, unused images and prunable build cache. It never removes what is running, what a deployment still needs to recover, volumes, your data or configuration.</div>
+      <div className="dialog-actions" style={{ alignItems: "center", gap: 10 }}>
+        <label className="text-meta" htmlFor="cleanup-keep">Keep previous releases for rollback</label>
+        <select id="cleanup-keep" value={keep} onChange={(e) => chooseKeep(Number(e.target.value))} disabled={busy !== null}>
+          {[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n === 0 ? "None (frees the most space)" : `${n} previous release${n === 1 ? "" : "s"}`}</option>)}
+        </select>
+        <button id={CLEANUP_TARGETS["clean-up"].button} className="btn btn--secondary" disabled={!enabled || busy !== null} onClick={review}>{busy === "review" ? "Reviewing…" : "Review clean up"}</button>
+        {plan && plan.eligible !== null && plan.eligible > 0 && <button className="btn btn--primary" disabled={busy !== null || otherCleanup} onClick={apply}>{busy === "apply" ? "Cleaning up…" : "Clean up now…"}</button>}
+      </div>
+      {plan && cache && (
+        <div role="region" aria-label="Clean up review" style={{ display: "grid", gap: 8, margin: "8px 0" }}>
+          <div className="text-body"><b>{plan.eligible === 0 ? "Nothing to clean up." : cleanUpSummary(plan, cache)}</b> {plan.keepRollbacks !== null ? `Keeping ${plan.keepRollbacks} previous release${plan.keepRollbacks === 1 ? "" : "s"} for rollback.` : ""}</div>
+          {plan.estimatedTotal !== null
+            ? <div className="text-meta">Estimated space freed: {plan.estimateExact === false ? "at least " : "about "}{fmtBytes(plan.estimatedTotal)}. This is an estimate from layer sharing and unused build cache; the real change is measured after the run.</div>
+            : <div className="text-meta">Space freed cannot be estimated beforehand; the guest's measured change is the real figure.</div>}
+          {layersNote && <div role="status" className="text-meta">{layersNote}</div>}
+          {cacheNote && <div role="status" className="text-meta">{cacheNote}</div>}
+          {cache.blocked && <div role="status" className="text-body">The build cache cannot be pruned right now: {cache.blocked}. Nothing was changed.</div>}
+          {plan.protectedSummary.length > 0 && (
+            <div>
+              <div className="text-meta"><b>Stays protected</b></div>
+              <ul style={{ margin: "2px 0 0 18px" }}>{plan.protectedSummary.map((p) => <li key={p.reason} className="text-meta">{protectedLabel(p.reason, p.count)}</li>)}</ul>
+            </div>
+          )}
+          {groups.map((g) => <ArtifactGroup key={g.key} g={g} expanded={open.has(g.key)} onToggle={() => toggle(g.key)} />)}
+        </div>
+      )}
+      {outcome && <CleanupResult outcome={outcome} label="Clean up" />}
+      {error && <div role="alert" style={{ color: "var(--error-fg)", whiteSpace: "pre-wrap" }}>{error}</div>}
+    </div>
+  );
+}
+
 export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expansion: ExpansionState | null | undefined }) {
   const view = useDiskView();
   const cap = view.status === "live" ? view.cap : null; // reclaiming needs the running guest, not a remembered reading
@@ -302,7 +395,11 @@ export function DiskReclaimCard({ enabled, expansion }: { enabled: boolean; expa
 
   return (
     <div className="panel" style={{ padding: 14 }}>
-      <DockerArtifacts enabled={enabled} onDone={() => void load()} />
+      <CleanUp enabled={enabled} onDone={() => void load()} />
+      <details style={{ margin: "6px 0 12px" }}>
+        <summary className="text-meta">More control: clean up one thing at a time</summary>
+        <DockerArtifacts enabled={enabled} onDone={() => void load()} />
+      </details>
       <div id={CLEANUP_TARGETS["disk-blocks"].section} tabIndex={-1} className="text-panel-title">Disk image on this Mac</div>
       <div className="text-body" style={{ lineHeight: 1.7, marginTop: 6 }}>
         {cap && cap.provisioned

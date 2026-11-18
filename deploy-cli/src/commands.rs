@@ -68,6 +68,7 @@ pub fn dispatch(p: &Parsed, gate: &Gate, svc: &mut Services, out: &mut String) -
         "inventory" => inventory(p, out),
         "teardown" => teardown(p, out),
         "cleanup-image" => cleanup_image(p, out),
+        "cleanup" => crate::cleanup::cleanup_all_cmd(p, out),
         "cleanup-releases" => crate::cleanup::cleanup_cmd(p, out),
         "prune-build-cache" => crate::cleanup::prune_cache_cmd(p, out),
         other => Err(Fail::usage(format!("unknown command {other:?}"))),

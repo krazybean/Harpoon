@@ -1261,7 +1261,15 @@ fn run_source(
     if !p.switch("simulate") && commands::authorized(p).is_ok() {
         if let Ok(Some(sock)) = commands::socket_flag(p) {
             let mut note = String::new();
-            match crate::cleanup::run(p, rt, &sock, true, &mut note) {
+            match crate::cleanup::run(
+                p,
+                rt,
+                &sock,
+                true,
+                crate::cleanup::keep_rollbacks(p).unwrap_or(0),
+                true,
+                &mut note,
+            ) {
                 Ok(t) => {
                     let _ = writeln!(out, "  cleanup: removed {} container(s), {} image(s) of earlier releases and failed attempts; the serving release, volumes and build cache were not touched", t.containers, t.images);
                 }
