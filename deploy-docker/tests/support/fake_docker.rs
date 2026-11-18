@@ -106,6 +106,8 @@ pub struct St {
     pub unexpected: Vec<Req>,
     /// BuildKit cache entries as `(size, in use)`.
     pub build_cache: Vec<(u64, bool)>,
+    /// Which build-cache records (same index) share their layers with an image; missing means not shared.
+    pub build_cache_shared: Vec<bool>,
     seq: usize,
 }
 
@@ -544,18 +546,33 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
             let entries: Vec<String> = s
                 .build_cache
                 .iter()
-                .map(|(n, u)| format!("{{\"Size\":{n},\"InUse\":{u}}}"))
+                .enumerate()
+                .map(|(i, (n, u))| {
+                    let sh = s.build_cache_shared.get(i).copied().unwrap_or(false);
+                    format!("{{\"Size\":{n},\"InUse\":{u},\"Shared\":{sh},\"Type\":\"regular\"}}")
+                })
                 .collect();
             (200, format!("{{\"BuildCache\":[{}]}}", entries.join(",")))
         }
         ("POST", ["build", "prune"]) => {
+            // a prune without --all keeps records in use and records whose layers an image holds
+            let keep =
+                |i: usize, u: bool| u || s.build_cache_shared.get(i).copied().unwrap_or(false);
             let freed: u64 = s
                 .build_cache
                 .iter()
-                .filter(|(_, u)| !*u)
-                .map(|(n, _)| *n)
+                .enumerate()
+                .filter(|(i, (_, u))| !keep(*i, *u))
+                .map(|(_, (n, _))| *n)
                 .sum();
-            s.build_cache.retain(|(_, u)| *u);
+            let kept: Vec<usize> = (0..s.build_cache.len())
+                .filter(|i| keep(*i, s.build_cache[*i].1))
+                .collect();
+            s.build_cache = kept.iter().map(|i| s.build_cache[*i]).collect();
+            s.build_cache_shared = kept
+                .iter()
+                .map(|i| s.build_cache_shared.get(*i).copied().unwrap_or(false))
+                .collect();
             (
                 200,
                 format!("{{\"CachesDeleted\":[],\"SpaceReclaimed\":{freed}}}"),

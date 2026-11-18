@@ -6,6 +6,8 @@
 //! all three Harpoon ownership labels, and the result is journaled. Protected, never touched:
 //!
 //! * the release each application serves now, and the deployment that owns its container;
+//! * the most recent previous release proven restorable (pinned configuration, retained image in the journal, the image in
+//!   Docker by its immutable id with this deployment's labels), and, when that cannot be shown, every candidate (fail closed);
 //! * the image id the serving release pins, even when an older deployment recorded the same id;
 //! * a deployment that has not finished (a writer holding the journal proves nothing else is deploying);
 //! * a prepared-but-unconfirmed candidate (cancelled), which the person may still confirm;
@@ -25,13 +27,14 @@ use harpoon_deploy::ledger::ResourceKey;
 use harpoon_deploy::ledger::{
     plan as ledger_plan, Action, Disposition, EndState, EntryState, Observed, ResourceKind,
 };
+use harpoon_deploy::rollback::retained_releases;
 use harpoon_deploy::serving::serving_release;
 use harpoon_deploy::state::DeploymentStatus;
 use harpoon_deploy::time::SystemClock;
-use harpoon_deploy_docker::backend::ImageVerdict;
+use harpoon_deploy_docker::backend::{ImageVerdict, RollbackImage};
 use harpoon_deploy_docker::guest::MgmtDfProbe;
 use harpoon_deploy_docker::json::{n, obj, s as js, Json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
@@ -91,6 +94,82 @@ pub(crate) fn run(
                     .map(|d| d.id.clone()),
             ),
         }
+    }
+    // Rollback targets. For each application that serves a release, the most recent PREVIOUS release that is proven
+    // restorable is kept, so that cleanup never removes the image a rollback would start from. "Proven" is the journal's own
+    // rollback eligibility (succeeded, earlier than the serving release, a pinned immutable image id, a retained image in the
+    // ledger) AND Docker holding exactly that id with this deployment's labels. Order only ranks releases that are proven; it
+    // never makes one a target. What cannot be shown is kept, not guessed: a journal image that is not the pinned one, a Docker
+    // that cannot be asked, an image whose labels do not match, or two proven releases that cannot be ordered keep every
+    // remaining candidate. An image Docker proves absent is not a rollback and protects nothing.
+    let mut rollback_why: BTreeMap<DeploymentId, (&'static str, String)> = BTreeMap::new();
+    let mut rollback_images: BTreeSet<String> = BTreeSet::new();
+    let mut retention: Vec<(ApplicationId, DeploymentId, String)> = Vec::new();
+    for app in &apps {
+        let Some(serving) = serving_release(&restored.ledger, deps, app) else {
+            continue;
+        };
+        let eligible: Vec<_> = retained_releases(&restored.ledger, deps, app)
+            .into_iter()
+            .filter(|r| r.eligible())
+            .collect();
+        let mut keep: Vec<(usize, &'static str, String)> = Vec::new();
+        let mut state = "no previous release is provably restorable".to_string();
+        for (i, r) in eligible.iter().enumerate() {
+            let pinned = r
+                .config
+                .as_ref()
+                .map(|c| c.image_id.clone())
+                .unwrap_or_default();
+            let recorded = restored.ledger.entries().iter().any(|e| {
+                e.deployment == r.deployment
+                    && e.key.kind == ResourceKind::Image
+                    && !e.is_released()
+                    && e.id.as_deref() == Some(pinned.as_str())
+            });
+            let doubt = if !recorded {
+                Some("the journal's retained image is not the image the release pins".to_string())
+            } else {
+                match backend.verify_rollback_image(&pinned, app, &r.deployment) {
+                    RollbackImage::Absent => continue,
+                    RollbackImage::Unverifiable(why) => Some(why),
+                    RollbackImage::Verified if eligible.get(i + 1).is_some_and(|n| n.finished_ms == r.finished_ms) => {
+                        Some("two restorable releases finished at the same moment, so the more recent one cannot be told".to_string())
+                    }
+                    RollbackImage::Verified => None,
+                }
+            };
+            match doubt {
+                None => {
+                    keep.push((i, "rollback-target", format!("the most recent previous release proven restorable: pinned image {pinned} present in Docker with this deployment's labels; kept so the application can be rolled back")));
+                    state = format!("rollback target {}", r.deployment);
+                }
+                Some(why) => {
+                    // fail closed: this and every older candidate stay
+                    for j in i..eligible.len() {
+                        keep.push((
+                            j,
+                            "rollback-unverified",
+                            format!("rollback eligibility could not be verified ({why}); kept"),
+                        ));
+                    }
+                    state = format!(
+                        "rollback eligibility unverified ({why}); {} release(s) kept",
+                        eligible.len() - i
+                    );
+                }
+            }
+            break;
+        }
+        for (i, reason, detail) in keep {
+            let r = &eligible[i];
+            protected.insert(r.deployment.clone());
+            if let Some(c) = &r.config {
+                rollback_images.insert(c.image_id.clone());
+            }
+            rollback_why.insert(r.deployment.clone(), (reason, detail));
+        }
+        retention.push((app.clone(), serving.deployment.clone(), state));
     }
     // in scope: succeeded releases that no longer serve (treated as ended without success for the planner), and
     // failed or interrupted deployments. Cancelled (prepared) candidates are left for the person to confirm or remove.
@@ -174,7 +253,30 @@ pub(crate) fn run(
         }
     );
     for id in &protected {
-        let _ = writeln!(out, "protected: deployment {id} (serves now, owns the serving container, or nothing is proven to serve)");
+        match rollback_why.get(id) {
+            Some(("rollback-target", _)) => {
+                let _ = writeln!(out, "protected: deployment {id} (rollback target: the most recent previous release proven restorable)");
+            }
+            Some(_) => {
+                let _ = writeln!(out, "protected: deployment {id} (rollback eligibility could not be verified, so it is kept)");
+            }
+            None => {
+                let _ = writeln!(out, "protected: deployment {id} (serves now, owns the serving container, or nothing is proven to serve)");
+            }
+        }
+    }
+    for (app, serving, state) in &retention {
+        let eligible = scope
+            .iter()
+            .filter(|(d, _)| {
+                deps.iter().any(|x| {
+                    x.id == *d
+                        && x.application_id == *app
+                        && x.status == DeploymentStatus::Succeeded
+                })
+            })
+            .count();
+        let _ = writeln!(out, "retention: application {app}: serving {serving}; {state}; {eligible} other release(s) eligible for cleanup");
     }
     for id in &protected {
         for e in restored.ledger.entries().iter().filter(|e| {
@@ -186,7 +288,9 @@ pub(crate) fn run(
                 )
         }) {
             let proven = serving_release(&restored.ledger, deps, &e.app).is_some();
-            let (reason, detail) = if proven {
+            let (reason, detail) = if let Some((reason, detail)) = rollback_why.get(id) {
+                (*reason, detail.as_str())
+            } else if proven {
                 (
                     "serving-release",
                     "the release serving this application now, or the container that serves it",
@@ -325,6 +429,15 @@ pub(crate) fn run(
             );
         };
         let skip = |out: &mut String, why: &str| skip_as(out, "review", "needs-review", why);
+        if rollback_images.contains(&id) {
+            skip_as(
+                out,
+                "protected",
+                "rollback-pins-image",
+                "the image a rollback of this application would start from",
+            );
+            continue;
+        }
         if protected_images.contains(&id) {
             skip_as(
                 out,
@@ -570,11 +683,26 @@ pub(crate) fn prune_cache_cmd(p: &Parsed, out: &mut String) -> Result<i32, Fail>
             socket.display()
         ))
     };
-    let (total, unused) = api
+    let usage = api
         .build_cache_usage(Duration::from_secs(30))
         .map_err(runtime_err)?;
-    let _ = writeln!(out, "build cache: {total} bytes in all, {unused} bytes not in use. A prune removes only the unused part; images, containers and volumes are not touched, and later builds are slower until the cache fills again.");
-    let _ = writeln!(out, "build-cache-reclaimable-bytes: {unused}");
+    // A record's size is not space a prune frees: records overlap each other and, when Docker marks one shared, its layers
+    // belong to an image and stay while the image does. Only an unused, unshared record is something a prune can remove.
+    let _ = writeln!(
+        out,
+        "build cache: {} record(s) whose own sizes add up to {} bytes. That is not disk space: records overlap, and {} of them ({} bytes) share layers with an image, {} ({} bytes) are in use.",
+        usage.records, usage.total_bytes, usage.shared_records, usage.shared_bytes, usage.in_use_records, usage.in_use_bytes
+    );
+    if usage.prunable_records == 0 {
+        let _ = writeln!(out, "A prune is expected to free about 0 bytes: no record is both unused and unshared. The space is held by images, and only removing releases (cleanup-releases) can free it.");
+    } else {
+        let _ = writeln!(out, "A prune can remove {} record(s), at most {} bytes (an estimate; Docker's own figure after the prune is the result). Images, containers and volumes are not touched, and later builds are slower until the cache fills again.", usage.prunable_records, usage.prunable_bytes);
+    }
+    let _ = writeln!(
+        out,
+        "build-cache-records: {}\nbuild-cache-total-bytes: {}\nbuild-cache-in-use-bytes: {}\nbuild-cache-shared-bytes: {}\nbuild-cache-prunable-records: {}\nbuild-cache-reclaimable-bytes: {}",
+        usage.records, usage.total_bytes, usage.in_use_bytes, usage.shared_bytes, usage.prunable_records, usage.prunable_bytes
+    );
     if !apply {
         match &guard {
             Ok(()) => {

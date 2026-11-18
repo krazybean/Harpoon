@@ -24,6 +24,29 @@ fn world(t: &T) -> W {
 }
 
 fn world_with(t: &T, serving_pins_the_old_image: bool) -> W {
+    world_full(t, serving_pins_the_old_image, None)
+}
+
+fn pin(image_id: String, host_port: u16) -> harpoon_deploy::release::ReleaseConfig {
+    harpoon_deploy::release::ReleaseConfig {
+        image_id,
+        image_tag: "harpoon/x:y".into(),
+        container_port: 8080,
+        host_port,
+        health: harpoon_deploy::health::HealthSpec::first_test("/"),
+        memory_bytes: 0,
+        nano_cpus: 0,
+        pids: 0,
+        env: vec![],
+        secrets: vec![],
+        snapshot: None,
+        build: None,
+    }
+}
+
+/// `old_pin`: the old release also pins an image (the seed of its id; 2000 is the one the ledger retained), so the journal can
+/// prove it is a rollback target.
+fn world_full(t: &T, serving_pins_the_old_image: bool, old_pin: Option<u64>) -> W {
     t.docker_runtime();
     let (app, old) = ids(1);
     let (_, serving) = ids(2);
@@ -47,6 +70,9 @@ fn world_with(t: &T, serving_pins_the_old_image: bool) -> W {
         let mut d = finished(&app, dep, status);
         if status == DeploymentStatus::Succeeded {
             d.release = Some(ReleaseId::from_deployment(dep));
+            if let (Some(seed), true) = (old_pin, dep == &old) {
+                d.pinned = Some(pin(support::fake_iid(seed), 38001));
+            }
             if dep == &serving {
                 let pinned = support::fake_iid(if serving_pins_the_old_image {
                     2000
@@ -306,6 +332,108 @@ fn the_build_cache_is_only_pruned_when_applied_and_confirmed_and_only_the_unused
     assert!(
         t.h.docker.requests().iter().all(|r| r.method != "DELETE"),
         "no image or container was removed"
+    );
+}
+
+#[test]
+fn shared_cache_records_are_never_advertised_as_reclaimable_and_the_prune_frees_nothing() {
+    let t = T::new();
+    t.docker_runtime();
+    // two big records shared with images, one unused unshared record, one in use
+    t.h.docker.with(|s| {
+        s.build_cache = vec![
+            (1_450_000_000, false),
+            (233_000_000, false),
+            (40, false),
+            (500, true),
+        ];
+        s.build_cache_shared = vec![true, true, false, false];
+    });
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("build-cache-reclaimable-bytes: 40"),
+        "only the unshared unused record: {}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("build-cache-total-bytes: 1683000540"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("build-cache-shared-bytes: 1683000000"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("build-cache-in-use-bytes: 500"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("build-cache-prunable-records: 1"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("share layers with an image"),
+        "{}",
+        o.stdout
+    );
+    // applied: Docker removes what it can; the shared records stay
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("build-cache-reclaimed-bytes: 40"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(t.h.docker.with(|s| s.build_cache.len()), 3);
+}
+
+#[test]
+fn when_every_record_is_shared_or_in_use_the_prune_says_it_will_free_about_nothing_and_does() {
+    let t = T::new();
+    t.docker_runtime();
+    t.h.docker.with(|s| {
+        s.build_cache = vec![(1_450_000_000, false), (233_000_000, false)];
+        s.build_cache_shared = vec![true, true];
+    });
+    let o = go(&t, &SHIPPING, &cache_args(&t, &[]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("build-cache-reclaimable-bytes: 0"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("build-cache-prunable-records: 0"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("expected to free about 0 bytes"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("only removing releases (cleanup-releases) can free it"),
+        "{}",
+        o.stdout
+    );
+    let o = go(&t, &SHIPPING, &cache_args(&t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    assert!(
+        o.stdout.contains("build-cache-reclaimed-bytes: 0"),
+        "a zero-byte prune is a zero, not an error: {}",
+        o.stdout
+    );
+    assert_eq!(
+        t.h.docker.with(|s| s.build_cache.len()),
+        2,
+        "nothing was removed"
     );
 }
 
@@ -638,6 +766,14 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
         &go(&t, &SHIPPING, &args(&t, &[])),
         &mut all,
     );
+    let t2 = T::new();
+    world_full(&t2, false, Some(2000));
+    capture(
+        &t2,
+        "releases-dry-run-rollback-target",
+        &go(&t2, &SHIPPING, &args(&t2, &[])),
+        &mut all,
+    );
     capture(
         &t,
         "releases-apply-refused-unauthorized",
@@ -752,6 +888,30 @@ fn cleanup_output_contracts_match_the_desktops_fixtures() {
             seed_cache(&t2);
             go(&t2, &SHIPPING, &cache_args(&t2, &["--apply", &auth()]))
         },
+        &mut all,
+    );
+
+    // the real guest's shape: everything unused, everything shared with an image: a prune frees about nothing
+    let t = T::new();
+    t.docker_runtime();
+    t.h.docker.with(|s| {
+        s.build_cache = vec![(1_450_000_000, false), (233_000_000, false)];
+        s.build_cache_shared = vec![true, true];
+    });
+    capture(
+        &t,
+        "cache-preview-all-shared",
+        &go(&t, &SHIPPING, &with_mgmt(&t, cache_args(&t, &[]))),
+        &mut all,
+    );
+    capture(
+        &t,
+        "cache-apply-all-shared-frees-nothing",
+        &go(
+            &t,
+            &SHIPPING,
+            &with_mgmt(&t, cache_args(&t, &["--apply", &auth()])),
+        ),
         &mut all,
     );
 
@@ -1092,4 +1252,277 @@ fn objects_docker_no_longer_has_are_reconciliation_not_removal() {
         deletes, 1,
         "only the failed deployment's present image is deleted; nothing absent is"
     );
+}
+
+// ---------------------------------------------------------------- rollback retention
+
+fn dry(t: &T) -> Outcome {
+    let o = go(t, &SHIPPING, &args(t, &[]));
+    assert_exit(&o, 0);
+    o
+}
+fn apply(t: &T) -> Outcome {
+    let o = go(t, &SHIPPING, &args(t, &["--apply", &auth()]));
+    assert_exit(&o, 0);
+    o
+}
+fn reason_of<'a>(its: &'a [Json], dep: &DeploymentId, kind: &str) -> (&'a str, &'a str) {
+    let i = find(its, dep, kind);
+    (field(i, "verdict"), field(i, "reason"))
+}
+
+#[test]
+fn the_most_recent_proven_restorable_previous_release_is_protected_and_labelled_apart_from_serving_and_disposable(
+) {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let o = dry(&t);
+    let its = items(&o.stdout);
+    // three different answers for three kinds of release
+    assert_eq!(
+        reason_of(&its, &w.serving, "image"),
+        ("protected", "serving-release")
+    );
+    assert_eq!(
+        reason_of(&its, &w.old, "image"),
+        ("protected", "rollback-target")
+    );
+    assert_eq!(
+        reason_of(&its, &w.old, "container"),
+        ("protected", "rollback-target")
+    );
+    assert_eq!(
+        reason_of(&its, &w.failed, "image").0,
+        "ready",
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains(&format!("protected: deployment {} (rollback target", w.old)),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains(&format!(
+            "serving {}; rollback target {}; 0 other release(s) eligible for cleanup",
+            w.serving, w.old
+        )),
+        "{}",
+        o.stdout
+    );
+    // applying removes only the disposable one
+    apply(&t);
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    let (srv_i, srv_c) = w.ids[&w.serving.to_string()].clone();
+    let (fail_i, _) = w.ids[&w.failed.to_string()].clone();
+    assert!(
+        image_present(&t, &old_i) && container_present(&t, &old_c),
+        "the rollback target is kept"
+    );
+    assert!(
+        image_present(&t, &srv_i) && container_present(&t, &srv_c),
+        "the serving release is kept"
+    );
+    assert!(!image_present(&t, &fail_i), "the failed attempt is removed");
+    // the journal still offers the rollback
+    let r = SqliteJournal::read_only(&t.journal_dir()).unwrap();
+    let kept = harpoon_deploy::rollback::retained_releases(&r.ledger, &r.deployments, &w.app);
+    assert!(kept
+        .iter()
+        .find(|x| x.deployment == w.old)
+        .unwrap()
+        .eligible());
+}
+
+#[test]
+fn repeating_the_cleanup_in_any_order_keeps_the_same_protection() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    let first = dry(&t);
+    apply(&t);
+    let again = apply(&t);
+    let third = dry(&t);
+    for o in [&first, &again, &third] {
+        assert!(
+            o.stdout
+                .contains(&format!("protected: deployment {} (rollback target", w.old)),
+            "{}",
+            o.stdout
+        );
+    }
+    assert!(
+        again.stdout.contains("removed 0 image(s)"),
+        "{}",
+        again.stdout
+    );
+    assert!(image_present(&t, &old_i));
+    assert_eq!(
+        items(&third.stdout).len(),
+        items(&again.stdout).len(),
+        "a repeat reports the same protected set"
+    );
+}
+
+#[test]
+fn a_release_without_pinned_configuration_is_not_a_rollback_target_and_is_cleaned_as_before() {
+    let t = T::new();
+    let w = world_full(&t, false, None); // the old release never pinned an image: missing metadata
+    let o = dry(&t);
+    assert!(!o.stdout.contains("rollback target"), "{}", o.stdout);
+    assert!(
+        o.stdout
+            .contains("no previous release is provably restorable"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(reason_of(&items(&o.stdout), &w.old, "image").0, "ready");
+}
+
+#[test]
+fn rollback_eligibility_that_cannot_be_shown_keeps_the_image_and_says_why() {
+    // Docker's image does not carry the deployment's labels: ownership is not provable
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (old_i, old_c) = w.ids[&w.old.to_string()].clone();
+    t.h.docker.with(|s| {
+        s.images.iter_mut().find(|i| i.id == old_i).unwrap().labels = Vec::new();
+    });
+    let o = apply(&t);
+    assert!(
+        image_present(&t, &old_i) && container_present(&t, &old_c),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("rollback eligibility could not be verified"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        reason_of(&items(&o.stdout), &w.old, "image"),
+        ("protected", "rollback-unverified")
+    );
+}
+
+#[test]
+fn a_journal_image_that_is_not_the_pinned_image_is_ambiguous_and_kept() {
+    let t = T::new();
+    // the release pins one image id while the ledger retained another
+    let w = world_full(&t, false, Some(9999));
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    let o = apply(&t);
+    assert!(image_present(&t, &old_i), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("not the image the release pins"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn an_image_docker_no_longer_has_protects_nothing_and_is_reconciled_not_deleted() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    t.h.docker.with(|s| s.images.retain(|i| i.id != old_i));
+    let o = apply(&t);
+    assert!(!o.stdout.contains("rollback target"), "{}", o.stdout);
+    assert_eq!(
+        reason_of(&items(&o.stdout), &w.old, "image").1,
+        "already-absent"
+    );
+    let (srv_i, _) = w.ids[&w.serving.to_string()].clone();
+    assert!(image_present(&t, &srv_i));
+}
+
+#[test]
+fn two_restorable_releases_that_cannot_be_ordered_are_both_kept() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    // a third release, restorable and finished at the very same moment as the old one
+    let app = w.app.clone();
+    let (_, extra) = ids(7);
+    let tag = format!(
+        "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+        app.as_str().to_ascii_lowercase(),
+        extra
+    );
+    let iid = support::fake_iid(2500);
+    let lbl = harpoon_deploy::backend::harpoon_labels(&app, &extra);
+    t.h.docker
+        .with(|s| s.add_image_with_id(&iid, &[&tag], lbl, vec![]));
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    let mut d = finished(&app, &extra, DeploymentStatus::Succeeded);
+    d.release = Some(ReleaseId::from_deployment(&extra));
+    d.pinned = Some(pin(iid.clone(), 38002));
+    d.finished_ms = Some(10_000);
+    j.persist(&d).unwrap();
+    j.record(&intent(
+        &app,
+        &extra,
+        ResourceKind::Image,
+        &tag,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&extra, ResourceKind::Image, &tag, &iid))
+        .unwrap();
+    drop(j);
+    let o = apply(&t);
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    assert!(
+        image_present(&t, &old_i) && image_present(&t, &iid),
+        "neither is guessed away: {}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("cannot be told"), "{}", o.stdout);
+}
+
+#[test]
+fn an_interrupted_deployment_that_records_or_uses_the_rollback_image_cannot_cause_its_removal() {
+    let t = T::new();
+    let w = world_full(&t, false, Some(2000));
+    let (old_i, _) = w.ids[&w.old.to_string()].clone();
+    // an interrupted deployment of the same application recorded the very same image id and left a container made from it
+    let app = w.app.clone();
+    let (_, intr) = ids(8);
+    let lbl = harpoon_deploy::backend::harpoon_labels(&app, &intr);
+    let name = format!("hp-{intr}-restored");
+    let cid = t.h.docker.with(|s| {
+        let id = s.add_container(&name, lbl, false);
+        s.containers.iter_mut().find(|c| c.id == id).unwrap().image = old_i.clone();
+        id
+    });
+    let tag = format!(
+        "harpoon/{}:{}-0123456789abcdef0123456789abcdef",
+        app.as_str().to_ascii_lowercase(),
+        intr
+    );
+    let (mut j, _) = open_j(&t.journal_dir()).unwrap();
+    let mut d = finished(&app, &intr, DeploymentStatus::Interrupted);
+    d.finished_ms = Some(40_000);
+    j.persist(&d).unwrap();
+    j.record(&intent(
+        &app,
+        &intr,
+        ResourceKind::Image,
+        &tag,
+        Disposition::Retain,
+    ))
+    .unwrap();
+    j.record(&receipt(&intr, ResourceKind::Image, &tag, &old_i))
+        .unwrap();
+    drop(j);
+    let o = apply(&t);
+    assert!(
+        image_present(&t, &old_i),
+        "the rollback image survives: {}",
+        o.stdout
+    );
+    assert!(container_present(&t, &cid), "{}", o.stdout);
+    let (srv_i, _) = w.ids[&w.serving.to_string()].clone();
+    assert!(image_present(&t, &srv_i));
 }

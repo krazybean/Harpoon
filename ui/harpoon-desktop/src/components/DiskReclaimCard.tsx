@@ -10,7 +10,7 @@ import { CLEANUP_TARGETS } from "../lib/cleanupTargets";
 import { acquireCleanup, useCleanupActive } from "../lib/cleanupLock";
 import { formatSize, reclaimBlockedReason, reclaimConfirmationMessage } from "../lib/diskCapacity";
 import type { ExpansionState } from "../lib/diskCapacity";
-import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
+import { cleanupActionLabel, confirmLabel, impactBreakdown, groupByApplication, groupCounts, cacheExplanation, inventorySummary, nothingToClean, operationSummary, parseCache, parseCleanup, reasonLabel, reconcilable, shortDeployment, STATUS_LABEL } from "../lib/artifactCleanup";
 import type { CleanupGroup, CleanupReport, Verdict } from "../lib/artifactCleanup";
 import type { OpResult } from "../lib/deployEngine";
 
@@ -219,13 +219,14 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
   const [outcome, setOutcome] = useState<CleanupOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
   const otherCleanup = useCleanupActive() !== null;
   const inFlight = useRef(false);
   const call = (apply: boolean) => invoke<OpResult>("deploy_op", apply ? { op: { op: "prune-build-cache", apply: true }, confirmation: { liveChanges: true, cutover: false } } : { op: { op: "prune-build-cache", apply: false } });
   const check = async () => {
     if (inFlight.current) return;
     inFlight.current = true;
-    setBusy("check"); setError(null); setOutcome(null); setEmpty(false); setBlocked(null); setSize(null);
+    setBusy("check"); setError(null); setOutcome(null); setEmpty(false); setBlocked(null); setSize(null); setNote(null);
     try {
       const r = await call(false);
       if (!r.ok) setError(r.hint || r.summary);
@@ -233,7 +234,7 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
         const c = parseCache(r.detail);
         // a missing figure is "unknown", never "nothing to prune"
         if (c.reclaimable === null) setError("The engine gave no build-cache figure, so nothing can be offered.");
-        else { setSize(c.reclaimable); setBlocked(c.blocked); setEmpty(c.reclaimable === 0); }
+        else { setSize(c.reclaimable); setBlocked(c.blocked); setEmpty(c.reclaimable === 0); setNote(cacheExplanation(c, fmtBytes)); }
       }
     } catch (e) { setError(String(e)); } finally { inFlight.current = false; setBusy(null); }
   };
@@ -252,7 +253,7 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
         const after = await hostAllocationNow();
         result = r.ok ? cacheOutcome(parseCache(r.detail), { before, after }, fmtBytes) : failureOutcome("build-cache", r, null, { before, after });
       } catch (e) { result = failureOutcome("build-cache", null, e, { before, after: await hostAllocationNow() }); }
-      setOutcome(result); setSize(null); setBlocked(null);
+      setOutcome(result); setSize(null); setBlocked(null); setNote(null);
     } finally { inFlight.current = false; release(); setBusy(null); onDone(); }
   };
   return (
@@ -263,6 +264,7 @@ function BuildCache({ enabled, onDone }: { enabled: boolean; onDone: () => void 
         {size !== null && size > 0 && !blocked && <button className="btn btn--secondary" disabled={busy !== null || otherCleanup} onClick={prune}>{busy === "prune" ? "Pruning…" : `Prune ${fmtBytes(size)}…`}</button>}
       </div>
       {empty && <div role="status" className="text-meta">No unused build cache.</div>}
+      {note && <div role="status" className="text-meta">{note}</div>}
       {blocked && <div role="status" className="text-body">Pruning is unavailable right now: {blocked}. Nothing was changed.</div>}
       {outcome && <CleanupResult outcome={outcome} label="Build cache prune" />}
       {error && <div role="alert" style={{ color: "var(--error-fg)", whiteSpace: "pre-wrap" }}>{error}</div>}
