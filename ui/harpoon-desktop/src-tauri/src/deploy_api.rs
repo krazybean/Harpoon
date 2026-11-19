@@ -2355,6 +2355,14 @@ pub async fn deploy_detect(path: String) -> Result<String, String> {
         .map_err(|e| format!("background task failed: {e}"))?
 }
 
+/// The local branches of a registered folder (read-only `git for-each-ref`), for the branch dropdown.
+#[tauri::command]
+pub async fn deploy_local_branches(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || harpoon_deploy_cli::local_branches(&path))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
+}
+
 /// The standard macOS folder picker with a fixed AppleScript (nothing from the app is interpolated into
 /// it), the same mechanism the Compose import uses. `None` when the person cancels. The path is only
 /// filled into the form; the engine validates it when the repository is registered.

@@ -105,6 +105,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const pickFolder = useCallback(async () => invoke<string | null>("deploy_pick_folder"), []);
   const preview = useCallback((url: string) => invoke<string>("deploy_preview", { url }), []);
   const detect = useCallback(async (path: string) => parseDetection(await invoke<string>("deploy_detect", { path })), []);
+  const localBranches = useCallback((path: string) => invoke<string[]>("deploy_local_branches", { path }), []);
   const networks = useCallback(async () => {
     try { return (await invoke<{ Name?: string }[]>("list_networks")).map((n) => n.Name ?? "").filter((n) => n && !["bridge", "host", "none"].includes(n)); }
     catch { return []; }
@@ -122,7 +123,7 @@ export function useDeployEngine(realRuntime: RuntimeState, active: boolean) {
   const state: DeployState = useMemo(() => toDeployState(snap, { observed, keychain, loadError, stale, externals, hostListeners }), [snap, observed, keychain, loadError, stale, externals, hostListeners]);
   // Docker could not be asked although the VM says it is up: do not claim to know the current state.
   const runtime: RuntimeState = realRuntime === "connected" && observed === null && snap != null ? "docker-not-ready" : realRuntime;
-  const api: EngineApi = useMemo(() => ({ testNamespace, run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, detect, preview, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs, metrics }), [testNamespace, run, refresh, busy, last, notice, clearNotice, pickFolder, detect, preview, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs, metrics]);
+  const api: EngineApi = useMemo(() => ({ testNamespace, run, refresh: () => void refresh(), busy, last, clearLast: () => setLast(null), notice, clearNotice, pickFolder, detect, localBranches, preview, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs, metrics }), [testNamespace, run, refresh, busy, last, notice, clearNotice, pickFolder, detect, localBranches, preview, networks, attachRuntime, detachRuntime, externalsError, stepLogs, runtimeLogs, metrics]);
   return { state, runtime, api };
 }
 

@@ -41,3 +41,19 @@ test("detection is described in plain lines", () => {
   assert.match(l[0], /Next\.js on node:22-slim/);
   assert.match(l[1], /Install: npm ci · Build: npm run build · Start: npm start/);
 });
+
+test("the branch dropdown keeps the configured branch selectable, flagged when the folder lacks it", async () => {
+  const { branchChoices } = await import("./deployEngine.ts");
+  assert.deepEqual(branchChoices(["main", "dev"], "dev"), { options: ["main", "dev"], missing: false });
+  // a refresh that no longer lists the chosen branch must not swap it for another
+  assert.deepEqual(branchChoices(["main"], "release"), { options: ["release", "main"], missing: true });
+  assert.deepEqual(branchChoices(["main"], ""), { options: ["main"], missing: false });
+});
+
+test("choosing another branch records only the branch; the serving release is not part of the edit", () => {
+  const form = { ...registrationFormOf(REPO), branch: "dev" };
+  const edit = registrationEdit(REPO, form, true);
+  assert.deepEqual(edit.changed, ["branch"]);
+  assert.equal(edit.op.branch, "dev");
+  assert.equal(registrationEdit(REPO, registrationFormOf(REPO), true).op, null, "an untouched dropdown changes nothing");
+});

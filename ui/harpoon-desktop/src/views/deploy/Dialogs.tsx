@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useDialogFocus } from "../../hooks/useDialogFocus.ts";
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, Cube, Check, FolderSimple, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, Cube, Check, FolderSimple, ArrowClockwise, GitBranch, Info, Key, Pause, Play, RocketLaunch, Warning } from "@phosphor-icons/react";
 import type { AppModel, EngineRepo, VariableScope, VariableType, VariableUse } from "../../lib/deployTypes.ts";
 import { appStatus, latestDeployment } from "../../lib/deployStore.ts";
 import { REMOVAL_DIALOGS } from "./context.ts";
-import { applicationRemoval, removalBackup, NO_NEW_BACKUP_NOTE, configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
+import { applicationRemoval, removalBackup, NO_NEW_BACKUP_NOTE, configValueProblem, EXACT_TEXT_INPUT, CUTOVER_ACKNOWLEDGEMENT, deployConfirmation, fileUrlFor, liveBlock, type LiveConfirmation, type RegistrationOutcome, branchChoices, registrationEdit, registrationFormOf, registrationOutcome, registrationRemoval, type RegistrationForm, RESERVED_ENV_PREFIX, suggestRepoName as suggestName, variableNameProblem } from "../../lib/deployEngine.ts";
 import { ROLLBACK_WARNING } from "../../lib/deployPresentation.ts";
 import { REV } from "../../lib/deployMock.ts";
 import type { Ctx, DialogState } from "./context.ts";
@@ -367,6 +367,46 @@ function VariableDialog({ c, name, close }: { c: Ctx; name?: string; close: () =
 }
 
 
+/**
+ * The branch of a local folder: a dropdown of its local branches (read-only `git for-each-ref`; nothing is fetched or
+ * checked out), with Refresh. The chosen value lives in the form, so a refresh never changes it. A Git URL, an empty
+ * repository or a folder Git cannot read keeps a plain text input.
+ */
+function BranchField({ c, folder, value, onChange, readOnly, id }: { c: Ctx; folder: string | null; value: string; onChange: (b: string) => void; readOnly?: boolean; id?: string }) {
+  const [listed, setListed] = useState<string[] | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    setListed(null); setProblem(null);
+    if (!folder) return;
+    let live = true;
+    c.engine!.localBranches(folder).then((l) => { if (live) setListed(l); }, (e) => { if (live) setProblem(String(e)); });
+    return () => { live = false; };
+  }, [folder, tick]);
+  const choices = listed && listed.length > 0 ? branchChoices(listed, value) : null;
+  if (!folder || !choices) {
+    return (
+      <div className="dp-field"><label htmlFor={id}>Branch</label>
+        <input id={id} className="dp-input" value={value} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        {problem ? <small style={{ color: "var(--error-fg)" }}>Could not list local branches: {problem}</small> : null}
+        {listed && listed.length === 0 ? <small>This repository has no local branches yet (no commits). Enter the branch you will create.</small> : null}
+      </div>
+    );
+  }
+  return (
+    <div className="dp-field"><label htmlFor={id}>Branch</label>
+      <div className="dp-row">
+        <select id={id} className="dp-input" style={{ flex: 1 }} value={value} disabled={readOnly} onChange={(e) => onChange(e.target.value)}>
+          {value === "" ? <option value="">Choose a branch…</option> : null}
+          {choices.options.map((b) => <option key={b} value={b}>{b}{b === value && choices.missing ? " (not a local branch)" : ""}</option>)}
+        </select>
+        <button type="button" className="btn btn--secondary" disabled={readOnly} onClick={() => setTick((n) => n + 1)}><ArrowClockwise size={14} /> Refresh</button>
+      </div>
+      {choices.missing ? <small style={{ color: "var(--error-fg)" }}>This folder has no local branch “{value}”. Choose one, or Refresh if it was just created.</small> : <small>Local branches only. Nothing is fetched or checked out.</small>}
+    </div>
+  );
+}
+
 /** Register a repository (Git URL or local folder) with the real engine. Nothing deploys until the user chooses Deploy. */
 function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
   const [kind, setKind] = useState<"git" | "folder">("git");
@@ -417,7 +457,7 @@ function EngineCreateDialog({ c, close }: { c: Ctx; close: () => void }) {
           <div className="dp-row"><input id="rloc" className="dp-input" style={{ flex: 1 }} value={location} onChange={(e) => setLocation(e.target.value)} placeholder={kind === "git" ? "https://github.com/acme/storefront.git" : "/Users/you/code/My Project"} />
             {kind === "folder" ? <button type="button" className="btn btn--secondary" disabled={picking} onClick={() => { setPicking(true); c.engine!.pickFolder().then((p) => { if (p) { setLocation(p); if (!name) setName(suggestName(p)); } }, () => {}).finally(() => setPicking(false)); }}><FolderSimple size={14} /> Choose…</button> : null}</div>
           {kind === "folder" && location.trim() !== "" && folderUrl === null ? <small style={{ color: "var(--error-fg)" }}>Enter an absolute folder path (starting with /, without . or .. parts).</small> : null}</div>
-        <div className="dp-field"><label>Branch</label><input className="dp-input" value={branch} onChange={(e) => setBranch(e.target.value)} /></div>
+        <BranchField c={c} folder={kind === "folder" && folderUrl !== null ? location.trim() : null} value={branch} onChange={setBranch} id="rbr" />
         <div className="dp-field"><label>Container port</label><input className="dp-input" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} /></div>
         <div className="dp-field"><label>Dockerfile (optional)</label><input className="dp-input" value={dockerfile} placeholder="Detected: yours if present, otherwise generated" onChange={(e) => setDockerfile(e.target.value)} /></div>
         <div className="dp-field"><label>Health check path</label><input className="dp-input" value={health} onChange={(e) => setHealth(e.target.value)} /></div>
@@ -535,7 +575,7 @@ function EditRegistrationDialog({ c, repo, hasHistory, close }: { c: Ctx; repo: 
         <div className="dp-field"><label htmlFor="eloc">{form.kind === "git" ? "Repository URL" : "Absolute path"}</label>
           <div className="dp-row"><input id="eloc" className="dp-input" style={{ flex: 1 }} value={form.location} readOnly={saved} onChange={(e) => set({ location: e.target.value })} />
             {form.kind === "folder" ? <button type="button" className="btn btn--secondary" disabled={picking || saved} onClick={() => { setPicking(true); c.engine!.pickFolder().then((p) => { if (p) set({ location: p }); }, () => {}).finally(() => setPicking(false)); }}><FolderSimple size={14} /> Choose…</button> : null}</div></div>
-        <div className="dp-field"><label htmlFor="ebr">Branch</label><input id="ebr" className="dp-input" value={form.branch} readOnly={saved} onChange={(e) => set({ branch: e.target.value })} /></div>
+        <BranchField c={c} folder={editFolder ? form.location.trim() : null} value={form.branch} onChange={(branch) => set({ branch })} readOnly={saved} id="ebr" />
         <div className="dp-field"><label htmlFor="epo">Container port</label><input id="epo" className="dp-input" inputMode="numeric" value={form.port} readOnly={saved} onChange={(e) => set({ port: e.target.value.replace(/\D/g, "") })} /></div>
         <div className="dp-field"><label htmlFor="edf">Dockerfile</label><input id="edf" className="dp-input" value={form.dockerfile} placeholder="None: build from detection" readOnly={saved} onChange={(e) => set({ dockerfile: e.target.value })} /><small>Clear this to let Harpoon detect how to build the folder. Nothing is written to your repository.</small></div>
         <div className="dp-field"><label htmlFor="ehp">Health check path</label><input id="ehp" className="dp-input" value={form.health} placeholder="/" readOnly={saved} onChange={(e) => set({ health: e.target.value })} /></div>
