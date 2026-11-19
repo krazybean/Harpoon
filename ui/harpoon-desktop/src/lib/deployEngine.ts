@@ -83,6 +83,8 @@ export type EngineApi = {
   pickFolder: () => Promise<string | null>;
   /** Read-only: what Harpoon detects for a folder (framework, install/build/start commands). Rejects with the reason. */
   detect: (path: string) => Promise<SourceDetection>;
+  /** Read-only: the local branches (`refs/heads`) of a registered folder. Rejects with Git's reason. */
+  localBranches: (path: string) => Promise<string[]>;
   /** A PNG data URI of the running app's page, captured natively in a private, non-persistent web view (never stored). Rejects with the reason. */
   preview: (url: string) => Promise<string>;
   /** Names of the Docker networks that exist, for the network choice. Empty when Docker cannot be asked. */
@@ -719,4 +721,13 @@ export function removalBackup(lines: string[]): { path: string; digest: string }
   const value = (key: string) => lines.map((l) => l.trim()).find((l) => l.startsWith(key))?.slice(key.length).trim() ?? "";
   const path = value("backup:");
   return path ? { path, digest: value("sha256:") } : null;
+}
+
+/**
+ * The choices for the branch dropdown. The configured branch stays selectable even when the folder no longer has it,
+ * flagged as missing, so a refresh never silently changes what the next deployment builds.
+ */
+export function branchChoices(listed: string[], current: string): { options: string[]; missing: boolean } {
+  const missing = current !== "" && !listed.includes(current);
+  return { options: missing ? [current, ...listed] : listed, missing };
 }

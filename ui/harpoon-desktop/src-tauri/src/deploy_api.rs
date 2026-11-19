@@ -2355,6 +2355,49 @@ pub async fn deploy_detect(path: String) -> Result<String, String> {
         .map_err(|e| format!("background task failed: {e}"))?
 }
 
+/// The local branches of the Git repository at `dir`, one name per line (`git for-each-ref refs/heads/`).
+/// Read-only: no fetch, checkout or write; remote and detached state are not branches and never listed.
+/// An empty repository answers an empty list; a folder that is not a Git repository is an error.
+pub fn local_branches(dir: &str) -> Result<Vec<String>, String> {
+    let path = std::path::Path::new(dir);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(format!("{dir} is not an absolute folder path"));
+    }
+    let out = std::process::Command::new("/usr/bin/git")
+        .env_clear()
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "-C",
+            dir,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot start git: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "git could not list the branches of {dir}: {}",
+            why.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// The local branches of a registered folder (read-only `git for-each-ref`), for the branch dropdown.
+#[tauri::command]
+pub async fn deploy_local_branches(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || local_branches(&path))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
+}
+
 /// The standard macOS folder picker with a fixed AppleScript (nothing from the app is interpolated into
 /// it), the same mechanism the Compose import uses. `None` when the person cancels. The path is only
 /// filled into the form; the engine validates it when the repository is registered.
