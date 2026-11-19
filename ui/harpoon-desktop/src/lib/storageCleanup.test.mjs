@@ -936,6 +936,14 @@ test("clean up: the review reads what will go, what stays and why, and the estim
   assert.match(protectedLabel("brand-new-reason", 2), /2 items protected \(brand-new-reason\)/, "an unknown reason is shown, never hidden");
 });
 
+test("clean up: the cache stage is read from the review, and an unknown or missing one stays unknown", () => {
+  assert.equal(parseCleanup(fx("cleanup-dry-run").detail).cacheStage, "now");
+  assert.equal(parseCleanup("cache-stage: after-images. 2 build-cache record(s) are shared with images.\n").cacheStage, "after-images");
+  assert.equal(parseCleanup("cache-stage: none\n").cacheStage, "none");
+  assert.equal(parseCleanup("cache-stage: sometimes\n").cacheStage, null);
+  assert.equal(parseCleanup("nothing here\n").cacheStage, null);
+});
+
 test("clean up: retention one keeps the previous release and says so", () => {
   const rep = parseCleanup(fx("cleanup-dry-run-keep-one").detail);
   assert.equal(rep.keepRollbacks, 1);

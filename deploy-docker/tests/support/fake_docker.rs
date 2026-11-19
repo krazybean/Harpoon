@@ -111,10 +111,19 @@ pub struct St {
     pub build_cache: Vec<(u64, bool)>,
     /// Which build-cache records (same index) share their layers with an image; missing means not shared.
     pub build_cache_shared: Vec<bool>,
+    /// Image ids that hold a build-cache record (same index). A record with holders is shared exactly while one of them still exists,
+    /// as with BuildKit: removing the image releases the record. Empty means `build_cache_shared` decides.
+    pub build_cache_holders: Vec<Vec<String>>,
     seq: usize,
 }
 
 impl St {
+    fn cache_shared(&self, i: usize) -> bool {
+        match self.build_cache_holders.get(i) {
+            Some(h) if !h.is_empty() => h.iter().any(|id| self.images.iter().any(|m| &m.id == id)),
+            _ => self.build_cache_shared.get(i).copied().unwrap_or(false),
+        }
+    }
     pub fn next_id(&mut self) -> String {
         self.seq += 1;
         // spread the leading digits so unique-prefix lookups (like Docker's) are unambiguous
@@ -555,7 +564,7 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
                 .iter()
                 .enumerate()
                 .map(|(i, (n, u))| {
-                    let sh = s.build_cache_shared.get(i).copied().unwrap_or(false);
+                    let sh = s.cache_shared(i);
                     format!("{{\"Size\":{n},\"InUse\":{u},\"Shared\":{sh},\"Type\":\"regular\"}}")
                 })
                 .collect();
@@ -563,8 +572,7 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
         }
         ("POST", ["build", "prune"]) => {
             // a prune without --all keeps records in use and records whose layers an image holds
-            let keep =
-                |i: usize, u: bool| u || s.build_cache_shared.get(i).copied().unwrap_or(false);
+            let keep = |i: usize, u: bool| u || s.cache_shared(i);
             let freed: u64 = s
                 .build_cache
                 .iter()
@@ -575,11 +583,14 @@ fn route(st: &Arc<Mutex<St>>, method: &str, path: &str, body: &str) -> (u16, Str
             let kept: Vec<usize> = (0..s.build_cache.len())
                 .filter(|i| keep(*i, s.build_cache[*i].1))
                 .collect();
-            s.build_cache = kept.iter().map(|i| s.build_cache[*i]).collect();
-            s.build_cache_shared = kept
+            let shared: Vec<bool> = kept.iter().map(|i| s.cache_shared(*i)).collect();
+            let holders: Vec<Vec<String>> = kept
                 .iter()
-                .map(|i| s.build_cache_shared.get(*i).copied().unwrap_or(false))
+                .map(|i| s.build_cache_holders.get(*i).cloned().unwrap_or_default())
                 .collect();
+            s.build_cache = kept.iter().map(|i| s.build_cache[*i]).collect();
+            s.build_cache_shared = shared;
+            s.build_cache_holders = holders;
             (
                 200,
                 format!("{{\"CachesDeleted\":[],\"SpaceReclaimed\":{freed}}}"),

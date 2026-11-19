@@ -353,6 +353,7 @@ export function CleanUp({ enabled, onDone }: { enabled: boolean; onDone: () => v
             : <div className="text-meta">Space freed cannot be estimated beforehand; the guest's measured change is the real figure.</div>}
           {layersNote && <div role="status" className="text-meta">{layersNote}</div>}
           {cacheNote && <div role="status" className="text-meta">{cacheNote}</div>}
+          {plan.cacheStage === "after-images" && <div role="status" className="text-meta">Build cache: some records are shared with images this clean up removes. After those images are gone the cache is checked again and only unused, unshared records are pruned, in this same run. Its savings are not estimated; the measured change is the real figure.</div>}
           {cache.blocked && <div role="status" className="text-body">The build cache cannot be pruned right now: {cache.blocked}. Nothing was changed.</div>}
           <div className="text-meta" data-cleanup-lists>Selected for removal: <b>{selected}</b> · Protected: <b>{kept}</b>. Open an application below to see each object and why.</div>
           {plan.eligible !== null && plan.eligible > 0 && !plan.plan && <div role="status" className="text-body">This engine did not identify the plan, so it cannot be applied safely. Review again.</div>}
