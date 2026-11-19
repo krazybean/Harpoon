@@ -207,41 +207,6 @@ pub fn run_with(args: &[String], gate: &Gate, svc: &mut Services) -> Outcome {
     }
 }
 
-/// The local branches of the Git repository at `dir`, one name per line (`git for-each-ref refs/heads/`).
-/// Read-only: no fetch, checkout or write; remote and detached state are not branches and never listed.
-/// An empty repository answers an empty list; a folder that is not a Git repository is an error.
-pub fn local_branches(dir: &str) -> Result<Vec<String>, String> {
-    let path = std::path::Path::new(dir);
-    if !path.is_absolute() || !path.is_dir() {
-        return Err(format!("{dir} is not an absolute folder path"));
-    }
-    let out = std::process::Command::new("/usr/bin/git")
-        .env_clear()
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args([
-            "-C",
-            dir,
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/",
-        ])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot start git: {e}"))?;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "git could not list the branches of {dir}: {}",
-            why.trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
 /// What Harpoon detects for the project in `dir`, as one JSON object for the desktop's registration form. Read-only:
 /// nothing is built, written or sent. A folder that has its own Dockerfile reports `hasDockerfile` and nothing else.
 pub fn detect_source(dir: &str) -> Result<String, String> {
